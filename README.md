@@ -2,7 +2,7 @@
 
 Consensus library for the Paqus proof-of-work blockchain. The crate provides
 canonical encoding, post-quantum signatures, transactions, blocks, ledger state,
-QCash UTXOs, fork choice, reorg handling, rewards, and dynamic genesis rules.
+QCash UTXOs, fork choice, reorg handling, rewards, and frozen genesis rules.
 
 Paqus currently uses protocol version 1. Consensus changes must remain
 deterministic across every node.
@@ -120,9 +120,10 @@ disconnected branch and restores UTXOs consumed by disconnected deposits.
 
 ## Blocks and Mining
 
-Genesis is created by the first miner at height 0 using that miner's address,
-current timestamp, and valid proof of work. It contains no allocation, coinbase,
-or premine. Other nodes synchronize the mined genesis through the peer network.
+Genesis is frozen by protocol at height 0 with a canonical hash and no premine.
+All nodes must start from that same block; the first miner-created block is
+height 1. Nodes with storage from a different genesis are on a different chain
+and must be resynchronized from a canonical peer.
 
 Every non-genesis block contains an exact coinbase payment. A block may be
 coinbase-only when the mempool is empty. Candidate validation checks:
