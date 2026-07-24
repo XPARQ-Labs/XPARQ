@@ -1,10 +1,11 @@
-use crate::block::Block;
-use crate::block::BlockHeight;
+use crate::block::{Block, BlockHeight, Height};
 use crate::consensus::supply::{Amount, Balance};
 use crate::crypto::Address;
 use crate::crypto::{BlockHash, HASH_SIZE, Hash, HashDomain, StateRoot, domain_hash};
 use crate::error::LedgerError;
-use crate::event::ProtocolEvent;
+use crate::event::{
+    AccountRollback, AccountSnapshot, ChainEvent, DisconnectedBlock, ProtocolEvent, RollbackEvent,
+};
 use crate::ledger::chain::Chain;
 use crate::ledger::{AccountStateProof, SparseStateTree};
 use crate::state::{Account, CreditSource, QCashUtxoSet};
@@ -40,6 +41,39 @@ pub struct QCashAccountJournal {
 pub(crate) struct AccountRollbackState {
     accounts: BTreeMap<Address, Account>,
     account_state_tree: Arc<SparseStateTree>,
+}
+
+fn account_snapshot(account: &Account) -> AccountSnapshot {
+    AccountSnapshot {
+        balance: account.balance,
+        nonce: account.nonce,
+    }
+}
+
+fn account_rollbacks(
+    before: &BTreeMap<Address, Account>,
+    after: &BTreeMap<Address, Account>,
+) -> Vec<AccountRollback> {
+    let mut addresses = before
+        .keys()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    addresses.extend(after.keys().copied());
+    addresses
+        .into_iter()
+        .filter_map(|address| {
+            let before_snapshot = before.get(&address).map(account_snapshot);
+            let after_snapshot = after.get(&address).map(account_snapshot);
+            if before_snapshot == after_snapshot {
+                return None;
+            }
+            Some(AccountRollback {
+                address,
+                before: before_snapshot,
+                after: after_snapshot,
+            })
+        })
+        .collect()
 }
 
 pub struct AccountMut<'a> {
@@ -280,7 +314,32 @@ impl Ledger {
 
     /// Disconnects the active tip and restores its complete rollback state.
     pub fn rollback_block(&mut self, block_hash: BlockHash) -> Result<(), LedgerError> {
+        self.rollback_block_inner(block_hash).map(|_| ())
+    }
+
+    /// Disconnects the active tip and returns a chain event describing the rollback impact.
+    pub fn rollback_block_with_event(
+        &mut self,
+        block_hash: BlockHash,
+    ) -> Result<ChainEvent, LedgerError> {
+        self.rollback_block_inner(block_hash)
+            .map(ChainEvent::RollbackCompleted)
+    }
+
+    fn rollback_block_inner(
+        &mut self,
+        block_hash: BlockHash,
+    ) -> Result<RollbackEvent, LedgerError> {
         let mut staged = self.clone();
+        let block = staged
+            .chain
+            .block(&staged.tip_height().ok_or(LedgerError::InvalidParent)?)
+            .filter(|block| block.hash() == block_hash)
+            .cloned()
+            .ok_or(LedgerError::InvalidParent)?;
+        let from_height = block.height();
+        let old_tip = block_hash;
+        let before_accounts = staged.accounts.clone();
         staged.chain.remove_tip(block_hash)?;
         let rollback_state = staged
             .rollback_states
@@ -294,8 +353,27 @@ impl Ledger {
         staged.account_state_tree = rollback_state.account_state_tree;
         staged.events_by_block.remove(&block_hash);
         staged.validate_supply()?;
+        let to_height = staged.tip_height().unwrap_or(Height(0));
+        let new_tip = staged.tip_hash().unwrap_or(BlockHash::ZERO);
+        let affected_accounts = account_rollbacks(&before_accounts, &staged.accounts);
+        let event = RollbackEvent {
+            from_height,
+            to_height,
+            old_tip,
+            new_tip,
+            disconnected_blocks: vec![DisconnectedBlock {
+                height: block.height(),
+                hash: block.hash(),
+                transaction_ids: block
+                    .transactions
+                    .iter()
+                    .map(|transaction| transaction.hash())
+                    .collect(),
+            }],
+            affected_accounts,
+        };
         *self = staged;
-        Ok(())
+        Ok(event)
     }
 
     fn apply_qcash_transaction(
@@ -466,4 +544,48 @@ pub fn calculate_protocol_state_root(
         )
         .0,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::Nonce;
+
+    #[test]
+    fn account_rollbacks_include_before_and_after_snapshots() {
+        let alice = Address([1; 20]);
+        let bob = Address([2; 20]);
+        let mut before = BTreeMap::new();
+        before.insert(
+            alice,
+            Account::trusted_with_nonce(alice, Amount(500), Nonce(12)),
+        );
+        before.insert(bob, Account::trusted_with_nonce(bob, Amount(100), Nonce(1)));
+
+        let mut after = BTreeMap::new();
+        after.insert(
+            alice,
+            Account::trusted_with_nonce(alice, Amount(800), Nonce(8)),
+        );
+        after.insert(bob, Account::trusted_with_nonce(bob, Amount(100), Nonce(1)));
+
+        let rollbacks = account_rollbacks(&before, &after);
+
+        assert_eq!(rollbacks.len(), 1);
+        assert_eq!(rollbacks[0].address, alice);
+        assert_eq!(
+            rollbacks[0].before,
+            Some(AccountSnapshot {
+                balance: Amount(500),
+                nonce: Nonce(12),
+            })
+        );
+        assert_eq!(
+            rollbacks[0].after,
+            Some(AccountSnapshot {
+                balance: Amount(800),
+                nonce: Nonce(8),
+            })
+        );
+    }
 }

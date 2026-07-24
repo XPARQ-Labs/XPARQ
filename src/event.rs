@@ -3,6 +3,7 @@
 use crate::block::BlockHeight;
 use crate::consensus::supply::Amount;
 use crate::crypto::{Address, BlockHash, HashDomain, TransactionHash, domain_hash};
+use crate::transaction::AccountNonce;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +25,43 @@ pub const MAX_PROTOCOL_EVENT_SIZE: usize = 256 * 1024;
     BorshDeserialize,
 )]
 pub struct EventId(pub [u8; 32]);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountSnapshot {
+    pub balance: Amount,
+    pub nonce: AccountNonce,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountRollback {
+    pub address: Address,
+    /// State before rollback, while the disconnected branch was active.
+    pub before: Option<AccountSnapshot>,
+    /// State after rollback, at the restored chain tip.
+    pub after: Option<AccountSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisconnectedBlock {
+    pub height: BlockHeight,
+    pub hash: BlockHash,
+    pub transaction_ids: Vec<TransactionHash>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RollbackEvent {
+    pub from_height: BlockHeight,
+    pub to_height: BlockHeight,
+    pub old_tip: BlockHash,
+    pub new_tip: BlockHash,
+    pub disconnected_blocks: Vec<DisconnectedBlock>,
+    pub affected_accounts: Vec<AccountRollback>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChainEvent {
+    RollbackCompleted(RollbackEvent),
+}
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
