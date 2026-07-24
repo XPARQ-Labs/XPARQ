@@ -98,10 +98,13 @@ impl ForkChoice {
             parent_node.cumulative_work
         };
         let expected_difficulty = self.expected_difficulty_for(&block, parent)?;
+        if block.difficulty() != expected_difficulty {
+            return Err(ForkChoiceError::InvalidDifficulty);
+        }
         Consensus::validate_proof_of_work_at_difficulty(&block, expected_difficulty)
             .map_err(|_| ForkChoiceError::InvalidProofOfWork)?;
 
-        let work = block_work(block.difficulty());
+        let work = block_work(expected_difficulty);
         let cumulative_work = parent_work.saturating_add(work);
         let node = BlockNode {
             height: block.height(),
@@ -291,4 +294,37 @@ pub enum ForkChoiceError {
 
 pub fn block_work(difficulty: u32) -> Work {
     Work::pow2(difficulty)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::Nonce;
+    use crate::crypto::Address;
+    use crate::genesis::genesis_block;
+
+    #[test]
+    fn rejects_block_that_claims_more_difficulty_than_expected() {
+        let mut fork_choice = ForkChoice::new();
+        let genesis = genesis_block();
+        let genesis_hash = fork_choice.insert_block(genesis.clone()).unwrap();
+        let forged = Block::with_difficulty(
+            Height(1),
+            genesis_hash,
+            Address([1; 20]),
+            DIFFICULTY_START.saturating_add(1),
+            genesis.timestamp().saturating_add(1),
+            Nonce(0),
+            vec![],
+        );
+
+        assert_eq!(
+            fork_choice.insert_block(forged),
+            Err(ForkChoiceError::InvalidDifficulty)
+        );
+        assert_eq!(
+            fork_choice.best_tip().map(|node| node.hash),
+            Some(genesis_hash)
+        );
+    }
 }
