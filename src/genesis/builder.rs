@@ -25,6 +25,7 @@ pub struct ChainParams {
 pub struct GenesisParams {
     pub miner_address: [u8; crate::crypto::ADDRESS_SIZE],
     pub timestamp: u64,
+    pub nonce: u64,
     pub hash: [u8; HASH_SIZE],
 }
 
@@ -43,6 +44,7 @@ pub const PAQUS_CHAIN: ChainParams = ChainParams {
         // Fixed timestamp of the first canonical genesis build. This must stay static so all nodes
         // derive the same genesis hash.
         timestamp: 1_700_000_000,
+        nonce: 5,
         hash: FROZEN_GENESIS_HASH,
     },
 };
@@ -50,8 +52,8 @@ pub const PAQUS_CHAIN: ChainParams = ChainParams {
 /// Frozen mainnet identity for the canonical encoding and block format.
 /// Never update this value without defining a new protocol version and chain identity.
 pub const FROZEN_GENESIS_HASH: [u8; HASH_SIZE] = [
-    20, 205, 6, 196, 205, 246, 63, 103, 128, 95, 97, 9, 177, 241, 134, 175, 123, 147, 85, 64, 142,
-    58, 92, 94, 91, 120, 3, 135, 47, 205, 205, 33,
+    213, 244, 119, 76, 104, 172, 67, 75, 33, 68, 88, 240, 20, 66, 241, 165, 130, 186, 135, 80, 198,
+    62, 2, 185, 227, 173, 17, 235, 5, 39, 153, 80,
 ];
 
 pub const CURRENT_CHAIN_PARAMS: ChainParams = PAQUS_CHAIN;
@@ -71,12 +73,14 @@ pub fn create_genesis_block(config: GenesisConfig) -> Block {
 }
 
 pub fn create_genesis_block_for_chain(params: ChainParams, config: GenesisConfig) -> Block {
-    Block::genesis_with_chain_commitment(
+    let mut block = Block::genesis_with_chain_commitment(
         config.miner_address,
         config.timestamp,
         chain_identity_commitment(params),
         vec![],
-    )
+    );
+    block.header.nonce = crate::block::Nonce(params.genesis.nonce);
+    block
 }
 
 pub fn create_genesis_ledger(config: GenesisConfig) -> Result<Ledger, GenesisError> {
@@ -179,5 +183,10 @@ mod tests {
     #[test]
     fn frozen_genesis_hash_matches_current_chain_params() {
         validate_genesis_identity(CURRENT_CHAIN_PARAMS).unwrap();
+    }
+
+    #[test]
+    fn frozen_genesis_ledger_is_valid() {
+        genesis_ledger().unwrap();
     }
 }
