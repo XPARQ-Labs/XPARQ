@@ -61,6 +61,10 @@ impl Consensus {
         Self::new(ConsensusConfig::default()).expect("default consensus config should be valid")
     }
 
+    pub fn with_expected_difficulty(expected_difficulty: u32) -> Result<Self, ConsensusError> {
+        Self::new(ConsensusConfig::new(expected_difficulty))
+    }
+
     pub fn config(&self) -> ConsensusConfig {
         self.config
     }
@@ -160,6 +164,13 @@ impl Consensus {
         }
 
         self.validate_claimed_proof_of_work(block)
+    }
+
+    pub fn validate_proof_of_work_at_difficulty(
+        block: &Block,
+        expected_difficulty: u32,
+    ) -> Result<(), ConsensusError> {
+        Self::with_expected_difficulty(expected_difficulty)?.validate_proof_of_work(block)
     }
 
     pub fn validate_claimed_proof_of_work(&self, block: &Block) -> Result<(), ConsensusError> {

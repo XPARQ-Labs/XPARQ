@@ -98,9 +98,7 @@ impl ForkChoice {
             parent_node.cumulative_work
         };
         let expected_difficulty = self.expected_difficulty_for(&block, parent)?;
-        Consensus::new(crate::consensus::ConsensusConfig::new(expected_difficulty))
-            .map_err(|_| ForkChoiceError::InvalidDifficulty)?
-            .validate_proof_of_work(&block)
+        Consensus::validate_proof_of_work_at_difficulty(&block, expected_difficulty)
             .map_err(|_| ForkChoiceError::InvalidProofOfWork)?;
 
         let work = block_work(block.difficulty());

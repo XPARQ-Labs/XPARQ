@@ -286,8 +286,7 @@ impl Ledger {
         self.chain.validate_next_block(block)?;
         if enforce_proof_of_work {
             let expected_difficulty = self.expected_next_difficulty()?;
-            Consensus::new(crate::consensus::ConsensusConfig::new(expected_difficulty))?
-                .validate_proof_of_work(block)?;
+            Consensus::validate_proof_of_work_at_difficulty(block, expected_difficulty)?;
         }
 
         let mut staged = self.clone();

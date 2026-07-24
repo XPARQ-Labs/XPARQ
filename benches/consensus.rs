@@ -388,7 +388,13 @@ fn qcash_file_operations(c: &mut Criterion) {
     .unwrap();
     let encoded = encode_cash_coin_file(&file).unwrap();
     let recipient = Address([0x52; 20]);
-    let deposit = DepositCashMetadata::new(&[file], recipient).unwrap();
+    let transaction_commitment = [0x99; 32];
+    let deposit = DepositCashMetadata::new_for_transaction(
+        std::slice::from_ref(&file),
+        recipient,
+        transaction_commitment,
+    )
+    .unwrap();
     let mut group = c.benchmark_group("qcash_file_operations");
     group.throughput(Throughput::Bytes(encoded.len() as u64));
 
@@ -406,7 +412,10 @@ fn qcash_file_operations(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 black_box(&file)
-                    .deposit_input(black_box(recipient))
+                    .deposit_input_for_transaction(
+                        black_box(recipient),
+                        black_box(transaction_commitment),
+                    )
                     .unwrap(),
             )
         })
@@ -414,7 +423,10 @@ fn qcash_file_operations(c: &mut Criterion) {
     group.bench_function("verify_deposit_authorization", |b| {
         b.iter(|| {
             black_box(&deposit)
-                .validate_authorizations(black_box(recipient))
+                .validate_authorizations_for_transaction(
+                    black_box(recipient),
+                    black_box(transaction_commitment),
+                )
                 .unwrap();
             black_box(())
         })
