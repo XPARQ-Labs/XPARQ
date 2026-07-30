@@ -1,202 +1,220 @@
-# Paqus Core
+# Paqus
 
-Consensus library for the Paqus proof-of-work blockchain. The crate provides
-canonical encoding, post-quantum signatures, transactions, blocks, ledger state,
-QCash UTXOs, fork choice, reorg handling, rewards, and frozen genesis rules.
+Paqus is an experimental proof-of-work blockchain protocol focused on
+deterministic execution, post-quantum authorization, independently verifiable
+state, and transferable QCash bearer value. This crate contains the consensus
+types and validation rules used by Paqus nodes and wallets.
 
-Paqus currently uses protocol version 1. Consensus changes must remain
-deterministic across every node.
+The current implementation is the **Sharksphere** patch of protocol version 1.
+The normative implementation-level parameters are documented in
+[CHAINSPEC.md](CHAINSPEC.md).
 
-## Current Protocol
+## Protocol Summary
 
 ```text
-Chain:                     Paqus
-Chain ID:                  747
-Coin:                      XPQ
-Smallest unit:             paqus
-Decimals:                  6
-Protocol stage:            Mainnet
-Protocol version:          1
-Proof of work:             SHA3-512
-Difficulty:                per-block ASERT, starting at 1 bit
-Target block time:         5 minutes
-Transaction confirmation: 5 blocks  (~25 minutes)
-Hard finality:             50 blocks (~4 hours 10 minutes)
-Block reward maturity:     100 blocks (~8 hours 20 minutes)
-QCash maturity:            50 blocks (~4 hours 10 minutes)
-Block subsidy:             25 XPQ
-Tail emission:             0.747 XPQ from height 525,600
-Genesis premine:           none
+Chain                    Paqus
+Chain ID                 747 (mainnet)
+Network magic            58 50 51 01 ("XPQ\x01")
+Asset                    XPQ
+Smallest unit            paqus
+Decimals                 8
+Consensus                proof of work, greatest cumulative chainwork
+Proof of work            Argon2id, 64 MiB, 1 iteration, 1 lane
+Difficulty               per-block ASERT, 1-hour half-life
+Target block interval    5 minutes
+Block size limit         5 MiB
+Confirmation depth       2 blocks
+Finality boundary        5 blocks
+Mining reward maturity   50 blocks
+QCash deposit delay      1 block after withdrawal
+Initial block subsidy    50 XPQ
+Tail emission            1.61172119 XPQ from height 420,480
+Genesis premine          none
 ```
 
-Full-node storage version 2 is required. Databases created under a different
-protocol or genesis identity must not be reused without an explicit migration.
+Genesis is frozen at height 0. Every node validates the same genesis identity
+and follows the valid branch with the greatest cumulative proof of work.
 
-## Architecture
+Network chain IDs are `707` for devnet, `717` for testnet, and `747` for
+mainnet. These IDs are consensus identities and must not be mixed between
+network databases.
 
-- `codec.rs` is the public boundary for canonical Borsh encoding and decoding.
-- `crypto/` provides SHA3 hashing, ML-DSA-87 signatures, and `PX1...` addresses.
-- `transaction/` contains transfer and QCash transaction envelopes.
-- `block/` contains version-1 SegWit blocks, Merkle roots, and witness roots.
-- `consensus/` contains proof-of-work, ASERT, rewards, and supply rules.
-- `ledger/` applies atomic state transitions, fork choice, finality, and reorgs.
-- `state/` contains account state and the QCash UTXO set.
-- `genesis/` defines chain identity and dynamic mined-genesis construction.
-- `event/` derives protocol receipts from successful canonical transitions.
+## Repository Scope
 
-Consensus data must be encoded through `codec.rs`. Do not call Borsh
-serialization directly for hashes, signatures, network payloads, or stored
-consensus objects.
+The crate provides:
 
-## Monetary Units
+- canonical Borsh encoding and domain-separated SHA3-256 hashes;
+- ML-DSA-44 key generation, signatures, and parallel dual-signature
+  verification;
+- `P1...` ML-DSA account addresses bound to two authorization public keys
+  (`PX1...` is reserved for the inactive SQIsign Level 5 candidate);
+- unified transfers containing between 1 and 64 outputs;
+- QCash withdrawal, bearer files, deposits, and authenticated UTXO state;
+- governance transactions and credentials;
+- SegWit-style transaction and witness commitments;
+- blocks, Argon2id proof of work, ASERT difficulty, rewards, and chainwork;
+- atomic ledger transitions, rollback, bounded reorganization, and invariants;
+- account and QCash state proofs;
+- frozen-genesis header-chain and checkpoint verification;
+- authenticated snapshot and checkpoint artifacts.
 
-```text
-1 XPQ = 1,000,000 paqus
-```
+Networking, RPC, mining orchestration, mempool policy, dynamic fee rates,
+snapshot transport, and database storage belong to the separate node crate.
+Those policies are not consensus parameters unless explicitly stated in the
+chain specification.
 
-Ordinary transfers and mining rewards use the account model. QCash bearer value
-uses a separate UTXO set. Economic supply is the sum of account balances and all
-active QCash UTXOs, preventing value from existing in both models at once.
+Governance bearer credentials are stored in password-protected `PGD1`
+containers. The credential secret key is encrypted with XChaCha20-Poly1305
+using an Argon2id-derived key; the authenticated header binds the file to the
+Paqus chain ID and frozen genesis. Plaintext legacy credential files are
+rejected.
 
-## Transactions and SegWit
+## Accounts and Dual Authorization
 
-Paqus has two transaction families:
+An address is derived from an ordered owner/auth ML-DSA-44 public-key pair.
+Both signatures are required by default.
 
-- `Transfer` moves XPQ between accounts.
-- `QCash` withdraws account value into bearer UTXOs or deposits bearer UTXOs
-  into an account.
+The first outgoing transaction from an account carries both public keys. After
+successful validation, the ledger stores them in `AccountAuthorization`.
+Subsequent transactions carry only the two signatures and the node resolves
+both public keys from authenticated account state. This avoids repeating
+2,624 bytes of public-key material in every transaction.
 
-The transaction ID (`txid`) commits to the payload and remains stable when the
-witness changes. The witness transaction ID (`wtxid`) commits to the complete
-signed envelope. Blocks commit to both a payload Merkle root and a witness root.
+Receiving funds does not require prior account registration. A new address can
+receive XPQ before its authorization keys are present in state; keys are
+registered when that account spends for the first time.
 
-Transaction outputs become available at:
+## Transfers
 
-```text
-block height + CONFIRMATION_DEPTH
-```
+There is one transfer representation:
 
-Coinbase fees follow confirmation maturity. The block subsidy becomes available
-at:
-
-```text
-block height + BLOCK_REWARD_MATURITY
-```
-
-## QCash UTXO
-
-A QCash withdrawal creates one `QCashUtxo` for each denomination. Each output
-has a canonical:
-
-```text
-QCashOutPoint {
-    transaction_hash,
-    output_index,
+```rust
+Transaction {
+    from,
+    outputs: Vec<TransferOutput>,
+    fee,
+    nonce,
+    timestamp,
+    validity,
+    credential_uses,
 }
 ```
 
-`CashCoinId` is derived from the withdrawal transaction and canonical output.
-New outputs are `Pending` and become `Spendable` after 50 blocks.
+A transfer must have 1–64 non-zero outputs. Recipients must be unique and may
+not equal the sender. A one-output transfer is therefore the canonical
+replacement for the former single-transfer form. Shared signatures and common
+transaction fields make multi-output transfers substantially smaller than
+multiple independent transfers.
 
-A bearer `.XPQ` file contains:
+Fees are consensus-visible amounts paid to the block producer. Relay,
+mempool-market, and miner minimum fee rates in `paqus/vByte` are node policy and
+can be configured independently.
 
-- the complete 32-byte UTXO identifier;
-- its denomination;
-- a private opening secret.
+## Transaction Lifecycle
 
-Deposit authorization is bound to the recipient and verified with ML-DSA. A
-successful deposit removes the UTXO immediately and creates an account credit
-locked for 50 blocks. Reusing the same file is rejected as unknown or already
-spent.
+For a transaction included at height `H`:
 
-Anyone holding a valid, unspent `.XPQ` file can deposit it into another wallet.
-The file must therefore be protected like physical cash. ML-KEM is not used to
-bind ownership; encryption used while transporting a file is a wallet or network
-transport concern, not a consensus ownership rule.
+```text
+H       included, still reorg-sensitive
+H + 2   confirmed
+H + 5   finalized by the local reorg boundary
+```
 
-The account state root and QCash UTXO root are domain-separated and combined
-into one protocol state root. Block rollback removes outputs created on the
-disconnected branch and restores UTXOs consumed by disconnected deposits.
+Normal transfer credits and QCash deposit credits become spendable at
+`H + 2`. Coinbase transaction fees use the same confirmation delay, while the
+block subsidy matures after 50 blocks.
 
-## Blocks and Mining
+“Finalized” here means the protocol rejects a reorganization crossing its
+configured finality boundary. It is not proof-of-stake or BFT finality.
 
-Genesis is frozen by protocol at height 0 with a canonical hash and no premine.
-All nodes must start from that same block; the first miner-created block is
-height 1. Nodes with storage from a different genesis are on a different chain
-and must be resynchronized from a canonical peer.
+## QCash
 
-Every non-genesis block contains an exact coinbase payment. A block may be
-coinbase-only when the mempool is empty. Candidate validation checks:
+QCash moves value between the account model and a separate authenticated UTXO
+set:
 
-- canonical version and encoding;
-- previous block linkage and timestamp policy;
-- expected ASERT difficulty and proof of work;
-- transaction and witness roots;
-- transaction signatures, nonces, fees, and maturity;
-- exact coinbase subsidy and fees;
-- the combined account and QCash protocol state root.
+```text
+account XPQ --withdraw--> QCash bearer UTXO
+QCash bearer UTXO --deposit--> account XPQ
+```
 
-Fork choice selects the valid branch with the greatest cumulative work.
-Competing branches cannot replace blocks beyond `FINALITY_DEPTH`.
+A withdrawal included at height `H` creates active off-chain bearer coins.
+They may be deposited starting at `H + 1`. A successful deposit consumes the
+QCash UTXO immediately and creates an account credit that becomes spendable at
+`deposit height + 2`.
 
-## Hashing and Encoding
+Each `.XPQ` file contains an opaque 32-byte coin ID, denomination, and private
+opening secret. The file is bearer value and must be protected like physical
+cash. Reorganizations are handled by canonical ledger rollback: outputs made
+on disconnected branches are removed and deposits disconnected from the
+canonical chain restore their consumed UTXOs.
 
-Consensus objects use canonical little-endian Borsh under the
-`paqus-borsh-le` profile. Hash domains and Rust wrapper types separate block,
-transaction, witness, state, event, and proof-of-work hashes.
+## Authenticated Fast Sync and Proofs
 
-Canonical compatibility fixtures are enforced by protocol-vector tests. Vector
-changes require an explicit consensus decision and must never be regenerated
-silently.
+The consensus crate verifies complete header chains from the frozen genesis,
+including linkage, timestamps, expected ASERT difficulty, Argon2id proof of
+work, and cumulative chainwork. The node can compare independently supplied
+valid header chains, choose the greatest-work tip, download the snapshot bound
+to that checkpoint, and activate it only when its state commitments match.
+
+Snapshot providers are therefore data sources, not trusted consensus
+authorities. Security still depends on obtaining the real greatest-work chain;
+nodes and light clients should compare multiple independently operated peers
+to reduce eclipse risk.
+
+Account and QCash proof bundles support trusted header checkpoints. After a
+wallet has validated and retained a checkpoint, it can verify only the header
+extension after that checkpoint instead of repeatedly carrying headers from
+genesis.
+
+## Encoding and Compatibility
+
+Consensus objects use canonical little-endian Borsh through `codec.rs`.
+Direct serialization must not be used for consensus hashes, signatures,
+network payloads, or persisted consensus objects.
+
+The transaction ID (`txid`) commits to the family and payload. The witness
+transaction ID (`wtxid`) commits to the complete signed envelope. Blocks commit
+to both payload and witness Merkle roots, plus the resulting protocol state
+root.
+
+Protocol vectors protect canonical bytes and hash results. Changing a
+consensus structure, field order, domain string, parameter, or frozen vector is
+a consensus change even if the numeric protocol-version field is unchanged.
 
 ## Build and Test
-
-From the core repository root:
 
 ```bash
 cargo build
 cargo test
 cargo test --doc
-```
-
-Run benchmarks:
-
-```bash
 cargo bench
+cargo run --release --example validation_benchmark
 ```
 
-Run decoder fuzz targets with nightly Rust:
+Decoder fuzzing requires nightly Rust and `cargo-fuzz`:
 
 ```bash
-cd core
 cargo +nightly fuzz run decode_signed_transaction
 cargo +nightly fuzz run decode_block
-```
-
-Useful environment variables:
-
-```text
-PAQUS_FUZZ_MAX_LEN=<bytes>
-PAQUS_FUZZ_RUNS=<count>
-PAQUS_FUZZ_TIME_SECS=<seconds>
 ```
 
 ## Safety Rules
 
 - State transitions must be deterministic and atomic.
-- Failed transactions or blocks must not mutate state.
-- Account keys must match their embedded addresses.
-- Account credits must sum to the recorded balance.
-- QCash value must exist either in accounts or active UTXOs, never both.
-- Hash domains and typed hashes must not be mixed.
-- Decode helpers must reject malformed, oversized, and trailing data.
+- Failed transactions and blocks must not mutate canonical state.
+- Both authorization signatures must validate against the account’s keys.
+- New account addresses may receive value without prior key registration.
+- XPQ value must exist in account state or active QCash UTXOs, never both.
+- Fork choice uses validated cumulative work, not peer claims or height alone.
+- Snapshot state must match its authenticated header checkpoint.
+- Decoders must reject malformed, oversized, and trailing data.
+- Consensus-domain strings and typed hashes must not be mixed.
 
-## Disclaimer
+## Status
 
-Paqus is an independent, non-profit blockchain research and development
-project. This software is experimental and should be reviewed carefully before
-production use.
-
-## Community
+Paqus is under active development. The current 1/2/5 lifecycle values are
+development parameters and protocol compatibility may change before a stable
+release. Do not use this software to secure production value without
+independent review.
 
 Protocol discussion: [Paqus Matrix room](https://matrix.to/#/#paqus:matrix.org)
