@@ -1,31 +1,85 @@
 [package]
 name = "paqus"
-version = "0.2.17"
+version = "0.2.18"
 edition = "2024"
-description = "Core consensus primitives for the Paqus proof-of-work blockchain"
+rust-version = "1.90"
+autobenches = false
+description = "Consensus primitives for the Paqus proof-of-work blockchain, Sharksphere patch"
 readme = "README.md"
 repository = "https://github.com/paqusprotocol/paqus"
 license = "MIT"
 keywords = ["blockchain", "proof-of-work", "post-quantum", "ml-dsa", "sha3"]
 categories = ["cryptography::cryptocurrencies"]
 
+[package.metadata]
+patch = "Sharksphere"
+
+[features]
+default = ["mainnet"]
+mainnet = []
+testnet = ["sqisign-blockchain-test"]
+devnet = ["sqisign-blockchain-test"]
+# Staging only. SQIsign is still a NIST Round 3 candidate and MUST NOT be used
+# by consensus until a final NIST standard and an explicit network upgrade.
+sqisign-candidate = ["dep:rand_10", "dep:sqisign_rs"]
+# Process-wide heap scrubbing for SQIsign arithmetic intermediates.
+sqisign-secure-memory = ["sqisign-candidate"]
+# Development-chain default. This remains experimental and chain-format
+# breaking; never combine its database or network with an ML-DSA chain.
+sqisign-blockchain-test = ["sqisign-candidate", "sqisign-secure-memory", "dep:chacha20"]
+
 [dependencies]
-sha3 = "0.12.0"
-ml_dsa = { package = "ml-dsa", version = "0.1.1" }
-borsh = { version = "1.5", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
-bech32 = "0.12.0"
-zeroize = { version = "1.9.0", features = ["derive"] }
-static_assertions = "1.1.0"
+sha3 = { version = "0.12.0", default-features = false, path = "src/dependencies/sha3/sha3" }
+ml_dsa = { package = "ml-dsa", version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "zeroize"], path = "src/dependencies/mldsa/ml-dsa" }
+sqisign_rs = { package = "paqus-sqisign", version = "0.1.0", optional = true, path = "src/dependencies/sqisign/sqisign-rs" }
+rand_10 = { package = "rand", version = "0.10.2", optional = true, features = ["sys_rng"], path = "src/dependencies/sqisign/rand-0.10" }
+chacha20 = { version = "0.10.1", optional = true, default-features = false, features = ["rng", "zeroize"], path = "src/dependencies/sqisign/chacha20-0.10.1" }
+borsh = { version = "1.5", features = ["derive"], path = "src/dependencies/traits/borsh" }
+serde = { version = "1", features = ["derive"], path = "src/dependencies/traits/serde" }
+bech32 = { version = "0.12.0", default-features = false, features = ["alloc"], path = "src/dependencies/bech32" }
+zeroize = { version = "1.9.0", features = ["alloc", "derive"], path = "src/dependencies/traits/zeroize" }
+static_assertions = { version = "1.1.0", path = "src/dependencies/utils/static_assertions" }
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc"], path = "src/dependencies/argon2/argon2" }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
+getrandom = { version = "0.4.3", default-features = false }
 
-[dev-dependencies]
-criterion = "0.8.2"
-hex = "0.4"
+[patch.crates-io]
+serde = { path = "src/dependencies/traits/serde" }
+serde_core = { path = "src/dependencies/traits/serde_core" }
+serde_derive = { path = "src/dependencies/traits/serde_derive" }
+autocfg = { path = "src/dependencies/utils/autocfg" }
+block-buffer = { path = "src/dependencies/utils/block-buffer" }
+crypto-bigint = { path = "src/dependencies/sqisign/crypto-bigint-0.7" }
+crypto-common = { path = "src/dependencies/utils/crypto-common-0.1.7" }
+digest = { path = "src/dependencies/traits/digest-0.10.7" }
+generic-array = { path = "src/dependencies/utils/generic-array" }
+hybrid-array = { path = "src/dependencies/utils/hybrid-array" }
+libm = { path = "src/dependencies/sqisign/libm" }
+num-bigint = { path = "src/dependencies/sqisign/num-bigint-0.5" }
+num-integer = { path = "src/dependencies/sqisign/num-integer" }
+num-traits = { path = "src/dependencies/traits/num-traits" }
+paste = { path = "src/dependencies/sqisign/paste" }
+proc-macro2 = { path = "src/dependencies/proc-macro/proc-macro2" }
+quote = { path = "src/dependencies/proc-macro/quote" }
+rand = { path = "src/dependencies/sqisign/rand-0.10" }
+rand_core = { path = "src/dependencies/traits/rand_core" }
+signature = { path = "src/dependencies/traits/signature" }
+chacha20 = { path = "src/dependencies/sqisign/chacha20-0.10.1" }
+cpubits = { path = "src/dependencies/utils/cpubits" }
+ctutils = { path = "src/dependencies/utils/ctutils" }
+subtle = { path = "src/dependencies/utils/subtle" }
+syn = { path = "src/dependencies/proc-macro/syn-2.0.119" }
+typenum = { path = "src/dependencies/utils/typenum" }
+unicode-ident = { path = "src/dependencies/proc-macro/unicode-ident" }
+version_check = { path = "src/dependencies/utils/version_check" }
+zeroize_derive = { path = "src/dependencies/traits/zeroize_derive" }
 
 [[bench]]
-name = "consensus"
+name = "sqisign_candidate"
 harness = false
+required-features = ["sqisign-candidate"]
 
 [[bench]]
-name = "pow"
+name = "sqisign_verifier"
 harness = false
+required-features = ["sqisign-blockchain-test"]

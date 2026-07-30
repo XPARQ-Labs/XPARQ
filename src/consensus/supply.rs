@@ -5,13 +5,13 @@ use static_assertions::const_assert;
 use crate::{block::BlockHeight, consensus::BLOCKS_PER_YEAR};
 
 pub const UNIT: u64 = 1;
-pub const XPQ: u64 = 1_000_000;
-pub const DECIMALS: u8 = 6;
+pub const XPQ: u64 = 100_000_000;
+pub const DECIMALS: u8 = 8;
 
-const_assert!(XPQ == 1_000_000);
+const_assert!(XPQ == 100_000_000);
 
-pub const BLOCK_REWARD: u64 = 25 * XPQ; // 25 XPQ
-pub const TAIL_EMISSION: u64 = 747_000; // 0.747 XPQ
+pub const BLOCK_REWARD: u64 = 50 * XPQ; // 50 XPQ
+pub const TAIL_EMISSION: u64 = 161_172_119;
 pub const TAIL_EMISSION_START_YEARS: u64 = 4;
 
 #[derive(

@@ -5,6 +5,8 @@ use std::fmt;
 pub enum StateError {
     InsufficientBalance,
     InvalidNonce,
+    NonceOverflow,
+    InvalidAuthorization,
     AddressMismatch,
     BalanceOverflow,
 }
@@ -15,6 +17,10 @@ impl fmt::Display for StateError {
             StateError::InsufficientBalance => f.write_str("account balance is insufficient"),
             StateError::InvalidNonce => {
                 f.write_str("transaction nonce does not match account nonce")
+            }
+            StateError::NonceOverflow => f.write_str("account nonce is exhausted"),
+            StateError::InvalidAuthorization => {
+                f.write_str("account authorization initialization is invalid")
             }
             StateError::AddressMismatch => {
                 f.write_str("transaction address does not match account address")

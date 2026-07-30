@@ -1,4 +1,5 @@
 use crate::block::BlockError;
+use crate::error::CodecError;
 use std::error::Error;
 use std::fmt;
 
@@ -8,10 +9,12 @@ pub enum ConsensusError {
     InvalidDifficulty,
     UnexpectedDifficulty,
     InvalidProofOfWorkParameters,
+    ProofOfWorkHashFailed,
     InvalidHeight,
     InvalidPreviousHash,
     InvalidTimestamp,
     InsufficientProofOfWork,
+    Serialization(CodecError),
 }
 
 impl fmt::Display for ConsensusError {
@@ -25,6 +28,7 @@ impl fmt::Display for ConsensusError {
             ConsensusError::InvalidProofOfWorkParameters => {
                 f.write_str("proof-of-work parameters are invalid")
             }
+            ConsensusError::ProofOfWorkHashFailed => f.write_str("proof-of-work hash failed"),
             ConsensusError::InvalidHeight => f.write_str("block height does not extend tip"),
             ConsensusError::InvalidPreviousHash => {
                 f.write_str("block previous hash does not match tip")
@@ -35,14 +39,29 @@ impl fmt::Display for ConsensusError {
             ConsensusError::InsufficientProofOfWork => {
                 f.write_str("block hash does not satisfy proof-of-work difficulty")
             }
+            ConsensusError::Serialization(error) => write!(f, "consensus encoding failed: {error}"),
         }
     }
 }
 
-impl Error for ConsensusError {}
+impl Error for ConsensusError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidBlock(error) => Some(error),
+            Self::Serialization(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<BlockError> for ConsensusError {
     fn from(error: BlockError) -> Self {
         Self::InvalidBlock(error)
+    }
+}
+
+impl From<CodecError> for ConsensusError {
+    fn from(error: CodecError) -> Self {
+        Self::Serialization(error)
     }
 }

@@ -1,3 +1,4 @@
+use crate::error::CodecError;
 use std::error::Error;
 use std::fmt;
 
@@ -20,6 +21,7 @@ pub enum BlockError {
     FeeOverflow,
     CoinbaseOverflow,
     FutureTimestamp,
+    Serialization(CodecError),
 }
 
 impl fmt::Display for BlockError {
@@ -54,8 +56,22 @@ impl fmt::Display for BlockError {
             BlockError::FeeOverflow => f.write_str("block transaction fees overflow"),
             BlockError::CoinbaseOverflow => f.write_str("block coinbase total overflow"),
             BlockError::FutureTimestamp => f.write_str("block timestamp is too far in the future"),
+            BlockError::Serialization(error) => write!(f, "block encoding failed: {error}"),
         }
     }
 }
 
-impl Error for BlockError {}
+impl Error for BlockError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Serialization(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<CodecError> for BlockError {
+    fn from(error: CodecError) -> Self {
+        Self::Serialization(error)
+    }
+}

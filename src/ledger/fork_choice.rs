@@ -1,11 +1,18 @@
-use crate::block::Block;
+use crate::block::{Block, BlockHeader};
 use crate::block::{BlockHeight, Height};
 use crate::consensus::{Consensus, DIFFICULTY_START, MIN_DIFFICULTY};
 use crate::crypto::{BlockHash, HASH_SIZE, Hash};
+use crate::ledger::MEDIAN_TIME_PAST_WINDOW;
+use borsh::{BorshDeserialize, BorshSerialize};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt;
 use std::ops::Add;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    BorshSerialize, BorshDeserialize, Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord,
+)]
 pub struct Work([u64; 8]);
 
 impl Work {
@@ -14,6 +21,10 @@ impl Work {
 
     pub fn to_be_limbs(self) -> [u64; 8] {
         self.0
+    }
+
+    pub const fn from_be_limbs(limbs: [u64; 8]) -> Self {
+        Self(limbs)
     }
 
     pub fn pow2(exponent: u32) -> Self {
@@ -72,7 +83,7 @@ impl ForkChoice {
     }
 
     pub fn insert_block(&mut self, block: Block) -> Result<BlockHash, ForkChoiceError> {
-        let hash = block.hash();
+        let hash = block.hash().map_err(ForkChoiceError::Serialization)?;
         if self.nodes.contains_key(&hash) {
             return Err(ForkChoiceError::DuplicateBlock);
         }
@@ -95,6 +106,14 @@ impl ForkChoice {
             if block.height().0 != parent_node.height.0.saturating_add(1) {
                 return Err(ForkChoiceError::InvalidHeight);
             }
+            if block.timestamp() <= parent_node.block.timestamp() {
+                return Err(ForkChoiceError::InvalidTimestamp);
+            }
+            if let Some(median_time_past) = self.median_time_past(parent)
+                && block.timestamp() <= median_time_past
+            {
+                return Err(ForkChoiceError::InvalidMedianTimePast);
+            }
             parent_node.cumulative_work
         };
         let expected_difficulty = self.expected_difficulty_for(&block, parent)?;
@@ -102,7 +121,7 @@ impl ForkChoice {
             return Err(ForkChoiceError::InvalidDifficulty);
         }
         Consensus::validate_proof_of_work_at_difficulty(&block, expected_difficulty)
-            .map_err(|_| ForkChoiceError::InvalidProofOfWork)?;
+            .map_err(ForkChoiceError::InvalidProofOfWork)?;
 
         let work = block_work(expected_difficulty);
         let cumulative_work = parent_work.saturating_add(work);
@@ -118,6 +137,19 @@ impl ForkChoice {
         self.nodes.insert(hash, node);
         self.update_best_tip(hash);
         Ok(hash)
+    }
+
+    /// Indexes an authenticated header when its historical block body is
+    /// intentionally absent (for example below a snapshot checkpoint).
+    ///
+    /// Header consensus rules and PoW are checked exactly as for a full block.
+    pub fn insert_header(&mut self, header: BlockHeader) -> Result<BlockHash, ForkChoiceError> {
+        self.insert_block(Block {
+            header,
+            genesis_allocations: Vec::new(),
+            coinbase: None,
+            transactions: Vec::new(),
+        })
     }
 
     pub fn best_tip(&self) -> Option<&BlockNode> {
@@ -141,6 +173,31 @@ impl ForkChoice {
         }
 
         hashes
+    }
+
+    pub fn ancestor_hash_at_height(
+        &self,
+        hash: BlockHash,
+        height: BlockHeight,
+    ) -> Option<BlockHash> {
+        self.ancestor_at_height(hash, height).map(|node| node.hash)
+    }
+
+    pub fn median_time_past(&self, tip: BlockHash) -> Option<u64> {
+        let mut timestamps = Vec::with_capacity(MEDIAN_TIME_PAST_WINDOW);
+        let mut current = tip;
+
+        loop {
+            let node = self.nodes.get(&current)?;
+            timestamps.push(node.block.timestamp());
+            if timestamps.len() == MEDIAN_TIME_PAST_WINDOW || node.height.0 == 0 {
+                break;
+            }
+            current = node.parent;
+        }
+
+        timestamps.sort_unstable();
+        timestamps.get(timestamps.len() / 2).copied()
     }
 
     pub fn branch_from_ancestor(&self, ancestor: BlockHash, tip: BlockHash) -> Option<Vec<Block>> {
@@ -228,11 +285,13 @@ impl ForkChoice {
 
         let should_update = match self.best_tip.and_then(|hash| self.nodes.get(&hash)) {
             None => true,
-            Some(best) => {
-                candidate.cumulative_work > best.cumulative_work
-                    || (candidate.cumulative_work == best.cumulative_work
-                        && candidate.hash < best.hash)
-            }
+            Some(best) => compare_chain_tips(
+                candidate.cumulative_work,
+                candidate.hash,
+                best.cumulative_work,
+                best.hash,
+            )
+            .is_gt(),
         };
 
         if should_update {
@@ -248,10 +307,6 @@ impl ForkChoice {
         if block.height().0 <= 1 {
             return Ok(DIFFICULTY_START);
         }
-        let parent_node = self
-            .nodes
-            .get(&parent)
-            .ok_or(ForkChoiceError::MissingParent)?;
         let anchor = self
             .ancestor_at_height(parent, Height(1))
             .ok_or(ForkChoiceError::MissingParent)?;
@@ -260,8 +315,8 @@ impl ForkChoice {
                 anchor.block.difficulty(),
                 anchor.block.timestamp(),
                 anchor.height,
-                parent_node.block.timestamp(),
-                parent_node.height,
+                block.timestamp(),
+                block.height(),
             )
             .map_err(|_| ForkChoiceError::InvalidDifficulty)
     }
@@ -285,15 +340,67 @@ impl ForkChoice {
 pub enum ForkChoiceError {
     DuplicateBlock,
     InvalidDifficulty,
-    InvalidProofOfWork,
+    InvalidProofOfWork(crate::error::ConsensusError),
     InvalidHeight,
+    InvalidTimestamp,
+    InvalidMedianTimePast,
     MissingParent,
     UnknownFinalizedBlock,
     FinalizedBlockNotOnBestChain,
+    Serialization(crate::error::CodecError),
+}
+
+impl fmt::Display for ForkChoiceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateBlock => f.write_str("block already exists in fork graph"),
+            Self::InvalidDifficulty => f.write_str("block difficulty is invalid for its branch"),
+            Self::InvalidProofOfWork(error) => write!(f, "block proof of work is invalid: {error}"),
+            Self::InvalidHeight => f.write_str("block height does not follow its parent"),
+            Self::InvalidTimestamp => f.write_str("block timestamp does not follow its parent"),
+            Self::InvalidMedianTimePast => {
+                f.write_str("block timestamp is not greater than branch median time past")
+            }
+            Self::MissingParent => f.write_str("block parent is missing from fork graph"),
+            Self::UnknownFinalizedBlock => {
+                f.write_str("finalized block is missing from fork graph")
+            }
+            Self::FinalizedBlockNotOnBestChain => {
+                f.write_str("finalized block is not on the selected best chain")
+            }
+            Self::Serialization(error) => write!(f, "fork graph encoding failed: {error}"),
+        }
+    }
+}
+
+impl Error for ForkChoiceError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidProofOfWork(error) => Some(error),
+            Self::Serialization(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 pub fn block_work(difficulty: u32) -> Work {
     Work::pow2(difficulty)
+}
+
+/// Consensus ordering for valid chain tips.
+///
+/// Greater locally-computed cumulative work wins. Equal-work branches use the
+/// numerically smaller block hash so every node reaches the same result
+/// without trusting peer identity, height claims, or arrival order.
+pub fn compare_chain_tips(
+    left_work: Work,
+    left_hash: BlockHash,
+    right_work: Work,
+    right_hash: BlockHash,
+) -> Ordering {
+    left_work
+        .cmp(&right_work)
+        .then_with(|| right_hash.cmp(&left_hash))
 }
 
 #[cfg(test)]
@@ -306,17 +413,25 @@ mod tests {
     #[test]
     fn rejects_block_that_claims_more_difficulty_than_expected() {
         let mut fork_choice = ForkChoice::new();
-        let genesis = genesis_block();
+        let genesis = genesis_block().unwrap();
         let genesis_hash = fork_choice.insert_block(genesis.clone()).unwrap();
-        let forged = Block::with_difficulty(
+        let miner = Address([1; 20]);
+        let forged = Block::from_protocol_transactions(
             Height(1),
             genesis_hash,
-            Address([1; 20]),
+            miner,
             DIFFICULTY_START.saturating_add(1),
             genesis.timestamp().saturating_add(1),
             Nonce(0),
+            Vec::new(),
+            Some(crate::block::CoinbaseTransaction::new(
+                miner,
+                crate::consensus::supply::Amount(0),
+                crate::consensus::supply::Amount(0),
+            )),
             vec![],
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             fork_choice.insert_block(forged),
@@ -325,6 +440,23 @@ mod tests {
         assert_eq!(
             fork_choice.best_tip().map(|node| node.hash),
             Some(genesis_hash)
+        );
+    }
+
+    #[test]
+    fn chain_tip_order_is_work_first_and_deterministic() {
+        let low_hash = BlockHash([1; HASH_SIZE]);
+        let high_hash = BlockHash([9; HASH_SIZE]);
+        let lower_work = Work::from_be_limbs([0, 0, 0, 0, 0, 0, 0, 20]);
+        let higher_work = Work::from_be_limbs([0, 0, 0, 0, 0, 0, 0, 21]);
+
+        assert!(compare_chain_tips(higher_work, high_hash, lower_work, low_hash).is_gt());
+        assert!(compare_chain_tips(lower_work, low_hash, higher_work, high_hash).is_lt());
+        assert!(compare_chain_tips(lower_work, low_hash, lower_work, high_hash).is_gt());
+        assert!(compare_chain_tips(lower_work, high_hash, lower_work, low_hash).is_lt());
+        assert_eq!(
+            compare_chain_tips(lower_work, low_hash, lower_work, low_hash),
+            Ordering::Equal
         );
     }
 }

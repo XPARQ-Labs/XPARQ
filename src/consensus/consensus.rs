@@ -1,7 +1,7 @@
 use crate::block::Block;
 use crate::block::{BlockHeight, Height};
 use crate::crypto::{
-    BlockHash, HASH_SIZE, Hash, ProofOfWorkHash, hash_meets_difficulty, sha3_512_proof_of_work_hash,
+    BlockHash, HASH_SIZE, Hash, ProofOfWorkHash, argon2id_proof_of_work_hash, hash_meets_difficulty,
 };
 
 use crate::error::ConsensusError;
@@ -16,7 +16,7 @@ pub const BLOCKS_PER_YEAR: u64 = 365 * BLOCKS_PER_DAY;
 pub const MIN_DIFFICULTY: u32 = 1;
 pub const DIFFICULTY_START: u32 = 1;
 pub const DIFFICULTY_ADJUSTMENT_INTERVAL: u64 = 1;
-pub const ASERT_HALF_LIFE: u64 = 1 * HOUR as u64;
+pub const ASERT_HALF_LIFE: u64 = HOUR as u64;
 pub const DIFFICULTY_ALGORITHM: &str = "asert-bits-v2";
 pub const MAX_FUTURE_TIME: u32 = 2 * MINUTE;
 
@@ -58,7 +58,9 @@ impl Consensus {
     }
 
     pub fn with_default_config() -> Self {
-        Self::new(ConsensusConfig::default()).expect("default consensus config should be valid")
+        Self {
+            config: ConsensusConfig::default(),
+        }
     }
 
     pub fn with_expected_difficulty(expected_difficulty: u32) -> Result<Self, ConsensusError> {
@@ -73,10 +75,6 @@ impl Consensus {
         self.config.difficulty()
     }
 
-    pub fn validate_genesis_block(&self, block: &Block) -> Result<(), ConsensusError> {
-        self.validate_genesis_block_at(block, block.timestamp())
-    }
-
     pub fn validate_genesis_block_at(&self, block: &Block, now: u64) -> Result<(), ConsensusError> {
         block.validate_at(now)?;
 
@@ -85,15 +83,6 @@ impl Consensus {
         }
 
         self.validate_proof_of_work(block)
-    }
-
-    pub fn validate_next_block(
-        &self,
-        block: &Block,
-        tip_height: BlockHeight,
-        tip_hash: BlockHash,
-    ) -> Result<(), ConsensusError> {
-        self.validate_next_block_at(block, tip_height, tip_hash, block.timestamp())
     }
 
     pub fn validate_next_block_at(
@@ -108,14 +97,6 @@ impl Consensus {
         self.validate_proof_of_work(block)
     }
 
-    pub fn validate_next_block_with_tip(
-        &self,
-        block: &Block,
-        tip: &Block,
-    ) -> Result<(), ConsensusError> {
-        self.validate_next_block_with_tip_at(block, tip, block.timestamp())
-    }
-
     pub fn validate_next_block_with_tip_at(
         &self,
         block: &Block,
@@ -123,7 +104,7 @@ impl Consensus {
         now: u64,
     ) -> Result<(), ConsensusError> {
         block.validate_at(now)?;
-        self.validate_next_block_linkage(block, tip.height(), tip.hash())?;
+        self.validate_next_block_linkage(block, tip.height(), tip.hash()?)?;
         if block.timestamp() <= tip.timestamp() {
             return Err(ConsensusError::InvalidTimestamp);
         }
@@ -147,14 +128,17 @@ impl Consensus {
         Ok(())
     }
 
-    pub fn validate_candidate_block(
+    pub fn validate_candidate_block_at(
         &self,
         block: &Block,
         tip: Option<(BlockHeight, BlockHash)>,
+        now: u64,
     ) -> Result<(), ConsensusError> {
         match tip {
-            Some((tip_height, tip_hash)) => self.validate_next_block(block, tip_height, tip_hash),
-            None => self.validate_genesis_block(block),
+            Some((tip_height, tip_hash)) => {
+                self.validate_next_block_at(block, tip_height, tip_hash, now)
+            }
+            None => self.validate_genesis_block_at(block, now),
         }
     }
 
@@ -210,10 +194,10 @@ impl Consensus {
         anchor_difficulty: u32,
         anchor_timestamp: u64,
         anchor_height: BlockHeight,
-        parent_timestamp: u64,
-        parent_height: BlockHeight,
+        block_timestamp: u64,
+        block_height: BlockHeight,
     ) -> Result<u32, ConsensusError> {
-        if anchor_difficulty < MIN_DIFFICULTY || parent_height < anchor_height {
+        if anchor_difficulty < MIN_DIFFICULTY || block_height < anchor_height {
             return Err(ConsensusError::InvalidDifficulty);
         }
 
@@ -221,9 +205,9 @@ impl Consensus {
         const FRACTION_SCALE: i128 = 1_i128 << FRACTION_BITS;
         const ROUNDING: i128 = FRACTION_SCALE / 2;
 
-        let height_delta = parent_height.0.saturating_sub(anchor_height.0) as i128;
+        let height_delta = block_height.0.saturating_sub(anchor_height.0) as i128;
         let ideal_elapsed = height_delta.saturating_mul(BLOCK_TIME as i128);
-        let actual_elapsed = parent_timestamp.saturating_sub(anchor_timestamp) as i128;
+        let actual_elapsed = block_timestamp.saturating_sub(anchor_timestamp) as i128;
         let time_error = ideal_elapsed.saturating_sub(actual_elapsed);
         let exponent = time_error
             .saturating_mul(FRACTION_SCALE)
@@ -244,6 +228,12 @@ impl Consensus {
 
 fn proof_of_work_hash(block: &Block) -> Result<ProofOfWorkHash, ConsensusError> {
     let header_bytes =
-        borsh::to_vec(&block.header).expect("block header serialization should not fail");
-    Ok(sha3_512_proof_of_work_hash(&header_bytes))
+        borsh::to_vec(&block.header).map_err(|_| ConsensusError::ProofOfWorkHashFailed)?;
+    argon2id_proof_of_work_hash(&header_bytes).map_err(|error| match error {
+        crate::error::CryptoError::InvalidProofOfWorkParameters => {
+            ConsensusError::InvalidProofOfWorkParameters
+        }
+        crate::error::CryptoError::ProofOfWorkHashFailed => ConsensusError::ProofOfWorkHashFailed,
+        _ => ConsensusError::ProofOfWorkHashFailed,
+    })
 }

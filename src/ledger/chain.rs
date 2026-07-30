@@ -1,14 +1,21 @@
-use crate::block::Block;
+use crate::block::{Block, BlockHeader};
 use crate::block::{BlockHeight, Height};
 use crate::crypto::{BlockHash, HASH_SIZE, Hash};
 use crate::error::LedgerError;
+use crate::ledger::MEDIAN_TIME_PAST_WINDOW;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Chain {
+    /// Authenticated canonical headers, including pruned history.
+    pub headers: BTreeMap<BlockHeight, BlockHeader>,
+    /// Full blocks retained locally. Snapshot-bootstrapped nodes may not have
+    /// bodies below their checkpoint.
     pub blocks: BTreeMap<BlockHeight, Block>,
     pub tip_height: Option<BlockHeight>,
     pub tip_hash: Option<BlockHash>,
+    /// A reorg may never disconnect this height or anything below it.
+    pub checkpoint_height: Option<BlockHeight>,
 }
 
 impl Chain {
@@ -20,7 +27,8 @@ impl Chain {
         self.validate_next_block(&block)?;
 
         let height = block.height();
-        let hash = block.hash();
+        let hash = block.hash()?;
+        self.headers.insert(height, block.header.clone());
         self.blocks.insert(height, block);
         self.tip_height = Some(height);
         self.tip_hash = Some(hash);
@@ -36,6 +44,46 @@ impl Chain {
         self.tip_height.is_some()
     }
 
+    pub fn header(&self, height: &BlockHeight) -> Option<&BlockHeader> {
+        self.headers.get(height)
+    }
+
+    /// Installs a complete header chain that has already passed the public
+    /// PoW verifier and pins its tip as the local snapshot checkpoint.
+    pub(crate) fn install_verified_headers(
+        &mut self,
+        headers: &[BlockHeader],
+        checkpoint_height: BlockHeight,
+    ) -> Result<(), LedgerError> {
+        crate::recovery::verify_header_chain(headers).map_err(|_| LedgerError::InvalidParent)?;
+        self.headers.clear();
+        self.blocks.clear();
+        for header in headers {
+            self.headers.insert(header.height, header.clone());
+        }
+        let tip = headers.last().ok_or(LedgerError::InvalidParent)?;
+        self.tip_height = Some(tip.height);
+        self.tip_hash = Some(tip.hash()?);
+        if checkpoint_height > tip.height {
+            return Err(LedgerError::InvalidBlockHeight);
+        }
+        self.checkpoint_height = Some(checkpoint_height);
+        Ok(())
+    }
+
+    /// Attaches an available body to an already authenticated canonical header.
+    pub(crate) fn attach_full_block(&mut self, block: Block) -> Result<(), LedgerError> {
+        let header = self
+            .headers
+            .get(&block.height())
+            .ok_or(LedgerError::InvalidParent)?;
+        if header != &block.header {
+            return Err(LedgerError::InvalidParent);
+        }
+        self.blocks.insert(block.height(), block);
+        Ok(())
+    }
+
     pub fn tip_height(&self) -> Option<BlockHeight> {
         self.tip_height
     }
@@ -45,7 +93,7 @@ impl Chain {
     }
 
     pub fn validate_next_block(&self, block: &Block) -> Result<(), LedgerError> {
-        if self.blocks.contains_key(&block.height()) {
+        if self.headers.contains_key(&block.height()) {
             return Err(LedgerError::DuplicateBlock);
         }
 
@@ -71,6 +119,12 @@ impl Chain {
                 {
                     return Err(LedgerError::InvalidTimestamp);
                 }
+
+                if let Some(median_time_past) = self.median_time_past(tip_height)
+                    && block.timestamp() <= median_time_past
+                {
+                    return Err(LedgerError::InvalidMedianTimePast);
+                }
             }
             _ => return Err(LedgerError::InvalidParent),
         }
@@ -83,18 +137,41 @@ impl Chain {
             return Err(LedgerError::InvalidParent);
         }
         let height = self.tip_height.ok_or(LedgerError::InvalidBlockHeight)?;
+        if self
+            .checkpoint_height
+            .is_some_and(|checkpoint| height <= checkpoint)
+        {
+            return Err(LedgerError::InvalidBlockHeight);
+        }
         let block = self
             .blocks
             .remove(&height)
             .ok_or(LedgerError::InvalidBlockHeight)?;
+        self.headers.remove(&height);
         let previous_height = height.0.checked_sub(1).map(Height);
         self.tip_height = previous_height;
-        self.tip_hash =
-            previous_height.and_then(|previous| self.blocks.get(&previous).map(Block::hash));
+        self.tip_hash = match previous_height.and_then(|previous| self.headers.get(&previous)) {
+            Some(previous) => Some(previous.hash()?),
+            None => None,
+        };
         Ok(block)
     }
 
     fn timestamp_at(&self, height: BlockHeight) -> Option<u64> {
-        self.blocks.get(&height).map(Block::timestamp)
+        self.headers.get(&height).map(|header| header.timestamp)
+    }
+
+    pub fn median_time_past(&self, tip_height: BlockHeight) -> Option<u64> {
+        let mut timestamps = Vec::with_capacity(MEDIAN_TIME_PAST_WINDOW);
+        let mut height = tip_height.0;
+        loop {
+            timestamps.push(self.headers.get(&Height(height))?.timestamp);
+            if timestamps.len() == MEDIAN_TIME_PAST_WINDOW || height == 0 {
+                break;
+            }
+            height = height.saturating_sub(1);
+        }
+        timestamps.sort_unstable();
+        timestamps.get(timestamps.len() / 2).copied()
     }
 }

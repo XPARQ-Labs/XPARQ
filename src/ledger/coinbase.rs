@@ -23,7 +23,7 @@ impl Ledger {
             return Err(LedgerError::InvalidCoinbase);
         }
         self.mint_miner_subsidy(coinbase.to, coinbase.subsidy, block.height())?;
-        self.refresh_account_state(&coinbase.to);
+        self.refresh_account_state(&coinbase.to)?;
         Ok(())
     }
 
@@ -33,9 +33,9 @@ impl Ledger {
         fees: Amount,
         height: BlockHeight,
     ) -> Result<(), LedgerError> {
-        let spendable_height =
+        let maturity_height =
             crate::block::Height(height.0.saturating_add(CONFIRMATION_DEPTH as u64));
-        self.credit_miner(miner_address, fees, spendable_height, CreditSource::Fee)
+        self.credit_miner(miner_address, fees, maturity_height, CreditSource::Fee)
     }
 
     fn mint_miner_subsidy(
@@ -44,12 +44,12 @@ impl Ledger {
         subsidy: Amount,
         height: BlockHeight,
     ) -> Result<(), LedgerError> {
-        let spendable_height =
+        let maturity_height =
             crate::block::Height(height.0.saturating_add(BLOCK_REWARD_MATURITY as u64));
         self.credit_miner(
             miner_address,
             subsidy,
-            spendable_height,
+            maturity_height,
             CreditSource::MiningReward,
         )
     }
@@ -62,14 +62,14 @@ impl Ledger {
         &mut self,
         miner_address: Address,
         amount: Amount,
-        spendable_height: BlockHeight,
+        maturity_height: BlockHeight,
         source: CreditSource,
     ) -> Result<(), LedgerError> {
         if let Some(miner) = self.accounts.get_mut(&miner_address) {
-            miner.credit_locked(amount, spendable_height, source)?;
+            miner.credit_at_maturity(amount, maturity_height, source)?;
         } else {
             let mut account = Account::new(miner_address, Amount(0));
-            account.credit_locked(amount, spendable_height, source)?;
+            account.credit_at_maturity(amount, maturity_height, source)?;
             self.accounts.insert(miner_address, account);
         }
 

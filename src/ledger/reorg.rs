@@ -22,7 +22,7 @@ pub fn plan_reorg(
     let ancestor =
         common_ancestor(old_tip, new_tip, fork_choice).ok_or(LedgerError::InvalidParent)?;
     if reorg_crosses_finality_boundary(active, fork_choice, ancestor) {
-        return Err(LedgerError::InvalidParent);
+        return Err(LedgerError::FinalityViolation);
     }
     let apply = fork_choice
         .branch_from_ancestor(ancestor, new_tip)
@@ -51,7 +51,7 @@ pub fn common_ancestor(
         .find(|hash| old_ancestors.contains(hash))
 }
 
-fn reorg_crosses_finality_boundary(
+pub fn reorg_crosses_finality_boundary(
     active: &Ledger,
     fork_choice: &ForkChoice,
     ancestor: BlockHash,
@@ -63,6 +63,29 @@ fn reorg_crosses_finality_boundary(
         return true;
     };
 
-    let first_replaced_height = ancestor.height.0.saturating_add(1);
-    tip_height.0 >= first_replaced_height.saturating_add(FINALITY_DEPTH as u64)
+    reorg_crosses_finality_height(tip_height.0, ancestor.height.0)
+}
+
+pub const fn reorg_crosses_finality_height(tip_height: u64, ancestor_height: u64) -> bool {
+    let finalized_height = tip_height.saturating_sub(FINALITY_DEPTH as u64);
+    ancestor_height < finalized_height
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finality_boundary_accepts_exact_checkpoint_and_rejects_one_block_deeper() {
+        let tip = 100;
+        let finalized = tip - FINALITY_DEPTH as u64;
+
+        assert!(!reorg_crosses_finality_height(tip, finalized));
+        assert!(reorg_crosses_finality_height(tip, finalized - 1));
+    }
+
+    #[test]
+    fn short_chain_does_not_finalize_genesis_early() {
+        assert!(!reorg_crosses_finality_height(FINALITY_DEPTH as u64 - 1, 0));
+    }
 }

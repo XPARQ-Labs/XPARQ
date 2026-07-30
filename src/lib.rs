@@ -5,7 +5,11 @@ pub mod crypto;
 pub mod error;
 pub mod event;
 pub mod genesis;
+pub mod governance;
 pub mod ledger;
 pub mod qcash;
+pub mod recovery;
 pub mod state;
 pub mod transaction;
+#[cfg(feature = "sqisign-secure-memory")]
+sqisign_rs::enable_secure_allocator!();

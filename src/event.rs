@@ -3,6 +3,10 @@
 use crate::block::BlockHeight;
 use crate::consensus::supply::Amount;
 use crate::crypto::{Address, BlockHash, HashDomain, TransactionHash, domain_hash};
+use crate::governance::{
+    GovernanceActionType, GovernanceIssuerId, ProposalId, ProposalOutcome, ProposalVotingMode,
+    VoteChoice,
+};
 use crate::transaction::AccountNonce;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -63,6 +67,37 @@ pub enum ChainEvent {
     RollbackCompleted(RollbackEvent),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RollbackHistory {
+    events: Vec<RollbackEvent>,
+}
+
+impl RollbackHistory {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record(&mut self, event: RollbackEvent) {
+        self.events.push(event);
+    }
+
+    pub fn events(&self) -> &[RollbackEvent] {
+        &self.events
+    }
+
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    pub fn last(&self) -> Option<&RollbackEvent> {
+        self.events.last()
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
@@ -81,6 +116,48 @@ pub enum ProtocolEventKind {
         signer: Address,
         recipient: Address,
         amount: Amount,
+    },
+    GovernanceIssuerRegistered {
+        issuer_id: GovernanceIssuerId,
+        controller: Address,
+    },
+    GovernanceIssuerApproved {
+        issuer_id: GovernanceIssuerId,
+        approver: Address,
+    },
+    GovernanceCredentialIssued {
+        issuer_id: GovernanceIssuerId,
+        subject: Address,
+        credential_type: GovernanceActionType,
+    },
+    GovernanceCredentialBound {
+        subject: Address,
+        credential_type: GovernanceActionType,
+    },
+    GovernanceCredentialRevoked {
+        subject: Address,
+        credential_type: GovernanceActionType,
+    },
+    GovernanceProposalCreated {
+        proposal_id: ProposalId,
+        proposer: Address,
+        action_type: GovernanceActionType,
+        voting_mode: ProposalVotingMode,
+        bond_amount: Amount,
+    },
+    GovernanceVoteCast {
+        proposal_id: ProposalId,
+        voter: Address,
+        choice: VoteChoice,
+        power: u64,
+    },
+    GovernanceProposalFinalized {
+        proposal_id: ProposalId,
+        outcome: ProposalOutcome,
+    },
+    GovernanceProposalExecuted {
+        proposal_id: ProposalId,
+        executor: Address,
     },
     GenesisAllocation {
         recipient: Address,
@@ -126,15 +203,42 @@ impl ProtocolEvent {
         }
     }
 
-    pub fn id(&self) -> EventId {
-        EventId(domain_hash(HashDomain::ProtocolEvent, &self.to_bytes()).0)
+    pub fn id(&self) -> Result<EventId, crate::error::CodecError> {
+        Ok(EventId(
+            domain_hash(HashDomain::ProtocolEvent, &self.to_bytes()?).0,
+        ))
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, crate::error::CodecError> {
         crate::codec::protocol_event_bytes(self)
     }
 
     pub fn validate(&self) -> bool {
         self.version == PROTOCOL_EVENT_VERSION && self.block_hash != BlockHash::ZERO
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::Height;
+
+    #[test]
+    fn rollback_history_records_events_in_order() {
+        let mut history = RollbackHistory::new();
+        let event = RollbackEvent {
+            from_height: Height(3),
+            to_height: Height(2),
+            old_tip: BlockHash([1; 32]),
+            new_tip: BlockHash([2; 32]),
+            disconnected_blocks: Vec::new(),
+            affected_accounts: Vec::new(),
+        };
+
+        history.record(event.clone());
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.last(), Some(&event));
+        assert_eq!(history.events(), &[event]);
     }
 }

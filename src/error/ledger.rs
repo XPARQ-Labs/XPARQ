@@ -1,6 +1,6 @@
 use crate::block::BlockError;
-use crate::error::ConsensusError;
-use crate::state::{QCashUtxoError, StateError};
+use crate::error::{CodecError, ConsensusError};
+use crate::state::{QCashUtxoError, StateError, VaultError};
 use crate::transaction::TransactionError;
 use std::error::Error;
 use std::fmt;
@@ -22,10 +22,25 @@ pub enum LedgerError {
     InvalidBlockHeight,
     InvalidPreviousHash,
     InvalidTimestamp,
+    InvalidMedianTimePast,
+    FinalityViolation,
     DuplicateBlock,
     SupplyOverflow,
+    SupplyMismatch,
+    UnauthorizedSupplyCreation,
     InvalidQCashUtxo(QCashUtxoError),
+    InvalidVault(VaultError),
     MissingQCashAccountJournal,
+    DuplicateGovernanceProposal,
+    DuplicateGovernanceProposalFinalization,
+    DuplicateGovernanceProposalExecution,
+    GovernanceProposalNotAccepted,
+    UnknownGovernanceProposal,
+    DuplicateGovernanceIssuer,
+    UnknownGovernanceIssuer,
+    IssuerNotAcceptedForProposal,
+    EventInvariantViolation,
+    Serialization(CodecError),
 }
 
 impl fmt::Display for LedgerError {
@@ -54,16 +69,57 @@ impl fmt::Display for LedgerError {
             LedgerError::InvalidTimestamp => {
                 f.write_str("block timestamp must be greater than ledger tip")
             }
+            LedgerError::InvalidMedianTimePast => {
+                f.write_str("block timestamp must be greater than median time past")
+            }
+            LedgerError::FinalityViolation => {
+                f.write_str("reorganization would replace finalized chain history")
+            }
             LedgerError::DuplicateBlock => f.write_str("block height already exists in ledger"),
             LedgerError::SupplyOverflow => {
                 f.write_str("ledger total supply exceeds maximum supply")
             }
+            LedgerError::SupplyMismatch => {
+                f.write_str("ledger economic supply does not match authorized issuance")
+            }
+            LedgerError::UnauthorizedSupplyCreation => {
+                f.write_str("only genesis and consensus coinbase may create supply")
+            }
             LedgerError::InvalidQCashUtxo(error) => {
                 write!(f, "invalid QCash UTXO state transition: {error}")
+            }
+            LedgerError::InvalidVault(error) => {
+                write!(f, "invalid vault state transition: {error:?}")
             }
             LedgerError::MissingQCashAccountJournal => {
                 f.write_str("QCash account block journal was not found")
             }
+            LedgerError::DuplicateGovernanceProposal => {
+                f.write_str("governance proposal already exists")
+            }
+            LedgerError::DuplicateGovernanceProposalFinalization => {
+                f.write_str("governance proposal is already finalized")
+            }
+            LedgerError::DuplicateGovernanceProposalExecution => {
+                f.write_str("governance proposal is already executed")
+            }
+            LedgerError::GovernanceProposalNotAccepted => {
+                f.write_str("governance proposal is not accepted")
+            }
+            LedgerError::UnknownGovernanceProposal => {
+                f.write_str("governance proposal was not found")
+            }
+            LedgerError::DuplicateGovernanceIssuer => {
+                f.write_str("governance issuer already exists")
+            }
+            LedgerError::UnknownGovernanceIssuer => f.write_str("governance issuer was not found"),
+            LedgerError::IssuerNotAcceptedForProposal => {
+                f.write_str("governance credential issuer is not accepted for this proposal")
+            }
+            LedgerError::EventInvariantViolation => {
+                f.write_str("applied block could not produce canonical protocol events")
+            }
+            LedgerError::Serialization(error) => write!(f, "ledger encoding failed: {error}"),
         }
     }
 }
@@ -74,11 +130,28 @@ impl From<QCashUtxoError> for LedgerError {
     }
 }
 
-impl Error for LedgerError {}
+impl Error for LedgerError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidBlock(error) => Some(error),
+            Self::InvalidConsensus(error) => Some(error),
+            Self::InvalidState(error) => Some(error),
+            Self::InvalidTransaction(error) => Some(error),
+            Self::InvalidQCashUtxo(error) => Some(error),
+            Self::Serialization(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<ConsensusError> for LedgerError {
     fn from(error: ConsensusError) -> Self {
-        Self::InvalidConsensus(error)
+        match error {
+            ConsensusError::InvalidPreviousHash => Self::InvalidPreviousHash,
+            ConsensusError::InvalidTimestamp => Self::InvalidTimestamp,
+            ConsensusError::InvalidHeight => Self::InvalidBlockHeight,
+            _ => Self::InvalidConsensus(error),
+        }
     }
 }
 
@@ -89,6 +162,12 @@ impl From<BlockError> for LedgerError {
             BlockError::InvalidCoinbase | BlockError::MissingCoinbase => Self::InvalidCoinbase,
             _ => Self::InvalidBlock(error),
         }
+    }
+}
+
+impl From<CodecError> for LedgerError {
+    fn from(error: CodecError) -> Self {
+        Self::Serialization(error)
     }
 }
 
@@ -106,8 +185,11 @@ impl From<TransactionError> for LedgerError {
     fn from(error: TransactionError) -> Self {
         match error {
             TransactionError::InvalidSignature
+            | TransactionError::InvalidAuthorizationSignature
             | TransactionError::EmptySignature
+            | TransactionError::EmptyAuthorizationSignature
             | TransactionError::EmptyPublicKey
+            | TransactionError::EmptyAuthorizationPublicKey
             | TransactionError::SenderAddressMismatch => Self::InvalidSignature,
             _ => Self::InvalidTransaction(error),
         }

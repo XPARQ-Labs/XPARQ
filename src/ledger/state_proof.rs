@@ -1,12 +1,23 @@
+use crate::block::{BlockHeader, BlockHeight};
 use crate::codec::{HashDomain, canonical_bytes, domain_hash};
 use crate::crypto::ADDRESS_SIZE;
 use crate::crypto::Address;
-use crate::crypto::{HASH_SIZE, Hash, StateRoot};
-use crate::state::Account;
+use crate::crypto::{BlockHash, HASH_SIZE, Hash, StateRoot};
+use crate::ledger::fork_choice::Work;
+use crate::recovery::RollbackProofError;
+use crate::state::{
+    Account, BlockStateCommitment, QCashCoinId, QCashStateProof, QCashUtxo, empty_qcash_state_root,
+    verify_qcash_state_proof,
+};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt;
 
 const ADDRESS_BITS: usize = ADDRESS_SIZE * 8;
+pub const ACCOUNT_STATE_PROOF_BUNDLE_VERSION: u8 = 1;
+pub const MAX_ACCOUNT_STATE_PROOF_HEADERS: usize = 1_000_000;
+pub const MAX_ACCOUNT_STATE_PROOF_BUNDLE_SIZE: usize = 256 * 1024 * 1024;
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProofSide {
@@ -25,6 +36,412 @@ pub struct AccountStateProof {
     pub address: Address,
     pub account: Account,
     pub siblings: Vec<StateProofNode>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AccountNonMembershipProof {
+    pub address: Address,
+    pub terminal_depth: u16,
+    pub siblings: Vec<StateProofNode>,
+}
+
+/// A self-contained proof that an account was committed by a PoW-validated
+/// canonical header path starting at the frozen genesis block.
+///
+/// A verifier still needs an independent freshness policy (for example,
+/// comparing tips from multiple peers) to defend against stale-tip/eclipse
+/// attacks.
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AccountStateProofBundle {
+    pub version: u8,
+    pub canonical_headers: Vec<BlockHeader>,
+    pub state_commitment: BlockStateCommitment,
+    pub account_proof: AccountStateProof,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AccountNonMembershipProofBundle {
+    pub version: u8,
+    pub canonical_headers: Vec<BlockHeader>,
+    pub state_commitment: BlockStateCommitment,
+    pub account_proof: AccountNonMembershipProof,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct QCashStateProofBundle {
+    pub version: u8,
+    pub canonical_headers: Vec<BlockHeader>,
+    pub state_commitment: BlockStateCommitment,
+    pub qcash_proof: QCashStateProof,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedAccountState {
+    pub height: BlockHeight,
+    pub block_hash: BlockHash,
+    pub cumulative_work: Work,
+    pub account: Account,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountStateProofBundleError {
+    UnsupportedVersion,
+    HeaderLimitExceeded,
+    BundleSizeExceeded,
+    InvalidHeaderChain(RollbackProofError),
+    CommitmentHeightMismatch,
+    CommitmentBlockHashMismatch,
+    CommitmentProtocolRootMismatch,
+    InvalidProtocolCommitment,
+    InvalidAccountProof,
+    Serialization(crate::error::CodecError),
+}
+
+impl fmt::Display for AccountStateProofBundleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::UnsupportedVersion => "unsupported account state proof bundle version",
+            Self::HeaderLimitExceeded => "account proof header limit exceeded",
+            Self::BundleSizeExceeded => "account proof bundle size limit exceeded",
+            Self::InvalidHeaderChain(_) => "account proof header chain is invalid",
+            Self::CommitmentHeightMismatch => {
+                "state commitment height does not match the proven tip"
+            }
+            Self::CommitmentBlockHashMismatch => {
+                "state commitment block hash does not match the proven tip"
+            }
+            Self::CommitmentProtocolRootMismatch => {
+                "state commitment protocol root does not match the proven tip"
+            }
+            Self::InvalidProtocolCommitment => {
+                "protocol state commitment components do not match its root"
+            }
+            Self::InvalidAccountProof => "account proof does not match the committed account root",
+            Self::Serialization(_) => "account state proof bundle serialization failed",
+        };
+        match self {
+            Self::InvalidHeaderChain(error) => write!(f, "{message}: {error}"),
+            Self::Serialization(error) => write!(f, "{message}: {error}"),
+            _ => f.write_str(message),
+        }
+    }
+}
+
+impl Error for AccountStateProofBundleError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidHeaderChain(error) => Some(error),
+            Self::Serialization(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl AccountStateProofBundle {
+    pub fn verify(&self) -> Result<VerifiedAccountState, AccountStateProofBundleError> {
+        if self.version != ACCOUNT_STATE_PROOF_BUNDLE_VERSION {
+            return Err(AccountStateProofBundleError::UnsupportedVersion);
+        }
+        if self.canonical_headers.len() > MAX_ACCOUNT_STATE_PROOF_HEADERS {
+            return Err(AccountStateProofBundleError::HeaderLimitExceeded);
+        }
+        let (block_hash, cumulative_work) =
+            crate::recovery::verify_header_chain(&self.canonical_headers)
+                .map_err(AccountStateProofBundleError::InvalidHeaderChain)?;
+        let tip = self.canonical_headers.last().ok_or(
+            AccountStateProofBundleError::InvalidHeaderChain(RollbackProofError::EmptyHeaderChain),
+        )?;
+        self.verify_state_binding(tip, block_hash)?;
+        Ok(VerifiedAccountState {
+            height: tip.height,
+            block_hash,
+            cumulative_work,
+            account: self.account_proof.account.clone(),
+        })
+    }
+
+    /// Verifies the commitment and account layers against a header whose hash
+    /// and chain validity were established separately.
+    pub fn verify_state_binding(
+        &self,
+        tip: &BlockHeader,
+        block_hash: BlockHash,
+    ) -> Result<(), AccountStateProofBundleError> {
+        if self.state_commitment.height != tip.height {
+            return Err(AccountStateProofBundleError::CommitmentHeightMismatch);
+        }
+        if self.state_commitment.block_hash != block_hash {
+            return Err(AccountStateProofBundleError::CommitmentBlockHashMismatch);
+        }
+        let committed_root = if tip.height.0 == 0 {
+            self.state_commitment.account_state_root
+        } else {
+            self.state_commitment.protocol_state_root
+        };
+        if committed_root != tip.state_root {
+            return Err(AccountStateProofBundleError::CommitmentProtocolRootMismatch);
+        }
+        if !self
+            .state_commitment
+            .matches_protocol_root()
+            .map_err(AccountStateProofBundleError::Serialization)?
+        {
+            return Err(AccountStateProofBundleError::InvalidProtocolCommitment);
+        }
+        if !verify_account_state_proof(
+            self.state_commitment.account_state_root,
+            &self.account_proof,
+        )
+        .map_err(AccountStateProofBundleError::Serialization)?
+        {
+            return Err(AccountStateProofBundleError::InvalidAccountProof);
+        }
+        Ok(())
+    }
+}
+
+impl AccountNonMembershipProofBundle {
+    pub fn verify(&self) -> Result<VerifiedAccountAbsence, AccountStateProofBundleError> {
+        if self.version != ACCOUNT_STATE_PROOF_BUNDLE_VERSION {
+            return Err(AccountStateProofBundleError::UnsupportedVersion);
+        }
+        if self.canonical_headers.len() > MAX_ACCOUNT_STATE_PROOF_HEADERS {
+            return Err(AccountStateProofBundleError::HeaderLimitExceeded);
+        }
+        let (block_hash, cumulative_work) =
+            crate::recovery::verify_header_chain(&self.canonical_headers)
+                .map_err(AccountStateProofBundleError::InvalidHeaderChain)?;
+        let tip = self.canonical_headers.last().ok_or(
+            AccountStateProofBundleError::InvalidHeaderChain(RollbackProofError::EmptyHeaderChain),
+        )?;
+        self.verify_state_binding(tip, block_hash)?;
+        Ok(VerifiedAccountAbsence {
+            height: tip.height,
+            block_hash,
+            cumulative_work,
+            address: self.account_proof.address,
+        })
+    }
+
+    /// Verifies absence against a header whose hash and chain validity were
+    /// established separately.
+    pub fn verify_state_binding(
+        &self,
+        tip: &BlockHeader,
+        block_hash: BlockHash,
+    ) -> Result<(), AccountStateProofBundleError> {
+        if self.state_commitment.height != tip.height {
+            return Err(AccountStateProofBundleError::CommitmentHeightMismatch);
+        }
+        if self.state_commitment.block_hash != block_hash {
+            return Err(AccountStateProofBundleError::CommitmentBlockHashMismatch);
+        }
+        let committed_root = if tip.height.0 == 0 {
+            self.state_commitment.account_state_root
+        } else {
+            self.state_commitment.protocol_state_root
+        };
+        if committed_root != tip.state_root {
+            return Err(AccountStateProofBundleError::CommitmentProtocolRootMismatch);
+        }
+        if !self
+            .state_commitment
+            .matches_protocol_root()
+            .map_err(AccountStateProofBundleError::Serialization)?
+        {
+            return Err(AccountStateProofBundleError::InvalidProtocolCommitment);
+        }
+        if !verify_account_non_membership_proof(
+            self.state_commitment.account_state_root,
+            &self.account_proof,
+        ) {
+            return Err(AccountStateProofBundleError::InvalidAccountProof);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedAccountAbsence {
+    pub height: BlockHeight,
+    pub block_hash: BlockHash,
+    pub cumulative_work: Work,
+    pub address: Address,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedQCashState {
+    pub height: BlockHeight,
+    pub block_hash: BlockHash,
+    pub cumulative_work: Work,
+    pub coin_id: QCashCoinId,
+    pub coin: Option<QCashUtxo>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QCashStateProofBundleError {
+    UnsupportedVersion,
+    HeaderLimitExceeded,
+    BundleSizeExceeded,
+    InvalidHeaderChain(RollbackProofError),
+    CommitmentHeightMismatch,
+    CommitmentBlockHashMismatch,
+    CommitmentProtocolRootMismatch,
+    InvalidProtocolCommitment,
+    InvalidQCashProof,
+    Serialization(crate::error::CodecError),
+}
+
+impl fmt::Display for QCashStateProofBundleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::UnsupportedVersion => "unsupported QCash state proof bundle version",
+            Self::HeaderLimitExceeded => "QCash proof header limit exceeded",
+            Self::BundleSizeExceeded => "QCash proof bundle size limit exceeded",
+            Self::InvalidHeaderChain(_) => "QCash proof header chain is invalid",
+            Self::CommitmentHeightMismatch => {
+                "state commitment height does not match the proven tip"
+            }
+            Self::CommitmentBlockHashMismatch => {
+                "state commitment block hash does not match the proven tip"
+            }
+            Self::CommitmentProtocolRootMismatch => {
+                "state commitment protocol root does not match the proven tip"
+            }
+            Self::InvalidProtocolCommitment => {
+                "protocol state commitment components do not match its root"
+            }
+            Self::InvalidQCashProof => "QCash proof does not match the committed QCash root",
+            Self::Serialization(_) => "QCash state proof bundle serialization failed",
+        };
+        match self {
+            Self::InvalidHeaderChain(error) => write!(f, "{message}: {error}"),
+            Self::Serialization(error) => write!(f, "{message}: {error}"),
+            _ => f.write_str(message),
+        }
+    }
+}
+
+impl Error for QCashStateProofBundleError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidHeaderChain(error) => Some(error),
+            Self::Serialization(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl QCashStateProofBundle {
+    pub fn verify(&self) -> Result<VerifiedQCashState, QCashStateProofBundleError> {
+        if self.version != ACCOUNT_STATE_PROOF_BUNDLE_VERSION {
+            return Err(QCashStateProofBundleError::UnsupportedVersion);
+        }
+        if self.canonical_headers.len() > MAX_ACCOUNT_STATE_PROOF_HEADERS {
+            return Err(QCashStateProofBundleError::HeaderLimitExceeded);
+        }
+        let (block_hash, cumulative_work) =
+            crate::recovery::verify_header_chain(&self.canonical_headers)
+                .map_err(QCashStateProofBundleError::InvalidHeaderChain)?;
+        let tip =
+            self.canonical_headers
+                .last()
+                .ok_or(QCashStateProofBundleError::InvalidHeaderChain(
+                    RollbackProofError::EmptyHeaderChain,
+                ))?;
+        self.verify_state_binding(tip, block_hash)?;
+        Ok(VerifiedQCashState {
+            height: tip.height,
+            block_hash,
+            cumulative_work,
+            coin_id: self.qcash_proof.coin_id,
+            coin: self.qcash_proof.coin.clone(),
+        })
+    }
+
+    pub fn verify_state_binding(
+        &self,
+        tip: &BlockHeader,
+        block_hash: BlockHash,
+    ) -> Result<(), QCashStateProofBundleError> {
+        if self.state_commitment.height != tip.height {
+            return Err(QCashStateProofBundleError::CommitmentHeightMismatch);
+        }
+        if self.state_commitment.block_hash != block_hash {
+            return Err(QCashStateProofBundleError::CommitmentBlockHashMismatch);
+        }
+        if tip.height.0 == 0 {
+            let empty_root =
+                empty_qcash_state_root().map_err(QCashStateProofBundleError::Serialization)?;
+            if self.state_commitment.qcash_state_root != StateRoot(empty_root.0)
+                || self.qcash_proof.coin.is_some()
+            {
+                return Err(QCashStateProofBundleError::CommitmentProtocolRootMismatch);
+            }
+        } else if self.state_commitment.protocol_state_root != tip.state_root {
+            return Err(QCashStateProofBundleError::CommitmentProtocolRootMismatch);
+        }
+        if !self
+            .state_commitment
+            .matches_protocol_root()
+            .map_err(QCashStateProofBundleError::Serialization)?
+        {
+            return Err(QCashStateProofBundleError::InvalidProtocolCommitment);
+        }
+        if !verify_qcash_state_proof(
+            Hash(self.state_commitment.qcash_state_root.0),
+            &self.qcash_proof,
+        )
+        .map_err(QCashStateProofBundleError::Serialization)?
+        {
+            return Err(QCashStateProofBundleError::InvalidQCashProof);
+        }
+        Ok(())
+    }
+}
+
+/// Decodes an untrusted proof bundle with an outer byte-size bound. Call
+/// [`AccountStateProofBundle::verify`] before using any contained account data.
+pub fn decode_account_state_proof_bundle(
+    bytes: &[u8],
+) -> Result<AccountStateProofBundle, AccountStateProofBundleError> {
+    if bytes.len() > MAX_ACCOUNT_STATE_PROOF_BUNDLE_SIZE {
+        return Err(AccountStateProofBundleError::BundleSizeExceeded);
+    }
+    let bundle: AccountStateProofBundle = crate::codec::canonical_deserialize(bytes)
+        .map_err(AccountStateProofBundleError::Serialization)?;
+    if bundle.canonical_headers.len() > MAX_ACCOUNT_STATE_PROOF_HEADERS {
+        return Err(AccountStateProofBundleError::HeaderLimitExceeded);
+    }
+    Ok(bundle)
+}
+
+pub fn decode_account_non_membership_proof_bundle(
+    bytes: &[u8],
+) -> Result<AccountNonMembershipProofBundle, AccountStateProofBundleError> {
+    if bytes.len() > MAX_ACCOUNT_STATE_PROOF_BUNDLE_SIZE {
+        return Err(AccountStateProofBundleError::BundleSizeExceeded);
+    }
+    let bundle: AccountNonMembershipProofBundle = crate::codec::canonical_deserialize(bytes)
+        .map_err(AccountStateProofBundleError::Serialization)?;
+    if bundle.canonical_headers.len() > MAX_ACCOUNT_STATE_PROOF_HEADERS {
+        return Err(AccountStateProofBundleError::HeaderLimitExceeded);
+    }
+    Ok(bundle)
+}
+
+pub fn decode_qcash_state_proof_bundle(
+    bytes: &[u8],
+) -> Result<QCashStateProofBundle, QCashStateProofBundleError> {
+    if bytes.len() > MAX_ACCOUNT_STATE_PROOF_BUNDLE_SIZE {
+        return Err(QCashStateProofBundleError::BundleSizeExceeded);
+    }
+    let bundle: QCashStateProofBundle = crate::codec::canonical_deserialize(bytes)
+        .map_err(QCashStateProofBundleError::Serialization)?;
+    if bundle.canonical_headers.len() > MAX_ACCOUNT_STATE_PROOF_HEADERS {
+        return Err(QCashStateProofBundleError::HeaderLimitExceeded);
+    }
+    Ok(bundle)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,24 +466,26 @@ impl SparseStateTree {
         Self::default()
     }
 
-    pub fn from_accounts(accounts: &BTreeMap<Address, Account>) -> Self {
+    pub fn from_accounts(
+        accounts: &BTreeMap<Address, Account>,
+    ) -> Result<Self, crate::error::CodecError> {
         let mut tree = Self::new();
         for account in accounts.values() {
-            tree.update_account(account);
+            tree.update_account(account)?;
         }
-        tree
+        Ok(tree)
     }
 
     pub fn root(&self) -> StateRoot {
         self.root
     }
 
-    pub fn update_account(&mut self, account: &Account) {
+    pub fn update_account(&mut self, account: &Account) -> Result<(), crate::error::CodecError> {
         if self
             .nodes
             .insert(
                 (ADDRESS_BITS, account.address.0),
-                account_leaf_hash(account),
+                account_leaf_hash(account)?,
             )
             .is_none()
         {
@@ -74,6 +493,7 @@ impl SparseStateTree {
         }
 
         self.recalculate_path(account.address);
+        Ok(())
     }
 
     pub fn remove_account(&mut self, address: &Address) {
@@ -115,6 +535,50 @@ impl SparseStateTree {
         }
     }
 
+    pub fn create_account_non_membership_proof(
+        &self,
+        address: Address,
+    ) -> AccountNonMembershipProof {
+        if self.root == StateRoot::ZERO {
+            return AccountNonMembershipProof {
+                address,
+                terminal_depth: 0,
+                siblings: Vec::new(),
+            };
+        }
+        let mut siblings = Vec::with_capacity(ADDRESS_BITS);
+        for depth in 0..ADDRESS_BITS {
+            let parent_prefix = address_prefix(&address, depth);
+            let bit = address_bit(&address, depth);
+            let sibling_prefix = child_prefix(parent_prefix, depth, !bit);
+            siblings.push(StateProofNode {
+                side: if bit {
+                    ProofSide::Left
+                } else {
+                    ProofSide::Right
+                },
+                hash: self
+                    .nodes
+                    .get(&(depth + 1, sibling_prefix))
+                    .copied()
+                    .unwrap_or_else(|| empty_subtree_hash(depth + 1)),
+            });
+            let target_prefix = child_prefix(parent_prefix, depth, bit);
+            if !self.nodes.contains_key(&(depth + 1, target_prefix)) {
+                return AccountNonMembershipProof {
+                    address,
+                    terminal_depth: (depth + 1) as u16,
+                    siblings,
+                };
+            }
+        }
+        AccountNonMembershipProof {
+            address,
+            terminal_depth: ADDRESS_BITS as u16,
+            siblings,
+        }
+    }
+
     fn recalculate_path(&mut self, address: Address) {
         for depth in (0..ADDRESS_BITS).rev() {
             let parent_prefix = address_prefix(&address, depth);
@@ -144,34 +608,41 @@ impl SparseStateTree {
     }
 }
 
-pub fn calculate_state_root(accounts: &BTreeMap<Address, Account>) -> StateRoot {
+pub fn calculate_state_root(
+    accounts: &BTreeMap<Address, Account>,
+) -> Result<StateRoot, crate::error::CodecError> {
     if accounts.is_empty() {
-        return StateRoot::ZERO;
+        return Ok(StateRoot::ZERO);
     }
 
-    SparseStateTree::from_accounts(accounts).root()
+    Ok(SparseStateTree::from_accounts(accounts)?.root())
 }
 
 pub fn create_account_state_proof(
     accounts: &BTreeMap<Address, Account>,
     address: &Address,
-) -> Option<AccountStateProof> {
-    let account = accounts.get(address)?.clone();
-    let siblings = sparse_proof(accounts, address);
+) -> Result<Option<AccountStateProof>, crate::error::CodecError> {
+    let Some(account) = accounts.get(address).cloned() else {
+        return Ok(None);
+    };
+    let siblings = sparse_proof(accounts, address)?;
 
-    Some(AccountStateProof {
+    Ok(Some(AccountStateProof {
         address: *address,
         account,
         siblings,
-    })
+    }))
 }
 
-pub fn verify_account_state_proof(root: StateRoot, proof: &AccountStateProof) -> bool {
+pub fn verify_account_state_proof(
+    root: StateRoot,
+    proof: &AccountStateProof,
+) -> Result<bool, crate::error::CodecError> {
     if proof.account.address != proof.address {
-        return false;
+        return Ok(false);
     }
 
-    let mut current = account_leaf_hash(&proof.account);
+    let mut current = account_leaf_hash(&proof.account)?;
     for sibling in proof.siblings.iter().rev() {
         current = match sibling.side {
             ProofSide::Left => parent_hash(sibling.hash, current),
@@ -179,25 +650,59 @@ pub fn verify_account_state_proof(root: StateRoot, proof: &AccountStateProof) ->
         };
     }
 
-    current == root
+    Ok(current == root)
 }
 
-fn sparse_root(accounts: &[(&Address, &Account)], depth: usize) -> Hash {
+pub fn verify_account_non_membership_proof(
+    root: StateRoot,
+    proof: &AccountNonMembershipProof,
+) -> bool {
+    let terminal_depth = usize::from(proof.terminal_depth);
+    if terminal_depth > ADDRESS_BITS || proof.siblings.len() != terminal_depth {
+        return false;
+    }
+    if proof.siblings.iter().enumerate().any(|(depth, sibling)| {
+        let expected = if address_bit(&proof.address, depth) {
+            ProofSide::Left
+        } else {
+            ProofSide::Right
+        };
+        sibling.side != expected
+    }) {
+        return false;
+    }
+    let mut current = empty_subtree_hash(terminal_depth);
+    for sibling in proof.siblings.iter().rev() {
+        current = match sibling.side {
+            ProofSide::Left => parent_hash(sibling.hash, current),
+            ProofSide::Right => parent_hash(current, sibling.hash),
+        };
+    }
+    current == root || (root == StateRoot::ZERO && terminal_depth == 0)
+}
+
+fn sparse_root(
+    accounts: &[(&Address, &Account)],
+    depth: usize,
+) -> Result<Hash, crate::error::CodecError> {
     if accounts.is_empty() {
-        return empty_subtree_hash(depth);
+        return Ok(empty_subtree_hash(depth));
     }
     if depth == ADDRESS_BITS {
         return account_leaf_hash(accounts[0].1);
     }
 
     let split = accounts.partition_point(|(address, _)| !address_bit(address, depth));
-    parent_hash(
-        sparse_root(&accounts[..split], depth + 1),
-        sparse_root(&accounts[split..], depth + 1),
-    )
+    Ok(parent_hash(
+        sparse_root(&accounts[..split], depth + 1)?,
+        sparse_root(&accounts[split..], depth + 1)?,
+    ))
 }
 
-fn sparse_proof(accounts: &BTreeMap<Address, Account>, address: &Address) -> Vec<StateProofNode> {
+fn sparse_proof(
+    accounts: &BTreeMap<Address, Account>,
+    address: &Address,
+) -> Result<Vec<StateProofNode>, crate::error::CodecError> {
     let nodes: Vec<(&Address, &Account)> = accounts.iter().collect();
     let mut current = nodes.as_slice();
     let mut siblings = Vec::with_capacity(ADDRESS_BITS);
@@ -212,16 +717,19 @@ fn sparse_proof(accounts: &BTreeMap<Address, Account>, address: &Address) -> Vec
         };
         siblings.push(StateProofNode {
             side,
-            hash: sparse_root(sibling, depth + 1),
+            hash: sparse_root(sibling, depth + 1)?,
         });
         current = same;
     }
 
-    siblings
+    Ok(siblings)
 }
 
-fn account_leaf_hash(account: &Account) -> Hash {
-    domain_hash(HashDomain::AccountState, &canonical_bytes(account))
+fn account_leaf_hash(account: &Account) -> Result<Hash, crate::error::CodecError> {
+    Ok(domain_hash(
+        HashDomain::AccountState,
+        &canonical_bytes(account)?,
+    ))
 }
 
 fn empty_subtree_hash(depth: usize) -> Hash {
@@ -280,4 +788,168 @@ fn parent_hash(left: Hash, right: Hash) -> Hash {
     bytes.extend_from_slice(&left.0);
     bytes.extend_from_slice(&right.0);
     domain_hash(HashDomain::StateNode, &bytes)
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+    use crate::consensus::supply::Amount;
+
+    fn state_bound_bundle() -> (AccountStateProofBundle, BlockHeader, BlockHash) {
+        let address = Address([7; ADDRESS_SIZE]);
+        let account = Account::new(address, Amount(42));
+        let mut accounts = BTreeMap::new();
+        accounts.insert(address, account);
+        let account_state_root = calculate_state_root(&accounts).unwrap();
+        let qcash_state_root = StateRoot([2; HASH_SIZE]);
+        let governance_state_root = StateRoot([3; HASH_SIZE]);
+        let credential_use_state_root = StateRoot([4; HASH_SIZE]);
+        let protocol_state_root = crate::ledger::calculate_protocol_state_root_from_roots(
+            account_state_root,
+            qcash_state_root,
+            governance_state_root,
+            credential_use_state_root,
+        )
+        .unwrap();
+        let block_hash = BlockHash([9; HASH_SIZE]);
+        let mut tip = crate::genesis::genesis_block().unwrap().header;
+        tip.height = crate::block::Height(1);
+        tip.state_root = protocol_state_root;
+        let bundle = AccountStateProofBundle {
+            version: ACCOUNT_STATE_PROOF_BUNDLE_VERSION,
+            canonical_headers: vec![tip.clone()],
+            state_commitment: BlockStateCommitment::new(
+                tip.height,
+                block_hash,
+                account_state_root,
+                qcash_state_root,
+                governance_state_root,
+                credential_use_state_root,
+                protocol_state_root,
+            ),
+            account_proof: create_account_state_proof(&accounts, &address)
+                .unwrap()
+                .unwrap(),
+        };
+        (bundle, tip, block_hash)
+    }
+
+    #[test]
+    fn account_bundle_roundtrip_preserves_verified_state_binding() {
+        let (bundle, tip, block_hash) = state_bound_bundle();
+        let bytes = canonical_bytes(&bundle).unwrap();
+        let decoded: AccountStateProofBundle = crate::codec::canonical_deserialize(&bytes).unwrap();
+
+        assert_eq!(decoded, bundle);
+        assert_eq!(decoded.verify_state_binding(&tip, block_hash), Ok(()));
+    }
+
+    #[test]
+    fn account_bundle_rejects_account_state_tampering() {
+        let (mut bundle, tip, block_hash) = state_bound_bundle();
+        bundle.account_proof.account.balance.0 ^= 1;
+
+        assert_eq!(
+            bundle.verify_state_binding(&tip, block_hash),
+            Err(AccountStateProofBundleError::InvalidAccountProof)
+        );
+    }
+
+    #[test]
+    fn account_bundle_rejects_protocol_commitment_tampering() {
+        let (mut bundle, tip, block_hash) = state_bound_bundle();
+        bundle.state_commitment.qcash_state_root.0[0] ^= 1;
+
+        assert_eq!(
+            bundle.verify_state_binding(&tip, block_hash),
+            Err(AccountStateProofBundleError::InvalidProtocolCommitment)
+        );
+    }
+
+    #[test]
+    fn account_bundle_rejects_tip_state_root_tampering() {
+        let (mut bundle, tip, block_hash) = state_bound_bundle();
+        bundle.state_commitment.protocol_state_root.0[0] ^= 1;
+
+        assert_eq!(
+            bundle.verify_state_binding(&tip, block_hash),
+            Err(AccountStateProofBundleError::CommitmentProtocolRootMismatch)
+        );
+    }
+
+    #[test]
+    fn non_membership_proof_verifies_for_missing_account() {
+        let existing = Account::new(Address([1; ADDRESS_SIZE]), Amount(10));
+        let missing = Address([2; ADDRESS_SIZE]);
+        let mut accounts = BTreeMap::new();
+        accounts.insert(existing.address, existing);
+        let tree = SparseStateTree::from_accounts(&accounts).unwrap();
+        let proof = tree.create_account_non_membership_proof(missing);
+
+        assert!(verify_account_non_membership_proof(tree.root(), &proof));
+    }
+
+    #[test]
+    fn non_membership_proof_rejects_relabel_and_existing_account() {
+        let existing = Account::new(Address([1; ADDRESS_SIZE]), Amount(10));
+        let missing = Address([2; ADDRESS_SIZE]);
+        let mut accounts = BTreeMap::new();
+        accounts.insert(existing.address, existing.clone());
+        let tree = SparseStateTree::from_accounts(&accounts).unwrap();
+        let mut proof = tree.create_account_non_membership_proof(missing);
+        proof.address = existing.address;
+        assert!(!verify_account_non_membership_proof(tree.root(), &proof));
+
+        let existing_proof = tree.create_account_non_membership_proof(existing.address);
+        assert!(!verify_account_non_membership_proof(
+            tree.root(),
+            &existing_proof
+        ));
+    }
+
+    #[test]
+    fn non_membership_proof_supports_empty_account_tree() {
+        let tree = SparseStateTree::new();
+        let proof = tree.create_account_non_membership_proof(Address([8; ADDRESS_SIZE]));
+
+        assert!(verify_account_non_membership_proof(tree.root(), &proof));
+    }
+
+    #[test]
+    fn qcash_absence_bundle_verifies_from_frozen_genesis() {
+        let ledger = crate::genesis::genesis_ledger().unwrap();
+        let block = crate::genesis::genesis_block().unwrap();
+        let coin_id = QCashCoinId([0x55; HASH_SIZE]);
+        let bundle = QCashStateProofBundle {
+            version: ACCOUNT_STATE_PROOF_BUNDLE_VERSION,
+            canonical_headers: vec![block.header],
+            state_commitment: ledger.tip_state_commitment().unwrap().unwrap(),
+            qcash_proof: ledger.qcash_utxos.create_state_proof(coin_id).unwrap(),
+        };
+
+        let verified = bundle.verify().unwrap();
+        assert_eq!(verified.coin_id, coin_id);
+        assert!(verified.coin.is_none());
+    }
+
+    #[test]
+    fn qcash_bundle_rejects_absence_path_tampering() {
+        let ledger = crate::genesis::genesis_ledger().unwrap();
+        let block = crate::genesis::genesis_block().unwrap();
+        let mut bundle = QCashStateProofBundle {
+            version: ACCOUNT_STATE_PROOF_BUNDLE_VERSION,
+            canonical_headers: vec![block.header],
+            state_commitment: ledger.tip_state_commitment().unwrap().unwrap(),
+            qcash_proof: ledger
+                .qcash_utxos
+                .create_state_proof(QCashCoinId([0x66; HASH_SIZE]))
+                .unwrap(),
+        };
+        bundle.qcash_proof.terminal_depth = 1;
+
+        assert_eq!(
+            bundle.verify(),
+            Err(QCashStateProofBundleError::InvalidQCashProof)
+        );
+    }
 }

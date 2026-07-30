@@ -34,3 +34,38 @@ path = "fuzz_targets/decode_block.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "state_transition"
+path = "fuzz_targets/state_transition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qcash_lifecycle"
+path = "fuzz_targets/qcash_lifecycle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "commitment_mutation"
+path = "fuzz_targets/commitment_mutation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mixed_family"
+path = "fuzz_targets/mixed_family.rs"
+test = false
+doc = false
+bench = false

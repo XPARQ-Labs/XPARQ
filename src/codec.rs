@@ -1,8 +1,9 @@
-use crate::block::{Block, BlockHeader, BlockHeight, MAX_BLOCK_SIZE};
+use crate::block::{Block, BlockHeader, BlockHeight, MAX_BLOCK_WEIGHT};
 use crate::crypto::{BlockHash, HASH_SIZE, StateRoot, TransactionHash, WitnessTransactionHash};
 pub use crate::crypto::{HashDomain, domain_hash, hash_bytes};
 use crate::error::CodecError;
 use crate::event::{MAX_PROTOCOL_EVENT_SIZE, ProtocolEvent};
+use crate::governance::{GovernanceAction, SignedGovernanceAction};
 use crate::transaction::{
     QCashTransaction, SignedProtocolTransaction, SignedQCashTransaction, SignedTransaction,
     Transaction,
@@ -14,8 +15,8 @@ pub const CANONICAL_ENCODING_VERSION: u8 = 1;
 pub const CANONICAL_ENCODING_PROFILE: &str = "paqus-borsh-le";
 
 /// Consensus-critical serialization. Do not replace or wrap this format under encoding version 1.
-pub fn canonical_bytes<T: BorshSerialize>(value: &T) -> Vec<u8> {
-    borsh::to_vec(value).expect("canonical serialization should not fail")
+pub fn canonical_bytes<T: BorshSerialize>(value: &T) -> Result<Vec<u8>, CodecError> {
+    borsh::to_vec(value).map_err(|_| CodecError::EncodeFailed)
 }
 
 /// Canonically deserializes bytes without applying domain validation.
@@ -28,31 +29,33 @@ pub fn canonical_decode<T: BorshDeserialize>(bytes: &[u8]) -> Result<T, CodecErr
     canonical_deserialize(bytes)
 }
 
-pub fn transaction_bytes(transaction: &Transaction) -> Vec<u8> {
+pub fn transaction_bytes(transaction: &Transaction) -> Result<Vec<u8>, CodecError> {
     canonical_bytes(transaction)
 }
 
-pub fn signed_transaction_bytes(transaction: &SignedTransaction) -> Vec<u8> {
+pub fn signed_transaction_bytes(transaction: &SignedTransaction) -> Result<Vec<u8>, CodecError> {
     canonical_bytes(transaction)
 }
 
-pub fn signed_protocol_transaction_bytes(transaction: &SignedProtocolTransaction) -> Vec<u8> {
+pub fn signed_protocol_transaction_bytes(
+    transaction: &SignedProtocolTransaction,
+) -> Result<Vec<u8>, CodecError> {
     canonical_bytes(transaction)
 }
 
 pub fn signed_protocol_transaction_hash(
     transaction: &SignedProtocolTransaction,
-) -> WitnessTransactionHash {
-    WitnessTransactionHash(
+) -> Result<WitnessTransactionHash, CodecError> {
+    Ok(WitnessTransactionHash(
         domain_hash(
             HashDomain::WitnessTransaction,
-            &signed_protocol_transaction_bytes(transaction),
+            &signed_protocol_transaction_bytes(transaction)?,
         )
         .0,
-    )
+    ))
 }
 
-pub fn protocol_event_bytes(event: &ProtocolEvent) -> Vec<u8> {
+pub fn protocol_event_bytes(event: &ProtocolEvent) -> Result<Vec<u8>, CodecError> {
     canonical_bytes(event)
 }
 
@@ -67,36 +70,42 @@ pub fn decode_protocol_event(bytes: &[u8]) -> Result<ProtocolEvent, CodecError> 
     Ok(event)
 }
 
-pub fn block_header_bytes(header: &BlockHeader) -> Vec<u8> {
+pub fn block_header_bytes(header: &BlockHeader) -> Result<Vec<u8>, CodecError> {
     canonical_bytes(header)
 }
 
-pub fn block_bytes(block: &Block) -> Vec<u8> {
+pub fn block_bytes(block: &Block) -> Result<Vec<u8>, CodecError> {
     canonical_bytes(block)
 }
 
 /// Canonical header and payload sections without the trailing witness sections.
-pub fn stripped_block_bytes(block: &Block) -> Vec<u8> {
+pub fn stripped_block_bytes(block: &Block) -> Result<Vec<u8>, CodecError> {
     let mut bytes = Vec::new();
     crate::block::serialize_stripped_block(block, &mut bytes)
-        .expect("canonical stripped block serialization should not fail");
-    bytes
+        .map_err(|_| CodecError::EncodeFailed)?;
+    Ok(bytes)
 }
 
 pub fn state_root_bytes(state_root: &StateRoot) -> [u8; HASH_SIZE] {
     state_root.0
 }
 
-pub fn transaction_hash(transaction: &Transaction) -> TransactionHash {
-    TransactionHash(domain_hash(HashDomain::Transaction, &transaction_bytes(transaction)).0)
+pub fn transaction_hash(transaction: &Transaction) -> Result<TransactionHash, CodecError> {
+    Ok(TransactionHash(
+        domain_hash(HashDomain::Transaction, &transaction_bytes(transaction)?).0,
+    ))
 }
 
-pub fn signed_transaction_hash(transaction: &SignedTransaction) -> WitnessTransactionHash {
-    signed_protocol_transaction_hash(&SignedProtocolTransaction::Transfer(transaction.clone()))
+pub fn signed_transaction_hash(
+    transaction: &SignedTransaction,
+) -> Result<WitnessTransactionHash, CodecError> {
+    signed_protocol_transaction_hash(&SignedProtocolTransaction::from(transaction.clone()))
 }
 
-pub fn block_header_hash(header: &BlockHeader) -> BlockHash {
-    BlockHash(domain_hash(HashDomain::BlockHeader, &block_header_bytes(header)).0)
+pub fn block_header_hash(header: &BlockHeader) -> Result<BlockHash, CodecError> {
+    Ok(BlockHash(
+        domain_hash(HashDomain::BlockHeader, &block_header_bytes(header)?).0,
+    ))
 }
 
 pub fn decode_transaction(bytes: &[u8]) -> Result<Transaction, CodecError> {
@@ -118,6 +127,22 @@ pub fn decode_signed_transaction(bytes: &[u8]) -> Result<SignedTransaction, Code
     let transaction: SignedTransaction = canonical_deserialize(bytes)?;
     transaction
         .validate_signed()
+        .map_err(|_| CodecError::InvalidTransaction)?;
+    Ok(transaction)
+}
+
+#[cfg(any(feature = "devnet", feature = "testnet"))]
+pub fn decode_signed_single_transfer_v2(
+    bytes: &[u8],
+    height: crate::block::BlockHeight,
+    upgrade: Option<crate::crypto::CryptoUpgradePlan>,
+) -> Result<crate::transaction::SignedSingleTransferV2, CodecError> {
+    if bytes.len() > crate::transaction::MAX_TX_SIZE {
+        return Err(CodecError::InvalidTransaction);
+    }
+    let transaction: crate::transaction::SignedSingleTransferV2 = canonical_deserialize(bytes)?;
+    transaction
+        .validate_signed_for_height(height, upgrade)
         .map_err(|_| CodecError::InvalidTransaction)?;
     Ok(transaction)
 }
@@ -144,6 +169,31 @@ pub fn decode_signed_qcash_transaction(bytes: &[u8]) -> Result<SignedQCashTransa
     Ok(transaction)
 }
 
+pub fn decode_governance_action(bytes: &[u8]) -> Result<GovernanceAction, CodecError> {
+    if bytes.len() > crate::governance::MAX_GOVERNANCE_ACTION_SIZE {
+        return Err(CodecError::InvalidTransaction);
+    }
+    let action: GovernanceAction = canonical_deserialize(bytes)?;
+    action
+        .validate_for_height(crate::block::Height(0))
+        .map_err(|_| CodecError::InvalidTransaction)?;
+    Ok(action)
+}
+
+pub fn decode_signed_governance_action(
+    bytes: &[u8],
+    height: BlockHeight,
+) -> Result<SignedGovernanceAction, CodecError> {
+    if bytes.len() > crate::transaction::MAX_PROTOCOL_TRANSACTION_SIZE {
+        return Err(CodecError::InvalidTransaction);
+    }
+    let transaction: SignedGovernanceAction = canonical_deserialize(bytes)?;
+    transaction
+        .validate_signed_for_height(height)
+        .map_err(|_| CodecError::InvalidTransaction)?;
+    Ok(transaction)
+}
+
 /// Decodes and validates a unified envelope in its block context.
 ///
 /// Authorization signatures are state-dependent, so the caller supplies the
@@ -165,6 +215,9 @@ pub fn decode_signed_protocol_transaction_at<F>(
         SignedProtocolTransaction::QCash(transaction) => {
             transaction.validate_signed_for_height(height)
         }
+        SignedProtocolTransaction::Governance(transaction) => {
+            transaction.validate_signed_for_height(height)
+        }
     };
     valid.map_err(|_| CodecError::InvalidTransaction)?;
     Ok(transaction)
@@ -176,10 +229,12 @@ pub fn decode_signed_protocol_transaction_at<F>(
 /// timestamp bounds. It does not validate proof of work, parent linkage, ledger state root, fork
 /// choice, or coinbase subsidy against a ledger.
 pub fn decode_block(bytes: &[u8]) -> Result<Block, CodecError> {
-    if bytes.len() > MAX_BLOCK_SIZE {
+    if bytes.len() > MAX_BLOCK_WEIGHT {
         return Err(CodecError::InvalidBlock);
     }
     let block: Block = canonical_deserialize(bytes)?;
-    block.validate().map_err(|_| CodecError::InvalidBlock)?;
+    block
+        .validate_structure()
+        .map_err(|_| CodecError::InvalidBlock)?;
     Ok(block)
 }

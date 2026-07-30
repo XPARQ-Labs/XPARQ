@@ -1,7 +1,8 @@
+use crate::error::CryptoError;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use sha3::{Digest, Sha3_256, Sha3_512};
+use sha3::{Digest, Sha3_256};
 use static_assertions::const_assert_eq;
 use std::fmt;
 
@@ -212,20 +213,32 @@ pub enum HashDomain {
     WitnessTransaction,
     BlockHeader,
     ChainParams,
+    ChainSpec,
     GenesisAllocation,
     Coinbase,
     MerkleNode,
     WitnessMerkleNode,
     AccountState,
     StateNode,
+    BlockStateCommitment,
     QCashCoin,
     QCashCommitment,
     QCashDepositAuthorization,
     QCashDepositTransaction,
     QCashFile,
     QCashState,
+    GovernanceProposal,
+    GovernanceIssuer,
+    GovernanceContext,
+    GovernanceNullifier,
+    GovernanceState,
+    CredentialFileKey,
+    CredentialUseState,
+    PaqusArtifact,
     ProtocolEvent,
     ProtocolState,
+    Vault,
+    VaultState,
     Raw,
 }
 
@@ -236,22 +249,32 @@ impl HashDomain {
             HashDomain::WitnessTransaction => b"PAQUS_HASH_WITNESS_TX_V1",
             HashDomain::BlockHeader => b"PAQUS_HASH_BLOCK_HEADER",
             HashDomain::ChainParams => b"PAQUS_HASH_CHAIN_PARAMS_V1",
+            HashDomain::ChainSpec => b"PAQUS_HASH_CHAIN_SPEC_V1",
             HashDomain::GenesisAllocation => b"PAQUS_HASH_GENESIS_ALLOCATION",
             HashDomain::Coinbase => b"PAQUS_HASH_COINBASE",
             HashDomain::MerkleNode => b"PAQUS_HASH_MERKLE_NODE",
             HashDomain::WitnessMerkleNode => b"PAQUS_HASH_WITNESS_MERKLE_NODE_V1",
             HashDomain::AccountState => b"PAQUS_HASH_ACCOUNT_STATE",
             HashDomain::StateNode => b"PAQUS_HASH_STATE_NODE",
-            // These legacy version-1 tags are consensus bytes. Their spelling
-            // remains stable even though the public feature name is QCash.
-            HashDomain::QCashCoin => b"PAQUS_HASH_ECASH_COIN_V1",
-            HashDomain::QCashCommitment => b"PAQUS_HASH_ECASH_COMMITMENT_V1",
+            HashDomain::BlockStateCommitment => b"PAQUS_HASH_BLOCK_STATE_COMMITMENT_V1",
+            HashDomain::QCashCoin => b"PAQUS_HASH_QCASH_COIN_V1",
+            HashDomain::QCashCommitment => b"PAQUS_HASH_QCASH_COMMITMENT_V1",
             HashDomain::QCashDepositAuthorization => b"PAQUS_HASH_QCASH_DEPOSIT_AUTH_V2",
             HashDomain::QCashDepositTransaction => b"PAQUS_HASH_QCASH_DEPOSIT_TX_V1",
-            HashDomain::QCashFile => b"PAQUS_HASH_ECASH_FILE_V1",
-            HashDomain::QCashState => b"PAQUS_HASH_ECASH_STATE_V1",
+            HashDomain::QCashFile => b"PAQUS_HASH_QCASH_FILE_V1",
+            HashDomain::QCashState => b"PAQUS_HASH_QCASH_STATE_V1",
+            HashDomain::GovernanceProposal => b"PAQUS_HASH_GOVERNANCE_PROPOSAL_V1",
+            HashDomain::GovernanceIssuer => b"PAQUS_HASH_GOVERNANCE_ISSUER_V1",
+            HashDomain::GovernanceContext => b"PAQUS_HASH_GOVERNANCE_CONTEXT_V1",
+            HashDomain::GovernanceNullifier => b"PAQUS_HASH_GOVERNANCE_NULLIFIER_V1",
+            HashDomain::GovernanceState => b"PAQUS_HASH_GOVERNANCE_STATE_V1",
+            HashDomain::CredentialFileKey => b"PAQUS_HASH_CREDENTIAL_FILE_KEY_V1",
+            HashDomain::CredentialUseState => b"PAQUS_HASH_CREDENTIAL_USE_STATE_V1",
+            HashDomain::PaqusArtifact => b"PAQUS_HASH_ARTIFACT_V1",
             HashDomain::ProtocolEvent => b"PAQUS_HASH_PROTOCOL_EVENT_V1",
             HashDomain::ProtocolState => b"PAQUS_HASH_PROTOCOL_STATE_V1",
+            HashDomain::Vault => b"PAQUS_HASH_VAULT_V1",
+            HashDomain::VaultState => b"PAQUS_HASH_VAULT_STATE_V1",
             HashDomain::Raw => b"PAQUS_HASH_RAW",
         }
     }
@@ -272,11 +295,27 @@ pub fn domain_hash(domain: HashDomain, bytes: &[u8]) -> Hash {
     Hash(hash)
 }
 
-pub fn sha3_512_proof_of_work_hash(header_bytes: &[u8]) -> ProofOfWorkHash {
-    let digest = Sha3_512::digest(header_bytes);
+/// Argon2id proof-of-work memory in KiB. This is a consensus parameter.
+pub const POW_ARGON2_MEMORY_KIB: u32 = 64 * 1024;
+/// Argon2id proof-of-work iteration count. This is a consensus parameter.
+pub const POW_ARGON2_ITERATIONS: u32 = 1;
+/// Argon2id proof-of-work parallelism. This is a consensus parameter.
+pub const POW_ARGON2_LANES: u32 = 1;
+
+pub fn argon2id_proof_of_work_hash(header_bytes: &[u8]) -> Result<ProofOfWorkHash, CryptoError> {
+    let params = argon2::Params::new(
+        POW_ARGON2_MEMORY_KIB,
+        POW_ARGON2_ITERATIONS,
+        POW_ARGON2_LANES,
+        Some(PROOF_OF_WORK_HASH_SIZE),
+    )
+    .map_err(|_| CryptoError::InvalidProofOfWorkParameters)?;
+    let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut output = [0_u8; PROOF_OF_WORK_HASH_SIZE];
-    output.copy_from_slice(&digest);
-    ProofOfWorkHash(output)
+    argon2
+        .hash_password_into(header_bytes, b"PAQUS_POW_ARGON2ID_V1", &mut output)
+        .map_err(|_| CryptoError::ProofOfWorkHashFailed)?;
+    Ok(ProofOfWorkHash(output))
 }
 
 pub fn hash_meets_difficulty(hash: &ProofOfWorkHash, difficulty: u32) -> bool {

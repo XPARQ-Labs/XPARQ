@@ -1,3 +1,5 @@
 /target
 /fuzz/target
+/src/dependencies/**/target
+/src/dependencies/sqisign/sqisign-rs/Cargo.lock
 paqus.cdx.json

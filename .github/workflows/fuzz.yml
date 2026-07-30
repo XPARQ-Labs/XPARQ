@@ -1,0 +1,50 @@
+name: bounded-fuzz
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+  pull_request:
+    paths:
+      - "src/**"
+      - "fuzz/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo check --manifest-path fuzz/Cargo.toml --bins
+
+  scheduled-security-fuzz:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - roundtrip
+          - state_transition
+          - qcash_lifecycle
+          - commitment_mutation
+          - mixed_family
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - name: Run bounded target
+        run: >-
+          cargo +nightly fuzz run ${{ matrix.target }}
+          fuzz/corpus/${{ matrix.target }} --
+          -max_total_time=120
+          -timeout=10
+          -max_len=5242880
+          -rss_limit_mb=2048
