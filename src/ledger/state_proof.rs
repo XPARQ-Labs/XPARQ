@@ -4,7 +4,7 @@ use crate::crypto::ADDRESS_SIZE;
 use crate::crypto::Address;
 use crate::crypto::{BlockHash, HASH_SIZE, Hash, StateRoot};
 use crate::ledger::fork_choice::Work;
-use crate::recovery::RollbackProofError;
+use crate::qcash::recovery::RollbackProofError;
 use crate::state::{
     Account, BlockStateCommitment, QCashCoinId, QCashStateProof, QCashUtxo, empty_qcash_state_root,
     verify_qcash_state_proof,
@@ -146,7 +146,7 @@ impl AccountStateProofBundle {
             return Err(AccountStateProofBundleError::HeaderLimitExceeded);
         }
         let (block_hash, cumulative_work) =
-            crate::recovery::verify_header_chain(&self.canonical_headers)
+            crate::qcash::recovery::verify_header_chain(&self.canonical_headers)
                 .map_err(AccountStateProofBundleError::InvalidHeaderChain)?;
         let tip = self.canonical_headers.last().ok_or(
             AccountStateProofBundleError::InvalidHeaderChain(RollbackProofError::EmptyHeaderChain),
@@ -209,7 +209,7 @@ impl AccountNonMembershipProofBundle {
             return Err(AccountStateProofBundleError::HeaderLimitExceeded);
         }
         let (block_hash, cumulative_work) =
-            crate::recovery::verify_header_chain(&self.canonical_headers)
+            crate::qcash::recovery::verify_header_chain(&self.canonical_headers)
                 .map_err(AccountStateProofBundleError::InvalidHeaderChain)?;
         let tip = self.canonical_headers.last().ok_or(
             AccountStateProofBundleError::InvalidHeaderChain(RollbackProofError::EmptyHeaderChain),
@@ -341,7 +341,7 @@ impl QCashStateProofBundle {
             return Err(QCashStateProofBundleError::HeaderLimitExceeded);
         }
         let (block_hash, cumulative_work) =
-            crate::recovery::verify_header_chain(&self.canonical_headers)
+            crate::qcash::recovery::verify_header_chain(&self.canonical_headers)
                 .map_err(QCashStateProofBundleError::InvalidHeaderChain)?;
         let tip =
             self.canonical_headers

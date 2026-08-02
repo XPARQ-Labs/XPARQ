@@ -7,7 +7,6 @@ pub mod event;
 pub mod genesis;
 pub mod ledger;
 pub mod qcash;
-pub mod recovery;
 pub mod state;
 pub mod transaction;
 #[cfg(feature = "sqisign-secure-memory")]

@@ -1,13 +1,13 @@
 use crate::crypto::{
     CryptoUpgradePlan, INITIAL_SIGNATURE_SCHEME, SignatureScheme, signature_scheme_active_at_height,
 };
-#[cfg(any(feature = "devnet", feature = "testnet"))]
+#[cfg(feature = "devnet")]
 use crate::crypto::{PublicKey, Signature, dual_address_from_public_keys, verify_dual_parallel};
 use crate::error::TransactionError;
 use borsh::{BorshDeserialize, BorshSerialize};
 
-#[cfg(any(feature = "devnet", feature = "testnet"))]
-use super::Transaction;
+#[cfg(feature = "devnet")]
+use super::BatchTransfer;
 pub use super::{AuthorizationProof, ValidityWindow};
 
 pub const AUTHORIZATION_PROOF_V2_VERSION: u8 = 2;
@@ -160,16 +160,16 @@ fn all_zero(bytes: &[u8]) -> bool {
 ///
 /// It remains separate from `SignedProtocolTransaction` until a protocol
 /// activation assigns its final enum tag.
-#[cfg(any(feature = "devnet", feature = "testnet"))]
+#[cfg(feature = "devnet")]
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SignedSingleTransferV2 {
-    pub transaction: Transaction,
+pub struct SignedBatchTransferV2 {
+    pub transaction: BatchTransfer,
     pub authorization_proof: AuthorizationProofV2,
 }
 
-#[cfg(any(feature = "devnet", feature = "testnet"))]
-impl SignedSingleTransferV2 {
-    pub fn new(transaction: Transaction, authorization_proof: AuthorizationProofV2) -> Self {
+#[cfg(feature = "devnet")]
+impl SignedBatchTransferV2 {
+    pub fn new(transaction: BatchTransfer, authorization_proof: AuthorizationProofV2) -> Self {
         Self {
             transaction,
             authorization_proof,
@@ -352,19 +352,19 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "devnet", feature = "testnet"))]
+    #[cfg(feature = "devnet")]
     #[test]
-    fn signed_single_transfer_v2_verifies_with_network_scheme() {
+    fn signed_batch_transfer_v2_verifies_with_network_scheme() {
         use crate::consensus::supply::Amount;
         use crate::crypto::{dual_address_from_public_keys, generate_keypair, sign};
-        use crate::transaction::TransferOutput;
+        use crate::transaction::BatchTransferOutput;
 
         let owner = generate_keypair();
         let authorization = generate_keypair();
         let sender = dual_address_from_public_keys(&owner.public_key, &authorization.public_key);
-        let transaction = Transaction::new(
+        let transaction = BatchTransfer::new(
             sender,
-            vec![TransferOutput {
+            vec![BatchTransferOutput {
                 to: (crate::crypto::Address([9; crate::crypto::ADDRESS_SIZE])).into(),
                 amount: Amount(1),
             }],
@@ -378,7 +378,7 @@ mod tests {
             sign(&authorization.secret_key, &payload).0.to_vec(),
         )
         .unwrap();
-        SignedSingleTransferV2::new(transaction, authorization_proof)
+        SignedBatchTransferV2::new(transaction, authorization_proof)
             .validate_signed_for_height(crate::block::Height(0), None)
             .unwrap();
     }

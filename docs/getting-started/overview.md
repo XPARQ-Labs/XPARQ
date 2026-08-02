@@ -35,7 +35,7 @@ statement. The statement is a last-signed snapshot, not a live balance mirror.
 
 Paqus supports two native transaction families:
 
-* Transfer
+* BatchTransfer
 * QCash
 
 A transfer can contain between 1 and 64 unique recipients and is applied

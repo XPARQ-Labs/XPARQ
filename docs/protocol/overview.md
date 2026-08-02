@@ -47,14 +47,15 @@ coinbase, and signed protocol transactions.
 | Lanes | 4 |
 | Difficulty algorithm | `argon2id-wbda-weight-v1` |
 | WBDA window | 2,048 blocks |
-| Low utilization threshold | 20% |
-| High utilization threshold | 80% |
+| WBDA target block weight | 5 MiB |
+| Low utilization threshold | 30% |
+| High utilization threshold | 70% |
 | Difficulty step | 1 |
 
 WBDA is weight based, not time based. It adjusts difficulty at window
 boundaries from the average raw canonical block weight over the previous
-window. Below 20% average utilization, mining becomes harder by one difficulty
-step. Above 80% average utilization, mining becomes easier by one difficulty
+window. Below 30% average utilization, mining becomes harder by one difficulty
+step. Above 70% average utilization, mining becomes easier by one difficulty
 step. Header-only recovery cannot derive a WBDA boundary without the block
 weights committed by the full blocks.
 
@@ -62,11 +63,11 @@ weights committed by the full blocks.
 
 | Limit | Value |
 | --- | ---: |
-| Maximum block size | 2 MiB |
-| Maximum block weight | 2 MiB |
+| Maximum block size | 5 MiB |
+| Maximum block weight | 5 MiB |
 | Maximum decoded block items | 4,096 |
 | Maximum genesis allocations | 4,096 |
-| Maximum outputs per Transfer | 64 |
+| Maximum outputs per BatchTransfer | 64 |
 | Maximum QCash withdrawal outputs | 256 |
 | Maximum QCash redeem inputs | 4 |
 
@@ -74,8 +75,10 @@ Paqus block weight is the raw canonical serialized block size.
 
 ## Monetary policy
 
-The block subsidy is 15 XPQ before height 400,000. From height 400,000 onward,
-tail emission is 0.85 XPQ per block. Genesis contains no premine.
+The first WBDA epoch pays 10 XPQ per block. Each completed epoch changes the
+following epoch's subsidy by 1 XPQ using the same utilization signal as
+difficulty: below 30% raises it, 30% through 70% keeps it unchanged, and above
+70% lowers it. The subsidy is bounded to 1–20 XPQ. Genesis contains no premine.
 
 ## Account state
 

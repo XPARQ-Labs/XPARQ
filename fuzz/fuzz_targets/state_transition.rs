@@ -8,8 +8,9 @@ use paqus::ledger::validate_ledger_invariants;
 use paqus::transaction::SignedProtocolTransaction;
 
 fuzz_target!(|data: &[u8]| {
-    let family = data.first().copied().unwrap_or(0) as usize % 3;
-    let mut transaction = support::protocol_fixtures()[family].clone();
+    let fixtures = support::protocol_fixtures();
+    let family = data.first().copied().unwrap_or(0) as usize % fixtures.len();
+    let mut transaction = fixtures[family].clone();
     support::mutate_transaction(&mut transaction, data.get(1..).unwrap_or_default());
 
     let mut ledger = support::ledger_for(&transaction);
@@ -17,7 +18,7 @@ fuzz_target!(|data: &[u8]| {
     let before_supply = ledger.economic_supply().expect("fixture supply");
 
     let result = match &transaction {
-        SignedProtocolTransaction::Transfer(signed) => {
+        SignedProtocolTransaction::BatchTransfer(signed) => {
             ledger.apply_signed_transaction_at(signed, Height(1))
         }
         SignedProtocolTransaction::QCash(signed) => {

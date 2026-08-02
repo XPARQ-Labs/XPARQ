@@ -97,7 +97,7 @@ impl RollbackHistory {
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
 pub enum ProtocolEventKind {
-    Transfer {
+    BatchTransfer {
         from: Address,
         to: Address,
         amount: Amount,

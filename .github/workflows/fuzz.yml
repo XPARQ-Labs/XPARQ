@@ -22,6 +22,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - run: cargo install cargo-fuzz --locked
       - run: cargo check --manifest-path fuzz/Cargo.toml --bins
+      - run: cargo check --manifest-path fuzz/Cargo.toml --bins --no-default-features --features devnet
 
   scheduled-security-fuzz:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -36,6 +37,10 @@ jobs:
           - qcash_lifecycle
           - commitment_mutation
           - mixed_family
+          - address_codec
+          - consensus_epoch
+          - artifact_codec
+          - qcash_coin_codec
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

@@ -1,6 +1,6 @@
 [package]
 name = "paqus"
-version = "0.2.19"
+version = "0.2.20"
 edition = "2024"
 rust-version = "1.90"
 autobenches = false
@@ -17,7 +17,7 @@ patch = "Sharksphere"
 [features]
 default = ["mainnet"]
 mainnet = []
-testnet = ["sqisign-blockchain-test"]
+testnet = []
 devnet = ["sqisign-blockchain-test"]
 # Staging only. SQIsign is still a NIST Round 3 candidate and MUST NOT be used
 # by consensus until a final NIST standard and an explicit network upgrade.
@@ -83,3 +83,7 @@ required-features = ["sqisign-candidate"]
 name = "sqisign_verifier"
 harness = false
 required-features = ["sqisign-blockchain-test"]
+
+[[bench]]
+name = "core_consensus"
+harness = false

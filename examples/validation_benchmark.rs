@@ -6,7 +6,7 @@ use paqus::crypto::{
 };
 use paqus::ledger::{Chain, Ledger};
 use paqus::state::Account;
-use paqus::transaction::{SignedTransaction, Transaction};
+use paqus::transaction::{BatchTransfer, SignedBatchTransfer};
 use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -81,11 +81,11 @@ fn applicable_block(count: usize) -> Result<(Ledger, Block), String> {
     chain.insert_block(genesis).unwrap();
     let ledger = Ledger::from_accounts_and_chain(accounts, chain).unwrap();
 
-    let transactions: Vec<SignedTransaction> = (0..count)
+    let transactions: Vec<SignedBatchTransfer> = (0..count)
         .map(|index| {
-            let transaction = Transaction::new(
+            let transaction = BatchTransfer::new(
                 sender,
-                vec![paqus::transaction::TransferOutput {
+                vec![paqus::transaction::BatchTransferOutput {
                     to: recipient.into(),
                     amount: Amount(1),
                 }],
@@ -95,7 +95,7 @@ fn applicable_block(count: usize) -> Result<(Ledger, Block), String> {
             let owner_signature = sign(&owner.secret_key, &payload);
             let auth_signature = sign(&auth.secret_key, &payload);
             if index == 0 {
-                SignedTransaction::new_authorized(
+                SignedBatchTransfer::new_authorized(
                     transaction,
                     owner.public_key,
                     owner_signature,
@@ -103,7 +103,7 @@ fn applicable_block(count: usize) -> Result<(Ledger, Block), String> {
                     auth_signature,
                 )
             } else {
-                SignedTransaction::new_stored_authorized(
+                SignedBatchTransfer::new_stored_authorized(
                     transaction,
                     owner_signature,
                     auth_signature,
@@ -111,7 +111,7 @@ fn applicable_block(count: usize) -> Result<(Ledger, Block), String> {
             }
         })
         .collect();
-    let coinbase = CoinbaseTransaction::new(miner, ledger.mintable_subsidy(Height(1)));
+    let coinbase = CoinbaseTransaction::new(miner, ledger.mintable_subsidy(Height(1)).unwrap());
     let mut block = Block::from_protocol_transactions(
         Height(1),
         genesis_hash,

@@ -6,8 +6,8 @@ use crate::crypto::{
 };
 pub use crate::error::BlockError;
 use crate::transaction::{
-    QCashTransaction, SignedProtocolTransaction, SignedQCashTransaction, SignedTransaction,
-    Transaction,
+    BatchTransfer, QCashTransaction, SignedBatchTransfer, SignedProtocolTransaction,
+    SignedQCashTransaction,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -49,7 +49,7 @@ pub struct Nonce(pub u64);
 pub type BlockHeight = Height;
 pub type BlockNonce = Nonce;
 
-pub const MAX_BLOCK_SIZE: usize = 2 * 1024 * 1024;
+pub const MAX_BLOCK_SIZE: usize = 5 * 1024 * 1024;
 pub const BLOCK_VERSION: u8 = 1;
 /// WBDA and block admission use the complete canonical serialized size.
 pub const MAX_BLOCK_WEIGHT: usize = MAX_BLOCK_SIZE;
@@ -134,7 +134,7 @@ pub struct Block {
 // decode cap independently bounds hostile count prefixes.
 #[derive(BorshSerialize, BorshDeserialize)]
 enum ProtocolPayload {
-    Transfer(Box<Transaction>),
+    BatchTransfer(Box<BatchTransfer>),
     QCash(Box<QCashTransaction>),
 }
 
@@ -248,9 +248,9 @@ impl Block {
         &self.body.transactions
     }
 
-    pub fn transfer_transactions(&self) -> impl Iterator<Item = &SignedTransaction> {
+    pub fn batch_transfer_transactions(&self) -> impl Iterator<Item = &SignedBatchTransfer> {
         self.body.transactions.iter().filter_map(|tx| match tx {
-            SignedProtocolTransaction::Transfer(tx) => Some(tx.as_ref()),
+            SignedProtocolTransaction::BatchTransfer(tx) => Some(tx.as_ref()),
             _ => None,
         })
     }
@@ -569,7 +569,7 @@ impl Block {
 
     pub fn push_transaction(
         &mut self,
-        transaction: SignedTransaction,
+        transaction: SignedBatchTransfer,
     ) -> Result<(), crate::error::CodecError> {
         self.body
             .transactions
@@ -648,21 +648,21 @@ mod tests {
     use super::*;
     use crate::consensus::DIFFICULTY_START;
     use crate::crypto::Signature;
-    use crate::transaction::TransferOutput;
+    use crate::transaction::BatchTransferOutput;
     use std::io::Cursor;
 
-    fn invalid_signed_transfer(seed: u64) -> SignedTransaction {
+    fn invalid_signed_transfer(seed: u64) -> SignedBatchTransfer {
         let mut last_state = [0_u8; crate::crypto::HASH_SIZE];
         last_state[..8].copy_from_slice(&seed.to_le_bytes());
-        let transaction = Transaction::new(
+        let transaction = BatchTransfer::new(
             Address([0xff; crate::crypto::ADDRESS_SIZE]),
-            vec![TransferOutput {
+            vec![BatchTransferOutput {
                 to: (Address([seed as u8; crate::crypto::ADDRESS_SIZE])).into(),
                 amount: Amount(1),
             }],
         )
         .with_last_state(Hash(last_state));
-        SignedTransaction::new_stored_authorized(
+        SignedBatchTransfer::new_stored_authorized(
             transaction,
             Signature([1; crate::crypto::SIGNATURE_SIZE]),
             Signature([2; crate::crypto::SIGNATURE_SIZE]),
@@ -671,7 +671,15 @@ mod tests {
 
     #[test]
     fn oversized_transaction_count_hits_block_size_limit() {
-        let transactions: Vec<SignedTransaction> = (0..501).map(invalid_signed_transfer).collect();
+        let encoded_size = SignedProtocolTransaction::from(invalid_signed_transfer(0))
+            .to_bytes()
+            .unwrap()
+            .len();
+        let transaction_count = (MAX_BLOCK_WEIGHT / encoded_size).saturating_add(2);
+        assert!(transaction_count <= MAX_BLOCK_DECODE_ITEMS);
+        let transactions: Vec<SignedBatchTransfer> = (0..transaction_count as u64)
+            .map(invalid_signed_transfer)
+            .collect();
         let miner = Address([4; crate::crypto::ADDRESS_SIZE]);
         let block = Block::from_protocol_transactions(
             Height(1),

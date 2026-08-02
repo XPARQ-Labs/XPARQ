@@ -3,8 +3,8 @@ pub mod envelope;
 pub mod qcash;
 pub mod transfer;
 
-#[cfg(any(feature = "devnet", feature = "testnet"))]
-pub use authorization_proof::SignedSingleTransferV2;
+#[cfg(feature = "devnet")]
+pub use authorization_proof::SignedBatchTransferV2;
 pub use authorization_proof::{
     AUTHORIZATION_PROOF_V2_VERSION, AuthorizationProofKeyMode, AuthorizationProofV2,
     ML_DSA_44_PUBLIC_KEY_SIZE, ML_DSA_44_SIGNATURE_SIZE, SQISIGN_LEVEL5_PUBLIC_KEY_SIZE,

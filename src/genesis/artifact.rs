@@ -1,7 +1,7 @@
 use crate::block::{Block, BlockHeader, Height};
 use crate::codec::{canonical_bytes, canonical_deserialize};
 use crate::consensus::supply::{
-    BLOCK_REWARD, DECIMALS, TAIL_EMISSION, TAIL_EMISSION_START_HEIGHT, UNIT, XPQ,
+    BASE_BLOCK_REWARD, BLOCK_REWARD_STEP, DECIMALS, MAX_BLOCK_REWARD, MIN_BLOCK_REWARD, UNIT, XPQ,
 };
 use crate::consensus::{
     DIFFICULTY_START, MIN_DIFFICULTY, WBDA_HIGH_UTILIZATION_PPM, WBDA_LOW_UTILIZATION_PPM,
@@ -76,6 +76,7 @@ pub struct ChainSpecArtifact {
     pub min_difficulty: u32,
     pub difficulty_start: u32,
     pub wbda_window: u64,
+    pub wbda_target_block_weight: u64,
     pub wbda_low_utilization_ppm: u64,
     pub wbda_high_utilization_ppm: u64,
     pub confirmation_depth: u32,
@@ -86,9 +87,10 @@ pub struct ChainSpecArtifact {
     pub unit: u64,
     pub xpq: u64,
     pub decimals: u8,
-    pub block_reward: u64,
-    pub tail_emission: u64,
-    pub tail_emission_start_height: u64,
+    pub base_block_reward: u64,
+    pub min_block_reward: u64,
+    pub max_block_reward: u64,
+    pub block_reward_step: u64,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
@@ -144,16 +146,16 @@ impl ArtifactTrustAnchor {
     /// and protocol state root are all taken from the validated tip header.
     pub fn from_verified_header_chain(
         headers: &[BlockHeader],
-    ) -> Result<(Self, Work), crate::recovery::RollbackProofError> {
-        let (block_hash, cumulative_work) = crate::recovery::verify_header_chain(headers)?;
+    ) -> Result<(Self, Work), crate::qcash::recovery::RollbackProofError> {
+        let (block_hash, cumulative_work) = crate::qcash::recovery::verify_header_chain(headers)?;
         let tip = headers
             .last()
-            .ok_or(crate::recovery::RollbackProofError::EmptyHeaderChain)?;
+            .ok_or(crate::qcash::recovery::RollbackProofError::EmptyHeaderChain)?;
         let protocol_state_root = if tip.height == Height(0) {
             genesis_ledger_for_chain(CURRENT_CHAIN_PARAMS)
-                .map_err(|_| crate::recovery::RollbackProofError::WrongGenesis)?
+                .map_err(|_| crate::qcash::recovery::RollbackProofError::WrongGenesis)?
                 .protocol_state_root()
-                .map_err(|_| crate::recovery::RollbackProofError::WrongGenesis)?
+                .map_err(|_| crate::qcash::recovery::RollbackProofError::WrongGenesis)?
         } else {
             tip.state_root
         };
@@ -171,7 +173,7 @@ impl ArtifactTrustAnchor {
     /// work, using the consensus hash tie-breaker when work is equal.
     pub fn select_best_verified_header_chain(
         candidates: &[Vec<BlockHeader>],
-    ) -> Result<(usize, Self, Work), crate::recovery::RollbackProofError> {
+    ) -> Result<(usize, Self, Work), crate::qcash::recovery::RollbackProofError> {
         let mut best: Option<(usize, Self, Work)> = None;
         for (index, headers) in candidates.iter().enumerate() {
             let (anchor, work) = Self::from_verified_header_chain(headers)?;
@@ -183,7 +185,7 @@ impl ArtifactTrustAnchor {
                 best = Some((index, anchor, work));
             }
         }
-        best.ok_or(crate::recovery::RollbackProofError::EmptyHeaderChain)
+        best.ok_or(crate::qcash::recovery::RollbackProofError::EmptyHeaderChain)
     }
 
     pub fn from_validated_ledger_tip(ledger: &Ledger) -> Result<Self, GenesisError> {
@@ -279,6 +281,7 @@ impl ChainSpecArtifact {
             min_difficulty: MIN_DIFFICULTY,
             difficulty_start: DIFFICULTY_START,
             wbda_window: WBDA_WINDOW as u64,
+            wbda_target_block_weight: crate::consensus::WBDA_TARGET_BLOCK_WEIGHT as u64,
             wbda_low_utilization_ppm: WBDA_LOW_UTILIZATION_PPM,
             wbda_high_utilization_ppm: WBDA_HIGH_UTILIZATION_PPM,
             confirmation_depth: CONFIRMATION_DEPTH,
@@ -289,9 +292,10 @@ impl ChainSpecArtifact {
             unit: UNIT,
             xpq: XPQ,
             decimals: DECIMALS,
-            block_reward: BLOCK_REWARD,
-            tail_emission: TAIL_EMISSION,
-            tail_emission_start_height: TAIL_EMISSION_START_HEIGHT,
+            base_block_reward: BASE_BLOCK_REWARD,
+            min_block_reward: MIN_BLOCK_REWARD,
+            max_block_reward: MAX_BLOCK_REWARD,
+            block_reward_step: BLOCK_REWARD_STEP,
         })
     }
 
@@ -507,19 +511,9 @@ pub fn validate_snapshot_artifact(snapshot: &SnapshotArtifact) -> Result<(), Gen
     let economic_supply = account_supply
         .checked_add(qcash_supply)
         .ok_or(GenesisError::InvalidStateCommitment)?;
-    let genesis = genesis_block_for_chain(CURRENT_CHAIN_PARAMS)?;
-    let expected_supply = crate::ledger::ledger::expected_issued_supply(
-        snapshot.height,
-        genesis
-            .genesis_allocations()
-            .iter()
-            .map(|allocation| allocation.amount),
-    )
-    .map_err(|_| GenesisError::InvalidStateCommitment)?
-    .0;
-    if economic_supply != expected_supply {
-        return Err(GenesisError::InvalidStateCommitment);
-    }
+    // The authenticated header chain is required to validate dynamic epoch
+    // issuance; internal snapshot validation can only check state consistency.
+    let _ = economic_supply;
 
     Ok(())
 }
@@ -563,6 +557,30 @@ pub fn ledger_from_authenticated_snapshot(
     let (anchor, work) = ArtifactTrustAnchor::from_verified_header_chain(headers)
         .map_err(|_| GenesisError::InvalidArtifact)?;
     let snapshot = decode_snapshot_paqus(bytes, &anchor)?;
+    let genesis = genesis_block_for_chain(CURRENT_CHAIN_PARAMS)?;
+    let expected_supply = crate::ledger::ledger::expected_issued_supply_from_headers(
+        headers,
+        genesis
+            .genesis_allocations()
+            .iter()
+            .map(|allocation| allocation.amount),
+    )
+    .map_err(|_| GenesisError::InvalidStateCommitment)?;
+    let snapshot_supply = snapshot
+        .accounts
+        .values()
+        .try_fold(0_u64, |total, account| total.checked_add(account.balance.0))
+        .and_then(|accounts| {
+            snapshot
+                .qcash_utxos
+                .total_value()
+                .ok()
+                .and_then(|cash| accounts.checked_add(cash.0))
+        })
+        .ok_or(GenesisError::InvalidStateCommitment)?;
+    if snapshot_supply != expected_supply.0 {
+        return Err(GenesisError::InvalidStateCommitment);
+    }
     let ledger = Ledger::from_snapshot_parts(snapshot.accounts, snapshot.qcash_utxos, headers)?;
     let commitment = ledger
         .tip_state_commitment()?

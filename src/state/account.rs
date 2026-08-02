@@ -2,7 +2,7 @@ use crate::block::BlockHeight;
 use crate::consensus::supply::{Amount, Balance};
 use crate::crypto::{Address, Hash, HashDomain, PublicKey, domain_hash};
 use crate::error::StateError;
-use crate::transaction::Transaction;
+use crate::transaction::BatchTransfer;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -18,6 +18,9 @@ pub struct Account {
     pub authorization: Option<AccountAuthorization>,
     pub credits: Vec<Credit>,
     pub statement: AccountStatement,
+    /// Height that produced the current statement. It becomes spendable after
+    /// `ACCOUNT_STATEMENT_ACTIVATION_DEPTH` blocks.
+    pub statement_height: BlockHeight,
 }
 
 #[derive(
@@ -73,6 +76,21 @@ mod tests {
             .unwrap();
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn advancing_statement_records_consensus_height() {
+        let mut account = Account::new(Address([6; crate::crypto::ADDRESS_SIZE]), Amount(10));
+        let previous = account.statement;
+        account.advance_statement(
+            previous,
+            Hash([7; crate::crypto::HASH_SIZE]),
+            Hash([8; crate::crypto::HASH_SIZE]),
+            crate::block::Height(42),
+        );
+
+        assert_ne!(account.statement, previous);
+        assert_eq!(account.statement_height, crate::block::Height(42));
     }
 }
 
@@ -130,8 +148,14 @@ impl Account {
                 source: CreditSource::Genesis,
             }],
             statement: AccountStatement::ZERO,
+            statement_height: crate::block::Height(0),
         };
-        account.advance_statement(AccountStatement::ZERO, Hash::ZERO, Hash::ZERO);
+        account.advance_statement(
+            AccountStatement::ZERO,
+            Hash::ZERO,
+            Hash::ZERO,
+            crate::block::Height(0),
+        );
         account
     }
 
@@ -155,8 +179,14 @@ impl Account {
                 source: CreditSource::Genesis,
             }],
             statement: AccountStatement::ZERO,
+            statement_height: crate::block::Height(0),
         };
-        account.advance_statement(AccountStatement::ZERO, Hash::ZERO, Hash::ZERO);
+        account.advance_statement(
+            AccountStatement::ZERO,
+            Hash::ZERO,
+            Hash::ZERO,
+            crate::block::Height(0),
+        );
         account
     }
 
@@ -186,10 +216,12 @@ impl Account {
         last_state: AccountStatement,
         authorized_tx_hash: Hash,
         authorization_proof_hash: Hash,
+        height: BlockHeight,
     ) {
         self.statement = self
             .calculate_statement(last_state, authorized_tx_hash, authorization_proof_hash)
             .expect("account statement payload is canonically serializable");
+        self.statement_height = height;
     }
 
     pub fn register_authorization(
@@ -308,7 +340,7 @@ impl Account {
 
     pub fn apply_outgoing_transaction(
         &mut self,
-        transaction: &Transaction,
+        transaction: &BatchTransfer,
         height: BlockHeight,
         applied_tx_hash: Hash,
         authorization_proof_hash: Hash,
@@ -327,13 +359,18 @@ impl Account {
 
         let last_state = self.statement;
         self.debit_at(total, height)?;
-        self.advance_statement(last_state, applied_tx_hash, authorization_proof_hash);
+        self.advance_statement(
+            last_state,
+            applied_tx_hash,
+            authorization_proof_hash,
+            height,
+        );
         Ok(())
     }
 
     pub fn apply_incoming_transaction(
         &mut self,
-        transaction: &Transaction,
+        transaction: &BatchTransfer,
         maturity_height: BlockHeight,
     ) -> Result<(), StateError> {
         let output = transaction

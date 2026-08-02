@@ -54,7 +54,8 @@ impl Chain {
         headers: &[BlockHeader],
         checkpoint_height: BlockHeight,
     ) -> Result<(), LedgerError> {
-        crate::recovery::verify_header_chain(headers).map_err(|_| LedgerError::InvalidParent)?;
+        crate::qcash::recovery::verify_header_chain(headers)
+            .map_err(|_| LedgerError::InvalidParent)?;
         self.headers.clear();
         self.blocks.clear();
         for header in headers {

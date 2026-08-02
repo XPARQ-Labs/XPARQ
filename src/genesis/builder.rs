@@ -116,12 +116,12 @@ pub const FROZEN_GENESIS_HASH: [u8; HASH_SIZE] = [
 ];
 
 pub const TESTNET_GENESIS_HASH: [u8; HASH_SIZE] = [
-    90, 130, 83, 154, 190, 205, 242, 37, 41, 192, 35, 171, 7, 205, 76, 254, 179, 184, 190, 138,
-    197, 207, 98, 246, 85, 18, 110, 52, 181, 95, 99, 36,
+    27, 144, 50, 83, 122, 4, 213, 175, 199, 165, 222, 190, 205, 251, 177, 203, 189, 45, 189, 231,
+    219, 167, 188, 28, 69, 129, 229, 15, 197, 48, 151, 252,
 ];
 pub const DEVNET_GENESIS_HASH: [u8; HASH_SIZE] = [
-    198, 183, 207, 189, 60, 207, 251, 49, 23, 159, 140, 32, 112, 185, 92, 69, 173, 131, 232, 80,
-    121, 195, 110, 196, 223, 203, 153, 185, 97, 113, 145, 98,
+    106, 145, 41, 61, 191, 148, 74, 92, 54, 0, 98, 103, 129, 147, 16, 250, 192, 92, 250, 141, 94,
+    99, 55, 246, 60, 79, 34, 39, 19, 220, 7, 143,
 ];
 
 #[cfg(any(
@@ -134,13 +134,13 @@ compile_error!(
 );
 #[cfg(not(any(feature = "mainnet", feature = "testnet", feature = "devnet")))]
 compile_error!("enable exactly one network feature: mainnet, testnet, or devnet");
-#[cfg(all(feature = "mainnet", feature = "sqisign-blockchain-test"))]
-compile_error!("mainnet consensus requires ML-DSA-44; SQIsign is not permitted");
 #[cfg(all(
-    any(feature = "testnet", feature = "devnet"),
-    not(feature = "sqisign-blockchain-test")
+    any(feature = "mainnet", feature = "testnet"),
+    feature = "sqisign-blockchain-test"
 ))]
-compile_error!("devnet and testnet consensus require SQIsign Level 5");
+compile_error!("mainnet and testnet consensus require ML-DSA-44; SQIsign is not permitted");
+#[cfg(all(feature = "devnet", not(feature = "sqisign-blockchain-test")))]
+compile_error!("devnet consensus requires SQIsign Level 5");
 
 #[cfg(feature = "mainnet")]
 pub const CURRENT_CHAIN_PARAMS: ChainParams = PAQUS_CHAIN;

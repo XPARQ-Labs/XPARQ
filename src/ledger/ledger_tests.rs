@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::block::{Block, Height, Nonce};
 use crate::consensus::supply::XPQ;
@@ -8,12 +7,14 @@ use crate::genesis::genesis_block;
 use crate::qcash::{
     QCashDenomination, QCashWithdrawalMetadata, qcash_redeem_key_commitment_from_secret,
 };
-use crate::transaction::{QCashTransaction, SignedQCashTransaction, Transaction, TransferOutput};
+use crate::transaction::{
+    BatchTransfer, BatchTransferOutput, QCashTransaction, SignedQCashTransaction,
+};
 
-fn single_output_transaction(from: Address, to: Address, amount: Amount) -> Transaction {
-    Transaction::new(
+fn single_output_transaction(from: Address, to: Address, amount: Amount) -> BatchTransfer {
+    BatchTransfer::new(
         from,
-        vec![TransferOutput {
+        vec![BatchTransferOutput {
             to: to.into(),
             amount,
         }],
@@ -25,12 +26,11 @@ fn authorized_transfer(
     auth: &crate::crypto::KeyPair,
     to: Address,
     last_state: crate::crypto::Hash,
-) -> SignedTransaction {
+) -> SignedBatchTransfer {
     let from = dual_address_from_public_keys(&spend.public_key, &auth.public_key);
-    let transaction =
-        single_output_transaction(from, to, Amount(25)).with_last_state(last_state);
+    let transaction = single_output_transaction(from, to, Amount(25)).with_last_state(last_state);
     let payload = transaction.signing_bytes().unwrap();
-    SignedTransaction::new_authorized(
+    SignedBatchTransfer::new_authorized(
         transaction,
         spend.public_key,
         sign(&spend.secret_key, &payload),
@@ -45,11 +45,11 @@ fn authorized_transfer_amount(
     to: Address,
     amount: Amount,
     last_state: crate::crypto::Hash,
-) -> SignedTransaction {
+) -> SignedBatchTransfer {
     let from = dual_address_from_public_keys(&spend.public_key, &auth.public_key);
     let transaction = single_output_transaction(from, to, amount).with_last_state(last_state);
     let payload = transaction.signing_bytes().unwrap();
-    SignedTransaction::new_authorized(
+    SignedBatchTransfer::new_authorized(
         transaction,
         spend.public_key,
         sign(&spend.secret_key, &payload),
@@ -148,7 +148,7 @@ fn qcash_withdraw_moves_value_out_of_account_into_bearer_utxo() {
     let signer = dual_address_from_public_keys(&spend.public_key, &auth.public_key);
     let initial_balance = Amount(2 * XPQ);
     let amount = QCashDenomination::One.amount();
-        let redeem_secret = [0x44; 32];
+    let redeem_secret = [0x44; 32];
     let metadata = QCashWithdrawalMetadata::with_denominations(
         amount,
         &[QCashDenomination::One],
@@ -174,15 +174,9 @@ fn qcash_withdraw_moves_value_out_of_account_into_bearer_utxo() {
         .unwrap();
 
     let account = ledger.account(&signer).unwrap();
-    assert_eq!(
-        account.balance,
-        Amount(initial_balance.0 - amount.0)
-    );
+    assert_eq!(account.balance, Amount(initial_balance.0 - amount.0));
     assert_eq!(ledger.qcash_utxos.total_value().unwrap(), amount);
-    assert_eq!(
-        ledger.economic_supply().unwrap(),
-        initial_balance
-    );
+    assert_eq!(ledger.economic_supply().unwrap(), initial_balance);
 }
 
 #[test]
@@ -190,17 +184,11 @@ fn account_rollbacks_include_before_and_after_snapshots() {
     let alice = Address([1; 20]);
     let bob = Address([2; 20]);
     let mut before = BTreeMap::new();
-    before.insert(
-        alice,
-        Account::trusted(alice, Amount(500)),
-    );
+    before.insert(alice, Account::trusted(alice, Amount(500)));
     before.insert(bob, Account::trusted(bob, Amount(100)));
 
     let mut after = BTreeMap::new();
-    after.insert(
-        alice,
-        Account::trusted(alice, Amount(800)),
-    );
+    after.insert(alice, Account::trusted(alice, Amount(800)));
     after.insert(bob, Account::trusted(bob, Amount(100)));
 
     let rollbacks = account_rollbacks(&before, &after);
@@ -263,7 +251,7 @@ fn first_spend_uses_stateless_dual_authorization() {
     let first = single_output_transaction(sender, recipient, Amount(25))
         .with_last_state(ledger.account(&sender).unwrap().statement);
     let first_payload = first.signing_bytes().unwrap();
-    let signed_first = SignedTransaction::new_authorized(
+    let signed_first = SignedBatchTransfer::new_authorized(
         first,
         spend.public_key,
         sign(&spend.secret_key, &first_payload),
@@ -275,7 +263,7 @@ fn first_spend_uses_stateless_dual_authorization() {
     let second = single_output_transaction(sender, Address([7; 20]), Amount(1))
         .with_last_state(ledger.account(&sender).unwrap().statement);
     let second_payload = second.signing_bytes().unwrap();
-    let unsigned_auth_second = SignedTransaction::new(
+    let unsigned_auth_second = SignedBatchTransfer::new(
         second.clone(),
         spend.public_key,
         sign(&spend.secret_key, &second_payload),
@@ -286,7 +274,7 @@ fn first_spend_uses_stateless_dual_authorization() {
             .is_err()
     );
 
-    let signed_second = SignedTransaction::new_authorized(
+    let signed_second = SignedBatchTransfer::new_authorized(
         second,
         spend.public_key,
         sign(&spend.secret_key, &second_payload),
@@ -311,7 +299,7 @@ fn stale_account_statement_is_rejected() {
     let first = single_output_transaction(sender, recipient, Amount(10))
         .with_last_state(original_statement);
     let first_payload = first.signing_bytes().unwrap();
-    let signed_first = SignedTransaction::new_authorized(
+    let signed_first = SignedBatchTransfer::new_authorized(
         first,
         spend.public_key,
         sign(&spend.secret_key, &first_payload),
@@ -323,7 +311,7 @@ fn stale_account_statement_is_rejected() {
     let stale = single_output_transaction(sender, Address([0x12; 20]), Amount(1))
         .with_last_state(original_statement);
     let stale_payload = stale.signing_bytes().unwrap();
-    let signed_stale = SignedTransaction::new_authorized(
+    let signed_stale = SignedBatchTransfer::new_authorized(
         stale,
         spend.public_key,
         sign(&spend.secret_key, &stale_payload),
@@ -364,7 +352,9 @@ fn new_account_statement_activates_in_next_block() {
         ledger.account(&sender).unwrap().statement,
     );
     assert_eq!(
-        ledger.clone().apply_signed_transaction_at(&second, Height(1)),
+        ledger
+            .clone()
+            .apply_signed_transaction_at(&second, Height(1)),
         Err(LedgerError::InvalidState(
             StateError::InvalidAccountStatement
         ))
@@ -389,15 +379,26 @@ fn incoming_transfer_does_not_advance_recipient_statement() {
 
     let bob_original_statement = ledger.account(&bob).unwrap().statement;
     let bob_to_john = authorized_transfer(&bob_spend, &bob_auth, john, bob_original_statement);
-    let alice_to_bob = authorized_transfer(&alice_spend, &alice_auth, bob, ledger.account(&alice).unwrap().statement);
+    let alice_to_bob = authorized_transfer(
+        &alice_spend,
+        &alice_auth,
+        bob,
+        ledger.account(&alice).unwrap().statement,
+    );
 
     ledger.apply_signed_transaction(&alice_to_bob).unwrap();
     assert_eq!(ledger.balance(&bob), Some(Amount(125)));
-    assert_eq!(ledger.account(&bob).unwrap().statement, bob_original_statement);
+    assert_eq!(
+        ledger.account(&bob).unwrap().statement,
+        bob_original_statement
+    );
 
     ledger.apply_signed_transaction(&bob_to_john).unwrap();
     assert_eq!(ledger.balance(&bob), Some(Amount(100)));
-    assert_ne!(ledger.account(&bob).unwrap().statement, bob_original_statement);
+    assert_ne!(
+        ledger.account(&bob).unwrap().statement,
+        bob_original_statement
+    );
 }
 
 #[test]
@@ -414,10 +415,17 @@ fn next_outgoing_statement_embeds_latest_balance_after_incoming() {
     ledger.create_account(bob, Amount(100)).unwrap();
 
     let bob_original_statement = ledger.account(&bob).unwrap().statement;
-    let alice_to_bob =
-        authorized_transfer(&alice_spend, &alice_auth, bob, ledger.account(&alice).unwrap().statement);
+    let alice_to_bob = authorized_transfer(
+        &alice_spend,
+        &alice_auth,
+        bob,
+        ledger.account(&alice).unwrap().statement,
+    );
     ledger.apply_signed_transaction(&alice_to_bob).unwrap();
-    assert_eq!(ledger.account(&bob).unwrap().statement, bob_original_statement);
+    assert_eq!(
+        ledger.account(&bob).unwrap().statement,
+        bob_original_statement
+    );
 
     let bob_to_john = authorized_transfer(&bob_spend, &bob_auth, john, bob_original_statement);
     let authorized_tx_hash = bob_to_john.transaction.hash().unwrap().as_hash();
@@ -455,7 +463,7 @@ fn registered_account_accepts_signature_only_authorization_proof_and_saves_both_
     let first = single_output_transaction(sender, recipient, Amount(1))
         .with_last_state(ledger.account(&sender).unwrap().statement);
     let first_payload = first.signing_bytes().unwrap();
-    let registration = SignedTransaction::new_authorized(
+    let registration = SignedBatchTransfer::new_authorized(
         first,
         owner.public_key,
         sign(&owner.secret_key, &first_payload),
@@ -468,12 +476,12 @@ fn registered_account_accepts_signature_only_authorization_proof_and_saves_both_
     let second = single_output_transaction(sender, recipient, Amount(1))
         .with_last_state(ledger.account(&sender).unwrap().statement);
     let second_payload = second.signing_bytes().unwrap();
-    let compact = SignedTransaction::new_stored_authorized(
+    let compact = SignedBatchTransfer::new_stored_authorized(
         second.clone(),
         sign(&owner.secret_key, &second_payload),
         sign(&auth.secret_key, &second_payload),
     );
-    let repeated = SignedTransaction::new_authorized(
+    let repeated = SignedBatchTransfer::new_authorized(
         second,
         owner.public_key,
         sign(&owner.secret_key, &second_payload),
@@ -508,7 +516,7 @@ fn signed_transfer_rejects_signature_from_wrong_authorization_key() {
     let transaction = single_output_transaction(sender, Address([8; 20]), Amount(25))
         .with_last_state(ledger.account(&sender).unwrap().statement);
     let payload = transaction.signing_bytes().unwrap();
-    let signed = SignedTransaction::new_authorized(
+    let signed = SignedBatchTransfer::new_authorized(
         transaction,
         spend.public_key,
         sign(&spend.secret_key, &payload),
@@ -547,7 +555,7 @@ fn dual_authorized_transfer_block_state_root_validates() {
             Vec::new(),
             Some(crate::block::CoinbaseTransaction::new(
                 sender,
-                ledger.mintable_subsidy(height),
+                ledger.mintable_subsidy(height).unwrap(),
             )),
             Vec::new(),
         )
@@ -565,7 +573,7 @@ fn dual_authorized_transfer_block_state_root_validates() {
     let transfer_height = Height(crate::ledger::BLOCK_REWARD_MATURITY as u64 + 1);
     let coinbase = crate::block::CoinbaseTransaction::new(
         miner,
-        ledger.mintable_subsidy(transfer_height),
+        ledger.mintable_subsidy(transfer_height).unwrap(),
     );
     let mut block = Block::from_protocol_transactions(
         transfer_height,
@@ -601,7 +609,7 @@ fn expected_next_difficulty_uses_wbda_weight_window() {
     let (staged, _) = ledger.execute_block(&genesis).unwrap();
     ledger = staged;
 
-    for height in 1..crate::consensus::WBDA_WINDOW as u64 {
+    for height in 1..=crate::consensus::WBDA_WINDOW as u64 {
         let height = Height(height);
         let block = Block::from_protocol_transactions(
             height,
@@ -612,7 +620,7 @@ fn expected_next_difficulty_uses_wbda_weight_window() {
             Vec::new(),
             Some(crate::block::CoinbaseTransaction::new(
                 miner,
-                ledger.mintable_subsidy(height),
+                ledger.mintable_subsidy(height).unwrap(),
             )),
             Vec::new(),
         )
@@ -623,9 +631,15 @@ fn expected_next_difficulty_uses_wbda_weight_window() {
 
     assert_eq!(
         ledger.chain.tip_height(),
-        Some(Height(crate::consensus::WBDA_WINDOW as u64 - 1))
+        Some(Height(crate::consensus::WBDA_WINDOW as u64))
     );
     assert_eq!(ledger.expected_difficulty_after_tip().unwrap(), 2);
+    assert_eq!(
+        ledger
+            .mintable_subsidy(Height(crate::consensus::WBDA_WINDOW as u64 + 1))
+            .unwrap(),
+        Amount(crate::consensus::BASE_BLOCK_REWARD + crate::consensus::BLOCK_REWARD_STEP)
+    );
 }
 
 #[test]
@@ -673,30 +687,4 @@ fn initialized_chain_rejects_non_coinbase_account_issuance_atomically() {
     // Zero-balance account creation is not issuance.
     ledger.create_account(address, Amount(0)).unwrap();
     assert_eq!(ledger.economic_supply().unwrap(), supply_before);
-}
-
-#[test]
-fn expected_supply_switches_to_tail_emission_at_the_boundary() {
-    let genesis = Amount(123);
-    let boundary = crate::consensus::supply::TAIL_EMISSION_START_HEIGHT;
-    let before = expected_issued_supply(Height(boundary - 1), [genesis].into_iter()).unwrap();
-    let at_boundary = expected_issued_supply(Height(boundary), [genesis].into_iter()).unwrap();
-    let after = expected_issued_supply(Height(boundary + 1), [genesis].into_iter()).unwrap();
-
-    assert_eq!(
-        at_boundary.0 - before.0,
-        crate::consensus::supply::TAIL_EMISSION
-    );
-    assert_eq!(
-        after.0 - at_boundary.0,
-        crate::consensus::supply::TAIL_EMISSION
-    );
-    assert_eq!(
-        crate::consensus::block_reward(Height(boundary - 1)),
-        Amount(crate::consensus::supply::BLOCK_REWARD)
-    );
-    assert_eq!(
-        crate::consensus::block_reward(Height(boundary)),
-        Amount(crate::consensus::supply::TAIL_EMISSION)
-    );
 }

@@ -116,6 +116,16 @@ version = "0.2.2"
 [[package]]
 name = "chacha20"
 version = "0.10.1"
+dependencies = [
+ "cfg-if 1.0.4",
+ "cpufeatures 0.3.0",
+ "rand_core 0.10.1",
+ "zeroize 1.9.0",
+]
+
+[[package]]
+name = "chacha20"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
 dependencies = [
@@ -132,7 +142,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb"
 dependencies = [
  "aead",
- "chacha20",
+ "chacha20 0.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "cipher",
  "poly1305",
  "zeroize 1.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -160,6 +170,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
+name = "cpubits"
+version = "0.1.1"
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 dependencies = [
@@ -180,6 +194,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
 dependencies = [
  "libc 0.2.186",
+]
+
+[[package]]
+name = "crypto-bigint"
+version = "0.7.5"
+dependencies = [
+ "cpubits",
+ "ctutils 0.4.2",
+ "num-traits",
 ]
 
 [[package]]
@@ -372,6 +395,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "libm"
+version = "0.2.16"
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 
@@ -399,10 +426,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.5.1"
+dependencies = [
+ "num-integer",
+ "num-traits",
+ "rand",
+ "rand_core 0.10.1",
+]
+
+[[package]]
+name = "num-integer"
+version = "0.1.46"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 dependencies = [
  "autocfg",
+ "libm",
 ]
 
 [[package]]
@@ -411,14 +456,17 @@ version = "1.21.4"
 
 [[package]]
 name = "paqus"
-version = "0.2.19"
+version = "0.2.20"
 dependencies = [
  "argon2",
  "bech32",
  "borsh",
+ "chacha20 0.10.1",
  "chacha20poly1305",
  "getrandom 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "ml-dsa",
+ "paqus-sqisign",
+ "rand",
  "serde",
  "sha3",
  "static_assertions",
@@ -434,12 +482,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "paqus-sqisign"
+version = "0.1.0"
+dependencies = [
+ "crypto-bigint",
+ "hybrid-array 0.4.13",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "paste",
+ "rand",
+ "rand_core 0.10.1",
+ "shake",
+ "signature",
+ "subtle",
+ "typenum 1.20.1",
+ "zeroize 1.9.0",
+]
+
+[[package]]
 name = "password-hash"
 version = "0.5.0"
 dependencies = [
  "base64ct",
  "subtle",
 ]
+
+[[package]]
+name = "paste"
+version = "1.0.15"
 
 [[package]]
 name = "poly1305"
@@ -487,6 +558,15 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "rand"
+version = "0.10.2"
+dependencies = [
+ "chacha20 0.10.1",
+ "getrandom 0.4.3",
+ "rand_core 0.10.1",
+]
 
 [[package]]
 name = "rand_core"

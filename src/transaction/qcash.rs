@@ -8,8 +8,8 @@ use crate::crypto::{
     dual_address_from_public_keys, verify,
 };
 use crate::error::TransactionError;
+use crate::qcash::recovery::{BlockHeaderProof, RollbackProofError, verify_header_proof_chain};
 use crate::qcash::{QCashCoinFile, QCashError, QCashRedeemMetadata, QCashWithdrawalMetadata};
-use crate::recovery::{BlockHeaderProof, RollbackProofError, verify_header_proof_chain};
 use borsh::{BorshDeserialize, BorshSerialize};
 
 pub const QCASH_TRANSACTION_VERSION: u8 = 1;

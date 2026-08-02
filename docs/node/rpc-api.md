@@ -25,7 +25,7 @@ http://127.0.0.1:6666
 | GET | `/blocks/hash/{hash}` | Block by hash |
 | GET | `/tx/{hash}` | Transaction lookup |
 | GET | `/address/{address}` | Address activity |
-| POST | `/tx` | Submit a signed Transfer transaction |
+| POST | `/tx` | Submit a signed BatchTransfer transaction |
 | POST | `/qcash/tx` | Submit a signed QCash transaction |
 
 Examples:

@@ -1,7 +1,9 @@
 use crate::block::Block;
 use crate::block::BlockHeight;
-use crate::consensus::block_reward;
 use crate::consensus::supply::Amount;
+use crate::consensus::{
+    BASE_BLOCK_REWARD, WBDA_WINDOW, is_wbda_epoch_boundary, next_reward_from_window,
+};
 use crate::crypto::Address;
 use crate::ledger::{BLOCK_REWARD_MATURITY, Ledger, LedgerError};
 use crate::state::{Account, CreditSource};
@@ -17,7 +19,7 @@ impl Ledger {
             return Err(LedgerError::InvalidCoinbase);
         }
 
-        let expected_subsidy = block_reward(block.height());
+        let expected_subsidy = self.expected_reward_for_height(block.height())?;
         if coinbase.subsidy != expected_subsidy {
             return Err(LedgerError::InvalidCoinbase);
         }
@@ -42,8 +44,36 @@ impl Ledger {
         )
     }
 
-    pub fn mintable_subsidy(&self, height: BlockHeight) -> Amount {
-        block_reward(height)
+    pub fn mintable_subsidy(&self, height: BlockHeight) -> Result<Amount, LedgerError> {
+        self.expected_reward_for_height(height)
+    }
+
+    pub(crate) fn expected_reward_for_height(
+        &self,
+        height: BlockHeight,
+    ) -> Result<Amount, LedgerError> {
+        if height.0 <= 1 {
+            return Ok(Amount(BASE_BLOCK_REWARD));
+        }
+        let mut reward = Amount(BASE_BLOCK_REWARD);
+        let mut boundary = WBDA_WINDOW as u64 + 1;
+        while boundary <= height.0 {
+            debug_assert!(is_wbda_epoch_boundary(boundary));
+            let start = boundary - WBDA_WINDOW as u64;
+            let weights = (start..boundary)
+                .map(|height| {
+                    self.chain
+                        .header(&crate::block::Height(height))
+                        .ok_or(LedgerError::InvalidParent)?
+                        .block_weight
+                        .try_into()
+                        .map_err(|_| LedgerError::InvalidParent)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            reward = next_reward_from_window(reward, &weights).ok_or(LedgerError::InvalidParent)?;
+            boundary = boundary.saturating_add(WBDA_WINDOW as u64);
+        }
+        Ok(reward)
     }
 
     fn credit_miner(
@@ -58,7 +88,6 @@ impl Ledger {
         } else {
             let mut account = Account::new(miner_address, Amount(0));
             account.credit_at_maturity(amount, maturity_height, source)?;
-            self.register_account_statement(account.statement, crate::block::Height(0));
             self.accounts.insert(miner_address, account);
         }
 

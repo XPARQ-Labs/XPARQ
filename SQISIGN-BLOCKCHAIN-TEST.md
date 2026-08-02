@@ -15,8 +15,7 @@ In this mode:
 - owner signatures use SQIsign Level 5;
 - authorization signatures use a second SQIsign Level 5 key;
 - public keys are 129 bytes, secret keys 705 bytes, and signatures 292 bytes;
-- newly encoded wallet addresses use the reserved `PX` HRP;
-- ML-DSA `P` addresses are rejected by the active address parser;
+- wallet addresses use the common `P` HRP on every network;
 - the crypto-agility registry marks only SQIsign Level 5 active.
 
 This is a development network, not a production activation. SQIsign is still a

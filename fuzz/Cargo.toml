@@ -10,9 +10,15 @@ members = ["."]
 [package.metadata]
 cargo-fuzz = true
 
+[features]
+default = ["mainnet"]
+mainnet = ["paqus/mainnet"]
+testnet = ["paqus/testnet"]
+devnet = ["paqus/devnet"]
+
 [dependencies]
 libfuzzer-sys = "0.4"
-paqus = { path = ".." }
+paqus = { path = "..", default-features = false }
 
 [[bin]]
 name = "decode"
@@ -66,6 +72,34 @@ bench = false
 [[bin]]
 name = "mixed_family"
 path = "fuzz_targets/mixed_family.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "address_codec"
+path = "fuzz_targets/address_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "consensus_epoch"
+path = "fuzz_targets/consensus_epoch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "artifact_codec"
+path = "fuzz_targets/artifact_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qcash_coin_codec"
+path = "fuzz_targets/qcash_coin_codec.rs"
 test = false
 doc = false
 bench = false

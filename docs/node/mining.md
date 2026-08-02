@@ -30,11 +30,16 @@ For bounded batches:
 
 | Rule | Value |
 | --- | ---: |
-| Initial subsidy | 15 XPQ |
-| Tail emission begins | Height 400,000 |
-| Tail emission | 0.85 XPQ |
+| Base subsidy | 10 XPQ |
+| Minimum subsidy | 1 XPQ |
+| Maximum subsidy | 20 XPQ |
+| WBDA epoch adjustment | 1 XPQ |
 | Reward maturity | 50 blocks |
 | Genesis premine | 0 XPQ |
+
+The completed WBDA epoch determines the subsidy for the following epoch.
+Below 30% utilization the subsidy rises by 1 XPQ, from 30% through 70% it
+remains unchanged, and above 70% it falls by 1 XPQ.
 
 Transaction fees are included in the coinbase transaction by node policy.
 Miner fee selection is controlled locally in `paqus/byte`; it is not a

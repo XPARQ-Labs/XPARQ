@@ -25,7 +25,7 @@ fuzz_target!(|data: &[u8]| {
     let mut families = [false; 2];
     for transaction in &block.body.transactions {
         families[match transaction.family() {
-            TransactionFamily::Transfer => 0,
+            TransactionFamily::BatchTransfer => 0,
             TransactionFamily::QCash => 1,
         }] = true;
     }

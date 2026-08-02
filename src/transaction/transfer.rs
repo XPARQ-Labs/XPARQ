@@ -114,22 +114,22 @@ impl From<Address> for OutputTarget {
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TransferOutput {
+pub struct BatchTransferOutput {
     pub to: OutputTarget,
     pub amount: Amount,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Transaction {
+pub struct BatchTransfer {
     pub version: u8,
     pub from: Address,
-    pub outputs: Vec<TransferOutput>,
+    pub outputs: Vec<BatchTransferOutput>,
     pub last_state: Hash,
     pub validity: ValidityWindow,
 }
 
-impl Transaction {
-    pub fn new(from: Address, outputs: Vec<TransferOutput>) -> Self {
+impl BatchTransfer {
+    pub fn new(from: Address, outputs: Vec<BatchTransferOutput>) -> Self {
         Self {
             version: TRANSACTION_VERSION,
             from,
@@ -149,7 +149,7 @@ impl Transaction {
         self
     }
 
-    pub fn outputs(&self) -> impl Iterator<Item = TransferOutput> + '_ {
+    pub fn outputs(&self) -> impl Iterator<Item = BatchTransferOutput> + '_ {
         self.outputs.iter().copied()
     }
 
@@ -344,13 +344,13 @@ impl BorshDeserialize for AuthorizationProof {
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SignedTransaction {
-    pub transaction: Transaction,
+pub struct SignedBatchTransfer {
+    pub transaction: BatchTransfer,
     pub authorization_proof: AuthorizationProof,
 }
 
-impl SignedTransaction {
-    pub fn new(transaction: Transaction, public_key: PublicKey, signature: Signature) -> Self {
+impl SignedBatchTransfer {
+    pub fn new(transaction: BatchTransfer, public_key: PublicKey, signature: Signature) -> Self {
         Self {
             transaction,
             authorization_proof: AuthorizationProof::new(public_key, signature),
@@ -358,7 +358,7 @@ impl SignedTransaction {
     }
 
     pub fn new_authorized(
-        transaction: Transaction,
+        transaction: BatchTransfer,
         public_key: PublicKey,
         signature: Signature,
         auth_public_key: PublicKey,
@@ -376,7 +376,7 @@ impl SignedTransaction {
     }
 
     pub fn new_stored_authorized(
-        transaction: Transaction,
+        transaction: BatchTransfer,
         signature: Signature,
         auth_signature: Signature,
     ) -> Self {
@@ -574,8 +574,8 @@ impl SignedTransaction {
 mod transfer_output_tests {
     use super::*;
 
-    fn output(byte: u8) -> TransferOutput {
-        TransferOutput {
+    fn output(byte: u8) -> BatchTransferOutput {
+        BatchTransferOutput {
             to: (Address([byte; crate::crypto::ADDRESS_SIZE])).into(),
             amount: Amount(1),
         }
@@ -583,11 +583,11 @@ mod transfer_output_tests {
 
     #[test]
     fn stored_authorized_single_output_size_is_explicit() {
-        let transaction = Transaction::new(
+        let transaction = BatchTransfer::new(
             Address([0xff; crate::crypto::ADDRESS_SIZE]),
             vec![output(1)],
         );
-        let signed = SignedTransaction::new_stored_authorized(
+        let signed = SignedBatchTransfer::new_stored_authorized(
             transaction,
             Signature([1; crate::crypto::SIGNATURE_SIZE]),
             Signature([2; crate::crypto::SIGNATURE_SIZE]),
@@ -605,12 +605,15 @@ mod transfer_output_tests {
     fn transfer_requires_between_one_and_max_outputs() {
         let sender = Address([0xff; crate::crypto::ADDRESS_SIZE]);
         assert_eq!(
-            Transaction::new(sender, Vec::new()).validate(),
+            BatchTransfer::new(sender, Vec::new()).validate(),
             Err(TransactionError::EmptyOutputs)
         );
-        assert_eq!(Transaction::new(sender, vec![output(1)]).validate(), Ok(()));
         assert_eq!(
-            Transaction::new(
+            BatchTransfer::new(sender, vec![output(1)]).validate(),
+            Ok(())
+        );
+        assert_eq!(
+            BatchTransfer::new(
                 sender,
                 (1..=MAX_BATCH_OUTPUTS + 1)
                     .map(|index| output(index as u8))

@@ -7,12 +7,12 @@ use static_assertions::const_assert;
 
 use super::qcash::{self, SignedQCashTransaction};
 use super::transfer::{
-    AuthorizationProof, MAX_TX_SIZE, OutputTarget, SignedTransaction, ValidityWindow,
+    AuthorizationProof, MAX_TX_SIZE, OutputTarget, SignedBatchTransfer, ValidityWindow,
 };
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SignedProtocolTransaction {
-    Transfer(Box<SignedTransaction>),
+    BatchTransfer(Box<SignedBatchTransfer>),
     QCash(Box<SignedQCashTransaction>),
 }
 
@@ -22,7 +22,7 @@ const_assert!(std::mem::size_of::<SignedProtocolTransaction>() <= 2 * std::mem::
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TransactionFamily {
-    Transfer,
+    BatchTransfer,
     QCash,
 }
 
@@ -33,14 +33,14 @@ const_assert!(MAX_TX_SIZE <= qcash::MAX_QCASH_TX_SIZE);
 impl SignedProtocolTransaction {
     pub fn authorization_proof(&self) -> &AuthorizationProof {
         match self {
-            Self::Transfer(tx) => &tx.authorization_proof,
+            Self::BatchTransfer(tx) => &tx.authorization_proof,
             Self::QCash(tx) => &tx.authorization_proof,
         }
     }
 
     pub fn authorization_proof_mut(&mut self) -> &mut AuthorizationProof {
         match self {
-            Self::Transfer(tx) => &mut tx.authorization_proof,
+            Self::BatchTransfer(tx) => &mut tx.authorization_proof,
             Self::QCash(tx) => &mut tx.authorization_proof,
         }
     }
@@ -59,7 +59,7 @@ impl SignedProtocolTransaction {
 
     pub fn family(&self) -> TransactionFamily {
         match self {
-            Self::Transfer(_) => TransactionFamily::Transfer,
+            Self::BatchTransfer(_) => TransactionFamily::BatchTransfer,
             Self::QCash(_) => TransactionFamily::QCash,
         }
     }
@@ -73,7 +73,7 @@ impl SignedProtocolTransaction {
     /// Unified payload size without public keys or signatures.
     pub fn stripped_size(&self) -> Result<usize, crate::error::CodecError> {
         Ok(1 + match self {
-            Self::Transfer(tx) => tx.transaction.to_bytes()?.len(),
+            Self::BatchTransfer(tx) => tx.transaction.to_bytes()?.len(),
             Self::QCash(tx) => tx.transaction.to_bytes()?.len(),
         })
     }
@@ -95,7 +95,7 @@ impl SignedProtocolTransaction {
     /// consensus fee field.
     pub fn block_miner_bounty(&self) -> u64 {
         match self {
-            Self::Transfer(tx) => tx
+            Self::BatchTransfer(tx) => tx
                 .transaction
                 .outputs()
                 .filter(|output| output.to == OutputTarget::BlockMiner)
@@ -107,14 +107,14 @@ impl SignedProtocolTransaction {
 
     pub fn signer(&self) -> Address {
         match self {
-            Self::Transfer(tx) => tx.transaction.from,
+            Self::BatchTransfer(tx) => tx.transaction.from,
             Self::QCash(tx) => tx.transaction.signer,
         }
     }
 
     pub fn validity(&self) -> ValidityWindow {
         match self {
-            Self::Transfer(tx) => tx.transaction.validity,
+            Self::BatchTransfer(tx) => tx.transaction.validity,
             Self::QCash(tx) => tx.transaction.validity,
         }
     }
@@ -163,12 +163,12 @@ impl SignedProtocolTransaction {
                     return Err(TransactionError::SenderAddressMismatch);
                 }
                 match self {
-                    Self::Transfer(tx) => tx.validate_signed_for_height(height)?,
+                    Self::BatchTransfer(tx) => tx.validate_signed_for_height(height)?,
                     Self::QCash(tx) => tx.validate_signed_for_height(height)?,
                 }
             } else {
                 match self {
-                    Self::Transfer(tx) => tx.validate_stored_keys_for_height(
+                    Self::BatchTransfer(tx) => tx.validate_stored_keys_for_height(
                         height,
                         &authorization.owner_public_key,
                         &authorization.auth_public_key,
@@ -183,7 +183,7 @@ impl SignedProtocolTransaction {
             Ok(None)
         } else {
             match self {
-                Self::Transfer(tx) => tx.validate_signed_for_height(height)?,
+                Self::BatchTransfer(tx) => tx.validate_signed_for_height(height)?,
                 Self::QCash(tx) => tx.validate_signed_for_height(height)?,
             }
             let authorization_proof = self.authorization_proof();
@@ -203,21 +203,21 @@ impl SignedProtocolTransaction {
             return Err(TransactionError::TransactionTooLarge);
         }
         match self {
-            Self::Transfer(tx) if tx.authorization_proof.carries_registration_keys() => {
+            Self::BatchTransfer(tx) if tx.authorization_proof.carries_registration_keys() => {
                 tx.validate_signed_for_height(height)
             }
             Self::QCash(tx) if tx.authorization_proof.carries_registration_keys() => {
                 tx.validate_signed_for_height(height)
             }
-            Self::Transfer(tx) => tx.transaction.validate_for_height(height),
+            Self::BatchTransfer(tx) => tx.transaction.validate_for_height(height),
             Self::QCash(tx) => tx.transaction.validate_for_height(height),
         }
     }
 }
 
-impl From<SignedTransaction> for SignedProtocolTransaction {
-    fn from(transaction: SignedTransaction) -> Self {
-        Self::Transfer(Box::new(transaction))
+impl From<SignedBatchTransfer> for SignedProtocolTransaction {
+    fn from(transaction: SignedBatchTransfer) -> Self {
+        Self::BatchTransfer(Box::new(transaction))
     }
 }
 impl From<SignedQCashTransaction> for SignedProtocolTransaction {

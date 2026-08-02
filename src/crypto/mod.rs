@@ -10,14 +10,12 @@ pub mod keygen;
 pub mod sqisign_candidate;
 
 pub use crate::error::CryptoError;
-pub use address::{
-    ADDRESS_SIZE, Address, AddressBytes, ML_DSA_ADDRESS_HRP, SQISIGN_ADDRESS_HRP,
-    address_from_public_key, address_from_string, address_to_string, dual_address_from_public_keys,
-    try_address_from_public_key, try_dual_address_from_public_keys, wallet_address_from_public_key,
-};
 #[cfg(feature = "sqisign-candidate")]
+pub use address::sqisign_dual_address_from_public_keys;
 pub use address::{
-    sqisign_address_from_string, sqisign_address_to_string, sqisign_dual_address_from_public_keys,
+    ADDRESS_HRP, ADDRESS_SIZE, Address, AddressBytes, address_from_public_key, address_from_string,
+    address_to_string, dual_address_from_public_keys, try_address_from_public_key,
+    try_dual_address_from_public_keys, wallet_address_from_public_key,
 };
 pub use agility::{
     CryptoPrimitive, CryptoPrimitiveFamily, CryptoUpgradeError, CryptoUpgradePhase,

@@ -353,7 +353,7 @@ fn validate_signed_transaction(
     height: BlockHeight,
 ) -> Result<(), RollbackProofError> {
     let result = match transaction {
-        SignedProtocolTransaction::Transfer(transaction) => {
+        SignedProtocolTransaction::BatchTransfer(transaction) => {
             transaction.validate_signed_for_height(height)
         }
         SignedProtocolTransaction::QCash(transaction) => {

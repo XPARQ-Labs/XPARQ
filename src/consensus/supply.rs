@@ -2,17 +2,23 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use static_assertions::const_assert;
 
-use crate::block::BlockHeight;
-
 pub const UNIT: u64 = 1;
 pub const XPQ: u64 = 1_000_000;
 pub const DECIMALS: u8 = 6;
 
 const_assert!(XPQ == 1_000_000);
 
-pub const BLOCK_REWARD: u64 = 15_000_000;
-pub const TAIL_EMISSION: u64 = 850_000;
-pub const TAIL_EMISSION_START_HEIGHT: u64 = 400_000;
+/// Reward used for the first WBDA epoch.
+pub const BASE_BLOCK_REWARD: u64 = 10 * XPQ;
+/// Consensus lower bound for the epoch reward.
+pub const MIN_BLOCK_REWARD: u64 = XPQ;
+/// Consensus upper bound for the epoch reward.
+pub const MAX_BLOCK_REWARD: u64 = 20 * XPQ;
+/// One utilization adjustment changes the reward by exactly 1 XPQ.
+pub const BLOCK_REWARD_STEP: u64 = XPQ;
+
+// Compatibility alias for consumers that used the former fixed reward name.
+pub const BLOCK_REWARD: u64 = BASE_BLOCK_REWARD;
 
 #[derive(
     Debug,
@@ -33,14 +39,6 @@ pub struct Amount(pub u64);
 pub type Balance = Amount;
 pub type Fee = Amount;
 
-pub fn block_reward(height: BlockHeight) -> Amount {
-    if height.0 < TAIL_EMISSION_START_HEIGHT {
-        Amount(BLOCK_REWARD)
-    } else {
-        Amount(TAIL_EMISSION)
-    }
-}
-
-pub fn tail_emission_start_height() -> u64 {
-    TAIL_EMISSION_START_HEIGHT
+pub const fn base_block_reward() -> Amount {
+    Amount(BASE_BLOCK_REWARD)
 }

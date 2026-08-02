@@ -4,8 +4,8 @@ pub use crate::crypto::{HashDomain, domain_hash, hash_bytes};
 use crate::error::CodecError;
 use crate::event::{MAX_PROTOCOL_EVENT_SIZE, ProtocolEvent};
 use crate::transaction::{
-    QCashTransaction, SignedProtocolTransaction, SignedQCashTransaction, SignedTransaction,
-    Transaction,
+    BatchTransfer, QCashTransaction, SignedBatchTransfer, SignedProtocolTransaction,
+    SignedQCashTransaction,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 
@@ -28,11 +28,11 @@ pub fn canonical_decode<T: BorshDeserialize>(bytes: &[u8]) -> Result<T, CodecErr
     canonical_deserialize(bytes)
 }
 
-pub fn transaction_bytes(transaction: &Transaction) -> Result<Vec<u8>, CodecError> {
+pub fn transaction_bytes(transaction: &BatchTransfer) -> Result<Vec<u8>, CodecError> {
     canonical_bytes(transaction)
 }
 
-pub fn signed_transaction_bytes(transaction: &SignedTransaction) -> Result<Vec<u8>, CodecError> {
+pub fn signed_transaction_bytes(transaction: &SignedBatchTransfer) -> Result<Vec<u8>, CodecError> {
     canonical_bytes(transaction)
 }
 
@@ -69,14 +69,14 @@ pub fn state_root_bytes(state_root: &StateRoot) -> [u8; HASH_SIZE] {
     state_root.0
 }
 
-pub fn transaction_hash(transaction: &Transaction) -> Result<TransactionHash, CodecError> {
+pub fn transaction_hash(transaction: &BatchTransfer) -> Result<TransactionHash, CodecError> {
     Ok(TransactionHash(
         domain_hash(HashDomain::Transaction, &transaction_bytes(transaction)?).0,
     ))
 }
 
 pub fn signed_transaction_hash(
-    transaction: &SignedTransaction,
+    transaction: &SignedBatchTransfer,
 ) -> Result<TransactionHash, CodecError> {
     Ok(TransactionHash(
         domain_hash(
@@ -93,11 +93,11 @@ pub fn block_header_hash(header: &BlockHeader) -> Result<BlockHash, CodecError> 
     ))
 }
 
-pub fn decode_transaction(bytes: &[u8]) -> Result<Transaction, CodecError> {
+pub fn decode_transaction(bytes: &[u8]) -> Result<BatchTransfer, CodecError> {
     if bytes.len() > crate::transaction::MAX_TX_SIZE {
         return Err(CodecError::InvalidTransaction);
     }
-    let transaction: Transaction = canonical_deserialize(bytes)?;
+    let transaction: BatchTransfer = canonical_deserialize(bytes)?;
     transaction
         .validate()
         .map_err(|_| CodecError::InvalidTransaction)?;
@@ -105,27 +105,27 @@ pub fn decode_transaction(bytes: &[u8]) -> Result<Transaction, CodecError> {
 }
 
 /// Decodes a signed transaction and verifies its signature and sender address.
-pub fn decode_signed_transaction(bytes: &[u8]) -> Result<SignedTransaction, CodecError> {
+pub fn decode_signed_transaction(bytes: &[u8]) -> Result<SignedBatchTransfer, CodecError> {
     if bytes.len() > crate::transaction::MAX_TX_SIZE {
         return Err(CodecError::InvalidTransaction);
     }
-    let transaction: SignedTransaction = canonical_deserialize(bytes)?;
+    let transaction: SignedBatchTransfer = canonical_deserialize(bytes)?;
     transaction
         .validate_signed()
         .map_err(|_| CodecError::InvalidTransaction)?;
     Ok(transaction)
 }
 
-#[cfg(any(feature = "devnet", feature = "testnet"))]
-pub fn decode_signed_single_transfer_v2(
+#[cfg(feature = "devnet")]
+pub fn decode_signed_batch_transfer_v2(
     bytes: &[u8],
     height: crate::block::BlockHeight,
     upgrade: Option<crate::crypto::CryptoUpgradePlan>,
-) -> Result<crate::transaction::SignedSingleTransferV2, CodecError> {
+) -> Result<crate::transaction::SignedBatchTransferV2, CodecError> {
     if bytes.len() > crate::transaction::MAX_TX_SIZE {
         return Err(CodecError::InvalidTransaction);
     }
-    let transaction: crate::transaction::SignedSingleTransferV2 = canonical_deserialize(bytes)?;
+    let transaction: crate::transaction::SignedBatchTransferV2 = canonical_deserialize(bytes)?;
     transaction
         .validate_signed_for_height(height, upgrade)
         .map_err(|_| CodecError::InvalidTransaction)?;
@@ -168,7 +168,7 @@ pub fn decode_signed_protocol_transaction_at<F>(
     }
     let transaction: SignedProtocolTransaction = canonical_deserialize(bytes)?;
     let valid = match &transaction {
-        SignedProtocolTransaction::Transfer(transaction) => {
+        SignedProtocolTransaction::BatchTransfer(transaction) => {
             transaction.validate_signed_for_height(height)
         }
         SignedProtocolTransaction::QCash(transaction) => {

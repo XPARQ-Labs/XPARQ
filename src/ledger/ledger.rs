@@ -14,7 +14,7 @@ use crate::ledger::{
 };
 use crate::state::{Account, BlockStateCommitment, CreditSource, QCashUtxoSet, StateError};
 use crate::transaction::{
-    QCashTransaction, QCashTransactionKind, SignedQCashTransaction, SignedTransaction,
+    QCashTransaction, QCashTransactionKind, SignedBatchTransfer, SignedQCashTransaction,
     TransactionError,
 };
 use std::collections::BTreeMap;
@@ -24,7 +24,6 @@ use std::sync::Arc;
 pub struct Ledger {
     pub(crate) accounts: BTreeMap<Address, Account>,
     account_state_tree: Arc<SparseStateTree>,
-    statement_heights: BTreeMap<Hash, BlockHeight>,
     pub chain: Chain,
     pub qcash_utxos: QCashUtxoSet,
     pub qcash_account_journals: BTreeMap<BlockHash, QCashAccountJournal>,
@@ -47,7 +46,6 @@ pub struct QCashAccountJournal {
 pub(crate) struct AccountRollbackState {
     accounts: BTreeMap<Address, Account>,
     account_state_tree: Arc<SparseStateTree>,
-    statement_heights: BTreeMap<Hash, BlockHeight>,
 }
 
 fn account_snapshot(account: &Account) -> AccountSnapshot {
@@ -157,54 +155,23 @@ impl Ledger {
         Ok(())
     }
 
-    pub(crate) fn register_account_statement(&mut self, statement: Hash, height: BlockHeight) {
-        self.statement_heights.insert(statement, height);
-    }
-
-    pub(crate) fn register_account_bootstrap_statement(&mut self, statement: Hash) {
-        self.statement_heights.entry(statement).or_insert(Height(0));
-    }
-
-    pub(crate) fn register_account_statement_for_address(
-        &mut self,
-        address: &Address,
-        height: BlockHeight,
-    ) -> Result<(), LedgerError> {
-        let statement = self
-            .accounts
-            .get(address)
-            .ok_or(LedgerError::AccountNotFound)?
-            .statement;
-        self.register_account_statement(statement, height);
-        Ok(())
-    }
-
-    pub(crate) fn register_account_bootstrap_statement_for_address(
-        &mut self,
-        address: &Address,
-    ) -> Result<(), LedgerError> {
-        let statement = self
-            .accounts
-            .get(address)
-            .ok_or(LedgerError::AccountNotFound)?
-            .statement;
-        self.register_account_bootstrap_statement(statement);
-        Ok(())
-    }
-
     pub(crate) fn validate_account_statement_is_active(
         &self,
+        address: &Address,
         statement: Hash,
         height: BlockHeight,
     ) -> Result<(), LedgerError> {
-        let produced_at =
-            self.statement_heights
-                .get(&statement)
-                .copied()
-                .ok_or(LedgerError::InvalidState(
-                    StateError::InvalidAccountStatement,
-                ))?;
-        let active_at = produced_at
+        let account = self
+            .accounts
+            .get(address)
+            .ok_or(LedgerError::AccountNotFound)?;
+        if account.statement != statement {
+            return Err(LedgerError::InvalidState(
+                StateError::InvalidAccountStatement,
+            ));
+        }
+        let active_at = account
+            .statement_height
             .0
             .saturating_add(ACCOUNT_STATEMENT_ACTIVATION_DEPTH as u64);
         if active_at > height.0 {
@@ -222,11 +189,9 @@ impl Ledger {
         self.refresh_account_state(&transaction.signer)?;
         match &transaction.kind {
             QCashTransactionKind::Redeem { recipient, .. } => {
-                self.register_account_bootstrap_statement_for_address(recipient)?;
                 self.refresh_account_state(recipient)?;
             }
             QCashTransactionKind::RecoverRedeem { claimant, .. } => {
-                self.register_account_bootstrap_statement_for_address(claimant)?;
                 self.refresh_account_state(claimant)?;
             }
             QCashTransactionKind::Withdraw { .. } => {}
@@ -259,7 +224,6 @@ impl Ledger {
 
         let mut staged = self.clone();
         let account = Account::new_with_authorization(address, auth_public_key, balance);
-        staged.register_account_statement(account.statement, Height(0));
         staged.accounts.insert(address, account);
         staged.refresh_account_state(&address)?;
         staged.validate_supply()?;
@@ -275,7 +239,6 @@ impl Ledger {
 
         let mut staged = self.clone();
         let address = account.address;
-        staged.register_account_statement(account.statement, Height(0));
         staged.accounts.insert(address, account);
         staged.refresh_account_state(&address)?;
         staged.validate_supply()?;
@@ -357,8 +320,35 @@ impl Ledger {
                 .body
                 .genesis_allocations
         };
-        let expected =
-            expected_issued_supply(block.height(), genesis_allocations.iter().map(|a| a.amount))?;
+        let genesis_supply = genesis_allocations
+            .iter()
+            .try_fold(0_u64, |total, allocation| {
+                total.checked_add(allocation.amount.0)
+            })
+            .ok_or(LedgerError::SupplyOverflow)?;
+        let expected = if block.is_genesis() {
+            Amount(genesis_supply)
+        } else {
+            let headers = self.chain.headers.values().cloned().collect::<Vec<_>>();
+            let prior = expected_issued_supply_from_headers(
+                &headers,
+                genesis_allocations
+                    .iter()
+                    .map(|allocation| allocation.amount),
+            )?;
+            let subsidy = block
+                .body
+                .coinbase
+                .as_ref()
+                .ok_or(LedgerError::InvalidCoinbase)?
+                .subsidy;
+            Amount(
+                prior
+                    .0
+                    .checked_add(subsidy.0)
+                    .ok_or(LedgerError::SupplyOverflow)?,
+            )
+        };
         if economic != expected {
             return Err(LedgerError::SupplyMismatch);
         }
@@ -370,8 +360,14 @@ impl Ledger {
             .chain
             .block(&crate::block::Height(0))
             .ok_or(LedgerError::InvalidParent)?;
-        expected_issued_supply(
-            height,
+        let headers = self
+            .chain
+            .headers
+            .range(..=height)
+            .map(|(_, header)| header.clone())
+            .collect::<Vec<_>>();
+        expected_issued_supply_from_headers(
+            &headers,
             genesis
                 .genesis_allocations()
                 .iter()
@@ -389,7 +385,11 @@ impl Ledger {
             .accounts
             .get(&signed.transaction.signer)
             .ok_or(LedgerError::AccountNotFound)?;
-        staged.validate_account_statement_is_active(signed.transaction.last_state, height)?;
+        staged.validate_account_statement_is_active(
+            &signed.transaction.signer,
+            signed.transaction.last_state,
+            height,
+        )?;
         let protocol = crate::transaction::SignedProtocolTransaction::from(signed.clone());
         if let Some((owner, auth)) = protocol
             .validate_with_account_authorization(account, height)
@@ -411,7 +411,6 @@ impl Ledger {
             None,
             authorization_proof_hash,
         )?;
-        staged.register_account_statement_for_address(&signed.transaction.signer, height)?;
         staged.refresh_qcash_accounts(&signed.transaction)?;
         *self = staged;
         Ok(())
@@ -428,7 +427,11 @@ impl Ledger {
             .accounts
             .get(&signed.transaction.signer)
             .ok_or(LedgerError::AccountNotFound)?;
-        staged.validate_account_statement_is_active(signed.transaction.last_state, height)?;
+        staged.validate_account_statement_is_active(
+            &signed.transaction.signer,
+            signed.transaction.last_state,
+            height,
+        )?;
         let protocol = crate::transaction::SignedProtocolTransaction::from(signed.clone());
         let registration = protocol
             .validate_with_account_authorization(account, height)
@@ -451,7 +454,6 @@ impl Ledger {
             Some(block_hash),
             authorization_proof_hash,
         )?;
-        staged.register_account_statement_for_address(&signed.transaction.signer, height)?;
         staged.refresh_qcash_accounts(&signed.transaction)?;
         // Supply is checked once the enclosing block has applied coinbase.
         *self = staged;
@@ -561,7 +563,6 @@ impl Ledger {
         staged.qcash_account_journals.remove(&block_hash);
         staged.accounts = rollback_state.accounts;
         staged.account_state_tree = rollback_state.account_state_tree;
-        staged.statement_heights = rollback_state.statement_heights;
         staged.events_by_block.remove(&block_hash);
         staged.validate_supply()?;
         let to_height = staged.tip_height().unwrap_or(Height(0));
@@ -613,7 +614,12 @@ impl Ledger {
                     .ok_or(LedgerError::AccountNotFound)?;
                 let last_state = account.statement;
                 account.debit_at(*amount, height)?;
-                account.advance_statement(last_state, applied_tx_hash, authorization_proof_hash);
+                account.advance_statement(
+                    last_state,
+                    applied_tx_hash,
+                    authorization_proof_hash,
+                    height,
+                );
                 if let Some(block_hash) = block_hash {
                     self.qcash_utxos.apply_withdraw_in_block(
                         block_hash,
@@ -659,7 +665,12 @@ impl Ledger {
                     .get_mut(&transaction.signer)
                     .ok_or(LedgerError::AccountNotFound)?;
                 let last_state = account.statement;
-                account.advance_statement(last_state, applied_tx_hash, authorization_proof_hash);
+                account.advance_statement(
+                    last_state,
+                    applied_tx_hash,
+                    authorization_proof_hash,
+                    height,
+                );
                 let maturity_height = crate::block::Height(
                     height
                         .0
@@ -702,7 +713,12 @@ impl Ledger {
                     .get_mut(&transaction.signer)
                     .ok_or(LedgerError::AccountNotFound)?;
                 let last_state = account.statement;
-                account.advance_statement(last_state, applied_tx_hash, authorization_proof_hash);
+                account.advance_statement(
+                    last_state,
+                    applied_tx_hash,
+                    authorization_proof_hash,
+                    height,
+                );
                 let maturity_height = crate::block::Height(
                     height
                         .0
@@ -724,7 +740,7 @@ impl Ledger {
 
     pub fn apply_signed_transaction(
         &mut self,
-        signed_transaction: &SignedTransaction,
+        signed_transaction: &SignedBatchTransfer,
     ) -> Result<(), LedgerError> {
         self.apply_signed_transaction_at(signed_transaction, crate::block::Height(1))
     }
@@ -742,7 +758,6 @@ impl Ledger {
             AccountRollbackState {
                 accounts: self.accounts.clone(),
                 account_state_tree: self.account_state_tree.clone(),
-                statement_heights: self.statement_heights.clone(),
             },
         );
         staged.record_protocol_events(&block)?;
@@ -845,28 +860,34 @@ pub fn calculate_protocol_state_root_from_roots(
     ))
 }
 
-pub(crate) fn expected_issued_supply(
-    height: BlockHeight,
+pub(crate) fn expected_issued_supply_from_headers(
+    headers: &[crate::block::BlockHeader],
     mut genesis_allocations: impl Iterator<Item = Amount>,
 ) -> Result<Amount, LedgerError> {
-    let genesis = genesis_allocations
+    let tip = headers.last().ok_or(LedgerError::InvalidParent)?.height;
+    if headers.len() != tip.0.saturating_add(1) as usize {
+        return Err(LedgerError::InvalidParent);
+    }
+    let mut total = genesis_allocations
         .try_fold(0_u64, |total, amount| total.checked_add(amount.0))
         .ok_or(LedgerError::SupplyOverflow)?;
-    let pre_tail_count = height
-        .0
-        .min(crate::consensus::supply::TAIL_EMISSION_START_HEIGHT.saturating_sub(1));
-    let tail_count = height.0.saturating_sub(pre_tail_count);
-    let pre_tail = pre_tail_count
-        .checked_mul(crate::consensus::supply::BLOCK_REWARD)
-        .ok_or(LedgerError::SupplyOverflow)?;
-    let tail = tail_count
-        .checked_mul(crate::consensus::supply::TAIL_EMISSION)
-        .ok_or(LedgerError::SupplyOverflow)?;
-    genesis
-        .checked_add(pre_tail)
-        .and_then(|total| total.checked_add(tail))
-        .map(Amount)
-        .ok_or(LedgerError::SupplyOverflow)
+    let mut reward = Amount(crate::consensus::BASE_BLOCK_REWARD);
+    for height in 1..=tip.0 {
+        if crate::consensus::is_wbda_epoch_boundary(height) {
+            let start = height as usize - crate::consensus::WBDA_WINDOW;
+            let weights = headers[start..height as usize]
+                .iter()
+                .map(|header| usize::try_from(header.block_weight))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| LedgerError::InvalidParent)?;
+            reward = crate::consensus::next_reward_from_window(reward, &weights)
+                .ok_or(LedgerError::InvalidParent)?;
+        }
+        total = total
+            .checked_add(reward.0)
+            .ok_or(LedgerError::SupplyOverflow)?;
+    }
+    Ok(Amount(total))
 }
 
 #[cfg(test)]

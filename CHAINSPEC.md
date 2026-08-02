@@ -9,13 +9,14 @@ summary ever differs from the implementation.
 | Network | Chain name | Chain ID | Coin | Stage | Network magic | Genesis hash |
 | --- | --- | ---: | --- | --- | --- | --- |
 | Mainnet | `Paqus` | `747` | `XPQ` | `Mainnet` | `58 50 51 01` | `067ce305a89f3879935f4838803d7a699af340f733a2791839eb10c96e8bffab` |
-| Testnet | `Paqus Testnet` | `717` | `tXPQ` | `Testnet` | `54 58 50 51` | `5a82539abecdf22529c023ab07cd4cfeb3b8be8ac5cf62f655126e34b55f6324` |
-| Devnet | `Paqus Devnet` | `707` | `dXPQ` | `Devnet` | `44 58 50 51` | `c6b7cfbd3ccffb31179f8c2070b95c45ad83e85079c36ec4dfcb99b961719162` |
+| Testnet | `Paqus Testnet` | `717` | `tXPQ` | `Testnet` | `54 58 50 51` | `1b9032537a04d5afc7a5debecdfbb1cbbd2dbde7dba7bc1c4581e50fc53097fc` |
+| Devnet | `Paqus Devnet` | `707` | `dXPQ` | `Devnet` | `44 58 50 51` | `6a91293dbf944a5c36006267819310fac05cfa8d5e6337f63c4f222713dc078f` |
 
 All networks use patch name `Sharksphere` and protocol version `1`. Exactly one
 network feature must be enabled: `mainnet`, `testnet`, or `devnet`. Mainnet
-uses ML-DSA-44. Testnet and devnet use the experimental SQIsign blockchain-test
-feature and must not share databases or wallet files with mainnet.
+uses ML-DSA-44. Testnet mirrors the mainnet signature and transaction format by
+also using ML-DSA-44. Devnet uses SQIsign. Network profiles must not share
+databases or wallet files.
 
 ## Monetary Policy
 
@@ -24,15 +25,17 @@ feature and must not share databases or wallet files with mainnet.
 | Smallest unit | `paqus` |
 | Decimal places | `6` |
 | Units per XPQ | `1,000,000` |
-| Initial block subsidy | `15 XPQ` |
-| Tail-emission start height | `400,000` |
-| Tail emission per block | `0.85 XPQ` |
+| Base block subsidy | `10 XPQ` |
+| Minimum block subsidy | `1 XPQ` |
+| Maximum block subsidy | `20 XPQ` |
+| Epoch subsidy step | `1 XPQ` |
 | Mainnet genesis premine | `0 XPQ` |
 | Testnet/devnet faucet allocation | `1,000,000,000 XPQ` |
 | Testnet/devnet faucet request cap | `1,000 XPQ` |
 
-For height `h`, `block_reward(h)` returns `15 XPQ` before height `400,000` and
-`0.85 XPQ` from height `400,000` onward.
+The first epoch pays `10 XPQ` per block. At each WBDA boundary, the completed
+epoch's utilization changes both difficulty and the subsidy for the following
+epoch. Subsidy changes by `1 XPQ` and is clamped to `1..=20 XPQ`.
 
 ## Cryptography
 
@@ -41,10 +44,10 @@ For height `h`, `block_reward(h)` returns `15 XPQ` before height `400,000` and
 | General hash | SHA3-256 |
 | Hash length | `32 bytes` |
 | Proof-of-work output | `64 bytes` |
-| Mainnet transaction signature | ML-DSA-44 |
+| Mainnet/testnet transaction signature | ML-DSA-44 |
+| Devnet transaction signature | SQIsign Level 5 |
 | Address payload | `20 bytes` |
-| ML-DSA address HRP | `P` |
-| Reserved SQIsign address HRP | `PX` |
+| Address HRP (all networks) | `P` |
 
 Account addresses commit to an ordered owner/authorization public-key pair and
 the active chain ID. Outgoing account transactions require both authorization
@@ -56,8 +59,8 @@ keys; later spends can resolve the stored keys from account state.
 | Parameter | Value |
 | --- | ---: |
 | Block version | `1` |
-| Maximum block size | `2 MiB` |
-| Maximum block weight | `2 MiB` |
+| Maximum block size | `5 MiB` |
+| Maximum block weight | `5 MiB` |
 | Maximum decoded protocol transactions | `4,096` |
 | Maximum genesis allocations | `4,096` |
 | Proof of work | Argon2id |
@@ -68,14 +71,18 @@ keys; later spends can resolve the stored keys from account state.
 | Starting difficulty | `1` |
 | Difficulty algorithm | `argon2id-wbda-weight-v1` |
 | WBDA window | `2,048 blocks` |
-| WBDA low-utilization threshold | `20%` |
-| WBDA high-utilization threshold | `80%` |
+| WBDA target block weight | `5 MiB` |
+| WBDA low-utilization threshold | `30%` |
+| WBDA high-utilization threshold | `70%` |
 | WBDA step | `1` |
 
-WBDA adjusts difficulty only at epoch boundaries. It samples the previous
-`2,048` block weights, decreases difficulty by one when utilization is below
-20%, increases it by one when utilization is above 80%, and otherwise keeps
-the previous difficulty. Difficulty is never allowed below `1`.
+WBDA adjusts difficulty and reward only at epoch boundaries. It samples the
+previous `2,048` block weights against the fixed `5 MiB` target. Below 30%
+utilization, difficulty and reward rise by one step. From 30% through 70%
+(inclusive), both remain unchanged. Above 70%, difficulty and reward fall by
+one step. Difficulty is never below `1`; reward stays within `1..=20 XPQ`.
+Genesis at height `0` is not part of an epoch: epoch 1 is heights `1..=2,048`,
+and its adjustment first applies to height `2,049`.
 
 Fork choice selects the valid branch with the greatest locally verified
 cumulative work. Height and peer-advertised work are not consensus authority.
@@ -84,15 +91,15 @@ cumulative work. Height and peer-advertised work are not consensus authority.
 
 The protocol envelope currently carries:
 
-- `Transfer`
+- `BatchTransfer`
 - `QCash`
 
-Transfer payloads contain between `1` and `64` unique non-zero outputs. A
-one-output transfer is the canonical single-recipient transfer form.
+`BatchTransfer` payloads contain between `1` and `64` unique non-zero outputs.
+A one-output batch transfer is the canonical single-recipient transfer form.
 
 | Parameter | Value |
 | --- | ---: |
-| Maximum transfer size | `24 KiB` |
+| Maximum batch-transfer size | `24 KiB` |
 | Maximum QCash transaction size | `64 KiB` |
 | Maximum protocol transaction size | `64 KiB + family tag` |
 | Confirmation depth | `2 blocks` |

@@ -9,7 +9,7 @@ use crate::crypto::{BlockHash, StateRoot, TransactionHash};
 use crate::event::{ProtocolEvent, ProtocolEventKind};
 use crate::ledger::{CONFIRMATION_DEPTH, Ledger, LedgerError};
 use crate::state::Account;
-use crate::transaction::{OutputTarget, QCashTransactionKind, SignedTransaction, Transaction};
+use crate::transaction::{BatchTransfer, OutputTarget, QCashTransactionKind, SignedBatchTransfer};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,8 +32,8 @@ pub struct BlockExecution {
 impl TransactionExecution {
     pub fn from_output(
         transaction_hash: TransactionHash,
-        transaction: &Transaction,
-        output: crate::transaction::TransferOutput,
+        transaction: &BatchTransfer,
+        output: crate::transaction::BatchTransferOutput,
         miner_address: Address,
     ) -> Self {
         Self {
@@ -54,7 +54,7 @@ pub(crate) fn resolve_output_target(target: OutputTarget, miner_address: Address
 
 pub(crate) fn apply_transaction_to_state_with_miner(
     accounts: &mut BTreeMap<Address, Account>,
-    transaction: &Transaction,
+    transaction: &BatchTransfer,
     height: BlockHeight,
     miner_address: Address,
     authorization_proof_hash: crate::crypto::Hash,
@@ -95,7 +95,7 @@ pub(crate) fn apply_transaction_to_state_with_miner(
 
 pub(crate) fn apply_transaction_to_state(
     accounts: &mut BTreeMap<Address, Account>,
-    transaction: &Transaction,
+    transaction: &BatchTransfer,
     height: BlockHeight,
 ) -> Result<(), LedgerError> {
     apply_transaction_to_state_with_miner(
@@ -109,7 +109,7 @@ pub(crate) fn apply_transaction_to_state(
 
 pub(crate) fn apply_signed_transaction_to_state_with_miner(
     accounts: &mut BTreeMap<Address, Account>,
-    signed: &SignedTransaction,
+    signed: &SignedBatchTransfer,
     height: BlockHeight,
     miner_address: Address,
 ) -> Result<(), LedgerError> {
@@ -141,7 +141,7 @@ pub(crate) fn apply_signed_transaction_to_state_with_miner(
 
 pub fn validate_transaction_against_state(
     accounts: &BTreeMap<Address, Account>,
-    transaction: &Transaction,
+    transaction: &BatchTransfer,
     height: BlockHeight,
 ) -> Result<(), LedgerError> {
     let mut staged = accounts.clone();
@@ -150,7 +150,7 @@ pub fn validate_transaction_against_state(
 
 pub fn validate_signed_transaction_against_state(
     accounts: &BTreeMap<Address, Account>,
-    transaction: &SignedTransaction,
+    transaction: &SignedBatchTransfer,
     height: BlockHeight,
 ) -> Result<(), LedgerError> {
     let account = accounts
@@ -196,12 +196,12 @@ impl Ledger {
             ));
         };
 
-        for signed in block.transfer_transactions() {
+        for signed in block.batch_transfer_transactions() {
             let tx = &signed.transaction;
             for output in tx.outputs() {
                 emit(
                     Some(tx.hash()?),
-                    ProtocolEventKind::Transfer {
+                    ProtocolEventKind::BatchTransfer {
                         from: tx.from,
                         to: resolve_output_target(output.to, block.miner_address()),
                         amount: output.amount,
@@ -266,7 +266,7 @@ impl Ledger {
 
     pub fn apply_signed_transaction_at(
         &mut self,
-        transaction: &SignedTransaction,
+        transaction: &SignedBatchTransfer,
         height: BlockHeight,
     ) -> Result<(), LedgerError> {
         self.apply_signed_transaction_at_with_miner(transaction, height, Address([0; 20]))
@@ -274,23 +274,25 @@ impl Ledger {
 
     pub fn apply_signed_transaction_at_with_miner(
         &mut self,
-        transaction: &SignedTransaction,
+        transaction: &SignedBatchTransfer,
         height: BlockHeight,
         miner_address: Address,
     ) -> Result<(), LedgerError> {
         let mut staged = self.clone();
-        staged.validate_account_statement_is_active(transaction.transaction.last_state, height)?;
+        staged.validate_account_statement_is_active(
+            &transaction.transaction.from,
+            transaction.transaction.last_state,
+            height,
+        )?;
         apply_signed_transaction_to_state_with_miner(
             &mut staged.accounts,
             transaction,
             height,
             miner_address,
         )?;
-        staged.register_account_statement_for_address(&transaction.transaction.from, height)?;
         staged.refresh_account_state(&transaction.transaction.from)?;
         for output in transaction.transaction.outputs() {
             let recipient = resolve_output_target(output.to, miner_address);
-            staged.register_account_bootstrap_statement_for_address(&recipient)?;
             staged.refresh_account_state(&recipient)?;
         }
         *self = staged;
@@ -299,7 +301,7 @@ impl Ledger {
 
     pub fn validate_transaction_against_state(
         &self,
-        transaction: &Transaction,
+        transaction: &BatchTransfer,
         height: BlockHeight,
     ) -> Result<(), LedgerError> {
         validate_transaction_against_state(&self.accounts, transaction, height)
@@ -307,7 +309,7 @@ impl Ledger {
 
     pub fn validate_signed_transaction_against_state(
         &self,
-        transaction: &SignedTransaction,
+        transaction: &SignedBatchTransfer,
         height: BlockHeight,
     ) -> Result<(), LedgerError> {
         validate_signed_transaction_against_state(&self.accounts, transaction, height)
@@ -330,7 +332,7 @@ impl Ledger {
         staged.chain.insert_block(committed_block)?;
 
         let mut transaction_executions = Vec::new();
-        for signed in block.transfer_transactions() {
+        for signed in block.batch_transfer_transactions() {
             let transaction_hash = signed.hash()?;
             for output in signed.transaction.outputs() {
                 transaction_executions.push(TransactionExecution::from_output(
@@ -369,7 +371,7 @@ impl Ledger {
         let block_hash = block.hash()?;
         for transaction in &block.body.transactions {
             match transaction {
-                crate::transaction::SignedProtocolTransaction::Transfer(transaction) => {
+                crate::transaction::SignedProtocolTransaction::BatchTransfer(transaction) => {
                     staged.apply_signed_transaction_at_with_miner(
                         transaction,
                         block.height(),
@@ -455,7 +457,7 @@ mod tests {
     use super::*;
     use crate::crypto::{Address, dual_address_from_public_keys, generate_keypair, sign};
     use crate::state::CreditSource;
-    use crate::transaction::{OutputTarget, SignedTransaction, TransferOutput};
+    use crate::transaction::{BatchTransferOutput, OutputTarget, SignedBatchTransfer};
 
     #[test]
     fn batch_transfer_uses_candidate_height_for_mature_balance() {
@@ -475,14 +477,14 @@ mod tests {
             )
             .unwrap();
 
-        let transaction = Transaction::new(
+        let transaction = BatchTransfer::new(
             sender,
             vec![
-                TransferOutput {
+                BatchTransferOutput {
                     to: (Address([2; 20])).into(),
                     amount: Amount(10),
                 },
-                TransferOutput {
+                BatchTransferOutput {
                     to: (Address([3; 20])).into(),
                     amount: Amount(10),
                 },
@@ -490,7 +492,7 @@ mod tests {
         )
         .with_last_state(ledger.account(&sender).unwrap().statement);
         let signing_bytes = transaction.signing_bytes().unwrap();
-        let signed = SignedTransaction::new_authorized(
+        let signed = SignedBatchTransfer::new_authorized(
             transaction,
             primary.public_key,
             sign(&primary.secret_key, &signing_bytes),
@@ -529,16 +531,16 @@ mod tests {
             .create_account_with_authorization(sender, authorization.public_key, Amount(100))
             .unwrap();
 
-        let transaction = Transaction::new(
+        let transaction = BatchTransfer::new(
             sender,
-            vec![TransferOutput {
+            vec![BatchTransferOutput {
                 to: OutputTarget::BlockMiner,
                 amount: Amount(7),
             }],
         )
         .with_last_state(ledger.account(&sender).unwrap().statement);
         let signing_bytes = transaction.signing_bytes().unwrap();
-        let signed = SignedTransaction::new_authorized(
+        let signed = SignedBatchTransfer::new_authorized(
             transaction,
             primary.public_key,
             sign(&primary.secret_key, &signing_bytes),

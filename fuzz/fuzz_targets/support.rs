@@ -11,8 +11,8 @@ use paqus::qcash::{
     QCashDenomination, QCashWithdrawalMetadata, qcash_redeem_key_commitment_from_secret,
 };
 use paqus::transaction::{
-    QCashTransaction, SignedProtocolTransaction, SignedQCashTransaction, SignedTransaction,
-    Transaction, TransferOutput,
+    BatchTransfer, BatchTransferOutput, QCashTransaction, SignedBatchTransfer,
+    SignedProtocolTransaction, SignedQCashTransaction,
 };
 use std::sync::OnceLock;
 
@@ -175,17 +175,17 @@ fn signed_transfer(
     recipient: Address,
     amount: Amount,
     last_state: Hash,
-) -> SignedTransaction {
-    let transaction = Transaction::new(
+) -> SignedBatchTransfer {
+    let transaction = BatchTransfer::new(
         signer,
-        vec![TransferOutput {
+        vec![BatchTransferOutput {
             to: recipient.into(),
             amount,
         }],
     )
     .with_last_state(last_state);
     let transfer_bytes = transaction.signing_bytes().expect("fixture serialization");
-    SignedTransaction::new_authorized(
+    SignedBatchTransfer::new_authorized(
         transaction,
         primary.public_key,
         sign(&primary.secret_key, &transfer_bytes),

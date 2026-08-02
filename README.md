@@ -1,9 +1,9 @@
 # Paqus
 
-Paqus is an experimental proof-of-work blockchain protocol focused on
-deterministic execution, post-quantum authorization, independently verifiable
-state, and transferable QCash bearer value. This crate contains the consensus
-types and validation rules used by Paqus nodes and wallets.
+Paqus is a proof-of-work blockchain protocol focused on deterministic
+execution, post-quantum authorization, independently verifiable state, and
+transferable QCash bearer value. This crate contains the consensus types and
+validation rules used by Paqus nodes and wallets.
 
 The current implementation is the **Sharksphere** patch of protocol version 1.
 The normative implementation-level parameters are documented in
@@ -21,14 +21,16 @@ Decimals                 6
 Consensus                proof of work, greatest cumulative chainwork
 Proof of work            Argon2id, 64 MiB, 1 iteration, 4 lanes
 Difficulty               Argon2id WBDA, weight-based
-Block size limit         2 MiB
-Block weight limit       2 MiB
+Block size limit         5 MiB
+Block weight limit       5 MiB
 Confirmation depth       2 blocks
 Finality boundary        5 blocks
 Mining reward maturity   50 blocks
 QCash redeem delay      1 block after withdrawal
-Initial block subsidy    15 XPQ
-Tail emission            0.85 XPQ from height 400,000
+Base block subsidy       10 XPQ
+Minimum block subsidy    1 XPQ
+Maximum block subsidy    20 XPQ
+Reward adjustment        1 XPQ per WBDA epoch
 Genesis premine          none
 ```
 
@@ -39,16 +41,42 @@ Network chain IDs are `707` for devnet, `717` for testnet, and `747` for
 mainnet. These IDs are consensus identities and must not be mixed between
 network databases.
 
+## WBDA Difficulty and Block Reward
+
+Paqus evaluates difficulty and block subsidy once per completed WBDA epoch of
+2,048 blocks. Utilization is the average canonical serialized block weight in
+the completed epoch divided by the fixed 5 MiB target:
+
+```text
+utilization = average block weight / 5 MiB
+
+below 30%       difficulty +1, subsidy +1 XPQ
+30% through 70% difficulty unchanged, subsidy unchanged
+above 70%       difficulty -1, subsidy -1 XPQ
+```
+
+The 30% and 70% boundaries are part of the unchanged zone. Difficulty cannot
+fall below `1`, and the subsidy is clamped to `1..=20 XPQ`. The first epoch,
+blocks `1..=2,048`, uses the base subsidy of 10 XPQ. Its measured utilization
+determines the difficulty and subsidy beginning at block `2,049`; every block
+within the following epoch uses that same result.
+
+Only the subsidy valid for the current epoch is issued in its coinbase. If the
+subsidy changes from 10 XPQ to 9 XPQ, the miner receives 9 XPQ and the remaining
+1 XPQ is never created. It is not burned after issuance and is not allocated to
+the protocol, a treasury, a foundation, a vault, developers, or any other
+recipient. A later increase similarly authorizes only the new subsidy for new
+blocks; it does not draw from a reserve of previously unissued XPQ.
+
 ## Repository Scope
 
 The crate provides:
 
 - canonical Borsh encoding and domain-separated SHA3-256 hashes;
-- ML-DSA-44 key generation, signatures, and parallel dual-signature
-  verification;
-- `P1...` ML-DSA account addresses bound to two authorization public keys
-  (`PX1...` is reserved for the inactive SQIsign Level 5 candidate);
-- unified transfers containing between 1 and 64 outputs;
+- network-selected post-quantum signatures: ML-DSA-44 on mainnet/testnet and
+  SQIsign on devnet;
+- account addresses bound to an ordered pair of authorization public keys;
+- batch transfers containing between 1 and 64 outputs;
 - QCash withdrawal, bearer files, redeems, and authenticated UTXO state;
 - blocks, Argon2id proof of work, WBDA difficulty, rewards, and chainwork;
 - atomic ledger transitions, rollback, bounded reorganization, and invariants;
@@ -63,8 +91,9 @@ chain specification.
 
 ## Accounts and Dual Authorization
 
-An address is derived from an ordered owner/auth ML-DSA-44 public-key pair.
-Both signatures are required by default.
+An address is derived from an ordered owner/auth public-key pair using the
+signature scheme selected by the compiled network. Both signatures are
+required by default.
 
 The first outgoing transaction from an account carries both public keys. After
 successful validation, the ledger stores them in `AccountAuthorization`.
@@ -76,19 +105,19 @@ Receiving funds does not require prior account registration. A new address can
 receive XPQ before its authorization keys are present in state; keys are
 registered when that account spends for the first time.
 
-## Transfers
+## Batch Transfers
 
-There is one transfer representation:
+There is one batch-transfer representation:
 
 ```rust
-Transaction {
+BatchTransfer {
     from,
-    outputs: Vec<TransferOutput>,
+    outputs: Vec<BatchTransferOutput>,
     last_state,
 }
 ```
 
-A transfer must have 1–64 non-zero outputs. Recipients must be unique and may
+A batch transfer must have 1–64 non-zero outputs. Recipients must be unique and may
 not equal the sender. A one-output transfer is therefore the canonical
 replacement for the former single-transfer form. Shared signatures and common
 transaction fields make multi-output transfers substantially smaller than
@@ -178,6 +207,14 @@ cargo bench
 cargo run --release --example validation_benchmark
 ```
 
+The default build targets mainnet. Select exactly one network profile when
+building for testnet or devnet:
+
+```bash
+cargo build --no-default-features --features testnet
+cargo build --no-default-features --features devnet
+```
+
 Decoder fuzzing requires nightly Rust and `cargo-fuzz`:
 
 ```bash
@@ -196,12 +233,5 @@ cargo +nightly fuzz run decode_block
 - Snapshot state must match its authenticated header checkpoint.
 - Decoders must reject malformed, oversized, and trailing data.
 - Consensus-domain strings and typed hashes must not be mixed.
-
-## Status
-
-Paqus is under active development. The current 1/2/5 lifecycle values are
-development parameters and protocol compatibility may change before a stable
-release. Do not use this software to secure production value without
-independent review.
 
 Protocol discussion: [Paqus Matrix room](https://matrix.to/#/#paqus:matrix.org)

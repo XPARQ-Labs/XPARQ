@@ -32,8 +32,7 @@ impl Address {
     pub const ZERO: Self = Self([0; ADDRESS_SIZE]);
 }
 
-pub const ML_DSA_ADDRESS_HRP: &str = "P";
-pub const SQISIGN_ADDRESS_HRP: &str = "PX";
+pub const ADDRESS_HRP: &str = "P";
 #[cfg(not(feature = "sqisign-blockchain-test"))]
 const DUAL_AUTHORIZATION_DOMAIN: &[u8] = b"PAQUS_DUAL_AUTHORIZATION_V1";
 #[cfg(feature = "sqisign-blockchain-test")]
@@ -41,13 +40,10 @@ const DUAL_AUTHORIZATION_DOMAIN: &[u8] = b"PAQUS_SQISIGN_LEVEL5_DUAL_AUTHORIZATI
 #[cfg(feature = "sqisign-candidate")]
 const SQISIGN_DUAL_AUTHORIZATION_DOMAIN: &[u8] = b"PAQUS_SQISIGN_LEVEL5_DUAL_AUTHORIZATION_V1";
 const BECH32_CHECKSUM_LEN: usize = 6;
-const ML_DSA_BECH32_ADDRESS_LEN: usize =
-    ML_DSA_ADDRESS_HRP.len() + 1 + (ADDRESS_SIZE * 8 / 5) + BECH32_CHECKSUM_LEN;
-const SQISIGN_BECH32_ADDRESS_LEN: usize =
-    SQISIGN_ADDRESS_HRP.len() + 1 + (ADDRESS_SIZE * 8 / 5) + BECH32_CHECKSUM_LEN;
+const BECH32_ADDRESS_LEN: usize =
+    ADDRESS_HRP.len() + 1 + (ADDRESS_SIZE * 8 / 5) + BECH32_CHECKSUM_LEN;
 const_assert_eq!(BECH32_CHECKSUM_LEN, 6);
-const_assert_eq!(ML_DSA_BECH32_ADDRESS_LEN, 40);
-const_assert_eq!(SQISIGN_BECH32_ADDRESS_LEN, 41);
+const_assert_eq!(BECH32_ADDRESS_LEN, 40);
 
 pub fn wallet_address_from_public_key(public_key: &PublicKey) -> String {
     address_to_string(&address_from_public_key(public_key))
@@ -112,27 +108,11 @@ fn dual_address_from_key_material(
 }
 
 pub fn address_to_string(address: &Address) -> String {
-    #[cfg(feature = "sqisign-blockchain-test")]
-    return address_to_string_with_hrp(address, SQISIGN_ADDRESS_HRP);
-    #[cfg(not(feature = "sqisign-blockchain-test"))]
-    address_to_string_with_hrp(address, ML_DSA_ADDRESS_HRP)
+    address_to_string_with_hrp(address, ADDRESS_HRP)
 }
 
 pub fn address_from_string(address: &str) -> Result<Address, CryptoError> {
-    #[cfg(feature = "sqisign-blockchain-test")]
-    return address_from_string_with_hrp(address, SQISIGN_ADDRESS_HRP, SQISIGN_BECH32_ADDRESS_LEN);
-    #[cfg(not(feature = "sqisign-blockchain-test"))]
-    address_from_string_with_hrp(address, ML_DSA_ADDRESS_HRP, ML_DSA_BECH32_ADDRESS_LEN)
-}
-
-/// Decodes the retired `PX` encoding for an ML-DSA wallet file.
-///
-/// This is only for validating stored addresses during the HRP transition.
-/// Network-facing parsers must use [`address_from_string`], where `PX` is
-/// reserved for SQIsign Level 5.
-#[doc(hidden)]
-pub fn legacy_ml_dsa_address_from_string(address: &str) -> Result<Address, CryptoError> {
-    address_from_string_with_hrp(address, SQISIGN_ADDRESS_HRP, SQISIGN_BECH32_ADDRESS_LEN)
+    address_from_string_with_hrp(address, ADDRESS_HRP, BECH32_ADDRESS_LEN)
 }
 
 #[cfg(feature = "sqisign-candidate")]
@@ -161,16 +141,6 @@ pub fn sqisign_dual_address_from_public_keys(
     material.extend_from_slice(owner_public_key.as_bytes());
     material.extend_from_slice(authorization_public_key.as_bytes());
     Ok(address_from_key_material(&material))
-}
-
-#[cfg(feature = "sqisign-candidate")]
-pub fn sqisign_address_to_string(address: &Address) -> String {
-    address_to_string_with_hrp(address, SQISIGN_ADDRESS_HRP)
-}
-
-#[cfg(feature = "sqisign-candidate")]
-pub fn sqisign_address_from_string(address: &str) -> Result<Address, CryptoError> {
-    address_from_string_with_hrp(address, SQISIGN_ADDRESS_HRP, SQISIGN_BECH32_ADDRESS_LEN)
 }
 
 fn address_to_string_with_hrp(address: &Address, hrp: &str) -> String {
@@ -224,44 +194,25 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "sqisign-blockchain-test"))]
     #[test]
-    fn ml_dsa_address_uses_p_hrp_and_rejects_reserved_px_hrp() {
+    fn every_network_address_uses_p_hrp() {
         let address = Address([7; ADDRESS_SIZE]);
         let encoded = address_to_string(&address);
         assert!(encoded.starts_with("P1"));
         assert!(!encoded.starts_with("PX1"));
-        assert_eq!(encoded.len(), ML_DSA_BECH32_ADDRESS_LEN);
+        assert_eq!(encoded.len(), BECH32_ADDRESS_LEN);
         assert_eq!(address_from_string(&encoded), Ok(address));
 
-        let reserved = address_to_string_with_hrp(&address, SQISIGN_ADDRESS_HRP);
-        assert!(reserved.starts_with("PX1"));
-        assert_eq!(legacy_ml_dsa_address_from_string(&reserved), Ok(address));
+        let px = address_to_string_with_hrp(&address, "PX");
         assert_eq!(
-            address_from_string(&reserved),
-            Err(CryptoError::InvalidAddressEncoding)
-        );
-    }
-
-    #[cfg(feature = "sqisign-blockchain-test")]
-    #[test]
-    fn blockchain_test_address_uses_px_hrp_and_rejects_p_hrp() {
-        let address = Address([7; ADDRESS_SIZE]);
-        let encoded = address_to_string(&address);
-        assert!(encoded.starts_with("PX1"));
-        assert_eq!(encoded.len(), SQISIGN_BECH32_ADDRESS_LEN);
-        assert_eq!(address_from_string(&encoded), Ok(address));
-
-        let ml_dsa = address_to_string_with_hrp(&address, ML_DSA_ADDRESS_HRP);
-        assert_eq!(
-            address_from_string(&ml_dsa),
+            address_from_string(&px),
             Err(CryptoError::InvalidAddressEncoding)
         );
     }
 
     #[cfg(feature = "sqisign-candidate")]
     #[test]
-    fn sqisign_address_uses_reserved_px_hrp() {
+    fn sqisign_address_uses_common_p_hrp() {
         use crate::crypto::sqisign_candidate::PublicKey as SqisignPublicKey;
 
         let owner = SqisignPublicKey::from_bytes_unchecked(
@@ -272,17 +223,10 @@ mod tests {
         );
         let address =
             sqisign_dual_address_from_public_keys(&owner, &authorization).expect("valid keys");
-        let encoded = sqisign_address_to_string(&address);
+        let encoded = address_to_string(&address);
 
-        assert!(encoded.starts_with("PX1"));
-        assert_eq!(encoded.len(), SQISIGN_BECH32_ADDRESS_LEN);
-        assert_eq!(sqisign_address_from_string(&encoded), Ok(address));
-        #[cfg(not(feature = "sqisign-blockchain-test"))]
-        assert_eq!(
-            address_from_string(&encoded),
-            Err(CryptoError::InvalidAddressEncoding)
-        );
-        #[cfg(feature = "sqisign-blockchain-test")]
+        assert!(encoded.starts_with("P1"));
+        assert_eq!(encoded.len(), BECH32_ADDRESS_LEN);
         assert_eq!(address_from_string(&encoded), Ok(address));
     }
 }
