@@ -45,10 +45,12 @@ network databases.
 
 Paqus evaluates difficulty and block subsidy once per completed WBDA epoch of
 2,048 blocks. Utilization is the average canonical serialized block weight in
-the completed epoch divided by the fixed 5 MiB target:
+the completed epoch divided by the fixed 5 MiB target. Equivalently, this is
+the total block weight across the epoch divided by `2,048 * 5 MiB` (`10 GiB`):
 
 ```text
 utilization = average block weight / 5 MiB
+            = total epoch block weight / 10 GiB
 
 below 30%       difficulty +1, subsidy +1 XPQ
 30% through 70% difficulty unchanged, subsidy unchanged
