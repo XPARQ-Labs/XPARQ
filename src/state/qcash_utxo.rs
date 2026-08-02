@@ -6,8 +6,8 @@ use crate::crypto::{
     Address, BlockHash, HASH_SIZE, Hash, HashDomain, TransactionHash, domain_hash,
 };
 use crate::qcash::{
-    QCashDenomination, QCashDepositMetadata, QCashError, QCashOutput, QCashWithdrawMetadata,
-    qcash_coin_id_bytes, qcash_spend_public_key_commitment,
+    QCashDenomination, QCashError, QCashRedeemMetadata, QCashWithdrawalMetadata,
+    QCashWithdrawalOutput, qcash_coin_id_bytes, qcash_redeem_key_commitment,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -54,24 +54,30 @@ pub struct QCashOutPoint {
 impl QCashCoinId {
     pub fn derive(
         withdraw_tx_hash: TransactionHash,
-        output: &QCashOutput,
+        output: &QCashWithdrawalOutput,
     ) -> Result<Self, QCashError> {
         Ok(Self(qcash_coin_id_bytes(withdraw_tx_hash, output)?))
     }
 
-    /// Sixteen uppercase hexadecimal characters for a human-facing file name.
+    /// Nine uppercase hexadecimal characters for human-facing file names.
     pub fn short_id(&self) -> String {
         const HEX: &[u8; 16] = b"0123456789ABCDEF";
-        let mut value = String::with_capacity(16);
-        for byte in self.0.iter().take(8) {
+        let mut value = String::with_capacity(9);
+        for byte in self.0.iter().take(5) {
             value.push(HEX[(byte >> 4) as usize] as char);
+            if value.len() == 9 {
+                break;
+            }
             value.push(HEX[(byte & 0x0f) as usize] as char);
+            if value.len() == 9 {
+                break;
+            }
         }
         value
     }
 
     pub fn file_name(&self, denomination: QCashDenomination) -> String {
-        format!("{}_{}.XPQ", denomination.xpq(), self.short_id())
+        format!("{}XPQ_{}.QCash", denomination.xpq(), self.short_id())
     }
 }
 
@@ -88,8 +94,8 @@ impl QCashCoinId {
     BorshDeserialize,
 )]
 pub enum QCashUtxoStatus {
-    Immature,
-    Mature,
+    Pending,
+    Redeemable,
 }
 
 /// One individually tracked QCash coin.
@@ -101,7 +107,7 @@ pub struct QCashUtxo {
     pub outpoint: QCashOutPoint,
     pub withdrawer: Address,
     pub denomination: QCashDenomination,
-    pub commitment: [u8; 32],
+    pub redeem_key_commitment: [u8; 32],
     pub issued_height: BlockHeight,
 }
 
@@ -129,10 +135,10 @@ pub struct QCashStateProof {
 
 impl QCashUtxo {
     pub fn status_at(&self, height: BlockHeight) -> QCashUtxoStatus {
-        if is_mature_at(self, height) {
-            QCashUtxoStatus::Mature
+        if is_redeemable_at(self, height) {
+            QCashUtxoStatus::Redeemable
         } else {
-            QCashUtxoStatus::Immature
+            QCashUtxoStatus::Pending
         }
     }
 }
@@ -143,7 +149,7 @@ pub struct QCashBlockJournal {
     pub block_height: BlockHeight,
     pub previous_journal_tip: Option<BlockHash>,
     pub issued_coin_ids: Vec<QCashCoinId>,
-    pub spent_utxos: Vec<QCashUtxo>,
+    pub redeemed_utxos: Vec<QCashUtxo>,
 }
 
 #[derive(
@@ -166,7 +172,7 @@ pub enum QCashUtxoError {
     CoinIdCollision,
     InvalidCoinProof,
     CoinDerivation(crate::qcash::QCashError),
-    CoinImmature,
+    CoinNotRedeemable,
     MissingBlockJournal,
     NonTipRollback,
 }
@@ -179,7 +185,7 @@ impl fmt::Display for QCashUtxoError {
                 f.write_str("QCash metadata operation does not match state operation")
             }
             Self::StateOverflow => f.write_str("QCash UTXO value overflow"),
-            Self::UnknownCoin => f.write_str("QCash output is unknown or already spent"),
+            Self::UnknownCoin => f.write_str("QCash output is unknown or already redeemed"),
             Self::DuplicateCoin => f.write_str("QCash coin is repeated in the operation"),
             Self::DenominationMismatch => {
                 f.write_str("QCash coin denominations do not match metadata")
@@ -187,7 +193,7 @@ impl fmt::Display for QCashUtxoError {
             Self::CoinIdCollision => f.write_str("derived QCash coin ID already exists"),
             Self::InvalidCoinProof => f.write_str("QCash coin proof does not match issued output"),
             Self::CoinDerivation(error) => write!(f, "failed to derive QCash coin ID: {error}"),
-            Self::CoinImmature => {
+            Self::CoinNotRedeemable => {
                 f.write_str("QCash coin has not completed its minimum off-chain block delay")
             }
             Self::MissingBlockJournal => f.write_str("QCash block journal was not found"),
@@ -235,22 +241,22 @@ impl QCashUtxoSet {
             .create_proof(coin_id, self.coins.get(&coin_id).cloned())
     }
 
-    pub fn mature_utxos_at(&self, height: BlockHeight) -> impl Iterator<Item = &QCashUtxo> {
+    pub fn redeemable_utxos_at(&self, height: BlockHeight) -> impl Iterator<Item = &QCashUtxo> {
         self.coins
             .values()
-            .filter(move |coin| is_mature_at(coin, height))
+            .filter(move |coin| is_redeemable_at(coin, height))
     }
 
-    pub fn mature_utxos(&self) -> impl Iterator<Item = &QCashUtxo> {
-        self.mature_utxos_at(Height(u64::MAX))
+    pub fn redeemable_utxos(&self) -> impl Iterator<Item = &QCashUtxo> {
+        self.redeemable_utxos_at(Height(u64::MAX))
     }
 
     pub fn utxos(&self) -> impl Iterator<Item = &QCashUtxo> {
         self.coins.values()
     }
 
-    pub fn mature_balance(&self) -> Result<Amount, QCashUtxoError> {
-        self.mature_utxos().try_fold(Amount(0), |total, coin| {
+    pub fn redeemable_balance(&self) -> Result<Amount, QCashUtxoError> {
+        self.redeemable_utxos().try_fold(Amount(0), |total, coin| {
             total
                 .0
                 .checked_add(coin.denomination.amount().0)
@@ -259,8 +265,8 @@ impl QCashUtxoSet {
         })
     }
 
-    pub fn mature_balance_at(&self, height: BlockHeight) -> Result<Amount, QCashUtxoError> {
-        self.mature_utxos_at(height)
+    pub fn redeemable_balance_at(&self, height: BlockHeight) -> Result<Amount, QCashUtxoError> {
+        self.redeemable_utxos_at(height)
             .try_fold(Amount(0), |total, coin| {
                 total
                     .0
@@ -285,13 +291,13 @@ impl QCashUtxoSet {
         &mut self,
         withdrawer: Address,
         withdraw_tx_hash: TransactionHash,
-        metadata: &QCashWithdrawMetadata,
+        metadata: &QCashWithdrawalMetadata,
         height: BlockHeight,
     ) -> Result<Vec<QCashCoinId>, QCashUtxoError> {
         metadata
             .validate()
             .map_err(|_| QCashUtxoError::InvalidMetadata)?;
-        let mut pending: Vec<(QCashCoinId, &QCashOutput)> =
+        let mut pending: Vec<(QCashCoinId, &QCashWithdrawalOutput)> =
             Vec::with_capacity(metadata.outputs.len());
         for output in &metadata.outputs {
             let id = QCashCoinId::derive(withdraw_tx_hash, output)
@@ -316,7 +322,7 @@ impl QCashUtxoSet {
                     },
                     withdrawer,
                     denomination: output.denomination,
-                    commitment: output.commitment,
+                    redeem_key_commitment: output.redeem_key_commitment,
                     issued_height: height,
                 },
             );
@@ -325,10 +331,10 @@ impl QCashUtxoSet {
         Ok(ids)
     }
 
-    /// Verifies bearer secrets and atomically redeems explicit deposit inputs.
-    pub fn apply_deposit_proof(
+    /// Verifies bearer secrets and atomically redeems explicit redeem inputs.
+    pub fn apply_redeem(
         &mut self,
-        metadata: &QCashDepositMetadata,
+        metadata: &QCashRedeemMetadata,
         recipient: Address,
         height: BlockHeight,
         transaction_commitment: [u8; 32],
@@ -336,7 +342,7 @@ impl QCashUtxoSet {
         metadata
             .validate_authorizations_for_transaction(recipient, transaction_commitment)
             .map_err(|_| QCashUtxoError::InvalidMetadata)?;
-        let (ids, amount) = self.validate_deposit_proof(metadata, height)?;
+        let (ids, amount) = self.validate_redeem(metadata, height)?;
         for id in ids {
             self.coins.remove(&id).ok_or(QCashUtxoError::UnknownCoin)?;
         }
@@ -349,7 +355,7 @@ impl QCashUtxoSet {
         height: BlockHeight,
         withdrawer: Address,
         withdraw_tx_hash: TransactionHash,
-        metadata: &QCashWithdrawMetadata,
+        metadata: &QCashWithdrawalMetadata,
     ) -> Result<Vec<QCashCoinId>, QCashUtxoError> {
         metadata
             .validate()
@@ -363,7 +369,7 @@ impl QCashUtxoSet {
                 block_height: height,
                 previous_journal_tip,
                 issued_coin_ids: Vec::new(),
-                spent_utxos: Vec::new(),
+                redeemed_utxos: Vec::new(),
             });
         if journal.block_height != height {
             return Err(QCashUtxoError::InvalidMetadata);
@@ -378,18 +384,18 @@ impl QCashUtxoSet {
         Ok(ids)
     }
 
-    pub fn apply_deposit_in_block(
+    pub fn apply_redeem_in_block(
         &mut self,
         block_hash: BlockHash,
         height: BlockHeight,
-        metadata: &QCashDepositMetadata,
+        metadata: &QCashRedeemMetadata,
         recipient: Address,
         transaction_commitment: [u8; 32],
     ) -> Result<Amount, QCashUtxoError> {
         metadata
             .validate_authorizations_for_transaction(recipient, transaction_commitment)
             .map_err(|_| QCashUtxoError::InvalidMetadata)?;
-        let (ids, amount) = self.validate_deposit_proof(metadata, height)?;
+        let (ids, amount) = self.validate_redeem(metadata, height)?;
         let previous = ids
             .iter()
             .map(|id| {
@@ -408,7 +414,7 @@ impl QCashUtxoSet {
                 block_height: height,
                 previous_journal_tip,
                 issued_coin_ids: Vec::new(),
-                spent_utxos: Vec::new(),
+                redeemed_utxos: Vec::new(),
             });
         if journal.block_height != height {
             return Err(QCashUtxoError::InvalidMetadata);
@@ -420,7 +426,7 @@ impl QCashUtxoSet {
             .journals
             .get_mut(&block_hash)
             .ok_or(QCashUtxoError::MissingBlockJournal)?;
-        journal.spent_utxos.extend(previous);
+        journal.redeemed_utxos.extend(previous);
         self.active_journal_tip = Some(block_hash);
         Ok(amount)
     }
@@ -434,7 +440,7 @@ impl QCashUtxoSet {
             .journals
             .remove(&block_hash)
             .ok_or(QCashUtxoError::MissingBlockJournal)?;
-        for previous in journal.spent_utxos.into_iter().rev() {
+        for previous in journal.redeemed_utxos.into_iter().rev() {
             self.coins.insert(previous.id, previous);
         }
         for id in journal.issued_coin_ids {
@@ -468,20 +474,21 @@ impl QCashUtxoSet {
         }
     }
 
-    fn validate_deposit_proof(
+    fn validate_redeem(
         &self,
-        metadata: &QCashDepositMetadata,
+        metadata: &QCashRedeemMetadata,
         height: BlockHeight,
     ) -> Result<(Vec<QCashCoinId>, Amount), QCashUtxoError> {
         let mut ids = Vec::with_capacity(metadata.inputs.len());
         for input in &metadata.inputs {
             let id = QCashCoinId(input.coin_id);
             let coin = self.coins.get(&id).ok_or(QCashUtxoError::UnknownCoin)?;
-            if !is_mature_at(coin, height) {
-                return Err(QCashUtxoError::CoinImmature);
+            if !is_redeemable_at(coin, height) {
+                return Err(QCashUtxoError::CoinNotRedeemable);
             }
             if coin.denomination != input.denomination
-                || coin.commitment != qcash_spend_public_key_commitment(&input.spend_public_key)
+                || coin.redeem_key_commitment
+                    != qcash_redeem_key_commitment(&input.redeem_public_key)
             {
                 return Err(QCashUtxoError::InvalidCoinProof);
             }
@@ -709,10 +716,10 @@ fn qcash_clear_bits_from(bytes: &mut [u8; HASH_SIZE], depth: usize) {
     }
 }
 
-fn is_mature_at(coin: &QCashUtxo, height: BlockHeight) -> bool {
+fn is_redeemable_at(coin: &QCashUtxo, height: BlockHeight) -> bool {
     coin.issued_height
         .0
-        .checked_add(crate::ledger::QCASH_DEPOSIT_DELAY as u64)
+        .checked_add(crate::ledger::QCASH_REDEEM_DELAY as u64)
         .is_some_and(|maturity_height| height.0 >= maturity_height)
 }
 
@@ -729,17 +736,31 @@ mod tests {
             },
             withdrawer: Address([byte.wrapping_add(2); crate::crypto::ADDRESS_SIZE]),
             denomination: QCashDenomination::Ten,
-            commitment: [byte.wrapping_add(3); HASH_SIZE],
+            redeem_key_commitment: [byte.wrapping_add(3); HASH_SIZE],
             issued_height: Height(u64::from(byte)),
         }
     }
 
     #[test]
-    fn withdrawn_coin_is_depositable_starting_in_the_next_block() {
+    fn withdrawn_coin_is_redeemable_starting_in_the_next_block() {
         let coin = coin(100);
 
-        assert_eq!(coin.status_at(Height(100)), QCashUtxoStatus::Immature);
-        assert_eq!(coin.status_at(Height(101)), QCashUtxoStatus::Mature);
+        assert_eq!(coin.status_at(Height(100)), QCashUtxoStatus::Pending);
+        assert_eq!(coin.status_at(Height(101)), QCashUtxoStatus::Redeemable);
+    }
+
+    #[test]
+    fn qcash_default_file_name_uses_nine_digit_coin_id() {
+        let coin_id = QCashCoinId([0xAB; HASH_SIZE]);
+
+        assert_eq!(
+            coin_id.file_name(QCashDenomination::One),
+            "1XPQ_ABABABABA.QCash"
+        );
+        assert_eq!(
+            coin_id.file_name(QCashDenomination::OneMillion),
+            "1000000XPQ_ABABABABA.QCash"
+        );
     }
 
     #[test]
@@ -781,7 +802,7 @@ mod tests {
         let root = set.consensus_root().unwrap();
 
         let mut membership = set.create_state_proof(existing.id).unwrap();
-        membership.coin.as_mut().unwrap().commitment[0] ^= 1;
+        membership.coin.as_mut().unwrap().redeem_key_commitment[0] ^= 1;
         assert!(!verify_qcash_state_proof(root, &membership).unwrap());
 
         let mut absence = set
@@ -803,7 +824,7 @@ mod tests {
                 block_height: crate::block::Height(1),
                 previous_journal_tip: None,
                 issued_coin_ids: Vec::new(),
-                spent_utxos: Vec::new(),
+                redeemed_utxos: Vec::new(),
             },
         );
         set.journals.insert(
@@ -813,7 +834,7 @@ mod tests {
                 block_height: crate::block::Height(2),
                 previous_journal_tip: Some(parent),
                 issued_coin_ids: Vec::new(),
-                spent_utxos: Vec::new(),
+                redeemed_utxos: Vec::new(),
             },
         );
         set.active_journal_tip = Some(child);

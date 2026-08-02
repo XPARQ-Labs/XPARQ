@@ -1,19 +1,20 @@
-use super::{AccountNonce, ValidityWindow, Witness, chain_bound_signing_bytes};
+use super::{AuthorizationProof, ValidityWindow, chain_bound_signing_bytes};
 use crate::block::BlockHeight;
+use crate::block::merkle::MerkleInclusionProof;
 use crate::codec::canonical_bytes;
 use crate::consensus::supply::Amount;
 use crate::crypto::{
-    Address, HashDomain, PublicKey, Signature, TransactionHash, domain_hash,
+    Address, BlockHash, Hash, HashDomain, PublicKey, Signature, TransactionHash, domain_hash,
     dual_address_from_public_keys, verify,
 };
 use crate::error::TransactionError;
-use crate::governance::{GovernanceCredentialUse, validate_attached_credentials};
-use crate::qcash::{QCashCoinFile, QCashDepositMetadata, QCashError, QCashWithdrawMetadata};
+use crate::qcash::{QCashCoinFile, QCashError, QCashRedeemMetadata, QCashWithdrawalMetadata};
+use crate::recovery::{BlockHeaderProof, RollbackProofError, verify_header_proof_chain};
 use borsh::{BorshDeserialize, BorshSerialize};
 
 pub const QCASH_TRANSACTION_VERSION: u8 = 1;
 /// QCash carries one or more post-quantum coin authorizations in addition to
-/// the transaction witness, so it needs a dedicated bounded envelope.
+/// the transaction authorization proof, so it needs a dedicated bounded envelope.
 pub const MAX_QCASH_TX_SIZE: usize = 64 * 1024;
 const QCASH_SIGNATURE_DOMAIN: &[u8] = b"PAQUS_SHARKSPHERE_QCASH_TX_V1";
 
@@ -21,135 +22,142 @@ const QCASH_SIGNATURE_DOMAIN: &[u8] = b"PAQUS_SHARKSPHERE_QCASH_TX_V1";
 pub enum QCashTransactionKind {
     Withdraw {
         amount: Amount,
-        metadata: QCashWithdrawMetadata,
+        metadata: QCashWithdrawalMetadata,
     },
-    Deposit {
+    Redeem {
         recipient: Address,
-        metadata: QCashDepositMetadata,
+        metadata: QCashRedeemMetadata,
     },
+    RecoverRedeem {
+        claimant: Address,
+        metadata: QCashRedeemMetadata,
+        orphan_tx_hash: TransactionHash,
+        recovery_proof: Box<QCashRecoverRedeemProof>,
+    },
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct QCashRecoverRedeemProof {
+    pub orphan_redeem_tx: Box<SignedQCashTransaction>,
+    pub orphan_block: BlockHeaderProof,
+    pub orphan_tx_proof: MerkleInclusionProof,
+    pub losing_branch: Vec<BlockHeaderProof>,
+    pub canonical_branch: Vec<BlockHeaderProof>,
+    pub common_ancestor: BlockHash,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct QCashTransaction {
     pub version: u8,
     pub signer: Address,
-    pub fee: Amount,
-    pub nonce: AccountNonce,
-    pub timestamp: u64,
+    pub last_state: Hash,
     pub kind: QCashTransactionKind,
     pub validity: ValidityWindow,
-    pub credential_uses: Vec<GovernanceCredentialUse>,
 }
 
 #[derive(BorshSerialize)]
-struct DepositTransactionCommitmentInput {
+struct RedeemTransactionCommitmentInput {
     version: u8,
     coin_id: [u8; 32],
     denomination: crate::qcash::QCashDenomination,
-    spend_public_key: PublicKey,
+    redeem_public_key: PublicKey,
 }
 
 #[derive(BorshSerialize)]
-struct DepositTransactionCommitmentPayload {
+struct RedeemTransactionCommitmentPayload {
     version: u8,
     signer: Address,
     recipient: Address,
-    fee: Amount,
-    nonce: AccountNonce,
-    timestamp: u64,
+    last_state: Hash,
     validity: ValidityWindow,
-    inputs: Vec<DepositTransactionCommitmentInput>,
+    inputs: Vec<RedeemTransactionCommitmentInput>,
 }
 
 impl QCashTransaction {
-    pub fn withdraw(
-        signer: Address,
-        amount: Amount,
-        fee: Amount,
-        nonce: AccountNonce,
-        metadata: QCashWithdrawMetadata,
-    ) -> Self {
+    pub fn withdraw(signer: Address, amount: Amount, metadata: QCashWithdrawalMetadata) -> Self {
         Self {
             version: QCASH_TRANSACTION_VERSION,
             signer,
-            fee,
-            nonce,
-            timestamp: 0,
+            last_state: Hash::ZERO,
             kind: QCashTransactionKind::Withdraw { amount, metadata },
             validity: ValidityWindow::UNBOUNDED,
-            credential_uses: Vec::new(),
         }
     }
 
-    pub fn deposit(
-        signer: Address,
-        recipient: Address,
-        fee: Amount,
-        nonce: AccountNonce,
-        metadata: QCashDepositMetadata,
-    ) -> Self {
+    pub fn redeem(signer: Address, recipient: Address, metadata: QCashRedeemMetadata) -> Self {
         Self {
             version: QCASH_TRANSACTION_VERSION,
             signer,
-            fee,
-            nonce,
-            timestamp: 0,
-            kind: QCashTransactionKind::Deposit {
+            last_state: Hash::ZERO,
+            kind: QCashTransactionKind::Redeem {
                 recipient,
                 metadata,
             },
             validity: ValidityWindow::UNBOUNDED,
-            credential_uses: Vec::new(),
         }
     }
 
-    pub fn deposit_from_files(
+    pub fn recover_redeem(
         signer: Address,
-        recipient: Address,
-        fee: Amount,
-        nonce: AccountNonce,
-        files: &[QCashCoinFile],
-    ) -> Result<Self, QCashError> {
-        Self::deposit_from_files_at(signer, recipient, fee, nonce, 0, files)
+        claimant: Address,
+        metadata: QCashRedeemMetadata,
+        orphan_tx_hash: TransactionHash,
+        recovery_proof: QCashRecoverRedeemProof,
+    ) -> Self {
+        Self {
+            version: QCASH_TRANSACTION_VERSION,
+            signer,
+            last_state: Hash::ZERO,
+            kind: QCashTransactionKind::RecoverRedeem {
+                claimant,
+                metadata,
+                orphan_tx_hash,
+                recovery_proof: Box::new(recovery_proof),
+            },
+            validity: ValidityWindow::UNBOUNDED,
+        }
     }
 
-    pub fn deposit_from_files_at(
+    pub fn redeem_from_files(
         signer: Address,
         recipient: Address,
-        fee: Amount,
-        nonce: AccountNonce,
-        timestamp: u64,
+        files: &[QCashCoinFile],
+    ) -> Result<Self, QCashError> {
+        Self::redeem_from_files_at(signer, recipient, files)
+    }
+
+    pub fn redeem_from_files_at(
+        signer: Address,
+        recipient: Address,
         files: &[QCashCoinFile],
     ) -> Result<Self, QCashError> {
         let placeholder_inputs = files
             .iter()
-            .map(|file| file.deposit_input_for_transaction(recipient, [0; 32]))
+            .map(|file| file.redeem_input_for_transaction(recipient, [0; 32]))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut transaction = Self::deposit(
+        let mut transaction = Self::redeem(
             signer,
             recipient,
-            fee,
-            nonce,
-            QCashDepositMetadata::from_inputs(placeholder_inputs)?,
-        )
-        .with_timestamp(timestamp);
+            QCashRedeemMetadata::from_inputs(placeholder_inputs)?,
+        );
         let commitment = transaction
-            .deposit_transaction_commitment()
+            .redeem_transaction_commitment()
             .map_err(|_| QCashError::Serialization)?
             .ok_or(QCashError::InvalidCommitment)?;
-        transaction.kind = QCashTransactionKind::Deposit {
+        transaction.kind = QCashTransactionKind::Redeem {
             recipient,
-            metadata: QCashDepositMetadata::new_for_transaction(files, recipient, commitment)?,
+            metadata: QCashRedeemMetadata::new_for_transaction(files, recipient, commitment)?,
         };
         Ok(transaction)
     }
 
-    pub fn with_timestamp(mut self, timestamp: u64) -> Self {
-        self.timestamp = timestamp;
-        self
-    }
     pub fn with_validity_window(mut self, validity: ValidityWindow) -> Self {
         self.validity = validity;
+        self
+    }
+
+    pub fn with_last_state(mut self, last_state: Hash) -> Self {
+        self.last_state = last_state;
         self
     }
 
@@ -166,14 +174,14 @@ impl QCashTransaction {
                     .validate_amount(*amount)
                     .map_err(|_| TransactionError::InvalidQCashMetadata)?;
             }
-            QCashTransactionKind::Deposit {
+            QCashTransactionKind::Redeem {
                 recipient,
                 metadata,
             } => {
                 metadata
                     .validate_authorizations_for_transaction(
                         *recipient,
-                        self.deposit_transaction_commitment()?
+                        self.redeem_transaction_commitment()?
                             .ok_or(TransactionError::InvalidQCashMetadata)?,
                     )
                     .map_err(|_| TransactionError::InvalidQCashMetadata)?;
@@ -181,9 +189,31 @@ impl QCashTransaction {
                     return Err(TransactionError::InvalidQCashRecipient);
                 }
             }
+            QCashTransactionKind::RecoverRedeem {
+                claimant,
+                metadata,
+                orphan_tx_hash,
+                recovery_proof,
+            } => {
+                metadata
+                    .validate_authorizations_for_transaction(
+                        *claimant,
+                        self.redeem_transaction_commitment()?
+                            .ok_or(TransactionError::InvalidQCashMetadata)?,
+                    )
+                    .map_err(|_| TransactionError::InvalidQCashMetadata)?;
+                if *claimant == Address([0; 20]) {
+                    return Err(TransactionError::InvalidQCashRecipient);
+                }
+                self.validate_recover_redeem_proof(
+                    *claimant,
+                    metadata,
+                    *orphan_tx_hash,
+                    recovery_proof,
+                )?;
+            }
         }
-        self.validity.validate()?;
-        validate_attached_credentials(&self.credential_uses, self.signer)
+        self.validity.validate()
     }
 
     pub fn validate_for_height(&self, height: BlockHeight) -> Result<(), TransactionError> {
@@ -194,7 +224,8 @@ impl QCashTransaction {
     pub fn amount(&self) -> Result<Amount, TransactionError> {
         match &self.kind {
             QCashTransactionKind::Withdraw { amount, .. } => Ok(*amount),
-            QCashTransactionKind::Deposit { metadata, .. } => metadata
+            QCashTransactionKind::Redeem { metadata, .. }
+            | QCashTransactionKind::RecoverRedeem { metadata, .. } => metadata
                 .amount()
                 .map_err(|_| TransactionError::InvalidQCashMetadata),
         }
@@ -214,56 +245,138 @@ impl QCashTransaction {
         ))
     }
 
-    pub fn deposit_transaction_commitment(
+    pub fn redeem_transaction_commitment(
         &self,
     ) -> Result<Option<[u8; 32]>, crate::error::CodecError> {
-        let QCashTransactionKind::Deposit {
-            recipient,
-            metadata,
-        } = &self.kind
-        else {
-            return Ok(None);
+        let (recipient, metadata) = match &self.kind {
+            QCashTransactionKind::Redeem {
+                recipient,
+                metadata,
+            } => (*recipient, metadata),
+            QCashTransactionKind::RecoverRedeem {
+                claimant, metadata, ..
+            } => (*claimant, metadata),
+            QCashTransactionKind::Withdraw { .. } => return Ok(None),
         };
-        let payload = DepositTransactionCommitmentPayload {
+        let payload = RedeemTransactionCommitmentPayload {
             version: self.version,
             signer: self.signer,
-            recipient: *recipient,
-            fee: self.fee,
-            nonce: self.nonce,
-            timestamp: self.timestamp,
+            recipient,
+            last_state: self.last_state,
             validity: self.validity,
             inputs: metadata
                 .inputs
                 .iter()
-                .map(|input| DepositTransactionCommitmentInput {
+                .map(|input| RedeemTransactionCommitmentInput {
                     version: input.version,
                     coin_id: input.coin_id,
                     denomination: input.denomination,
-                    spend_public_key: input.spend_public_key,
+                    redeem_public_key: input.redeem_public_key,
                 })
                 .collect(),
         };
         Ok(Some(
             domain_hash(
-                HashDomain::QCashDepositTransaction,
+                HashDomain::QCashRedeemTransaction,
                 &canonical_bytes(&payload)?,
             )
             .0,
         ))
     }
+
+    fn validate_recover_redeem_proof(
+        &self,
+        claimant: Address,
+        metadata: &QCashRedeemMetadata,
+        orphan_tx_hash: TransactionHash,
+        recovery_proof: &QCashRecoverRedeemProof,
+    ) -> Result<(), TransactionError> {
+        let orphan_tx = &recovery_proof.orphan_redeem_tx.transaction;
+        let QCashTransactionKind::Redeem {
+            recipient,
+            metadata: orphan_metadata,
+        } = &orphan_tx.kind
+        else {
+            return Err(TransactionError::InvalidQCashMetadata);
+        };
+        if *recipient != claimant || orphan_metadata != metadata {
+            return Err(TransactionError::InvalidQCashMetadata);
+        }
+        if recovery_proof
+            .orphan_redeem_tx
+            .hash()
+            .map_err(|_| TransactionError::InvalidQCashMetadata)?
+            != orphan_tx_hash
+        {
+            return Err(TransactionError::InvalidQCashMetadata);
+        }
+        recovery_proof
+            .orphan_redeem_tx
+            .validate_signed_for_height(recovery_proof.orphan_block.header.height)?;
+        if !recovery_proof.orphan_tx_proof.verify(
+            orphan_tx_hash.as_hash(),
+            recovery_proof.orphan_block.header.merkle_root.as_hash(),
+            HashDomain::MerkleNode,
+        ) {
+            return Err(TransactionError::InvalidQCashMetadata);
+        }
+        let orphan_block_hash = recovery_proof
+            .orphan_block
+            .hash()
+            .map_err(|_| TransactionError::InvalidQCashMetadata)?;
+        let (losing_tip, losing_work) = verify_header_proof_chain(&recovery_proof.losing_branch)
+            .map_err(recover_proof_error)?;
+        let (canonical_tip, canonical_work) =
+            verify_header_proof_chain(&recovery_proof.canonical_branch)
+                .map_err(recover_proof_error)?;
+        let shared_count = recovery_proof
+            .losing_branch
+            .iter()
+            .zip(&recovery_proof.canonical_branch)
+            .take_while(|(left, right)| left == right)
+            .count();
+        if shared_count == 0
+            || shared_count == recovery_proof.losing_branch.len()
+            || shared_count == recovery_proof.canonical_branch.len()
+        {
+            return Err(TransactionError::InvalidQCashMetadata);
+        }
+        let common_ancestor = recovery_proof.losing_branch[shared_count - 1]
+            .hash()
+            .map_err(|_| TransactionError::InvalidQCashMetadata)?;
+        if common_ancestor != recovery_proof.common_ancestor {
+            return Err(TransactionError::InvalidQCashMetadata);
+        }
+        if !recovery_proof.losing_branch[shared_count..]
+            .iter()
+            .any(|header| header.hash() == Ok(orphan_block_hash))
+        {
+            return Err(TransactionError::InvalidQCashMetadata);
+        }
+        if canonical_work < losing_work
+            || (canonical_work == losing_work && canonical_tip >= losing_tip)
+        {
+            return Err(TransactionError::InvalidQCashMetadata);
+        }
+        Ok(())
+    }
+}
+
+fn recover_proof_error(_error: RollbackProofError) -> TransactionError {
+    TransactionError::InvalidQCashMetadata
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SignedQCashTransaction {
     pub transaction: QCashTransaction,
-    pub witness: Witness,
+    pub authorization_proof: AuthorizationProof,
 }
 
 impl SignedQCashTransaction {
     pub fn new(transaction: QCashTransaction, public_key: PublicKey, signature: Signature) -> Self {
         Self {
             transaction,
-            witness: Witness::new(public_key, signature),
+            authorization_proof: AuthorizationProof::new(public_key, signature),
         }
     }
 
@@ -276,7 +389,7 @@ impl SignedQCashTransaction {
     ) -> Self {
         Self {
             transaction,
-            witness: Witness::new_authorized(
+            authorization_proof: AuthorizationProof::new_authorized(
                 public_key,
                 signature,
                 auth_public_key,
@@ -292,7 +405,7 @@ impl SignedQCashTransaction {
     ) -> Self {
         Self {
             transaction,
-            witness: Witness::new_stored(signature, auth_signature),
+            authorization_proof: AuthorizationProof::new_stored(signature, auth_signature),
         }
     }
 
@@ -301,27 +414,47 @@ impl SignedQCashTransaction {
         if self.to_bytes()?.len() > MAX_QCASH_TX_SIZE {
             return Err(TransactionError::TransactionTooLarge);
         }
-        if self.witness.public_key.0.iter().all(|byte| *byte == 0) {
+        if self
+            .authorization_proof
+            .public_key
+            .0
+            .iter()
+            .all(|byte| *byte == 0)
+        {
             return Err(TransactionError::EmptyPublicKey);
         }
-        if self.witness.signature.0.iter().all(|byte| *byte == 0) {
+        if self
+            .authorization_proof
+            .signature
+            .0
+            .iter()
+            .all(|byte| *byte == 0)
+        {
             return Err(TransactionError::EmptySignature);
         }
-        if self.witness.auth_signature.0.iter().all(|byte| *byte == 0) {
+        if self
+            .authorization_proof
+            .auth_signature
+            .0
+            .iter()
+            .all(|byte| *byte == 0)
+        {
             return Err(TransactionError::EmptyAuthorizationSignature);
         }
-        if dual_address_from_public_keys(&self.witness.public_key, &self.witness.auth_public_key)
-            != self.transaction.signer
+        if dual_address_from_public_keys(
+            &self.authorization_proof.public_key,
+            &self.authorization_proof.auth_public_key,
+        ) != self.transaction.signer
         {
             return Err(TransactionError::SenderAddressMismatch);
         }
         let payload = self.transaction.signing_bytes()?;
         let (owner_valid, auth_valid) = crate::crypto::verify_dual_parallel(
-            &self.witness.public_key,
-            &self.witness.auth_public_key,
+            &self.authorization_proof.public_key,
+            &self.authorization_proof.auth_public_key,
             &payload,
-            &self.witness.signature,
-            &self.witness.auth_signature,
+            &self.authorization_proof.signature,
+            &self.authorization_proof.auth_signature,
         );
         if !owner_valid {
             return Err(TransactionError::InvalidSignature);
@@ -342,13 +475,25 @@ impl SignedQCashTransaction {
         if self.to_bytes()?.len() > MAX_QCASH_TX_SIZE {
             return Err(TransactionError::TransactionTooLarge);
         }
-        if !self.witness.uses_stored_keys() {
+        if !self.authorization_proof.uses_stored_keys() {
             return Err(TransactionError::InvalidAuthorizationSignature);
         }
-        if self.witness.signature.0.iter().all(|byte| *byte == 0) {
+        if self
+            .authorization_proof
+            .signature
+            .0
+            .iter()
+            .all(|byte| *byte == 0)
+        {
             return Err(TransactionError::EmptySignature);
         }
-        if self.witness.auth_signature.0.iter().all(|byte| *byte == 0) {
+        if self
+            .authorization_proof
+            .auth_signature
+            .0
+            .iter()
+            .all(|byte| *byte == 0)
+        {
             return Err(TransactionError::EmptyAuthorizationSignature);
         }
         let payload = self.transaction.signing_bytes()?;
@@ -356,8 +501,8 @@ impl SignedQCashTransaction {
             owner_public_key,
             auth_public_key,
             &payload,
-            &self.witness.signature,
-            &self.witness.auth_signature,
+            &self.authorization_proof.signature,
+            &self.authorization_proof.auth_signature,
         );
         if !owner_valid {
             return Err(TransactionError::InvalidSignature);
@@ -375,7 +520,7 @@ impl SignedQCashTransaction {
         if verify(
             auth_public_key,
             &self.transaction.signing_bytes()?,
-            &self.witness.auth_signature,
+            &self.authorization_proof.auth_signature,
         ) {
             Ok(())
         } else {
@@ -390,10 +535,6 @@ impl SignedQCashTransaction {
 
     pub fn hash(&self) -> Result<TransactionHash, crate::error::CodecError> {
         self.transaction.hash()
-    }
-
-    pub fn wtxid(&self) -> Result<crate::crypto::WitnessTransactionHash, crate::error::CodecError> {
-        super::SignedProtocolTransaction::from(self.clone()).wtxid()
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, crate::error::CodecError> {

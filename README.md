@@ -17,18 +17,18 @@ Chain ID                 747 (mainnet)
 Network magic            58 50 51 01 ("XPQ\x01")
 Asset                    XPQ
 Smallest unit            paqus
-Decimals                 8
+Decimals                 6
 Consensus                proof of work, greatest cumulative chainwork
-Proof of work            Argon2id, 64 MiB, 1 iteration, 1 lane
-Difficulty               per-block ASERT, 1-hour half-life
-Target block interval    5 minutes
-Block size limit         5 MiB
+Proof of work            Argon2id, 64 MiB, 1 iteration, 4 lanes
+Difficulty               Argon2id WBDA, weight-based
+Block size limit         2 MiB
+Block weight limit       2 MiB
 Confirmation depth       2 blocks
 Finality boundary        5 blocks
 Mining reward maturity   50 blocks
-QCash deposit delay      1 block after withdrawal
-Initial block subsidy    50 XPQ
-Tail emission            1.61172119 XPQ from height 420,480
+QCash redeem delay      1 block after withdrawal
+Initial block subsidy    15 XPQ
+Tail emission            0.85 XPQ from height 400,000
 Genesis premine          none
 ```
 
@@ -49,10 +49,8 @@ The crate provides:
 - `P1...` ML-DSA account addresses bound to two authorization public keys
   (`PX1...` is reserved for the inactive SQIsign Level 5 candidate);
 - unified transfers containing between 1 and 64 outputs;
-- QCash withdrawal, bearer files, deposits, and authenticated UTXO state;
-- governance transactions and credentials;
-- SegWit-style transaction and witness commitments;
-- blocks, Argon2id proof of work, ASERT difficulty, rewards, and chainwork;
+- QCash withdrawal, bearer files, redeems, and authenticated UTXO state;
+- blocks, Argon2id proof of work, WBDA difficulty, rewards, and chainwork;
 - atomic ledger transitions, rollback, bounded reorganization, and invariants;
 - account and QCash state proofs;
 - frozen-genesis header-chain and checkpoint verification;
@@ -62,12 +60,6 @@ Networking, RPC, mining orchestration, mempool policy, dynamic fee rates,
 snapshot transport, and database storage belong to the separate node crate.
 Those policies are not consensus parameters unless explicitly stated in the
 chain specification.
-
-Governance bearer credentials are stored in password-protected `PGD1`
-containers. The credential secret key is encrypted with XChaCha20-Poly1305
-using an Argon2id-derived key; the authenticated header binds the file to the
-Paqus chain ID and frozen genesis. Plaintext legacy credential files are
-rejected.
 
 ## Accounts and Dual Authorization
 
@@ -92,11 +84,7 @@ There is one transfer representation:
 Transaction {
     from,
     outputs: Vec<TransferOutput>,
-    fee,
-    nonce,
-    timestamp,
-    validity,
-    credential_uses,
+    last_state,
 }
 ```
 
@@ -106,9 +94,8 @@ replacement for the former single-transfer form. Shared signatures and common
 transaction fields make multi-output transfers substantially smaller than
 multiple independent transfers.
 
-Fees are consensus-visible amounts paid to the block producer. Relay,
-mempool-market, and miner minimum fee rates in `paqus/vByte` are node policy and
-can be configured independently.
+Fees are not a core consensus field. Relay, mempool-market, and miner minimum
+fee rates in `paqus/vByte` are node policy and can be configured independently.
 
 ## Transaction Lifecycle
 
@@ -120,7 +107,7 @@ H + 2   confirmed
 H + 5   finalized by the local reorg boundary
 ```
 
-Normal transfer credits and QCash deposit credits become spendable at
+Normal transfer credits and QCash redeem credits become spendable at
 `H + 2`. Coinbase transaction fees use the same confirmation delay, while the
 block subsidy matures after 50 blocks.
 
@@ -134,27 +121,28 @@ set:
 
 ```text
 account XPQ --withdraw--> QCash bearer UTXO
-QCash bearer UTXO --deposit--> account XPQ
+QCash bearer UTXO --redeem--> account XPQ
 ```
 
 A withdrawal included at height `H` creates active off-chain bearer coins.
-They may be deposited starting at `H + 1`. A successful deposit consumes the
+They may be redeemed starting at `H + 1`. A successful redeem consumes the
 QCash UTXO immediately and creates an account credit that becomes spendable at
-`deposit height + 2`.
+`redeem height + 2`.
 
 Each `.XPQ` file contains an opaque 32-byte coin ID, denomination, and private
 opening secret. The file is bearer value and must be protected like physical
 cash. Reorganizations are handled by canonical ledger rollback: outputs made
-on disconnected branches are removed and deposits disconnected from the
+on disconnected branches are removed and redeems disconnected from the
 canonical chain restore their consumed UTXOs.
 
 ## Authenticated Fast Sync and Proofs
 
 The consensus crate verifies complete header chains from the frozen genesis,
-including linkage, timestamps, expected ASERT difficulty, Argon2id proof of
-work, and cumulative chainwork. The node can compare independently supplied
-valid header chains, choose the greatest-work tip, download the snapshot bound
-to that checkpoint, and activate it only when its state commitments match.
+including linkage, expected WBDA difficulty, Argon2id proof of work, block
+weight commitments, and cumulative chainwork. The node can compare
+independently supplied valid header chains, choose the greatest-work tip,
+download the snapshot bound to that checkpoint, and activate it only when its
+state commitments match.
 
 Snapshot providers are therefore data sources, not trusted consensus
 authorities. Security still depends on obtaining the real greatest-work chain;
@@ -172,10 +160,9 @@ Consensus objects use canonical little-endian Borsh through `codec.rs`.
 Direct serialization must not be used for consensus hashes, signatures,
 network payloads, or persisted consensus objects.
 
-The transaction ID (`txid`) commits to the family and payload. The witness
-transaction ID (`wtxid`) commits to the complete signed envelope. Blocks commit
-to both payload and witness Merkle roots, plus the resulting protocol state
-root.
+The transaction hash commits to the signed protocol envelope. Blocks commit to
+the ordered transaction Merkle root, the resulting protocol state root, the
+chain commitment, and the canonical block weight.
 
 Protocol vectors protect canonical bytes and hash results. Changing a
 consensus structure, field order, domain string, parameter, or frozen vector is

@@ -4,8 +4,8 @@ use crate::consensus::supply::{
     BLOCK_REWARD, DECIMALS, TAIL_EMISSION, TAIL_EMISSION_START_HEIGHT, UNIT, XPQ,
 };
 use crate::consensus::{
-    ASERT_HALF_LIFE, BLOCK_TIME, DIFFICULTY_ADJUSTMENT_INTERVAL, DIFFICULTY_START, MAX_FUTURE_TIME,
-    MIN_DIFFICULTY,
+    DIFFICULTY_START, MIN_DIFFICULTY, WBDA_HIGH_UTILIZATION_PPM, WBDA_LOW_UTILIZATION_PPM,
+    WBDA_WINDOW,
 };
 use crate::crypto::{BlockHash, Hash, HashDomain, domain_hash};
 use crate::error::{CodecError, GenesisError};
@@ -14,13 +14,11 @@ use crate::genesis::{
     genesis_ledger_for_chain,
 };
 use crate::ledger::{
-    BLOCK_REWARD_MATURITY, CONFIRMATION_DEPTH, FINALITY_DEPTH, Ledger, MEDIAN_TIME_PAST_WINDOW,
-    QCASH_DEPOSIT_DELAY, QCASH_DEPOSIT_MATURITY, SparseStateTree, Work,
+    BLOCK_REWARD_MATURITY, CONFIRMATION_DEPTH, FINALITY_DEPTH, Ledger,
+    QCASH_REDEEM_CREDIT_MATURITY, QCASH_REDEEM_DELAY, SparseStateTree, Work,
     calculate_protocol_state_root_from_roots,
 };
-use crate::state::{
-    Account, BlockStateCommitment, CredentialUseState, GovernanceState, QCashUtxoSet,
-};
+use crate::state::{Account, BlockStateCommitment, QCashUtxoSet};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::BTreeMap;
 
@@ -69,26 +67,22 @@ pub struct ChainParamsArtifact {
 pub struct ChainSpecArtifact {
     pub params: ChainParamsArtifact,
     pub genesis_miner_address: [u8; crate::crypto::ADDRESS_SIZE],
-    pub genesis_timestamp: u64,
     pub genesis_nonce: u64,
     pub genesis_hash: [u8; crate::crypto::HASH_SIZE],
     pub block_version: u8,
     pub max_block_size: u64,
-    pub witness_scale_factor: u32,
     pub max_block_weight: u64,
     pub max_block_decode_items: u64,
-    pub block_time_seconds: u32,
     pub min_difficulty: u32,
     pub difficulty_start: u32,
-    pub difficulty_adjustment_interval: u64,
-    pub asert_half_life_seconds: u64,
-    pub max_future_time_seconds: u32,
+    pub wbda_window: u64,
+    pub wbda_low_utilization_ppm: u64,
+    pub wbda_high_utilization_ppm: u64,
     pub confirmation_depth: u32,
     pub finality_depth: u32,
-    pub median_time_past_window: u32,
     pub block_reward_maturity: u32,
-    pub qcash_deposit_maturity: u32,
-    pub qcash_withdraw_maturity: u32,
+    pub qcash_redeem_credit_maturity: u32,
+    pub qcash_redeem_delay: u32,
     pub unit: u64,
     pub xpq: u64,
     pub decimals: u8,
@@ -116,8 +110,6 @@ pub struct SnapshotArtifact {
     pub state_commitment: BlockStateCommitment,
     pub accounts: BTreeMap<crate::crypto::Address, Account>,
     pub qcash_utxos: QCashUtxoSet,
-    pub governance: GovernanceState,
-    pub credential_uses: CredentialUseState,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
@@ -129,7 +121,6 @@ pub struct CheckpointArtifact {
     pub state_commitment: BlockStateCommitment,
     pub cumulative_work: Work,
     pub difficulty: u32,
-    pub timestamp: u64,
     pub ancestor_hashes: Vec<BlockHash>,
 }
 
@@ -279,26 +270,22 @@ impl ChainSpecArtifact {
         Ok(Self {
             params: ChainParamsArtifact::from_chain_params(params)?,
             genesis_miner_address: params.genesis.miner_address,
-            genesis_timestamp: params.genesis.timestamp,
             genesis_nonce: params.genesis.nonce,
             genesis_hash: params.genesis.hash,
             block_version: crate::block::BLOCK_VERSION,
             max_block_size: crate::block::MAX_BLOCK_SIZE as u64,
-            witness_scale_factor: crate::block::WITNESS_SCALE_FACTOR as u32,
             max_block_weight: crate::block::MAX_BLOCK_WEIGHT as u64,
             max_block_decode_items: crate::block::MAX_BLOCK_DECODE_ITEMS as u64,
-            block_time_seconds: BLOCK_TIME,
             min_difficulty: MIN_DIFFICULTY,
             difficulty_start: DIFFICULTY_START,
-            difficulty_adjustment_interval: DIFFICULTY_ADJUSTMENT_INTERVAL,
-            asert_half_life_seconds: ASERT_HALF_LIFE,
-            max_future_time_seconds: MAX_FUTURE_TIME,
+            wbda_window: WBDA_WINDOW as u64,
+            wbda_low_utilization_ppm: WBDA_LOW_UTILIZATION_PPM,
+            wbda_high_utilization_ppm: WBDA_HIGH_UTILIZATION_PPM,
             confirmation_depth: CONFIRMATION_DEPTH,
             finality_depth: FINALITY_DEPTH,
-            median_time_past_window: MEDIAN_TIME_PAST_WINDOW as u32,
             block_reward_maturity: BLOCK_REWARD_MATURITY,
-            qcash_deposit_maturity: QCASH_DEPOSIT_MATURITY,
-            qcash_withdraw_maturity: QCASH_DEPOSIT_DELAY,
+            qcash_redeem_credit_maturity: QCASH_REDEEM_CREDIT_MATURITY,
+            qcash_redeem_delay: QCASH_REDEEM_DELAY,
             unit: UNIT,
             xpq: XPQ,
             decimals: DECIMALS,
@@ -474,8 +461,6 @@ pub fn create_snapshot_artifact(ledger: &Ledger) -> Result<SnapshotArtifact, Gen
         state_commitment,
         accounts: ledger.accounts().clone(),
         qcash_utxos: ledger.qcash_utxos.clone(),
-        governance: ledger.governance.clone(),
-        credential_uses: ledger.credential_uses.clone(),
     })
 }
 
@@ -498,19 +483,11 @@ pub fn validate_snapshot_artifact(snapshot: &SnapshotArtifact) -> Result<(), Gen
 
     let account_state_root = SparseStateTree::from_accounts(&snapshot.accounts)?.root();
     let qcash_state_root = crate::crypto::StateRoot(snapshot.qcash_utxos.consensus_root()?.0);
-    let governance_state_root = snapshot.governance.consensus_root()?;
-    let credential_use_state_root = snapshot.credential_uses.consensus_root()?;
-    let protocol_state_root = calculate_protocol_state_root_from_roots(
-        account_state_root,
-        qcash_state_root,
-        governance_state_root,
-        credential_use_state_root,
-    )?;
+    let protocol_state_root =
+        calculate_protocol_state_root_from_roots(account_state_root, qcash_state_root)?;
 
     if snapshot.state_commitment.account_state_root != account_state_root
         || snapshot.state_commitment.qcash_state_root != qcash_state_root
-        || snapshot.state_commitment.governance_state_root != governance_state_root
-        || snapshot.state_commitment.credential_use_state_root != credential_use_state_root
         || snapshot.state_commitment.protocol_state_root != protocol_state_root
         || !snapshot.state_commitment.matches_protocol_root()?
     {
@@ -534,7 +511,7 @@ pub fn validate_snapshot_artifact(snapshot: &SnapshotArtifact) -> Result<(), Gen
     let expected_supply = crate::ledger::ledger::expected_issued_supply(
         snapshot.height,
         genesis
-            .genesis_allocations
+            .genesis_allocations()
             .iter()
             .map(|allocation| allocation.amount),
     )
@@ -586,13 +563,7 @@ pub fn ledger_from_authenticated_snapshot(
     let (anchor, work) = ArtifactTrustAnchor::from_verified_header_chain(headers)
         .map_err(|_| GenesisError::InvalidArtifact)?;
     let snapshot = decode_snapshot_paqus(bytes, &anchor)?;
-    let ledger = Ledger::from_snapshot_parts(
-        snapshot.accounts,
-        snapshot.qcash_utxos,
-        snapshot.governance,
-        snapshot.credential_uses,
-        headers,
-    )?;
+    let ledger = Ledger::from_snapshot_parts(snapshot.accounts, snapshot.qcash_utxos, headers)?;
     let commitment = ledger
         .tip_state_commitment()?
         .ok_or(GenesisError::InvalidStateCommitment)?;
@@ -627,7 +598,6 @@ pub fn create_checkpoint_artifact(
         state_commitment,
         cumulative_work,
         difficulty: block.difficulty(),
-        timestamp: block.timestamp(),
         ancestor_hashes,
     })
 }
@@ -787,11 +757,10 @@ mod tests {
             .values()
             .map(|block| block.header.clone())
             .collect::<Vec<_>>();
-        let (anchor, work) = ArtifactTrustAnchor::from_verified_header_chain(&headers).unwrap();
+        let (anchor, _work) = ArtifactTrustAnchor::from_verified_header_chain(&headers).unwrap();
 
         let snapshot = decode_snapshot_paqus(&bytes, &anchor).unwrap();
         assert_eq!(snapshot.height, Height(0));
-        assert_ne!(work, Work::ZERO);
     }
 
     #[test]
@@ -803,7 +772,7 @@ mod tests {
             .values()
             .map(|block| block.header.clone())
             .collect::<Vec<_>>();
-        headers[0].nonce.0 ^= 1;
+        headers[0].chain_commitment.0[0] ^= 1;
 
         assert!(ArtifactTrustAnchor::from_verified_header_chain(&headers).is_err());
     }

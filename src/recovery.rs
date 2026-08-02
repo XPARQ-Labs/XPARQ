@@ -1,8 +1,7 @@
 use crate::block::merkle::MerkleInclusionProof;
-use crate::block::{Block, BlockHeader, BlockHeight};
+use crate::block::{Block, BlockHeader, BlockHeight, BlockProof, Nonce};
 use crate::crypto::{BlockHash, HashDomain};
 use crate::genesis::GENESIS_HASH;
-use crate::ledger::MEDIAN_TIME_PAST_WINDOW;
 use crate::ledger::fork_choice::{ForkChoice, Work};
 use crate::transaction::{SignedProtocolTransaction, TransactionError};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -10,13 +9,34 @@ use std::error::Error;
 use std::fmt;
 
 pub const ROLLBACK_PROOF_VERSION: u8 = 1;
+pub const RECENT_HEADER_WINDOW: usize = crate::consensus::WBDA_WINDOW;
 pub const MAX_ROLLBACK_PROOF_HEADERS: usize = 1_000_000;
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BlockHeaderProof {
+    pub header: BlockHeader,
+    pub proof: BlockProof,
+}
+
+impl BlockHeaderProof {
+    pub fn new(header: BlockHeader, proof: BlockProof) -> Self {
+        Self { header, proof }
+    }
+
+    pub fn block(&self) -> Block {
+        Block::from_header_with_proof(self.header.clone(), self.proof.clone())
+    }
+
+    pub fn hash(&self) -> Result<BlockHash, crate::error::CodecError> {
+        self.block().hash()
+    }
+}
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TrustedHeaderCheckpoint {
     pub header: BlockHeader,
     pub cumulative_work: Work,
-    pub asert_anchor: BlockHeader,
+    pub difficulty_anchor: BlockHeader,
     pub recent_headers: Vec<BlockHeader>,
 }
 
@@ -26,7 +46,6 @@ pub struct RollbackProofBundle {
     pub transaction: SignedProtocolTransaction,
     pub disconnected_block_header: BlockHeader,
     pub transaction_proof: MerkleInclusionProof,
-    pub witness_proof: MerkleInclusionProof,
     /// Complete header path from frozen genesis through the disconnected tip.
     pub losing_headers: Vec<BlockHeader>,
     /// Complete header path from frozen genesis through the selected canonical tip.
@@ -56,7 +75,6 @@ pub enum RollbackProofError {
     DisconnectedBlockNotOnLosingBranch,
     TransactionInvalid(TransactionError),
     TransactionProofInvalid,
-    WitnessProofInvalid,
     CanonicalBranchDoesNotWin,
     Serialization(crate::error::CodecError),
 }
@@ -75,7 +93,6 @@ impl fmt::Display for RollbackProofError {
             }
             Self::TransactionInvalid(_) => "rollback proof transaction is invalid",
             Self::TransactionProofInvalid => "rollback transaction inclusion proof is invalid",
-            Self::WitnessProofInvalid => "rollback witness inclusion proof is invalid",
             Self::CanonicalBranchDoesNotWin => "rollback canonical branch does not win fork choice",
             Self::Serialization(_) => "rollback proof serialization failed",
         };
@@ -151,17 +168,6 @@ impl RollbackProofBundle {
         ) {
             return Err(RollbackProofError::TransactionProofInvalid);
         }
-        let witness_hash = self
-            .transaction
-            .wtxid()
-            .map_err(RollbackProofError::Serialization)?;
-        if !self.witness_proof.verify(
-            witness_hash.as_hash(),
-            self.disconnected_block_header.witness_root.as_hash(),
-            HashDomain::WitnessMerkleNode,
-        ) {
-            return Err(RollbackProofError::WitnessProofInvalid);
-        }
         if canonical_work < losing_work
             || (canonical_work == losing_work && canonical_tip >= losing_tip)
         {
@@ -180,7 +186,7 @@ impl RollbackProofBundle {
 }
 
 /// Verifies a complete header chain from the frozen genesis, including
-/// linkage, timestamps, difficulty adjustment and proof of work.
+/// linkage, difficulty adjustment and proof of work.
 ///
 /// The returned work is suitable for comparing independently obtained
 /// candidate chains. Callers must still bind any state data to the returned
@@ -188,22 +194,28 @@ impl RollbackProofBundle {
 pub fn verify_header_chain(
     headers: &[BlockHeader],
 ) -> Result<(BlockHash, Work), RollbackProofError> {
+    let headers = headers
+        .iter()
+        .cloned()
+        .map(|header| BlockHeaderProof::new(header, BlockProof::new(Nonce(0))))
+        .collect::<Vec<_>>();
+    verify_header_proof_chain(&headers)
+}
+
+pub fn verify_header_proof_chain(
+    headers: &[BlockHeaderProof],
+) -> Result<(BlockHash, Work), RollbackProofError> {
     let first = headers
         .first()
         .ok_or(RollbackProofError::EmptyHeaderChain)?;
-    if first.height.0 != 0
+    if first.header.height.0 != 0
         || first.hash().map_err(RollbackProofError::Serialization)?.0 != GENESIS_HASH
     {
         return Err(RollbackProofError::WrongGenesis);
     }
     let mut fork_choice = ForkChoice::new();
     for header in headers {
-        let block = Block {
-            header: header.clone(),
-            genesis_allocations: Vec::new(),
-            coinbase: None,
-            transactions: Vec::new(),
-        };
+        let block = header.block();
         fork_choice
             .insert_block(block)
             .map_err(RollbackProofError::InvalidHeaderChain)?;
@@ -223,24 +235,23 @@ pub fn trusted_header_checkpoint(
         .last()
         .cloned()
         .ok_or(RollbackProofError::EmptyHeaderChain)?;
-    let asert_anchor = validated_headers
+    let difficulty_anchor = validated_headers
         .get(usize::from(header.height.0 > 0))
         .cloned()
         .ok_or(RollbackProofError::EmptyHeaderChain)?;
-    let start = validated_headers
-        .len()
-        .saturating_sub(MEDIAN_TIME_PAST_WINDOW);
+    let start = validated_headers.len().saturating_sub(RECENT_HEADER_WINDOW);
     Ok(TrustedHeaderCheckpoint {
         header,
         cumulative_work,
-        asert_anchor,
+        difficulty_anchor,
         recent_headers: validated_headers[start..].to_vec(),
     })
 }
 
 /// Validates only the headers following a previously fully validated
-/// checkpoint. The checkpoint carries the ASERT and median-time context needed
-/// to preserve the same consensus checks as full genesis-to-tip validation.
+/// checkpoint. Non-boundary headers inherit parent difficulty. WBDA epoch
+/// boundaries are verified from the raw block weights committed in recent
+/// headers.
 pub fn verify_header_chain_extension(
     checkpoint: &TrustedHeaderCheckpoint,
     headers: &[BlockHeader],
@@ -250,9 +261,8 @@ pub fn verify_header_chain_extension(
         .hash()
         .map_err(RollbackProofError::Serialization)?;
     if checkpoint.recent_headers.is_empty()
-        || checkpoint.recent_headers.len() > MEDIAN_TIME_PAST_WINDOW
+        || checkpoint.recent_headers.len() > RECENT_HEADER_WINDOW
         || checkpoint.recent_headers.last() != Some(&checkpoint.header)
-        || (checkpoint.header.height.0 > 0 && checkpoint.asert_anchor.height.0 != 1)
     {
         return Err(RollbackProofError::InvalidCommonAncestor);
     }
@@ -266,49 +276,36 @@ pub fn verify_header_chain_extension(
         {
             return Err(RollbackProofError::InvalidCommonAncestor);
         }
-        if header.timestamp <= previous.timestamp {
-            return Err(RollbackProofError::InvalidHeaderChain(
-                crate::ledger::fork_choice::ForkChoiceError::InvalidTimestamp,
-            ));
-        }
-        let mut timestamps = recent
-            .iter()
-            .map(|header| header.timestamp)
-            .collect::<Vec<_>>();
-        timestamps.sort_unstable();
-        if header.timestamp <= timestamps[timestamps.len() / 2] {
-            return Err(RollbackProofError::InvalidHeaderChain(
-                crate::ledger::fork_choice::ForkChoiceError::InvalidMedianTimePast,
-            ));
-        }
-        let expected_difficulty = if header.height.0 <= 1 {
-            crate::consensus::DIFFICULTY_START
-        } else {
-            crate::consensus::Consensus::with_default_config()
-                .asert_difficulty(
-                    checkpoint.asert_anchor.difficulty,
-                    checkpoint.asert_anchor.timestamp,
-                    checkpoint.asert_anchor.height,
-                    header.timestamp,
-                    header.height,
-                )
+        let expected_difficulty = if crate::consensus::is_wbda_epoch_boundary(header.height.0) {
+            if recent.len() < crate::consensus::WBDA_WINDOW {
+                return Err(RollbackProofError::InvalidHeaderChain(
+                    crate::ledger::fork_choice::ForkChoiceError::MissingParent,
+                ));
+            }
+            let start = recent.len() - crate::consensus::WBDA_WINDOW;
+            let weights = recent[start..]
+                .iter()
+                .map(|header| usize::try_from(header.block_weight))
+                .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| {
                     RollbackProofError::InvalidHeaderChain(
                         crate::ledger::fork_choice::ForkChoiceError::InvalidDifficulty,
                     )
-                })?
+                })?;
+            crate::consensus::next_difficulty_from_window(previous.difficulty, &weights).ok_or(
+                RollbackProofError::InvalidHeaderChain(
+                    crate::ledger::fork_choice::ForkChoiceError::InvalidDifficulty,
+                ),
+            )?
+        } else {
+            previous.difficulty
         };
         if header.difficulty != expected_difficulty {
             return Err(RollbackProofError::InvalidHeaderChain(
                 crate::ledger::fork_choice::ForkChoiceError::InvalidDifficulty,
             ));
         }
-        let block = Block {
-            header: header.clone(),
-            genesis_allocations: Vec::new(),
-            coinbase: None,
-            transactions: Vec::new(),
-        };
+        let block = Block::from_header_with_proof(header.clone(), BlockProof::new(Nonce(0)));
         crate::consensus::Consensus::validate_proof_of_work_at_difficulty(
             &block,
             expected_difficulty,
@@ -323,7 +320,7 @@ pub fn verify_header_chain_extension(
         previous_hash = header.hash().map_err(RollbackProofError::Serialization)?;
         previous = header.clone();
         recent.push(header.clone());
-        if recent.len() > MEDIAN_TIME_PAST_WINDOW {
+        if recent.len() > RECENT_HEADER_WINDOW {
             recent.remove(0);
         }
     }
@@ -337,8 +334,8 @@ pub fn advance_trusted_header_checkpoint(
     let (_, cumulative_work) = verify_header_chain_extension(checkpoint, headers)?;
     let mut recent_headers = checkpoint.recent_headers.clone();
     recent_headers.extend_from_slice(headers);
-    if recent_headers.len() > MEDIAN_TIME_PAST_WINDOW {
-        recent_headers = recent_headers[recent_headers.len() - MEDIAN_TIME_PAST_WINDOW..].to_vec();
+    if recent_headers.len() > RECENT_HEADER_WINDOW {
+        recent_headers = recent_headers[recent_headers.len() - RECENT_HEADER_WINDOW..].to_vec();
     }
     Ok(TrustedHeaderCheckpoint {
         header: headers
@@ -346,7 +343,7 @@ pub fn advance_trusted_header_checkpoint(
             .cloned()
             .unwrap_or_else(|| checkpoint.header.clone()),
         cumulative_work,
-        asert_anchor: checkpoint.asert_anchor.clone(),
+        difficulty_anchor: checkpoint.difficulty_anchor.clone(),
         recent_headers,
     })
 }
@@ -360,9 +357,6 @@ fn validate_signed_transaction(
             transaction.validate_signed_for_height(height)
         }
         SignedProtocolTransaction::QCash(transaction) => {
-            transaction.validate_signed_for_height(height)
-        }
-        SignedProtocolTransaction::Governance(transaction) => {
             transaction.validate_signed_for_height(height)
         }
     };

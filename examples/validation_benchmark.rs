@@ -11,8 +11,6 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-const TIMESTAMP: u64 = 1_700_000_000;
-
 fn elapsed_per_item(elapsed: Duration, count: usize) -> f64 {
     elapsed.as_secs_f64() * 1_000_000.0 / count.max(1) as f64
 }
@@ -70,7 +68,6 @@ fn applicable_block(count: usize) -> Result<(Ledger, Block), String> {
     let recipient = Address([3; 20]);
     let genesis = Block::genesis(
         miner,
-        TIMESTAMP,
         vec![GenesisAllocation {
             to: sender,
             amount: Amount((count as u64 + 1) * 3),
@@ -86,16 +83,14 @@ fn applicable_block(count: usize) -> Result<(Ledger, Block), String> {
 
     let transactions: Vec<SignedTransaction> = (0..count)
         .map(|index| {
-            let transaction = Transaction::new_at(
+            let transaction = Transaction::new(
                 sender,
                 vec![paqus::transaction::TransferOutput {
-                    to: recipient,
+                    to: recipient.into(),
                     amount: Amount(1),
                 }],
-                Amount(1),
-                Nonce(index as u64),
-                TIMESTAMP + 1,
-            );
+            )
+            .with_last_state(ledger.account(&sender).unwrap().statement);
             let payload = transaction.signing_bytes().unwrap();
             let owner_signature = sign(&owner.secret_key, &payload);
             let auth_signature = sign(&auth.secret_key, &payload);
@@ -116,17 +111,12 @@ fn applicable_block(count: usize) -> Result<(Ledger, Block), String> {
             }
         })
         .collect();
-    let coinbase = CoinbaseTransaction::new(
-        miner,
-        ledger.mintable_subsidy(Height(1)),
-        Amount(count as u64),
-    );
+    let coinbase = CoinbaseTransaction::new(miner, ledger.mintable_subsidy(Height(1)));
     let mut block = Block::from_protocol_transactions(
         Height(1),
         genesis_hash,
         miner,
         DIFFICULTY_START,
-        TIMESTAMP + 1,
         Nonce(1),
         vec![],
         Some(coinbase),

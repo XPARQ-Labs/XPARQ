@@ -15,7 +15,6 @@ fuzz_target!(|data: &[u8]| {
     let mut ledger = support::ledger_for(&transaction);
     let before = ledger.clone();
     let before_supply = ledger.economic_supply().expect("fixture supply");
-    let fee = transaction.fee();
 
     let result = match &transaction {
         SignedProtocolTransaction::Transfer(signed) => {
@@ -23,9 +22,6 @@ fuzz_target!(|data: &[u8]| {
         }
         SignedProtocolTransaction::QCash(signed) => {
             ledger.apply_signed_qcash_transaction(signed, Height(1))
-        }
-        SignedProtocolTransaction::Governance(signed) => {
-            ledger.apply_signed_governance_action(signed, Height(1))
         }
     };
 
@@ -37,8 +33,7 @@ fuzz_target!(|data: &[u8]| {
     validate_ledger_invariants(&ledger).expect("successful transition broke ledger invariants");
     let after_supply = ledger.economic_supply().expect("post-transition supply");
     assert_eq!(
-        after_supply.0.checked_add(fee.0),
-        Some(before_supply.0),
-        "transaction family failed to conserve value plus declared fee"
+        after_supply.0, before_supply.0,
+        "transaction family failed to conserve value"
     );
 });

@@ -2,12 +2,7 @@
 
 use crate::block::BlockHeight;
 use crate::consensus::supply::Amount;
-use crate::crypto::{Address, BlockHash, HashDomain, TransactionHash, domain_hash};
-use crate::governance::{
-    GovernanceActionType, GovernanceIssuerId, ProposalId, ProposalOutcome, ProposalVotingMode,
-    VoteChoice,
-};
-use crate::transaction::AccountNonce;
+use crate::crypto::{Address, BlockHash, Hash, HashDomain, TransactionHash, domain_hash};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -33,7 +28,7 @@ pub struct EventId(pub [u8; 32]);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountSnapshot {
     pub balance: Amount,
-    pub nonce: AccountNonce,
+    pub statement: Hash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,58 +101,20 @@ pub enum ProtocolEventKind {
         from: Address,
         to: Address,
         amount: Amount,
-        fee: Amount,
     },
     QCashWithdrawn {
         signer: Address,
         amount: Amount,
     },
-    QCashDeposited {
+    QCashRedeemed {
         signer: Address,
         recipient: Address,
         amount: Amount,
     },
-    GovernanceIssuerRegistered {
-        issuer_id: GovernanceIssuerId,
-        controller: Address,
-    },
-    GovernanceIssuerApproved {
-        issuer_id: GovernanceIssuerId,
-        approver: Address,
-    },
-    GovernanceCredentialIssued {
-        issuer_id: GovernanceIssuerId,
-        subject: Address,
-        credential_type: GovernanceActionType,
-    },
-    GovernanceCredentialBound {
-        subject: Address,
-        credential_type: GovernanceActionType,
-    },
-    GovernanceCredentialRevoked {
-        subject: Address,
-        credential_type: GovernanceActionType,
-    },
-    GovernanceProposalCreated {
-        proposal_id: ProposalId,
-        proposer: Address,
-        action_type: GovernanceActionType,
-        voting_mode: ProposalVotingMode,
-        bond_amount: Amount,
-    },
-    GovernanceVoteCast {
-        proposal_id: ProposalId,
-        voter: Address,
-        choice: VoteChoice,
-        power: u64,
-    },
-    GovernanceProposalFinalized {
-        proposal_id: ProposalId,
-        outcome: ProposalOutcome,
-    },
-    GovernanceProposalExecuted {
-        proposal_id: ProposalId,
-        executor: Address,
+    QCashRecoverRedeemed {
+        signer: Address,
+        claimant: Address,
+        amount: Amount,
     },
     GenesisAllocation {
         recipient: Address,
@@ -166,10 +123,6 @@ pub enum ProtocolEventKind {
     CoinbasePaid {
         miner: Address,
         subsidy: Amount,
-    },
-    MinerFeeRevenue {
-        miner: Address,
-        fees: Amount,
     },
 }
 

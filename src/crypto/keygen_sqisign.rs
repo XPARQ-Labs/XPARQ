@@ -3,7 +3,6 @@
 //! This module is selected only by `sqisign-blockchain-test`. Its wire format
 //! is deliberately incompatible with the default ML-DSA-44 chain.
 
-use crate::crypto::hash::{HashDomain, domain_hash};
 use crate::error::CryptoError;
 use crate::genesis::CURRENT_CHAIN_PARAMS;
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -21,7 +20,7 @@ use static_assertions::const_assert_eq;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 type PaqusSigningKey = SqisignSigningKey<Level5>;
 type PaqusVerifyingKey = SqisignPublicKey<Level5>;
@@ -30,8 +29,6 @@ type PaqusSignature = SqisignSignature<Level5>;
 pub const PUBLIC_KEY_SIZE: usize = 129;
 pub const SECRET_KEY_SIZE: usize = 705;
 pub const SIGNATURE_SIZE: usize = 292;
-pub const CREDENTIAL_FILE_KEY_SIZE: usize = 32;
-pub const CREDENTIAL_FILE_SALT_MIN_SIZE: usize = 16;
 const_assert_eq!(PUBLIC_KEY_SIZE, 129);
 const_assert_eq!(SECRET_KEY_SIZE, 705);
 const_assert_eq!(SIGNATURE_SIZE, 292);
@@ -40,8 +37,7 @@ const VERIFYING_KEY_CACHE_CAPACITY: usize = 4_096;
 pub type PublicKeyBytes = [u8; PUBLIC_KEY_SIZE];
 pub type SecretKeyBytes = [u8; SECRET_KEY_SIZE];
 pub type SignatureBytes = [u8; SIGNATURE_SIZE];
-pub type AuthorizationSeed = super::memory::LockedSecret<[u8; 32]>;
-pub type CredentialFileKey = super::memory::LockedSecret<[u8; CREDENTIAL_FILE_KEY_SIZE]>;
+pub type AuthorizationSeed = Zeroizing<[u8; 32]>;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
@@ -171,7 +167,6 @@ pub fn generate_keypair() -> KeyPair {
 }
 
 pub fn keypair_from_seed(seed: &[u8; 32]) -> KeyPair {
-    let _memory_lock = super::memory::lock_secret(seed).ok();
     // ChaCha12Rng matches rand 0.10 StdRng's stream while additionally
     // zeroizing its key, state, and buffered output when dropped.
     let mut rng = ChaCha12Rng::from_seed(*seed);
@@ -214,7 +209,6 @@ pub fn authorization_seed_from_password(
     password: &[u8],
     primary_public_key: &PublicKey,
 ) -> Result<AuthorizationSeed, CryptoError> {
-    let _password_lock = super::memory::lock_secret(password).ok();
     let params = argon2::Params::new(64 * 1024, 3, 1, Some(32))
         .map_err(|_| CryptoError::InvalidKeyDerivationParameters)?;
     let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
@@ -231,38 +225,16 @@ pub fn authorization_seed_from_password(
     Ok(AuthorizationSeed::new(seed))
 }
 
-pub fn credential_file_key_from_password(
-    password: &[u8],
-    salt: &[u8],
-) -> Result<CredentialFileKey, CryptoError> {
-    let _password_lock = super::memory::lock_secret(password).ok();
-    if salt.len() < CREDENTIAL_FILE_SALT_MIN_SIZE {
-        return Err(CryptoError::InvalidKeyDerivationParameters);
-    }
-    let params = argon2::Params::new(64 * 1024, 3, 1, Some(CREDENTIAL_FILE_KEY_SIZE))
-        .map_err(|_| CryptoError::InvalidKeyDerivationParameters)?;
-    let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    let salt_hash = domain_hash(HashDomain::CredentialFileKey, salt);
-    let mut key = [0_u8; CREDENTIAL_FILE_KEY_SIZE];
-    argon2
-        .hash_password_into(password, &salt_hash.0, &mut key)
-        .map_err(|_| CryptoError::InvalidKeyDerivationParameters)?;
-    Ok(CredentialFileKey::new(key))
-}
-
 pub fn public_key_from_seed(seed: &[u8; 32]) -> PublicKey {
-    let _memory_lock = super::memory::lock_secret(seed).ok();
     keypair_from_seed(seed).public_key
 }
 
 pub fn sign_from_seed(seed: &[u8; 32], message: &[u8]) -> Signature {
-    let _memory_lock = super::memory::lock_secret(seed).ok();
     let keypair = keypair_from_seed(seed);
     sign(&keypair.secret_key, message)
 }
 
 pub fn derive_public_key(secret_key: &SecretKey) -> PublicKey {
-    let _memory_lock = super::memory::lock_secret(secret_key).ok();
     let signing_key = PaqusSigningKey::from_bytes(&secret_key.0)
         .expect("valid SQIsign Level 5 secret key required");
     PublicKey(
@@ -276,7 +248,6 @@ pub fn derive_public_key(secret_key: &SecretKey) -> PublicKey {
 }
 
 pub fn sign(secret_key: &SecretKey, message: &[u8]) -> Signature {
-    let _memory_lock = super::memory::lock_secret(secret_key).ok();
     let signing_key = PaqusSigningKey::from_bytes(&secret_key.0)
         .expect("valid SQIsign Level 5 secret key required");
     let signature = signing_key

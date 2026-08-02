@@ -19,6 +19,10 @@ pub type ProofOfWorkHashBytes = [u8; PROOF_OF_WORK_HASH_SIZE];
 )]
 pub struct Hash(pub HashBytes);
 
+impl Hash {
+    pub const ZERO: Self = Self([0; HASH_SIZE]);
+}
+
 impl Serialize for Hash {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -183,9 +187,7 @@ macro_rules! hash_newtype {
 
 hash_newtype!(BlockHash);
 hash_newtype!(TransactionHash);
-hash_newtype!(WitnessTransactionHash);
 hash_newtype!(MerkleHash);
-hash_newtype!(WitnessMerkleHash);
 hash_newtype!(StateRoot);
 hash_newtype!(PreviousHash);
 
@@ -210,35 +212,27 @@ impl PartialEq<PreviousHash> for BlockHash {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HashDomain {
     Transaction,
-    WitnessTransaction,
+    Block,
     BlockHeader,
     ChainParams,
     ChainSpec,
     GenesisAllocation,
     Coinbase,
     MerkleNode,
-    WitnessMerkleNode,
     AccountState,
+    AccountStatement,
+    AuthorizationProof,
     StateNode,
     BlockStateCommitment,
     QCashCoin,
-    QCashCommitment,
-    QCashDepositAuthorization,
-    QCashDepositTransaction,
+    QCashRedeemKeyCommitment,
+    QCashRedeemAuthorization,
+    QCashRedeemTransaction,
     QCashFile,
     QCashState,
-    GovernanceProposal,
-    GovernanceIssuer,
-    GovernanceContext,
-    GovernanceNullifier,
-    GovernanceState,
-    CredentialFileKey,
-    CredentialUseState,
     PaqusArtifact,
     ProtocolEvent,
     ProtocolState,
-    Vault,
-    VaultState,
     Raw,
 }
 
@@ -246,35 +240,27 @@ impl HashDomain {
     fn tag(self) -> &'static [u8] {
         match self {
             HashDomain::Transaction => b"PAQUS_HASH_TX",
-            HashDomain::WitnessTransaction => b"PAQUS_HASH_WITNESS_TX_V1",
+            HashDomain::Block => b"PAQUS_HASH_BLOCK_V1",
             HashDomain::BlockHeader => b"PAQUS_HASH_BLOCK_HEADER",
             HashDomain::ChainParams => b"PAQUS_HASH_CHAIN_PARAMS_V1",
             HashDomain::ChainSpec => b"PAQUS_HASH_CHAIN_SPEC_V1",
             HashDomain::GenesisAllocation => b"PAQUS_HASH_GENESIS_ALLOCATION",
             HashDomain::Coinbase => b"PAQUS_HASH_COINBASE",
             HashDomain::MerkleNode => b"PAQUS_HASH_MERKLE_NODE",
-            HashDomain::WitnessMerkleNode => b"PAQUS_HASH_WITNESS_MERKLE_NODE_V1",
             HashDomain::AccountState => b"PAQUS_HASH_ACCOUNT_STATE",
+            HashDomain::AccountStatement => b"PAQUS_HASH_ACCOUNT_STATEMENT_FINAL_V1",
+            HashDomain::AuthorizationProof => b"PAQUS_HASH_AUTHORIZATION_PROOF_V1",
             HashDomain::StateNode => b"PAQUS_HASH_STATE_NODE",
             HashDomain::BlockStateCommitment => b"PAQUS_HASH_BLOCK_STATE_COMMITMENT_V1",
             HashDomain::QCashCoin => b"PAQUS_HASH_QCASH_COIN_V1",
-            HashDomain::QCashCommitment => b"PAQUS_HASH_QCASH_COMMITMENT_V1",
-            HashDomain::QCashDepositAuthorization => b"PAQUS_HASH_QCASH_DEPOSIT_AUTH_V2",
-            HashDomain::QCashDepositTransaction => b"PAQUS_HASH_QCASH_DEPOSIT_TX_V1",
+            HashDomain::QCashRedeemKeyCommitment => b"PAQUS_HASH_QCASH_REDEEM_KEY_COMMITMENT_V1",
+            HashDomain::QCashRedeemAuthorization => b"PAQUS_HASH_QCASH_REDEEM_AUTH_V1",
+            HashDomain::QCashRedeemTransaction => b"PAQUS_HASH_QCASH_REDEEM_TX_V1",
             HashDomain::QCashFile => b"PAQUS_HASH_QCASH_FILE_V1",
             HashDomain::QCashState => b"PAQUS_HASH_QCASH_STATE_V1",
-            HashDomain::GovernanceProposal => b"PAQUS_HASH_GOVERNANCE_PROPOSAL_V1",
-            HashDomain::GovernanceIssuer => b"PAQUS_HASH_GOVERNANCE_ISSUER_V1",
-            HashDomain::GovernanceContext => b"PAQUS_HASH_GOVERNANCE_CONTEXT_V1",
-            HashDomain::GovernanceNullifier => b"PAQUS_HASH_GOVERNANCE_NULLIFIER_V1",
-            HashDomain::GovernanceState => b"PAQUS_HASH_GOVERNANCE_STATE_V1",
-            HashDomain::CredentialFileKey => b"PAQUS_HASH_CREDENTIAL_FILE_KEY_V1",
-            HashDomain::CredentialUseState => b"PAQUS_HASH_CREDENTIAL_USE_STATE_V1",
             HashDomain::PaqusArtifact => b"PAQUS_HASH_ARTIFACT_V1",
             HashDomain::ProtocolEvent => b"PAQUS_HASH_PROTOCOL_EVENT_V1",
             HashDomain::ProtocolState => b"PAQUS_HASH_PROTOCOL_STATE_V1",
-            HashDomain::Vault => b"PAQUS_HASH_VAULT_V1",
-            HashDomain::VaultState => b"PAQUS_HASH_VAULT_STATE_V1",
             HashDomain::Raw => b"PAQUS_HASH_RAW",
         }
     }
@@ -300,7 +286,7 @@ pub const POW_ARGON2_MEMORY_KIB: u32 = 64 * 1024;
 /// Argon2id proof-of-work iteration count. This is a consensus parameter.
 pub const POW_ARGON2_ITERATIONS: u32 = 1;
 /// Argon2id proof-of-work parallelism. This is a consensus parameter.
-pub const POW_ARGON2_LANES: u32 = 1;
+pub const POW_ARGON2_LANES: u32 = 4;
 
 pub fn argon2id_proof_of_work_hash(header_bytes: &[u8]) -> Result<ProofOfWorkHash, CryptoError> {
     let params = argon2::Params::new(

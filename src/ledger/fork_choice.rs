@@ -1,8 +1,10 @@
-use crate::block::{Block, BlockHeader};
+use crate::block::{Block, BlockHeader, BlockProof, Nonce};
 use crate::block::{BlockHeight, Height};
-use crate::consensus::{Consensus, DIFFICULTY_START, MIN_DIFFICULTY};
+use crate::consensus::{
+    Consensus, DIFFICULTY_START, MIN_DIFFICULTY, WBDA_WINDOW, is_wbda_epoch_boundary,
+    next_difficulty_from_window,
+};
 use crate::crypto::{BlockHash, HASH_SIZE, Hash};
-use crate::ledger::MEDIAN_TIME_PAST_WINDOW;
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -106,24 +108,22 @@ impl ForkChoice {
             if block.height().0 != parent_node.height.0.saturating_add(1) {
                 return Err(ForkChoiceError::InvalidHeight);
             }
-            if block.timestamp() <= parent_node.block.timestamp() {
-                return Err(ForkChoiceError::InvalidTimestamp);
-            }
-            if let Some(median_time_past) = self.median_time_past(parent)
-                && block.timestamp() <= median_time_past
-            {
-                return Err(ForkChoiceError::InvalidMedianTimePast);
-            }
             parent_node.cumulative_work
         };
         let expected_difficulty = self.expected_difficulty_for(&block, parent)?;
-        if block.difficulty() != expected_difficulty {
-            return Err(ForkChoiceError::InvalidDifficulty);
+        if !block.is_genesis() {
+            if block.difficulty() != expected_difficulty {
+                return Err(ForkChoiceError::InvalidDifficulty);
+            }
+            Consensus::validate_proof_of_work_at_difficulty(&block, expected_difficulty)
+                .map_err(ForkChoiceError::InvalidProofOfWork)?;
         }
-        Consensus::validate_proof_of_work_at_difficulty(&block, expected_difficulty)
-            .map_err(ForkChoiceError::InvalidProofOfWork)?;
 
-        let work = block_work(expected_difficulty);
+        let work = if block.is_genesis() {
+            Work::ZERO
+        } else {
+            block_work(expected_difficulty)
+        };
         let cumulative_work = parent_work.saturating_add(work);
         let node = BlockNode {
             height: block.height(),
@@ -144,12 +144,10 @@ impl ForkChoice {
     ///
     /// Header consensus rules and PoW are checked exactly as for a full block.
     pub fn insert_header(&mut self, header: BlockHeader) -> Result<BlockHash, ForkChoiceError> {
-        self.insert_block(Block {
+        self.insert_block(Block::from_header_with_proof(
             header,
-            genesis_allocations: Vec::new(),
-            coinbase: None,
-            transactions: Vec::new(),
-        })
+            BlockProof::new(Nonce(0)),
+        ))
     }
 
     pub fn best_tip(&self) -> Option<&BlockNode> {
@@ -181,23 +179,6 @@ impl ForkChoice {
         height: BlockHeight,
     ) -> Option<BlockHash> {
         self.ancestor_at_height(hash, height).map(|node| node.hash)
-    }
-
-    pub fn median_time_past(&self, tip: BlockHash) -> Option<u64> {
-        let mut timestamps = Vec::with_capacity(MEDIAN_TIME_PAST_WINDOW);
-        let mut current = tip;
-
-        loop {
-            let node = self.nodes.get(&current)?;
-            timestamps.push(node.block.timestamp());
-            if timestamps.len() == MEDIAN_TIME_PAST_WINDOW || node.height.0 == 0 {
-                break;
-            }
-            current = node.parent;
-        }
-
-        timestamps.sort_unstable();
-        timestamps.get(timestamps.len() / 2).copied()
     }
 
     pub fn branch_from_ancestor(&self, ancestor: BlockHash, tip: BlockHash) -> Option<Vec<Block>> {
@@ -304,21 +285,41 @@ impl ForkChoice {
         block: &Block,
         parent: BlockHash,
     ) -> Result<u32, ForkChoiceError> {
-        if block.height().0 <= 1 {
+        if block.height() == Height(0) {
             return Ok(DIFFICULTY_START);
         }
-        let anchor = self
-            .ancestor_at_height(parent, Height(1))
+        let parent_node = self
+            .nodes
+            .get(&parent)
             .ok_or(ForkChoiceError::MissingParent)?;
-        Consensus::with_default_config()
-            .asert_difficulty(
-                anchor.block.difficulty(),
-                anchor.block.timestamp(),
-                anchor.height,
-                block.timestamp(),
-                block.height(),
-            )
-            .map_err(|_| ForkChoiceError::InvalidDifficulty)
+        if !is_wbda_epoch_boundary(block.height().0) {
+            return Ok(parent_node.block.difficulty());
+        }
+
+        let mut weights = Vec::with_capacity(WBDA_WINDOW);
+        let mut current = parent;
+        for _ in 0..WBDA_WINDOW {
+            let node = self
+                .nodes
+                .get(&current)
+                .ok_or(ForkChoiceError::MissingParent)?;
+            weights.push(
+                node.block
+                    .block_weight()
+                    .try_into()
+                    .map_err(|_| ForkChoiceError::InvalidDifficulty)?,
+            );
+            if node.height == Height(0) {
+                break;
+            }
+            current = node.parent;
+        }
+        if weights.len() != WBDA_WINDOW {
+            return Err(ForkChoiceError::MissingParent);
+        }
+        weights.reverse();
+        next_difficulty_from_window(parent_node.block.difficulty(), &weights)
+            .ok_or(ForkChoiceError::MissingParent)
     }
 
     fn ancestor_at_height(&self, hash: BlockHash, height: Height) -> Option<&BlockNode> {
@@ -342,8 +343,6 @@ pub enum ForkChoiceError {
     InvalidDifficulty,
     InvalidProofOfWork(crate::error::ConsensusError),
     InvalidHeight,
-    InvalidTimestamp,
-    InvalidMedianTimePast,
     MissingParent,
     UnknownFinalizedBlock,
     FinalizedBlockNotOnBestChain,
@@ -357,10 +356,6 @@ impl fmt::Display for ForkChoiceError {
             Self::InvalidDifficulty => f.write_str("block difficulty is invalid for its branch"),
             Self::InvalidProofOfWork(error) => write!(f, "block proof of work is invalid: {error}"),
             Self::InvalidHeight => f.write_str("block height does not follow its parent"),
-            Self::InvalidTimestamp => f.write_str("block timestamp does not follow its parent"),
-            Self::InvalidMedianTimePast => {
-                f.write_str("block timestamp is not greater than branch median time past")
-            }
             Self::MissingParent => f.write_str("block parent is missing from fork graph"),
             Self::UnknownFinalizedBlock => {
                 f.write_str("finalized block is missing from fork graph")
@@ -421,12 +416,10 @@ mod tests {
             genesis_hash,
             miner,
             DIFFICULTY_START.saturating_add(1),
-            genesis.timestamp().saturating_add(1),
             Nonce(0),
             Vec::new(),
             Some(crate::block::CoinbaseTransaction::new(
                 miner,
-                crate::consensus::supply::Amount(0),
                 crate::consensus::supply::Amount(0),
             )),
             vec![],

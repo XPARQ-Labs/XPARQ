@@ -2,7 +2,6 @@ use crate::block::{Block, BlockHeader};
 use crate::block::{BlockHeight, Height};
 use crate::crypto::{BlockHash, HASH_SIZE, Hash};
 use crate::error::LedgerError;
-use crate::ledger::MEDIAN_TIME_PAST_WINDOW;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -112,19 +111,7 @@ impl Chain {
                     return Err(LedgerError::InvalidParent);
                 }
 
-                if block.timestamp()
-                    <= self
-                        .timestamp_at(tip_height)
-                        .ok_or(LedgerError::InvalidParent)?
-                {
-                    return Err(LedgerError::InvalidTimestamp);
-                }
-
-                if let Some(median_time_past) = self.median_time_past(tip_height)
-                    && block.timestamp() <= median_time_past
-                {
-                    return Err(LedgerError::InvalidMedianTimePast);
-                }
+                let _ = tip_height;
             }
             _ => return Err(LedgerError::InvalidParent),
         }
@@ -155,23 +142,5 @@ impl Chain {
             None => None,
         };
         Ok(block)
-    }
-
-    fn timestamp_at(&self, height: BlockHeight) -> Option<u64> {
-        self.headers.get(&height).map(|header| header.timestamp)
-    }
-
-    pub fn median_time_past(&self, tip_height: BlockHeight) -> Option<u64> {
-        let mut timestamps = Vec::with_capacity(MEDIAN_TIME_PAST_WINDOW);
-        let mut height = tip_height.0;
-        loop {
-            timestamps.push(self.headers.get(&Height(height))?.timestamp);
-            if timestamps.len() == MEDIAN_TIME_PAST_WINDOW || height == 0 {
-                break;
-            }
-            height = height.saturating_sub(1);
-        }
-        timestamps.sort_unstable();
-        timestamps.get(timestamps.len() / 2).copied()
     }
 }

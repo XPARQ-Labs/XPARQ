@@ -16,7 +16,7 @@ pub enum TransactionError {
     EmptyAuthorizationPublicKey,
     EmptyAuthorizationSignature,
     UnsupportedSignatureScheme,
-    InvalidWitnessEncoding,
+    InvalidAuthorizationProofEncoding,
     TransactionTooLarge,
     InvalidSignature,
     InvalidAuthorizationSignature,
@@ -28,11 +28,6 @@ pub enum TransactionError {
     InvalidValidityWindow,
     NotYetValid,
     ValidityExpired,
-    InvalidGovernanceProposal,
-    InactiveGovernanceProposal,
-    DuplicateGovernanceCredential,
-    InvalidGovernanceCredential,
-    TooManyCredentials,
     Serialization(CodecError),
 }
 
@@ -71,8 +66,8 @@ impl fmt::Display for TransactionError {
             TransactionError::UnsupportedSignatureScheme => {
                 f.write_str("signature scheme is not active at this block height")
             }
-            TransactionError::InvalidWitnessEncoding => {
-                f.write_str("transaction witness encoding is invalid")
+            TransactionError::InvalidAuthorizationProofEncoding => {
+                f.write_str("transaction authorization proof encoding is invalid")
             }
             TransactionError::TransactionTooLarge => {
                 f.write_str("signed transaction exceeds maximum serialized size")
@@ -94,7 +89,7 @@ impl fmt::Display for TransactionError {
                 f.write_str("transaction contains invalid QCash metadata")
             }
             TransactionError::InvalidQCashRecipient => {
-                f.write_str("QCash deposit recipient is invalid")
+                f.write_str("QCash redeem recipient is invalid")
             }
             TransactionError::InvalidValidityWindow => {
                 f.write_str("transaction validity window is invalid")
@@ -104,21 +99,6 @@ impl fmt::Display for TransactionError {
             }
             TransactionError::ValidityExpired => {
                 f.write_str("transaction validity window has expired")
-            }
-            TransactionError::InvalidGovernanceProposal => {
-                f.write_str("governance proposal is invalid")
-            }
-            TransactionError::InactiveGovernanceProposal => {
-                f.write_str("governance proposal is not active")
-            }
-            TransactionError::DuplicateGovernanceCredential => {
-                f.write_str("governance credential has already been used for this context")
-            }
-            TransactionError::InvalidGovernanceCredential => {
-                f.write_str("governance credential proof is invalid")
-            }
-            TransactionError::TooManyCredentials => {
-                f.write_str("transaction carries too many credentials")
             }
             TransactionError::Serialization(error) => {
                 write!(f, "transaction encoding failed: {error}")

@@ -6,7 +6,6 @@ pub mod keygen;
 #[cfg(feature = "sqisign-blockchain-test")]
 #[path = "keygen_sqisign.rs"]
 pub mod keygen;
-pub mod memory;
 #[cfg(feature = "sqisign-candidate")]
 pub mod sqisign_candidate;
 
@@ -29,18 +28,15 @@ pub use agility::{
 pub use hash::{
     BlockHash, HASH_SIZE, Hash, HashBytes, HashDomain, MerkleHash, POW_ARGON2_ITERATIONS,
     POW_ARGON2_LANES, POW_ARGON2_MEMORY_KIB, PROOF_OF_WORK_HASH_SIZE, PreviousHash,
-    ProofOfWorkHash, ProofOfWorkHashBytes, StateRoot, TransactionHash, WitnessMerkleHash,
-    WitnessTransactionHash, argon2id_proof_of_work_hash, domain_hash, hash_bytes,
-    hash_meets_difficulty,
+    ProofOfWorkHash, ProofOfWorkHashBytes, StateRoot, TransactionHash, argon2id_proof_of_work_hash,
+    domain_hash, hash_bytes, hash_meets_difficulty,
 };
 pub use keygen::{
-    AuthorizationSeed, CREDENTIAL_FILE_KEY_SIZE, CREDENTIAL_FILE_SALT_MIN_SIZE, CachedVerifyingKey,
-    CredentialFileKey, KeyPair, PUBLIC_KEY_SIZE, PublicKey, PublicKeyBytes, SECRET_KEY_SIZE,
-    SIGNATURE_SIZE, SecretKey, SecretKeyBytes, Signature, SignatureBytes,
+    AuthorizationSeed, CachedVerifyingKey, KeyPair, PUBLIC_KEY_SIZE, PublicKey, PublicKeyBytes,
+    SECRET_KEY_SIZE, SIGNATURE_SIZE, SecretKey, SecretKeyBytes, Signature, SignatureBytes,
     authorization_keypair_from_password, authorization_seed_from_password, cached_verifying_key,
-    credential_file_key_from_password, derive_public_key, generate_keypair, keypair_from_seed,
-    public_key_from_seed, sign, sign_from_seed, verify, verify_dual_parallel, verify_result,
+    derive_public_key, generate_keypair, keypair_from_seed, public_key_from_seed, sign,
+    sign_from_seed, verify, verify_dual_parallel, verify_result,
 };
 #[cfg(feature = "sqisign-blockchain-test")]
 pub use keygen::{clear_verifying_key_cache, verify_batch_parallel};
-pub use memory::{LockedSecret, SecretMemoryLock, harden_process_memory, lock_secret};

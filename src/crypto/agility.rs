@@ -2,7 +2,7 @@
 //!
 //! Registration does not imply activation. Upgrade plans are deterministic
 //! consensus data: nodes derive the same policy from the block height and the
-//! governance-approved plan.
+//! protocol-approved plan.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
@@ -56,7 +56,7 @@ pub enum CryptoPrimitiveFamily {
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CryptoUpgradePlan {
-    /// Governance proposal/event that authorized this upgrade.
+    /// Protocol event or release record that authorized this upgrade.
     pub authorization_id: [u8; 32],
     pub from: CryptoPrimitive,
     pub to: CryptoPrimitive,
@@ -133,11 +133,8 @@ pub enum SignatureSchemeStatus {
 #[repr(u8)]
 pub enum SignatureContext {
     ProtocolTransaction = 1,
-    GovernanceAction = 2,
-    GovernanceCredentialIssuer = 3,
-    GovernanceCredentialUse = 4,
-    QCashTransaction = 5,
-    RecoveryProof = 6,
+    QCashTransaction = 2,
+    RecoveryProof = 3,
 }
 
 #[cfg(not(feature = "sqisign-blockchain-test"))]
@@ -162,7 +159,7 @@ pub const fn signature_scheme_active_for_consensus(scheme: SignatureScheme) -> b
 }
 
 /// Height-aware consensus gate. The plan must already have passed
-/// [`CryptoUpgradePlan::validate`] and governance authorization checks.
+/// [`CryptoUpgradePlan::validate`] and protocol authorization checks.
 pub fn signature_scheme_active_at_height(
     scheme: SignatureScheme,
     height: u64,

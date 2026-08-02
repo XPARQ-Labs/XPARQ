@@ -365,7 +365,7 @@ version = "1.21.4"
 
 [[package]]
 name = "paqus"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "argon2",
  "bech32",

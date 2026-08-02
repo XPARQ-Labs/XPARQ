@@ -1,3 +1,8 @@
+//! Runtime CPU feature detection helpers for architecture-specific crypto code.
+//!
+//! This vendored crate is used by local cryptographic dependencies to expose
+//! small macros and modules for checking processor capabilities at runtime.
+
 #![no_std]
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/RustCrypto/media/6ee8e381/logo.svg",

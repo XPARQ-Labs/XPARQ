@@ -37,7 +37,6 @@ pub struct ChainParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GenesisParams {
     pub miner_address: [u8; crate::crypto::ADDRESS_SIZE],
-    pub timestamp: u64,
     pub nonce: u64,
     pub hash: [u8; HASH_SIZE],
 }
@@ -58,9 +57,6 @@ pub const PAQUS_CHAIN: ChainParams = ChainParams {
     network_magic: [0x58, 0x50, 0x51, 0x01],
     genesis: GenesisParams {
         miner_address: [0; crate::crypto::ADDRESS_SIZE],
-        // Fixed timestamp of the first canonical genesis build. This must stay static so all nodes
-        // derive the same genesis hash.
-        timestamp: 1_700_000_000,
         nonce: 0,
         hash: FROZEN_GENESIS_HASH,
     },
@@ -86,7 +82,6 @@ pub const PAQUS_TESTNET_CHAIN: ChainParams = ChainParams {
     network_magic: [0x54, 0x58, 0x50, 0x51],
     genesis: GenesisParams {
         miner_address: [0; crate::crypto::ADDRESS_SIZE],
-        timestamp: 1_700_000_001,
         nonce: 0,
         hash: TESTNET_GENESIS_HASH,
     },
@@ -108,7 +103,6 @@ pub const PAQUS_DEVNET_CHAIN: ChainParams = ChainParams {
     network_magic: [0x44, 0x58, 0x50, 0x51],
     genesis: GenesisParams {
         miner_address: [0; crate::crypto::ADDRESS_SIZE],
-        timestamp: 1_700_000_002,
         nonce: 0,
         hash: DEVNET_GENESIS_HASH,
     },
@@ -117,17 +111,17 @@ pub const PAQUS_DEVNET_CHAIN: ChainParams = ChainParams {
 /// Frozen mainnet identity for the canonical encoding and block format.
 /// Never update this value without defining a new protocol version and chain identity.
 pub const FROZEN_GENESIS_HASH: [u8; HASH_SIZE] = [
-    60, 11, 40, 86, 49, 2, 145, 228, 67, 65, 157, 119, 251, 131, 2, 163, 36, 95, 171, 68, 246, 111,
-    201, 116, 29, 3, 8, 101, 32, 184, 106, 133,
+    6, 124, 227, 5, 168, 159, 56, 121, 147, 95, 72, 56, 128, 61, 122, 105, 154, 243, 64, 247, 51,
+    162, 121, 24, 57, 235, 16, 201, 110, 139, 255, 171,
 ];
 
 pub const TESTNET_GENESIS_HASH: [u8; HASH_SIZE] = [
-    11, 129, 165, 200, 45, 156, 6, 232, 83, 27, 36, 21, 216, 101, 108, 87, 99, 193, 173, 182, 214,
-    74, 37, 135, 57, 52, 238, 38, 5, 119, 173, 95,
+    90, 130, 83, 154, 190, 205, 242, 37, 41, 192, 35, 171, 7, 205, 76, 254, 179, 184, 190, 138,
+    197, 207, 98, 246, 85, 18, 110, 52, 181, 95, 99, 36,
 ];
 pub const DEVNET_GENESIS_HASH: [u8; HASH_SIZE] = [
-    11, 66, 139, 20, 165, 58, 159, 248, 110, 71, 205, 81, 136, 108, 206, 178, 19, 251, 254, 140,
-    182, 93, 118, 162, 147, 0, 24, 196, 234, 119, 41, 208,
+    198, 183, 207, 189, 60, 207, 251, 49, 23, 159, 140, 32, 112, 185, 92, 69, 173, 131, 232, 80,
+    121, 195, 110, 196, 223, 203, 153, 185, 97, 113, 145, 98,
 ];
 
 #[cfg(any(
@@ -156,13 +150,11 @@ pub const CURRENT_CHAIN_PARAMS: ChainParams = PAQUS_TESTNET_CHAIN;
 pub const CURRENT_CHAIN_PARAMS: ChainParams = PAQUS_DEVNET_CHAIN;
 
 pub const GENESIS_MINER_ADDRESS: Address = Address(CURRENT_CHAIN_PARAMS.genesis.miner_address);
-pub const GENESIS_TIMESTAMP: u64 = CURRENT_CHAIN_PARAMS.genesis.timestamp;
 pub const GENESIS_HASH: [u8; HASH_SIZE] = CURRENT_CHAIN_PARAMS.genesis.hash;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GenesisConfig {
     pub miner_address: Address,
-    pub timestamp: u64,
 }
 
 pub fn create_genesis_block(config: GenesisConfig) -> Result<Block, GenesisError> {
@@ -176,11 +168,10 @@ pub fn create_genesis_block_for_chain(
     let allocations = genesis_allocations_for_chain(params);
     let mut block = Block::genesis_with_chain_commitment(
         config.miner_address,
-        config.timestamp,
         chain_identity_commitment(params)?,
         allocations,
     )?;
-    block.header.nonce = crate::block::Nonce(params.genesis.nonce);
+    block.proof.nonce = crate::block::Nonce(params.genesis.nonce);
     Ok(block)
 }
 
@@ -223,8 +214,7 @@ pub fn create_genesis_ledger_for_chain(
 ) -> Result<Ledger, GenesisError> {
     let mut ledger = Ledger::new();
     let block = create_genesis_block_for_chain(params, config)?;
-    let now = block.timestamp();
-    ledger.apply_block_at(block, now)?;
+    ledger.apply_block(block)?;
 
     Ok(ledger)
 }
@@ -238,7 +228,6 @@ pub fn genesis_block_for_chain(params: ChainParams) -> Result<Block, GenesisErro
         params,
         GenesisConfig {
             miner_address: Address(params.genesis.miner_address),
-            timestamp: params.genesis.timestamp,
         },
     )
 }
@@ -266,20 +255,13 @@ pub fn genesis_ledger_for_chain(params: ChainParams) -> Result<Ledger, GenesisEr
     validate_genesis_identity(params)?;
     let mut ledger = Ledger::new();
     let block = genesis_block_for_chain(params)?;
-    let now = block.timestamp();
-    ledger.apply_block_at(block, now)?;
+    ledger.apply_block(block)?;
 
     Ok(ledger)
 }
 
-pub fn create_default_genesis_ledger(
-    miner_address: Address,
-    timestamp: u64,
-) -> Result<Ledger, GenesisError> {
-    create_genesis_ledger(GenesisConfig {
-        miner_address,
-        timestamp,
-    })
+pub fn create_default_genesis_ledger(miner_address: Address) -> Result<Ledger, GenesisError> {
+    create_genesis_ledger(GenesisConfig { miner_address })
 }
 
 #[derive(BorshSerialize)]
@@ -291,11 +273,6 @@ struct ChainIdentityCommitment {
     unit_name: String,
     protocol_stage: String,
     protocol_version: u8,
-    pow_algorithm: String,
-    pow_memory_kib: u32,
-    pow_iterations: u32,
-    pow_lanes: u32,
-    difficulty_algorithm: String,
     network_magic: [u8; 4],
 }
 
@@ -308,11 +285,6 @@ pub fn chain_identity_commitment(params: ChainParams) -> Result<Hash, crate::err
         unit_name: params.unit_name.to_owned(),
         protocol_stage: params.protocol_stage.to_owned(),
         protocol_version: params.protocol_version,
-        pow_algorithm: params.pow_algorithm.to_owned(),
-        pow_memory_kib: params.pow_memory_kib,
-        pow_iterations: params.pow_iterations,
-        pow_lanes: params.pow_lanes,
-        difficulty_algorithm: params.difficulty_algorithm.to_owned(),
         network_magic: params.network_magic,
     };
     Ok(domain_hash(
@@ -353,7 +325,7 @@ mod tests {
     fn mainnet_genesis_has_zero_supply_and_no_allocations() {
         assert!(MAINNET_FAIR_LAUNCH);
         let block = genesis_block().unwrap();
-        assert!(block.genesis_allocations.is_empty());
+        assert!(block.body.genesis_allocations.is_empty());
         let ledger = genesis_ledger().unwrap();
         assert_eq!(
             ledger.economic_supply().unwrap(),
@@ -366,7 +338,6 @@ mod tests {
     fn mainnet_consensus_rejects_forged_genesis_premine() {
         let block = Block::genesis(
             Address([0; crate::crypto::ADDRESS_SIZE]),
-            GENESIS_TIMESTAMP,
             vec![GenesisAllocation::new(
                 Address([0x55; crate::crypto::ADDRESS_SIZE]),
                 crate::consensus::supply::Amount(1),

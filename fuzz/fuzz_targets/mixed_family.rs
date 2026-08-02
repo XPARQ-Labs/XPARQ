@@ -8,30 +8,28 @@ use paqus::transaction::TransactionFamily;
 fuzz_target!(|data: &[u8]| {
     let mut block = support::mixed_family_block();
     if data.first().copied().unwrap_or(0) & 1 != 0 {
-        block.transactions.reverse();
+        block.body.transactions.reverse();
         block = paqus::block::Block::from_protocol_transactions(
             block.height(),
             block.previous_hash(),
             block.miner_address(),
             block.difficulty(),
-            block.timestamp(),
-            block.header.nonce,
+            block.proof.nonce,
             Vec::new(),
-            block.coinbase,
-            block.transactions,
+            block.body.coinbase,
+            block.body.transactions,
         )
         .expect("rebuild reordered block");
     }
 
-    let mut families = [false; 3];
-    for transaction in &block.transactions {
+    let mut families = [false; 2];
+    for transaction in &block.body.transactions {
         families[match transaction.family() {
             TransactionFamily::Transfer => 0,
             TransactionFamily::QCash => 1,
-            TransactionFamily::Governance => 2,
         }] = true;
     }
-    assert_eq!(families, [true; 3]);
+    assert_eq!(families, [true; 2]);
 
     let encoded = paqus::codec::block_bytes(&block).expect("mixed block encoding");
     let decoded = paqus::codec::decode_block(&encoded).expect("mixed block decoding");
@@ -42,10 +40,10 @@ fuzz_target!(|data: &[u8]| {
     let payload_count_offset = paqus::codec::canonical_bytes(&block.header)
         .expect("header encoding")
         .len()
-        + paqus::codec::canonical_bytes(&block.genesis_allocations)
+        + paqus::codec::canonical_bytes(&block.body.genesis_allocations)
             .expect("allocation encoding")
             .len()
-        + paqus::codec::canonical_bytes(&block.coinbase)
+        + paqus::codec::canonical_bytes(&block.body.coinbase)
             .expect("coinbase encoding")
             .len();
     let mut hostile = encoded;

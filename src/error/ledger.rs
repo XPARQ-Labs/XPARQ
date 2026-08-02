@@ -1,6 +1,6 @@
 use crate::block::BlockError;
 use crate::error::{CodecError, ConsensusError};
-use crate::state::{QCashUtxoError, StateError, VaultError};
+use crate::state::{QCashUtxoError, StateError};
 use crate::transaction::TransactionError;
 use std::error::Error;
 use std::fmt;
@@ -15,30 +15,18 @@ pub enum LedgerError {
     InvalidTransaction(TransactionError),
     InvalidSignature,
     InsufficientBalance,
-    NonceMismatch,
     InvalidStateRoot,
     InvalidCoinbase,
     InvalidParent,
     InvalidBlockHeight,
     InvalidPreviousHash,
-    InvalidTimestamp,
-    InvalidMedianTimePast,
     FinalityViolation,
     DuplicateBlock,
     SupplyOverflow,
     SupplyMismatch,
     UnauthorizedSupplyCreation,
     InvalidQCashUtxo(QCashUtxoError),
-    InvalidVault(VaultError),
     MissingQCashAccountJournal,
-    DuplicateGovernanceProposal,
-    DuplicateGovernanceProposalFinalization,
-    DuplicateGovernanceProposalExecution,
-    GovernanceProposalNotAccepted,
-    UnknownGovernanceProposal,
-    DuplicateGovernanceIssuer,
-    UnknownGovernanceIssuer,
-    IssuerNotAcceptedForProposal,
     EventInvariantViolation,
     Serialization(CodecError),
 }
@@ -54,9 +42,6 @@ impl fmt::Display for LedgerError {
             LedgerError::InvalidTransaction(error) => write!(f, "invalid transaction: {error}"),
             LedgerError::InvalidSignature => f.write_str("transaction signature is invalid"),
             LedgerError::InsufficientBalance => f.write_str("account balance is insufficient"),
-            LedgerError::NonceMismatch => {
-                f.write_str("transaction nonce does not match account nonce")
-            }
             LedgerError::InvalidStateRoot => f.write_str("block state root does not match ledger"),
             LedgerError::InvalidCoinbase => f.write_str("block coinbase is invalid"),
             LedgerError::InvalidParent => f.write_str("block parent does not match ledger tip"),
@@ -65,12 +50,6 @@ impl fmt::Display for LedgerError {
             }
             LedgerError::InvalidPreviousHash => {
                 f.write_str("block previous hash does not match ledger tip")
-            }
-            LedgerError::InvalidTimestamp => {
-                f.write_str("block timestamp must be greater than ledger tip")
-            }
-            LedgerError::InvalidMedianTimePast => {
-                f.write_str("block timestamp must be greater than median time past")
             }
             LedgerError::FinalityViolation => {
                 f.write_str("reorganization would replace finalized chain history")
@@ -88,33 +67,8 @@ impl fmt::Display for LedgerError {
             LedgerError::InvalidQCashUtxo(error) => {
                 write!(f, "invalid QCash UTXO state transition: {error}")
             }
-            LedgerError::InvalidVault(error) => {
-                write!(f, "invalid vault state transition: {error:?}")
-            }
             LedgerError::MissingQCashAccountJournal => {
                 f.write_str("QCash account block journal was not found")
-            }
-            LedgerError::DuplicateGovernanceProposal => {
-                f.write_str("governance proposal already exists")
-            }
-            LedgerError::DuplicateGovernanceProposalFinalization => {
-                f.write_str("governance proposal is already finalized")
-            }
-            LedgerError::DuplicateGovernanceProposalExecution => {
-                f.write_str("governance proposal is already executed")
-            }
-            LedgerError::GovernanceProposalNotAccepted => {
-                f.write_str("governance proposal is not accepted")
-            }
-            LedgerError::UnknownGovernanceProposal => {
-                f.write_str("governance proposal was not found")
-            }
-            LedgerError::DuplicateGovernanceIssuer => {
-                f.write_str("governance issuer already exists")
-            }
-            LedgerError::UnknownGovernanceIssuer => f.write_str("governance issuer was not found"),
-            LedgerError::IssuerNotAcceptedForProposal => {
-                f.write_str("governance credential issuer is not accepted for this proposal")
             }
             LedgerError::EventInvariantViolation => {
                 f.write_str("applied block could not produce canonical protocol events")
@@ -148,7 +102,6 @@ impl From<ConsensusError> for LedgerError {
     fn from(error: ConsensusError) -> Self {
         match error {
             ConsensusError::InvalidPreviousHash => Self::InvalidPreviousHash,
-            ConsensusError::InvalidTimestamp => Self::InvalidTimestamp,
             ConsensusError::InvalidHeight => Self::InvalidBlockHeight,
             _ => Self::InvalidConsensus(error),
         }
@@ -175,7 +128,6 @@ impl From<StateError> for LedgerError {
     fn from(error: StateError) -> Self {
         match error {
             StateError::InsufficientBalance => Self::InsufficientBalance,
-            StateError::InvalidNonce => Self::NonceMismatch,
             _ => Self::InvalidState(error),
         }
     }

@@ -1,12 +1,13 @@
-use crate::block::{BlockHeight, Nonce};
+use crate::block::BlockHeight;
 use crate::consensus::supply::{Amount, Balance};
-use crate::crypto::{Address, PublicKey};
+use crate::crypto::{Address, Hash, HashDomain, PublicKey, domain_hash};
 use crate::error::StateError;
-use crate::transaction::AccountNonce;
 use crate::transaction::Transaction;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+pub type AccountStatement = Hash;
 
 #[derive(
     Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash,
@@ -14,10 +15,9 @@ use std::collections::BTreeMap;
 pub struct Account {
     pub address: Address,
     pub balance: Balance,
-    pub nonce: AccountNonce,
     pub authorization: Option<AccountAuthorization>,
     pub credits: Vec<Credit>,
-    pub locks: Vec<BalanceLock>,
+    pub statement: AccountStatement,
 }
 
 #[derive(
@@ -33,14 +33,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exhausted_nonce_is_rejected_instead_of_reused() {
-        let mut account = Account::trusted_with_nonce(
-            Address([1; crate::crypto::ADDRESS_SIZE]),
-            Amount(1),
-            crate::block::Nonce(u64::MAX),
-        );
-        assert_eq!(account.increment_nonce(), Err(StateError::NonceOverflow));
-        assert_eq!(account.nonce.0, u64::MAX);
+    fn account_statement_binds_applied_transaction_hash() {
+        let account = Account::new(Address([1; crate::crypto::ADDRESS_SIZE]), Amount(10));
+        let first = account
+            .calculate_statement(
+                account.statement,
+                Hash([1; crate::crypto::HASH_SIZE]),
+                Hash::ZERO,
+            )
+            .unwrap();
+        let second = account
+            .calculate_statement(
+                account.statement,
+                Hash([2; crate::crypto::HASH_SIZE]),
+                Hash::ZERO,
+            )
+            .unwrap();
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn account_statement_binds_authorization_proof_hash() {
+        let account = Account::new(Address([2; crate::crypto::ADDRESS_SIZE]), Amount(10));
+        let tx_hash = Hash([3; crate::crypto::HASH_SIZE]);
+        let first = account
+            .calculate_statement(
+                account.statement,
+                tx_hash,
+                Hash([4; crate::crypto::HASH_SIZE]),
+            )
+            .unwrap();
+        let second = account
+            .calculate_statement(
+                account.statement,
+                tx_hash,
+                Hash([5; crate::crypto::HASH_SIZE]),
+            )
+            .unwrap();
+
+        assert_ne!(first, second);
     }
 }
 
@@ -51,14 +83,6 @@ pub struct Credit {
     pub amount: Amount,
     pub maturity_height: BlockHeight,
     pub source: CreditSource,
-}
-
-#[derive(
-    Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash,
-)]
-pub struct BalanceLock {
-    pub amount: Amount,
-    pub until_height: BlockHeight,
 }
 
 #[derive(
@@ -80,23 +104,35 @@ pub enum CreditSource {
     Transaction,
     Fee,
     MiningReward,
-    QCashDeposit,
+    QCashRedeem,
+}
+
+#[derive(BorshSerialize)]
+struct AccountStatementPayload {
+    address: Address,
+    balance: Balance,
+    authorization: Option<AccountAuthorization>,
+    credits: Vec<Credit>,
+    authorized_tx_hash: Hash,
+    authorization_proof_hash: Hash,
+    last_state: AccountStatement,
 }
 
 impl Account {
     pub fn new(address: Address, balance: Balance) -> Self {
-        Self {
+        let mut account = Self {
             address,
             balance,
-            nonce: Nonce(0),
             authorization: None,
             credits: vec![Credit {
                 amount: balance,
                 maturity_height: crate::block::Height(0),
                 source: CreditSource::Genesis,
             }],
-            locks: Vec::new(),
-        }
+            statement: AccountStatement::ZERO,
+        };
+        account.advance_statement(AccountStatement::ZERO, Hash::ZERO, Hash::ZERO);
+        account
     }
 
     pub fn new_with_authorization(
@@ -108,19 +144,52 @@ impl Account {
     }
 
     /// Builds account state for trusted imports or tests.
-    pub fn trusted_with_nonce(address: Address, balance: Balance, nonce: AccountNonce) -> Self {
-        Self {
+    pub fn trusted(address: Address, balance: Balance) -> Self {
+        let mut account = Self {
             address,
             balance,
-            nonce,
             authorization: None,
             credits: vec![Credit {
                 amount: balance,
                 maturity_height: crate::block::Height(0),
                 source: CreditSource::Genesis,
             }],
-            locks: Vec::new(),
-        }
+            statement: AccountStatement::ZERO,
+        };
+        account.advance_statement(AccountStatement::ZERO, Hash::ZERO, Hash::ZERO);
+        account
+    }
+
+    pub fn calculate_statement(
+        &self,
+        last_state: AccountStatement,
+        authorized_tx_hash: Hash,
+        authorization_proof_hash: Hash,
+    ) -> Result<AccountStatement, crate::error::CodecError> {
+        let payload = AccountStatementPayload {
+            address: self.address,
+            balance: self.balance,
+            authorization: self.authorization.clone(),
+            credits: self.credits.clone(),
+            authorized_tx_hash,
+            authorization_proof_hash,
+            last_state,
+        };
+        Ok(domain_hash(
+            HashDomain::AccountStatement,
+            &crate::codec::canonical_bytes(&payload)?,
+        ))
+    }
+
+    pub fn advance_statement(
+        &mut self,
+        last_state: AccountStatement,
+        authorized_tx_hash: Hash,
+        authorization_proof_hash: Hash,
+    ) {
+        self.statement = self
+            .calculate_statement(last_state, authorized_tx_hash, authorization_proof_hash)
+            .expect("account statement payload is canonically serializable");
     }
 
     pub fn register_authorization(
@@ -145,17 +214,7 @@ impl Account {
             .filter(|credit| credit.maturity_height.0 <= height.0)
             .map(|credit| credit.amount.0)
             .sum::<u64>();
-        Amount(matured.saturating_sub(self.locked_balance_at(height).0))
-    }
-
-    pub fn locked_balance_at(&self, height: BlockHeight) -> Amount {
-        Amount(
-            self.locks
-                .iter()
-                .filter(|lock| height.0 <= lock.until_height.0)
-                .map(|lock| lock.amount.0)
-                .sum(),
-        )
+        Amount(matured)
     }
 
     pub fn immature_balance_at(&self, height: BlockHeight) -> Amount {
@@ -224,26 +283,6 @@ impl Account {
         Ok(())
     }
 
-    pub fn lock_until(
-        &mut self,
-        amount: Balance,
-        until_height: BlockHeight,
-        current_height: BlockHeight,
-    ) -> Result<(), StateError> {
-        if amount.0 == 0 {
-            return Ok(());
-        }
-        if self.available_balance_at(current_height).0 < amount.0 {
-            return Err(StateError::InsufficientBalance);
-        }
-        self.locks.push(BalanceLock {
-            amount,
-            until_height,
-        });
-        self.compact_locks();
-        Ok(())
-    }
-
     pub fn compact_credits(&mut self) {
         let mut compacted: BTreeMap<(BlockHeight, CreditSource), u64> = BTreeMap::new();
         for credit in &self.credits {
@@ -267,55 +306,28 @@ impl Account {
             .collect();
     }
 
-    pub fn compact_locks(&mut self) {
-        let mut compacted: BTreeMap<BlockHeight, u64> = BTreeMap::new();
-        for lock in &self.locks {
-            if lock.amount.0 == 0 {
-                continue;
-            }
-            let entry = compacted.entry(lock.until_height).or_insert(0);
-            *entry = entry.saturating_add(lock.amount.0);
-        }
-        self.locks = compacted
-            .into_iter()
-            .map(|(until_height, amount)| BalanceLock {
-                amount: Amount(amount),
-                until_height,
-            })
-            .collect();
-    }
-
-    pub fn increment_nonce(&mut self) -> Result<(), StateError> {
-        self.nonce.0 = self
-            .nonce
-            .0
-            .checked_add(1)
-            .ok_or(StateError::NonceOverflow)?;
-        Ok(())
-    }
-
     pub fn apply_outgoing_transaction(
         &mut self,
         transaction: &Transaction,
         height: BlockHeight,
+        applied_tx_hash: Hash,
+        authorization_proof_hash: Hash,
     ) -> Result<(), StateError> {
         if transaction.from != self.address {
             return Err(StateError::AddressMismatch);
         }
 
-        if transaction.nonce != self.nonce {
-            return Err(StateError::InvalidNonce);
+        if transaction.last_state != self.statement {
+            return Err(StateError::InvalidAccountStatement);
         }
 
         let total = transaction
             .total_amount()
-            .map_err(|_| StateError::BalanceOverflow)?
-            .0
-            .checked_add(transaction.fee.0)
-            .ok_or(StateError::BalanceOverflow)?;
+            .map_err(|_| StateError::BalanceOverflow)?;
 
-        self.debit_at(Amount(total), height)?;
-        self.increment_nonce()?;
+        let last_state = self.statement;
+        self.debit_at(total, height)?;
+        self.advance_statement(last_state, applied_tx_hash, authorization_proof_hash);
         Ok(())
     }
 
@@ -326,7 +338,7 @@ impl Account {
     ) -> Result<(), StateError> {
         let output = transaction
             .outputs()
-            .find(|output| output.to == self.address)
+            .find(|output| output.to.address() == Some(self.address))
             .ok_or(StateError::AddressMismatch)?;
         self.credit_at_maturity(output.amount, maturity_height, CreditSource::Transaction)
     }

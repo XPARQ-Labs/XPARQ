@@ -127,7 +127,7 @@ pub fn address_from_string(address: &str) -> Result<Address, CryptoError> {
 
 /// Decodes the retired `PX` encoding for an ML-DSA wallet file.
 ///
-/// This is only for validating stored credentials during the HRP transition.
+/// This is only for validating stored addresses during the HRP transition.
 /// Network-facing parsers must use [`address_from_string`], where `PX` is
 /// reserved for SQIsign Level 5.
 #[doc(hidden)]

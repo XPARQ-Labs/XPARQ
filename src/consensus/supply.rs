@@ -2,17 +2,17 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use static_assertions::const_assert;
 
-use crate::{block::BlockHeight, consensus::BLOCKS_PER_YEAR};
+use crate::block::BlockHeight;
 
 pub const UNIT: u64 = 1;
-pub const XPQ: u64 = 100_000_000;
-pub const DECIMALS: u8 = 8;
+pub const XPQ: u64 = 1_000_000;
+pub const DECIMALS: u8 = 6;
 
-const_assert!(XPQ == 100_000_000);
+const_assert!(XPQ == 1_000_000);
 
-pub const BLOCK_REWARD: u64 = 50 * XPQ; // 50 XPQ
-pub const TAIL_EMISSION: u64 = 161_172_119;
-pub const TAIL_EMISSION_START_YEARS: u64 = 4;
+pub const BLOCK_REWARD: u64 = 15_000_000;
+pub const TAIL_EMISSION: u64 = 850_000;
+pub const TAIL_EMISSION_START_HEIGHT: u64 = 400_000;
 
 #[derive(
     Debug,
@@ -32,8 +32,6 @@ pub struct Amount(pub u64);
 
 pub type Balance = Amount;
 pub type Fee = Amount;
-
-pub const TAIL_EMISSION_START_HEIGHT: u64 = TAIL_EMISSION_START_YEARS * BLOCKS_PER_YEAR;
 
 pub fn block_reward(height: BlockHeight) -> Amount {
     if height.0 < TAIL_EMISSION_START_HEIGHT {

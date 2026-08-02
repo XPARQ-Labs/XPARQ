@@ -16,11 +16,9 @@ pub enum BlockError {
     InvalidCoinbase,
     InvalidGenesisAllocation,
     InvalidMerkleRoot,
-    InvalidWitnessRoot,
     InvalidStateRoot,
-    FeeOverflow,
+    InvalidBlockWeight,
     CoinbaseOverflow,
-    FutureTimestamp,
     Serialization(CodecError),
 }
 
@@ -37,7 +35,7 @@ impl fmt::Display for BlockError {
             }
             BlockError::TooManyTransactions => f.write_str("block contains too many transactions"),
             BlockError::BlockTooLarge => f.write_str("block serialized size exceeds limit"),
-            BlockError::BlockTooHeavy => f.write_str("block witness weight exceeds limit"),
+            BlockError::BlockTooHeavy => f.write_str("block serialized weight exceeds limit"),
             BlockError::InvalidTransaction => f.write_str("block contains an invalid transaction"),
             BlockError::DuplicateTransaction => {
                 f.write_str("block contains a duplicate transaction")
@@ -49,13 +47,11 @@ impl fmt::Display for BlockError {
             BlockError::InvalidMerkleRoot => {
                 f.write_str("block merkle root does not match transactions")
             }
-            BlockError::InvalidWitnessRoot => {
-                f.write_str("block witness root does not match transaction witnesses")
-            }
             BlockError::InvalidStateRoot => f.write_str("block state root does not match ledger"),
-            BlockError::FeeOverflow => f.write_str("block transaction fees overflow"),
+            BlockError::InvalidBlockWeight => {
+                f.write_str("block header weight does not match canonical block size")
+            }
             BlockError::CoinbaseOverflow => f.write_str("block coinbase total overflow"),
-            BlockError::FutureTimestamp => f.write_str("block timestamp is too far in the future"),
             BlockError::Serialization(error) => write!(f, "block encoding failed: {error}"),
         }
     }

@@ -14,14 +14,18 @@ pub use crate::error::LedgerError;
 pub const CONFIRMATION_DEPTH: u32 = 2;
 pub const BLOCK_REWARD_MATURITY: u32 = 50;
 pub const FINALITY_DEPTH: u32 = 5;
-pub const MEDIAN_TIME_PAST_WINDOW: usize = 11;
-/// Minimum height difference between the confirming withdraw and a deposit.
+/// Account statements become eligible as `last_state` one block after they are produced.
+///
+/// This is an activation delay, not finality. A statement is finalized only when
+/// the block that produced it is finalized by the global chain.
+pub const ACCOUNT_STATEMENT_ACTIVATION_DEPTH: u32 = 1;
+/// Minimum height difference between the confirming withdraw and a redeem.
 ///
 /// The QCash coin is active as soon as the withdraw block is accepted; only
-/// deposit eligibility is delayed.
-pub const QCASH_DEPOSIT_DELAY: u32 = 1;
-/// A deposited QCash credit follows the same spendability delay as a normal transfer.
-pub const QCASH_DEPOSIT_MATURITY: u32 = CONFIRMATION_DEPTH;
+/// redeem eligibility is delayed.
+pub const QCASH_REDEEM_DELAY: u32 = 1;
+/// A redeemed QCash credit follows the same spendability delay as a normal transfer.
+pub const QCASH_REDEEM_CREDIT_MATURITY: u32 = CONFIRMATION_DEPTH;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransactionLifecycle {
@@ -103,11 +107,11 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn qcash_uses_one_block_offchain_delay_and_normal_deposit_confirmation() {
-        assert_eq!(QCASH_DEPOSIT_DELAY, 1);
+    fn qcash_uses_one_block_offchain_delay_and_normal_redeem_confirmation() {
+        assert_eq!(QCASH_REDEEM_DELAY, 1);
         assert_eq!(CONFIRMATION_DEPTH, 2);
         assert_eq!(FINALITY_DEPTH, 5);
-        assert_eq!(QCASH_DEPOSIT_MATURITY, CONFIRMATION_DEPTH);
+        assert_eq!(QCASH_REDEEM_CREDIT_MATURITY, CONFIRMATION_DEPTH);
     }
 
     #[test]

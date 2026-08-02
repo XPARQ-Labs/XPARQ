@@ -1,16 +1,16 @@
 # Paqus Fuzzing
 
 The fuzz workspace covers canonical decoders, roundtrips, unified
-mixed-family blocks, atomic state transitions, QCash withdraw/deposit and
+mixed-family blocks, atomic state transitions, QCash withdraw/redeem and
 rollback, and transaction/Merkle/witness commitment mutation.
 
 ## Targets
 
 - `decode`, `decode_protocol`, `decode_block`: malformed canonical input;
 - `roundtrip`: canonical block and protocol-transaction encode/decode;
-- `state_transition`: Transfer, QCash, and Governance success/failure
+- `state_transition`: Transfer, QCash, and Vault success/failure
   atomicity, invariants, and value conservation;
-- `qcash_lifecycle`: withdrawal, matured deposit, fee conservation, rejected
+- `qcash_lifecycle`: withdrawal, redeem, fee conservation, rejected
   signature atomicity, and exact rollback;
 - `commitment_mutation`: Merkle root, witness root, and witness-data mutation;
 - `mixed_family`: all families in one ordered block plus hostile transaction
@@ -31,4 +31,3 @@ cargo +nightly fuzz run state_transition fuzz/corpus/state_transition -- \
 Replace `state_transition` and its corpus path with another target. Every pull
 request compiles all targets. The scheduled workflow runs each security target
 with a bounded time, timeout, input length, and RSS limit.
-

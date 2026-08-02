@@ -802,13 +802,9 @@ mod bundle_tests {
         accounts.insert(address, account);
         let account_state_root = calculate_state_root(&accounts).unwrap();
         let qcash_state_root = StateRoot([2; HASH_SIZE]);
-        let governance_state_root = StateRoot([3; HASH_SIZE]);
-        let credential_use_state_root = StateRoot([4; HASH_SIZE]);
         let protocol_state_root = crate::ledger::calculate_protocol_state_root_from_roots(
             account_state_root,
             qcash_state_root,
-            governance_state_root,
-            credential_use_state_root,
         )
         .unwrap();
         let block_hash = BlockHash([9; HASH_SIZE]);
@@ -823,8 +819,6 @@ mod bundle_tests {
                 block_hash,
                 account_state_root,
                 qcash_state_root,
-                governance_state_root,
-                credential_use_state_root,
                 protocol_state_root,
             ),
             account_proof: create_account_state_proof(&accounts, &address)

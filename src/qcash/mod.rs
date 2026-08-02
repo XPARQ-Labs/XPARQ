@@ -1,6 +1,3 @@
-mod model;
+mod domain;
 
-pub mod file;
-pub mod metadata;
-
-pub use model::*;
+pub use domain::*;

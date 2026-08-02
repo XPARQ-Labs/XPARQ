@@ -1,9 +1,9 @@
 use crate::crypto::{HASH_SIZE, Hash, HashDomain, domain_hash};
 use borsh::{BorshDeserialize, BorshSerialize};
 
-pub use crate::crypto::{MerkleHash, WitnessMerkleHash};
+pub use crate::crypto::MerkleHash;
 
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MerkleInclusionProof {
     pub leaf_index: u32,
     pub leaf_count: u32,
@@ -124,6 +124,6 @@ mod tests {
         let mut tampered = proof.clone();
         tampered.siblings[0] = Hash([8; 32]);
         assert!(!tampered.verify(leaves[1], root, HashDomain::MerkleNode));
-        assert!(!proof.verify(leaves[1], root, HashDomain::WitnessMerkleNode));
+        assert!(!proof.verify(leaves[1], root, HashDomain::Transaction));
     }
 }

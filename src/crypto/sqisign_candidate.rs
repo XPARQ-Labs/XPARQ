@@ -269,7 +269,7 @@ mod tests {
             role_message(SignatureContext::QCashTransaction, OWNER_ROLE, message)
         );
         assert_ne!(
-            role_message(SignatureContext::GovernanceAction, OWNER_ROLE, message),
+            role_message(SignatureContext::ProtocolTransaction, OWNER_ROLE, message),
             role_message(SignatureContext::RecoveryProof, OWNER_ROLE, message)
         );
     }

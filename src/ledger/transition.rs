@@ -1,13 +1,15 @@
 use crate::block::Block;
 use crate::block::BlockHeight;
 use crate::consensus::supply::Amount;
-use crate::consensus::{Consensus, DIFFICULTY_START};
+use crate::consensus::{
+    Consensus, DIFFICULTY_START, WBDA_WINDOW, is_wbda_epoch_boundary, next_difficulty_from_window,
+};
 use crate::crypto::Address;
 use crate::crypto::{BlockHash, StateRoot, TransactionHash};
 use crate::event::{ProtocolEvent, ProtocolEventKind};
 use crate::ledger::{CONFIRMATION_DEPTH, Ledger, LedgerError};
 use crate::state::Account;
-use crate::transaction::{QCashTransactionKind, SignedTransaction, Transaction};
+use crate::transaction::{OutputTarget, QCashTransactionKind, SignedTransaction, Transaction};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,7 +18,6 @@ pub struct TransactionExecution {
     pub from: crate::crypto::Address,
     pub to: crate::crypto::Address,
     pub amount: Amount,
-    pub fee: Amount,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,40 +34,55 @@ impl TransactionExecution {
         transaction_hash: TransactionHash,
         transaction: &Transaction,
         output: crate::transaction::TransferOutput,
-        fee: Amount,
+        miner_address: Address,
     ) -> Self {
         Self {
             transaction_hash,
             from: transaction.from,
-            to: output.to,
+            to: resolve_output_target(output.to, miner_address),
             amount: output.amount,
-            fee,
         }
     }
 }
 
-pub(crate) fn apply_transaction_to_state(
+pub(crate) fn resolve_output_target(target: OutputTarget, miner_address: Address) -> Address {
+    match target {
+        OutputTarget::Address(address) => address,
+        OutputTarget::BlockMiner => miner_address,
+    }
+}
+
+pub(crate) fn apply_transaction_to_state_with_miner(
     accounts: &mut BTreeMap<Address, Account>,
     transaction: &Transaction,
     height: BlockHeight,
+    miner_address: Address,
+    authorization_proof_hash: crate::crypto::Hash,
 ) -> Result<(), LedgerError> {
     transaction.validate_for_height(height)?;
     if !accounts.contains_key(&transaction.from) {
         return Err(LedgerError::AccountNotFound);
     }
+    let applied_tx_hash = transaction.hash()?.as_hash();
 
     {
         let sender = accounts
             .get_mut(&transaction.from)
             .ok_or(LedgerError::AccountNotFound)?;
-        sender.apply_outgoing_transaction(transaction, height)?;
+        sender.apply_outgoing_transaction(
+            transaction,
+            height,
+            applied_tx_hash,
+            authorization_proof_hash,
+        )?;
     }
 
     let maturity_height = crate::block::Height(height.0.saturating_add(CONFIRMATION_DEPTH as u64));
     for output in transaction.outputs() {
+        let to = resolve_output_target(output.to, miner_address);
         let receiver = accounts
-            .entry(output.to)
-            .or_insert_with(|| Account::new(output.to, Amount(0)));
+            .entry(to)
+            .or_insert_with(|| Account::new(to, Amount(0)));
         receiver.credit_at_maturity(
             output.amount,
             maturity_height,
@@ -77,10 +93,25 @@ pub(crate) fn apply_transaction_to_state(
     Ok(())
 }
 
-pub(crate) fn apply_signed_transaction_to_state(
+pub(crate) fn apply_transaction_to_state(
+    accounts: &mut BTreeMap<Address, Account>,
+    transaction: &Transaction,
+    height: BlockHeight,
+) -> Result<(), LedgerError> {
+    apply_transaction_to_state_with_miner(
+        accounts,
+        transaction,
+        height,
+        Address([0; 20]),
+        crate::crypto::Hash::ZERO,
+    )
+}
+
+pub(crate) fn apply_signed_transaction_to_state_with_miner(
     accounts: &mut BTreeMap<Address, Account>,
     signed: &SignedTransaction,
     height: BlockHeight,
+    miner_address: Address,
 ) -> Result<(), LedgerError> {
     let account = accounts
         .get(&signed.transaction.from)
@@ -95,7 +126,17 @@ pub(crate) fn apply_signed_transaction_to_state(
             .ok_or(LedgerError::AccountNotFound)?
             .register_authorization(owner, auth)?;
     }
-    apply_transaction_to_state(accounts, &signed.transaction, height)
+    let applied_tx_hash = signed.transaction.hash()?.as_hash();
+    let authorization_proof_hash = signed
+        .authorization_proof
+        .hash_with_transaction(applied_tx_hash)?;
+    apply_transaction_to_state_with_miner(
+        accounts,
+        &signed.transaction,
+        height,
+        miner_address,
+        authorization_proof_hash,
+    )
 }
 
 pub fn validate_transaction_against_state(
@@ -141,7 +182,7 @@ impl Ledger {
         let block_hash = block.hash()?;
         let mut events = Vec::with_capacity(
             block.transaction_count()
-                + block.genesis_allocations.len()
+                + block.body.genesis_allocations.len()
                 + usize::from(!block.is_genesis()),
         );
         let mut emit = |transaction_hash, kind| {
@@ -157,14 +198,13 @@ impl Ledger {
 
         for signed in block.transfer_transactions() {
             let tx = &signed.transaction;
-            for (index, output) in tx.outputs().enumerate() {
+            for output in tx.outputs() {
                 emit(
                     Some(tx.hash()?),
                     ProtocolEventKind::Transfer {
                         from: tx.from,
-                        to: output.to,
+                        to: resolve_output_target(output.to, block.miner_address()),
                         amount: output.amount,
-                        fee: if index == 0 { tx.fee } else { Amount(0) },
                     },
                 );
             }
@@ -178,12 +218,21 @@ impl Ledger {
                         amount: *amount,
                     }
                 }
-                QCashTransactionKind::Deposit {
+                QCashTransactionKind::Redeem {
                     recipient,
                     metadata,
-                } => ProtocolEventKind::QCashDeposited {
+                } => ProtocolEventKind::QCashRedeemed {
                     signer: tx.signer,
                     recipient: *recipient,
+                    amount: metadata
+                        .amount()
+                        .map_err(|_| LedgerError::EventInvariantViolation)?,
+                },
+                QCashTransactionKind::RecoverRedeem {
+                    claimant, metadata, ..
+                } => ProtocolEventKind::QCashRecoverRedeemed {
+                    signer: tx.signer,
+                    claimant: *claimant,
                     amount: metadata
                         .amount()
                         .map_err(|_| LedgerError::EventInvariantViolation)?,
@@ -191,116 +240,8 @@ impl Ledger {
             };
             emit(Some(tx.hash()?), kind);
         }
-        for signed in block.governance_actions() {
-            let tx = &signed.action;
-            let kind = match &tx.kind {
-                crate::governance::GovernanceActionKind::RegisterIssuer {
-                    issuer_public_key,
-                    metadata_hash,
-                    metadata_uri,
-                    fee_policy_hash,
-                    fee_policy_uri,
-                    bond_amount,
-                    bond_locked_until,
-                } => {
-                    let issuer = crate::governance::GovernanceIssuer::new_registered(
-                        tx.signer,
-                        **issuer_public_key,
-                        *metadata_hash,
-                        metadata_uri.clone(),
-                        *fee_policy_hash,
-                        fee_policy_uri.clone(),
-                        *bond_amount,
-                        *bond_locked_until,
-                        height,
-                    )
-                    .map_err(|_| LedgerError::EventInvariantViolation)?;
-                    ProtocolEventKind::GovernanceIssuerRegistered {
-                        issuer_id: issuer.id,
-                        controller: tx.signer,
-                    }
-                }
-                crate::governance::GovernanceActionKind::ApproveIssuer { issuer_id, .. } => {
-                    ProtocolEventKind::GovernanceIssuerApproved {
-                        issuer_id: *issuer_id,
-                        approver: tx.signer,
-                    }
-                }
-                crate::governance::GovernanceActionKind::IssueCredential { credential } => {
-                    let issuer = self
-                        .governance
-                        .active_issuer_by_key(&credential.issuer_public_key)
-                        .ok_or(LedgerError::EventInvariantViolation)?;
-                    ProtocolEventKind::GovernanceCredentialIssued {
-                        issuer_id: issuer.id,
-                        subject: credential
-                            .subject
-                            .ok_or(LedgerError::EventInvariantViolation)?,
-                        credential_type: credential.credential_type.clone(),
-                    }
-                }
-                crate::governance::GovernanceActionKind::BindCredential { credential_use } => {
-                    ProtocolEventKind::GovernanceCredentialBound {
-                        subject: tx.signer,
-                        credential_type: credential_use.credential.credential_type.clone(),
-                    }
-                }
-                crate::governance::GovernanceActionKind::RevokeCredential { credential_type } => {
-                    ProtocolEventKind::GovernanceCredentialRevoked {
-                        subject: tx.signer,
-                        credential_type: credential_type.clone(),
-                    }
-                }
-                crate::governance::GovernanceActionKind::CreateProposal {
-                    proposal,
-                    bond_amount,
-                    ..
-                } => ProtocolEventKind::GovernanceProposalCreated {
-                    proposal_id: proposal.id,
-                    proposer: proposal.proposer,
-                    action_type: proposal.action_type.clone(),
-                    voting_mode: proposal.voting_mode,
-                    bond_amount: *bond_amount,
-                },
-                crate::governance::GovernanceActionKind::Vote {
-                    proposal_id,
-                    choice,
-                    authorization,
-                } => ProtocolEventKind::GovernanceVoteCast {
-                    proposal_id: *proposal_id,
-                    voter: tx.signer,
-                    choice: *choice,
-                    power: match authorization.as_ref() {
-                        crate::governance::VoteAuthorization::Credential(_)
-                        | crate::governance::VoteAuthorization::BoundCredential { .. } => 1,
-                        crate::governance::VoteAuthorization::CoinPower { amount } => amount.0,
-                    },
-                },
-                crate::governance::GovernanceActionKind::FinalizeProposal { proposal_id } => {
-                    let proposal = self
-                        .governance
-                        .proposal(proposal_id)
-                        .ok_or(LedgerError::EventInvariantViolation)?;
-                    let tally = self
-                        .governance
-                        .vote_tally(proposal_id)
-                        .ok_or(LedgerError::EventInvariantViolation)?;
-                    ProtocolEventKind::GovernanceProposalFinalized {
-                        proposal_id: *proposal_id,
-                        outcome: tally.outcome_for(proposal),
-                    }
-                }
-                crate::governance::GovernanceActionKind::ExecuteProposal { proposal_id } => {
-                    ProtocolEventKind::GovernanceProposalExecuted {
-                        proposal_id: *proposal_id,
-                        executor: tx.signer,
-                    }
-                }
-            };
-            emit(Some(tx.hash()?), kind);
-        }
         if block.is_genesis() {
-            for allocation in &block.genesis_allocations {
+            for allocation in &block.body.genesis_allocations {
                 emit(
                     None,
                     ProtocolEventKind::GenesisAllocation {
@@ -309,7 +250,7 @@ impl Ledger {
                     },
                 );
             }
-        } else if let Some(coinbase) = &block.coinbase {
+        } else if let Some(coinbase) = &block.body.coinbase {
             emit(
                 None,
                 ProtocolEventKind::CoinbasePaid {
@@ -317,15 +258,6 @@ impl Ledger {
                     subsidy: coinbase.subsidy,
                 },
             );
-            if coinbase.fees.0 > 0 {
-                emit(
-                    None,
-                    ProtocolEventKind::MinerFeeRevenue {
-                        miner: coinbase.to,
-                        fees: coinbase.fees,
-                    },
-                );
-            }
         }
 
         self.events_by_block.insert(block_hash, events);
@@ -337,15 +269,30 @@ impl Ledger {
         transaction: &SignedTransaction,
         height: BlockHeight,
     ) -> Result<(), LedgerError> {
+        self.apply_signed_transaction_at_with_miner(transaction, height, Address([0; 20]))
+    }
+
+    pub fn apply_signed_transaction_at_with_miner(
+        &mut self,
+        transaction: &SignedTransaction,
+        height: BlockHeight,
+        miner_address: Address,
+    ) -> Result<(), LedgerError> {
         let mut staged = self.clone();
-        staged.record_attached_credentials(&transaction.transaction.credential_uses)?;
-        apply_signed_transaction_to_state(&mut staged.accounts, transaction, height)?;
+        staged.validate_account_statement_is_active(transaction.transaction.last_state, height)?;
+        apply_signed_transaction_to_state_with_miner(
+            &mut staged.accounts,
+            transaction,
+            height,
+            miner_address,
+        )?;
+        staged.register_account_statement_for_address(&transaction.transaction.from, height)?;
         staged.refresh_account_state(&transaction.transaction.from)?;
         for output in transaction.transaction.outputs() {
-            staged.refresh_account_state(&output.to)?;
+            let recipient = resolve_output_target(output.to, miner_address);
+            staged.register_account_bootstrap_statement_for_address(&recipient)?;
+            staged.refresh_account_state(&recipient)?;
         }
-        // Fee revenue is credited by coinbase after every transaction in the
-        // candidate has executed, so supply cannot be checked mid-block.
         *self = staged;
         Ok(())
     }
@@ -385,16 +332,12 @@ impl Ledger {
         let mut transaction_executions = Vec::new();
         for signed in block.transfer_transactions() {
             let transaction_hash = signed.hash()?;
-            for (index, output) in signed.transaction.outputs().enumerate() {
+            for output in signed.transaction.outputs() {
                 transaction_executions.push(TransactionExecution::from_output(
                     transaction_hash,
                     &signed.transaction,
                     output,
-                    if index == 0 {
-                        signed.transaction.fee
-                    } else {
-                        Amount(0)
-                    },
+                    block.miner_address(),
                 ));
             }
         }
@@ -416,7 +359,7 @@ impl Ledger {
     ) -> Result<(Self, StateRoot), LedgerError> {
         block.validate_structure()?;
         self.chain.validate_next_block(block)?;
-        if enforce_proof_of_work {
+        if enforce_proof_of_work && !block.is_genesis() {
             let expected_difficulty = self.expected_difficulty_for_block(block)?;
             Consensus::validate_proof_of_work_at_difficulty(block, expected_difficulty)?;
         }
@@ -424,10 +367,14 @@ impl Ledger {
         let mut staged = self.clone();
 
         let block_hash = block.hash()?;
-        for transaction in &block.transactions {
+        for transaction in &block.body.transactions {
             match transaction {
                 crate::transaction::SignedProtocolTransaction::Transfer(transaction) => {
-                    staged.apply_signed_transaction_at(transaction, block.height())?;
+                    staged.apply_signed_transaction_at_with_miner(
+                        transaction,
+                        block.height(),
+                        block.miner_address(),
+                    )?;
                 }
                 crate::transaction::SignedProtocolTransaction::QCash(transaction) => {
                     staged.apply_signed_qcash_transaction_in_block(
@@ -436,13 +383,10 @@ impl Ledger {
                         block_hash,
                     )?;
                 }
-                crate::transaction::SignedProtocolTransaction::Governance(transaction) => {
-                    staged.apply_signed_governance_action(transaction, block.height())?;
-                }
             }
         }
         if block.is_genesis() {
-            for allocation in &block.genesis_allocations {
+            for allocation in &block.body.genesis_allocations {
                 staged.create_account(allocation.to, allocation.amount)?;
             }
         } else {
@@ -465,34 +409,53 @@ impl Ledger {
         Ok((staged, expected_state_root))
     }
 
-    fn expected_difficulty_for_block(&self, block: &Block) -> Result<u32, LedgerError> {
+    pub fn expected_difficulty_after_tip(&self) -> Result<u32, LedgerError> {
         let Some(tip_height) = self.chain.tip_height() else {
             return Ok(DIFFICULTY_START);
         };
-        if block.height().0 <= 1 || tip_height == crate::block::Height(0) {
+        let next_height = crate::block::Height(tip_height.0.saturating_add(1));
+        self.expected_difficulty_for_height(next_height)
+    }
+
+    fn expected_difficulty_for_block(&self, block: &Block) -> Result<u32, LedgerError> {
+        self.expected_difficulty_for_height(block.height())
+    }
+
+    fn expected_difficulty_for_height(
+        &self,
+        height: crate::block::BlockHeight,
+    ) -> Result<u32, LedgerError> {
+        if height.0 == 0 {
             return Ok(DIFFICULTY_START);
         }
-        let anchor = self
+        let parent = self
             .chain
-            .block(&crate::block::Height(1))
+            .block(&crate::block::Height(height.0 - 1))
             .ok_or(LedgerError::InvalidParent)?;
-        Ok(Consensus::with_default_config().asert_difficulty(
-            anchor.difficulty(),
-            anchor.timestamp(),
-            anchor.height(),
-            block.timestamp(),
-            block.height(),
-        )?)
+        if !is_wbda_epoch_boundary(height.0) {
+            return Ok(parent.difficulty());
+        }
+        let start = height.0.saturating_sub(WBDA_WINDOW as u64);
+        let weights = (start..height.0)
+            .map(|height| {
+                self.chain
+                    .block(&crate::block::Height(height))
+                    .ok_or(LedgerError::InvalidParent)?
+                    .block_weight()
+                    .try_into()
+                    .map_err(|_| LedgerError::InvalidParent)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        next_difficulty_from_window(parent.difficulty(), &weights).ok_or(LedgerError::InvalidParent)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::Nonce;
     use crate::crypto::{Address, dual_address_from_public_keys, generate_keypair, sign};
     use crate::state::CreditSource;
-    use crate::transaction::{SignedTransaction, TransferOutput};
+    use crate::transaction::{OutputTarget, SignedTransaction, TransferOutput};
 
     #[test]
     fn batch_transfer_uses_candidate_height_for_mature_balance() {
@@ -503,10 +466,8 @@ mod tests {
         ledger
             .create_account_with_authorization(sender, authorization.public_key, Amount(0))
             .unwrap();
-        ledger
-            .accounts
-            .get_mut(&sender)
-            .unwrap()
+        let account = ledger.accounts.get_mut(&sender).unwrap();
+        account
             .credit_at_maturity(
                 Amount(100),
                 crate::block::Height(50),
@@ -518,17 +479,16 @@ mod tests {
             sender,
             vec![
                 TransferOutput {
-                    to: Address([2; 20]),
+                    to: (Address([2; 20])).into(),
                     amount: Amount(10),
                 },
                 TransferOutput {
-                    to: Address([3; 20]),
+                    to: (Address([3; 20])).into(),
                     amount: Amount(10),
                 },
             ],
-            Amount(1),
-            Nonce(0),
-        );
+        )
+        .with_last_state(ledger.account(&sender).unwrap().statement);
         let signing_bytes = transaction.signing_bytes().unwrap();
         let signed = SignedTransaction::new_authorized(
             transaction,
@@ -547,7 +507,7 @@ mod tests {
         ledger
             .apply_signed_transaction_at(&signed, crate::block::Height(50))
             .unwrap();
-        assert_eq!(ledger.account(&sender).unwrap().balance, Amount(79));
+        assert_eq!(ledger.account(&sender).unwrap().balance, Amount(80));
         assert_eq!(
             ledger.account(&Address([2; 20])).unwrap().balance,
             Amount(10)
@@ -555,6 +515,49 @@ mod tests {
         assert_eq!(
             ledger.account(&Address([3; 20])).unwrap().balance,
             Amount(10)
+        );
+    }
+
+    #[test]
+    fn block_miner_output_is_paid_to_candidate_miner() {
+        let primary = generate_keypair();
+        let authorization = generate_keypair();
+        let sender = dual_address_from_public_keys(&primary.public_key, &authorization.public_key);
+        let miner = Address([9; 20]);
+        let mut ledger = Ledger::new();
+        ledger
+            .create_account_with_authorization(sender, authorization.public_key, Amount(100))
+            .unwrap();
+
+        let transaction = Transaction::new(
+            sender,
+            vec![TransferOutput {
+                to: OutputTarget::BlockMiner,
+                amount: Amount(7),
+            }],
+        )
+        .with_last_state(ledger.account(&sender).unwrap().statement);
+        let signing_bytes = transaction.signing_bytes().unwrap();
+        let signed = SignedTransaction::new_authorized(
+            transaction,
+            primary.public_key,
+            sign(&primary.secret_key, &signing_bytes),
+            authorization.public_key,
+            sign(&authorization.secret_key, &signing_bytes),
+        );
+
+        ledger
+            .apply_signed_transaction_at_with_miner(&signed, crate::block::Height(1), miner)
+            .unwrap();
+
+        assert_eq!(ledger.account(&sender).unwrap().balance, Amount(93));
+        assert_eq!(ledger.account(&miner).unwrap().balance, Amount(7));
+        assert_eq!(
+            ledger
+                .account(&miner)
+                .unwrap()
+                .available_balance_at(crate::block::Height(1)),
+            Amount(0)
         );
     }
 }

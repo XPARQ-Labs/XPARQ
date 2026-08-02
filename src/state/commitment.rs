@@ -22,8 +22,6 @@ pub struct BlockStateCommitment {
     pub block_hash: BlockHash,
     pub account_state_root: StateRoot,
     pub qcash_state_root: StateRoot,
-    pub governance_state_root: StateRoot,
-    pub credential_use_state_root: StateRoot,
     pub protocol_state_root: StateRoot,
 }
 
@@ -33,8 +31,6 @@ impl BlockStateCommitment {
         block_hash: BlockHash([0; crate::crypto::HASH_SIZE]),
         account_state_root: StateRoot::ZERO,
         qcash_state_root: StateRoot::ZERO,
-        governance_state_root: StateRoot::ZERO,
-        credential_use_state_root: StateRoot::ZERO,
         protocol_state_root: StateRoot::ZERO,
     };
 
@@ -43,8 +39,6 @@ impl BlockStateCommitment {
         block_hash: BlockHash,
         account_state_root: StateRoot,
         qcash_state_root: StateRoot,
-        governance_state_root: StateRoot,
-        credential_use_state_root: StateRoot,
         protocol_state_root: StateRoot,
     ) -> Self {
         Self {
@@ -52,8 +46,6 @@ impl BlockStateCommitment {
             block_hash,
             account_state_root,
             qcash_state_root,
-            governance_state_root,
-            credential_use_state_root,
             protocol_state_root,
         }
     }
@@ -66,18 +58,8 @@ impl BlockStateCommitment {
     }
 
     pub fn matches_protocol_root(&self) -> Result<bool, crate::error::CodecError> {
-        Ok(self.protocol_state_root
-            == StateRoot(
-                domain_hash(
-                    HashDomain::ProtocolState,
-                    &crate::codec::canonical_bytes(&(
-                        self.account_state_root,
-                        self.qcash_state_root,
-                        self.governance_state_root,
-                        self.credential_use_state_root,
-                    ))?,
-                )
-                .0,
-            ))
+        let bytes =
+            crate::codec::canonical_bytes(&(self.account_state_root, self.qcash_state_root))?;
+        Ok(self.protocol_state_root == StateRoot(domain_hash(HashDomain::ProtocolState, &bytes).0))
     }
 }

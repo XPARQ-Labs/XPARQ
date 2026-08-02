@@ -12,7 +12,6 @@ pub enum ConsensusError {
     ProofOfWorkHashFailed,
     InvalidHeight,
     InvalidPreviousHash,
-    InvalidTimestamp,
     InsufficientProofOfWork,
     Serialization(CodecError),
 }
@@ -32,9 +31,6 @@ impl fmt::Display for ConsensusError {
             ConsensusError::InvalidHeight => f.write_str("block height does not extend tip"),
             ConsensusError::InvalidPreviousHash => {
                 f.write_str("block previous hash does not match tip")
-            }
-            ConsensusError::InvalidTimestamp => {
-                f.write_str("block timestamp must be greater than tip")
             }
             ConsensusError::InsufficientProofOfWork => {
                 f.write_str("block hash does not satisfy proof-of-work difficulty")

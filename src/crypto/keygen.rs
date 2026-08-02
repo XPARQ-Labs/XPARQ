@@ -1,4 +1,3 @@
-use crate::crypto::hash::{HashDomain, domain_hash};
 use crate::error::CryptoError;
 use crate::genesis::CURRENT_CHAIN_PARAMS;
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -9,7 +8,7 @@ use ml_dsa::{
 use static_assertions::const_assert_eq;
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -22,18 +21,14 @@ type PaqusSignature = MlDsaSignature<MlDsa44>;
 pub const PUBLIC_KEY_SIZE: usize = 1_312;
 pub const SECRET_KEY_SIZE: usize = 2_560;
 pub const SIGNATURE_SIZE: usize = 2_420;
-pub const CREDENTIAL_FILE_KEY_SIZE: usize = 32;
-pub const CREDENTIAL_FILE_SALT_MIN_SIZE: usize = 16;
 const_assert_eq!(PUBLIC_KEY_SIZE, 1_312);
 const_assert_eq!(SECRET_KEY_SIZE, 2_560);
 const_assert_eq!(SIGNATURE_SIZE, 2_420);
-const_assert_eq!(CREDENTIAL_FILE_KEY_SIZE, 32);
 
 pub type PublicKeyBytes = [u8; PUBLIC_KEY_SIZE];
 pub type SecretKeyBytes = [u8; SECRET_KEY_SIZE];
 pub type SignatureBytes = [u8; SIGNATURE_SIZE];
-pub type AuthorizationSeed = super::memory::LockedSecret<[u8; 32]>;
-pub type CredentialFileKey = super::memory::LockedSecret<[u8; CREDENTIAL_FILE_KEY_SIZE]>;
+pub type AuthorizationSeed = Zeroizing<[u8; 32]>;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
@@ -163,7 +158,6 @@ pub fn generate_keypair() -> KeyPair {
 }
 
 pub fn keypair_from_seed(seed: &[u8; 32]) -> KeyPair {
-    let _memory_lock = super::memory::lock_secret(seed).ok();
     let signing_key = PaqusSigningKey::from_seed(&(*seed).into());
     keypair_from_signing_key(signing_key)
 }
@@ -185,7 +179,6 @@ pub fn authorization_keypair_from_password(
     primary_public_key: &PublicKey,
 ) -> Result<KeyPair, CryptoError> {
     let seed = authorization_seed_from_password(password, primary_public_key)?;
-    let _seed_lock = super::memory::lock_secret(&*seed).ok();
     let mut encoded_seed = (*seed).into();
     let signing_key = PaqusSigningKey::from_seed(&encoded_seed);
     encoded_seed.zeroize();
@@ -204,7 +197,6 @@ pub fn authorization_seed_from_password(
     password: &[u8],
     primary_public_key: &PublicKey,
 ) -> Result<AuthorizationSeed, CryptoError> {
-    let _password_lock = super::memory::lock_secret(password).ok();
     let params = argon2::Params::new(64 * 1024, 3, 1, Some(32))
         .map_err(|_| CryptoError::InvalidKeyDerivationParameters)?;
     let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
@@ -221,51 +213,27 @@ pub fn authorization_seed_from_password(
     Ok(AuthorizationSeed::new(seed))
 }
 
-pub fn credential_file_key_from_password(
-    password: &[u8],
-    salt: &[u8],
-) -> Result<CredentialFileKey, CryptoError> {
-    let _password_lock = super::memory::lock_secret(password).ok();
-    if salt.len() < CREDENTIAL_FILE_SALT_MIN_SIZE {
-        return Err(CryptoError::InvalidKeyDerivationParameters);
-    }
-
-    let params = argon2::Params::new(64 * 1024, 3, 1, Some(CREDENTIAL_FILE_KEY_SIZE))
-        .map_err(|_| CryptoError::InvalidKeyDerivationParameters)?;
-    let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    let salt_hash = domain_hash(HashDomain::CredentialFileKey, salt);
-    let mut key = [0_u8; CREDENTIAL_FILE_KEY_SIZE];
-    argon2
-        .hash_password_into(password, &salt_hash.0, &mut key)
-        .map_err(|_| CryptoError::InvalidKeyDerivationParameters)?;
-    Ok(CredentialFileKey::new(key))
-}
-
 /// Deterministically derives an ML-DSA-44 public key from a compact 32-byte seed.
 /// This is used by bearer QCash files so the large expanded secret key never
 /// needs to be stored in the file.
 pub fn public_key_from_seed(seed: &[u8; 32]) -> PublicKey {
-    let _memory_lock = super::memory::lock_secret(seed).ok();
     let signing_key = PaqusSigningKey::from_seed(&(*seed).into());
     PublicKey(signing_key.verifying_key().encode().into())
 }
 
 /// Signs with the ML-DSA-44 key deterministically derived from a 32-byte seed.
 pub fn sign_from_seed(seed: &[u8; 32], message: &[u8]) -> Signature {
-    let _memory_lock = super::memory::lock_secret(seed).ok();
     let signing_key = PaqusSigningKey::from_seed(&(*seed).into());
     let signature: PaqusSignature = signing_key.sign(message);
     Signature(signature.to_bytes().into())
 }
 
 pub fn derive_public_key(secret_key: &SecretKey) -> PublicKey {
-    let _memory_lock = super::memory::lock_secret(secret_key).ok();
     let expanded_key = expanded_signing_key(secret_key);
     PublicKey(expanded_key.verifying_key().encode().into())
 }
 
 pub fn sign(secret_key: &SecretKey, message: &[u8]) -> Signature {
-    let _memory_lock = super::memory::lock_secret(secret_key).ok();
     let expanded_key = expanded_signing_key(secret_key);
     let signature: PaqusSignature = expanded_key.sign(message);
     Signature(signature.to_bytes().into())
@@ -411,27 +379,6 @@ mod tests {
 
         assert_eq!(key_a.public_key, key_a_again.public_key);
         assert_ne!(key_a.public_key, key_b.public_key);
-    }
-
-    #[test]
-    fn credential_file_key_is_deterministic_and_salt_separated() {
-        let password = b"correct horse battery staple";
-        let salt_a = b"credential-file-salt-a";
-        let salt_b = b"credential-file-salt-b";
-
-        let key_a = credential_file_key_from_password(password, salt_a).unwrap();
-        let key_a_again = credential_file_key_from_password(password, salt_a).unwrap();
-        let key_b = credential_file_key_from_password(password, salt_b).unwrap();
-
-        assert_eq!(key_a, key_a_again);
-        assert_ne!(key_a, key_b);
-    }
-
-    #[test]
-    fn credential_file_key_rejects_short_salt() {
-        let error = credential_file_key_from_password(b"password", b"short").unwrap_err();
-
-        assert_eq!(error, CryptoError::InvalidKeyDerivationParameters);
     }
 
     #[test]

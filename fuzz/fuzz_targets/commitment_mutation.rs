@@ -13,8 +13,13 @@ fuzz_target!(|data: &[u8]| {
     let mut mutated = original.clone();
     match data.first().copied().unwrap_or(0) % 3 {
         0 => mutated.header.merkle_root.0[0] ^= 1,
-        1 => mutated.header.witness_root.0[0] ^= 1,
-        _ => mutated.transactions[0].witness_mut().signature.0[0] ^= 1,
+        1 => mutated.header.block_weight = mutated.header.block_weight.saturating_add(1),
+        _ => {
+            mutated.body.transactions[0]
+                .authorization_proof_mut()
+                .signature
+                .0[0] ^= 1
+        }
     }
     assert!(
         mutated.validate_structure().is_err(),
