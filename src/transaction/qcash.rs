@@ -123,13 +123,14 @@ impl QCashTransaction {
         recipient: Address,
         files: &[QCashCoinFile],
     ) -> Result<Self, QCashError> {
-        Self::redeem_from_files_at(signer, recipient, files)
+        Self::redeem_from_files_at(signer, recipient, files, Hash::ZERO)
     }
 
     pub fn redeem_from_files_at(
         signer: Address,
         recipient: Address,
         files: &[QCashCoinFile],
+        last_state: Hash,
     ) -> Result<Self, QCashError> {
         let placeholder_inputs = files
             .iter()
@@ -140,6 +141,7 @@ impl QCashTransaction {
             recipient,
             QCashRedeemMetadata::from_inputs(placeholder_inputs)?,
         );
+        transaction.last_state = last_state;
         let commitment = transaction
             .redeem_transaction_commitment()
             .map_err(|_| QCashError::Serialization)?
