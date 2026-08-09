@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = []
+exclude = [
+    "argon2/*",
+    "mldsa/*",
+    "proc-macro/*",
+    "sha3/*",
+    "sqisign/*",
+    "traits/*",
+    "utils/*",
+    "bech32",
+    "keccak",
+]

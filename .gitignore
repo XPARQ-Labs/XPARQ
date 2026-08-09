@@ -1,5 +1,20 @@
 /target
 /fuzz/target
-/src/dependencies/**/target
-/src/dependencies/sqisign/sqisign-rs/Cargo.lock
-paqus.cdx.json
+/core/target
+/core/fuzz/target
+/depend/target
+/depend/**/target
+/depend/sqisign/sqisign-rs/Cargo.lock
+xparq.cdx.json
+
+# Local runtime state and bearer secrets
+/data/
+/backup/
+/cash/
+/wallet.json
+*.QCash
+.env
+.env.*
+
+# Editor-local settings
+/.vscode/

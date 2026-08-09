@@ -1,0 +1,207 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify mainnet release
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate tag and package versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "release tag must use the stable form vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+
+          expected_version="${BASH_REMATCH[1]}"
+          metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+          node_version="$(jq -r '.packages[] | select(.name == "xparq-node") | .version' <<<"${metadata}")"
+          wallet_version="$(jq -r '.packages[] | select(.name == "xparq-wallet") | .version' <<<"${metadata}")"
+
+          if [[ "${node_version}" != "${expected_version}" || "${wallet_version}" != "${expected_version}" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match node=${node_version} wallet=${wallet_version}" >&2
+            exit 1
+          fi
+
+      - name: Run mainnet workspace tests
+        run: cargo test --workspace --locked
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            rustflags: ""
+          - os: windows-latest
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            rustflags: "-C target-feature=+crt-static"
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Run Windows package tests
+        if: runner.os == 'Windows'
+        run: >-
+          cargo test --locked
+          --target ${{ matrix.target }}
+          -p xparq-node
+          -p xparq-wallet
+
+      - name: Build mainnet binaries
+        run: >-
+          cargo build --release --locked
+          --target ${{ matrix.target }}
+          -p xparq-node
+          -p xparq-wallet
+
+      - name: Smoke test Linux binaries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          target/${{ matrix.target }}/release/xparq-node version
+          target/${{ matrix.target }}/release/wallet --version
+
+      - name: Package Linux release
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="xparq-${GITHUB_REF_NAME}-mainnet-${{ matrix.platform }}"
+          package_dir="dist/${package}"
+          mkdir -p "${package_dir}"
+          install -m 0755 "target/${{ matrix.target }}/release/xparq-node" "${package_dir}/xparq-node"
+          install -m 0755 "target/${{ matrix.target }}/release/wallet" "${package_dir}/wallet"
+          cp README.md "${package_dir}/README.md"
+          cp LICENSE "${package_dir}/LICENSE"
+          cp node/README.md "${package_dir}/NODE-README.md"
+          cp wallet/README.md "${package_dir}/WALLET-README.md"
+          printf 'tag=%s\nversion=%s\nnetwork=mainnet\ntarget=%s\ncommit=%s\n' \
+            "${GITHUB_REF_NAME}" "${GITHUB_REF_NAME#v}" "${{ matrix.target }}" "${GITHUB_SHA}" \
+            > "${package_dir}/VERSION"
+          tar -C dist -czf "dist/${package}.tar.gz" "${package}"
+
+      - name: Smoke test Windows binaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "target/${{ matrix.target }}/release/xparq-node.exe" version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "target/${{ matrix.target }}/release/wallet.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package Windows release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $package = "xparq-$env:GITHUB_REF_NAME-mainnet-${{ matrix.platform }}"
+          $packageDir = Join-Path "dist" $package
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/xparq-node.exe" $packageDir
+          Copy-Item "target/${{ matrix.target }}/release/wallet.exe" $packageDir
+          Copy-Item "README.md" (Join-Path $packageDir "README.md")
+          Copy-Item "LICENSE" (Join-Path $packageDir "LICENSE")
+          Copy-Item "node/README.md" (Join-Path $packageDir "NODE-README.md")
+          Copy-Item "wallet/README.md" (Join-Path $packageDir "WALLET-README.md")
+          @(
+            "tag=$env:GITHUB_REF_NAME"
+            "version=$($env:GITHUB_REF_NAME.TrimStart('v'))"
+            "network=mainnet"
+            "target=${{ matrix.target }}"
+            "commit=$env:GITHUB_SHA"
+          ) | Set-Content -Encoding utf8 (Join-Path $packageDir "VERSION")
+          Compress-Archive -Path $packageDir -DestinationPath "dist/$package.zip"
+
+      - name: Upload packaged release
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download packaged releases
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ./*.tar.gz ./*.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest release archives
+        uses: actions/attest@v4
+        with:
+          subject-path: "dist/xparq-*"
+
+      - name: Create draft release with assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/*.tar.gz \
+            dist/*.zip \
+            dist/SHA256SUMS \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --draft \
+            --generate-notes \
+            --title "XPARQ ${GITHUB_REF_NAME}"
+          gh release edit "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft=false \
+            --latest

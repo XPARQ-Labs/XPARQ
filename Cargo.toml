@@ -1,89 +1,86 @@
-[package]
-name = "paqus"
-version = "0.2.21"
+[workspace]
+resolver = "3"
+members = [
+    "core",
+    "node",
+    "wallet",
+]
+exclude = [
+    "depend",
+    "core/fuzz",
+]
+
+[workspace.package]
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
-autobenches = false
-description = "Consensus primitives for the Paqus proof-of-work blockchain, Sharksphere patch"
-readme = "README.md"
-repository = "https://github.com/paqusprotocol/paqus"
 license = "MIT"
-keywords = ["blockchain", "proof-of-work", "post-quantum", "ml-dsa", "sha3"]
-categories = ["cryptography::cryptocurrencies"]
+repository = "https://github.com/XPARQ-Labs/XPARQ"
 
-[package.metadata]
-patch = "Sharksphere"
-
-[features]
-default = ["mainnet"]
-mainnet = []
-testnet = []
-devnet = ["sqisign-blockchain-test"]
-# Staging only. SQIsign is still a NIST Round 3 candidate and MUST NOT be used
-# by consensus until a final NIST standard and an explicit network upgrade.
-sqisign-candidate = ["dep:rand_10", "dep:sqisign_rs"]
-# Process-wide heap scrubbing for SQIsign arithmetic intermediates.
-sqisign-secure-memory = ["sqisign-candidate"]
-# Development-chain default. This remains experimental and chain-format
-# breaking; never combine its database or network with an ML-DSA chain.
-sqisign-blockchain-test = ["sqisign-candidate", "sqisign-secure-memory", "dep:chacha20"]
-
-[dependencies]
-sha3 = { version = "0.12.0", default-features = false, path = "src/dependencies/sha3/sha3" }
-ml_dsa = { package = "ml-dsa", version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "zeroize"], path = "src/dependencies/mldsa/ml-dsa" }
-sqisign_rs = { package = "paqus-sqisign", version = "0.1.0", optional = true, path = "src/dependencies/sqisign/sqisign-rs" }
-rand_10 = { package = "rand", version = "0.10.2", optional = true, features = ["sys_rng"], path = "src/dependencies/sqisign/rand-0.10" }
-chacha20 = { version = "0.10.1", optional = true, default-features = false, features = ["rng", "zeroize"], path = "src/dependencies/sqisign/chacha20-0.10.1" }
-borsh = { version = "1.5", features = ["derive"], path = "src/dependencies/traits/borsh" }
-serde = { version = "1", features = ["derive"], path = "src/dependencies/traits/serde" }
-bech32 = { version = "0.12.0", default-features = false, features = ["alloc"], path = "src/dependencies/bech32" }
-zeroize = { version = "1.9.0", features = ["alloc", "derive"], path = "src/dependencies/traits/zeroize" }
-static_assertions = { version = "1.1.0", path = "src/dependencies/utils/static_assertions" }
-argon2 = { version = "0.5.3", default-features = false, features = ["alloc"], path = "src/dependencies/argon2/argon2" }
+[workspace.dependencies]
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc"], path = "depend/argon2/argon2" }
+axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+async-trait = "0.1"
+bip39 = "2.2"
+bech32 = { version = "0.12.0", default-features = false, features = ["alloc"], path = "depend/bech32" }
+borsh = { version = "1.5", features = ["derive"], path = "depend/traits/borsh" }
+chacha20 = { version = "0.10.1", default-features = false, features = ["rng", "zeroize"], path = "depend/sqisign/chacha20-0.10.1" }
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
+ctrlc = "3.4"
+futures-util = "0.3"
 getrandom = { version = "0.4.3", default-features = false }
+hex = "0.4"
+igd-next = "0.16"
+lmdb = "0.8"
+libp2p = { version = "0.54", default-features = false, features = ["identify", "kad", "macros", "noise", "ping", "request-response", "tcp", "tokio", "yamux"] }
+ml_dsa = { package = "ml-dsa", version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "zeroize"], path = "depend/mldsa/ml-dsa" }
+prost = "0.14"
+protoc-bin-vendored = "3"
+serde = { version = "1", features = ["derive"], path = "depend/traits/serde" }
+serde_json = "1"
+sha3 = { version = "0.12.0", default-features = false, path = "depend/sha3/sha3" }
+socket2 = "0.6"
+sqisign_rs = { package = "xparq-sqisign", version = "0.1.0", path = "depend/sqisign/sqisign-rs" }
+static_assertions = { version = "1.1.0", path = "depend/utils/static_assertions" }
+tokio = { version = "1", features = ["full"] }
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["cors", "limit", "timeout"] }
+zeroize = { version = "1.9.0", features = ["alloc", "derive"], path = "depend/traits/zeroize" }
+rand_10 = { package = "rand", version = "0.10.2", features = ["sys_rng"], path = "depend/sqisign/rand-0.10" }
+
+xparq = { path = "core", default-features = false }
 
 [patch.crates-io]
-serde = { path = "src/dependencies/traits/serde" }
-serde_core = { path = "src/dependencies/traits/serde_core" }
-serde_derive = { path = "src/dependencies/traits/serde_derive" }
-autocfg = { path = "src/dependencies/utils/autocfg" }
-block-buffer = { path = "src/dependencies/utils/block-buffer" }
-crypto-bigint = { path = "src/dependencies/sqisign/crypto-bigint-0.7" }
-crypto-common = { path = "src/dependencies/utils/crypto-common-0.1.7" }
-digest = { path = "src/dependencies/traits/digest-0.10.7" }
-generic-array = { path = "src/dependencies/utils/generic-array" }
-hybrid-array = { path = "src/dependencies/utils/hybrid-array" }
-libm = { path = "src/dependencies/sqisign/libm" }
-num-bigint = { path = "src/dependencies/sqisign/num-bigint-0.5" }
-num-integer = { path = "src/dependencies/sqisign/num-integer" }
-num-traits = { path = "src/dependencies/traits/num-traits" }
-paste = { path = "src/dependencies/sqisign/paste" }
-proc-macro2 = { path = "src/dependencies/proc-macro/proc-macro2" }
-quote = { path = "src/dependencies/proc-macro/quote" }
-rand = { path = "src/dependencies/sqisign/rand-0.10" }
-rand_core = { path = "src/dependencies/traits/rand_core" }
-signature = { path = "src/dependencies/traits/signature" }
-chacha20 = { path = "src/dependencies/sqisign/chacha20-0.10.1" }
-cpubits = { path = "src/dependencies/utils/cpubits" }
-ctutils = { path = "src/dependencies/utils/ctutils" }
-subtle = { path = "src/dependencies/utils/subtle" }
-syn = { path = "src/dependencies/proc-macro/syn-2.0.119" }
-typenum = { path = "src/dependencies/utils/typenum" }
-unicode-ident = { path = "src/dependencies/proc-macro/unicode-ident" }
-version_check = { path = "src/dependencies/utils/version_check" }
-zeroize_derive = { path = "src/dependencies/traits/zeroize_derive" }
-
-[[bench]]
-name = "sqisign_candidate"
-harness = false
-required-features = ["sqisign-candidate"]
-
-[[bench]]
-name = "sqisign_verifier"
-harness = false
-required-features = ["sqisign-blockchain-test"]
-
-[[bench]]
-name = "core_consensus"
-harness = false
+serde = { path = "depend/traits/serde" }
+serde_core = { path = "depend/traits/serde_core" }
+serde_derive = { path = "depend/traits/serde_derive" }
+autocfg = { path = "depend/utils/autocfg" }
+block-buffer = { path = "depend/utils/block-buffer" }
+crypto-bigint = { path = "depend/sqisign/crypto-bigint-0.7" }
+crypto-common = { path = "depend/utils/crypto-common-0.1.7" }
+digest = { path = "depend/traits/digest-0.10.7" }
+generic-array = { path = "depend/utils/generic-array" }
+hybrid-array = { path = "depend/utils/hybrid-array" }
+libm = { path = "depend/sqisign/libm" }
+num-bigint = { path = "depend/sqisign/num-bigint-0.5" }
+num-integer = { path = "depend/sqisign/num-integer" }
+num-traits = { path = "depend/traits/num-traits" }
+paste = { path = "depend/sqisign/paste" }
+proc-macro2 = { path = "depend/proc-macro/proc-macro2" }
+quote = { path = "depend/proc-macro/quote" }
+rand = { path = "depend/sqisign/rand-0.10" }
+rand_core = { path = "depend/traits/rand_core" }
+signature = { path = "depend/traits/signature" }
+chacha20 = { path = "depend/sqisign/chacha20-0.10.1" }
+cpubits = { path = "depend/utils/cpubits" }
+ctutils = { path = "depend/utils/ctutils" }
+subtle = { path = "depend/utils/subtle" }
+syn = { path = "depend/proc-macro/syn-2.0.119" }
+typenum = { path = "depend/utils/typenum" }
+unicode-ident = { path = "depend/proc-macro/unicode-ident" }
+version_check = { path = "depend/utils/version_check" }
+zeroize_derive = { path = "depend/traits/zeroize_derive" }

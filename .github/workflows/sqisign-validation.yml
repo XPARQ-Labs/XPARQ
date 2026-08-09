@@ -1,0 +1,33 @@
+name: sqisign-validation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 4 * * 6"
+  pull_request:
+    paths:
+      - "core/src/crypto/**"
+      - "core/tests/sqisign_candidate.rs"
+      - "core/benches/sqisign_*.rs"
+      - "core/fuzz/fuzz_targets/sqisign_parser.rs"
+      - "depend/sqisign/**"
+      - ".github/workflows/sqisign-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validation-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Populate Cargo cache for offline gates
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path depend/sqisign/sqisign-rs/Cargo.toml
+          cargo fetch --locked --manifest-path depend/sqisign/sqisign-verify/Cargo.toml
+          cargo fetch --locked --manifest-path core/fuzz/Cargo.toml
+      - name: Run SQIsign validation gates
+        run: sh depend/sqisign/tools/run-validation-gates.sh

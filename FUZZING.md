@@ -1,6 +1,6 @@
-# Paqus Fuzzing
+# XPARQ Fuzzing
 
-The fuzz workspace tracks the current Paqus core formats and consensus rules.
+The fuzz workspace tracks the current XPARQ core formats and consensus rules.
 It covers canonical decoders and roundtrips, unified BatchTransfer/QCash
 blocks, atomic state transitions, QCash lifecycle and bearer files, address
 encoding, WBDA epochs, authenticated artifacts, and block commitments.
@@ -13,12 +13,12 @@ encoding, WBDA epochs, authenticated artifacts, and block commitments.
   ledger invariants, and value conservation;
 - `qcash_lifecycle`: withdrawal, redeem, rejected
   signature atomicity, and exact rollback;
-- `commitment_mutation`: transaction and block commitment mutation;
+- `commitment_mutation`: transaction and block commitment 0x9b08423da6b1d9209419cfbbc46b8147e6eb7955mutation;
 - `mixed_family`: all families in one ordered block plus hostile transaction
   count prefixes at and beyond consensus limits;
-- `address_codec`: canonical uppercase `P1` Bech32 address roundtrips;
+- `address_codec`: canonical lowercase `x1` Bech32 address roundtrips;
 - `consensus_epoch`: exact 2,048-block WBDA windows, bounds, and epoch boundary;
-- `artifact_codec`: generic `.PAQUS` and authenticated genesis decoding;
+- `artifact_codec`: generic `.XPARQ` and authenticated genesis decoding;
 - `qcash_coin_codec`: strict `.QCash` decoding and canonical roundtrips.
 
 The checked-in corpus selects every synthetic regression mode. Synthetic
@@ -29,6 +29,7 @@ freeze private signing material or obsolete consensus encodings.
 
 ```bash
 cargo install cargo-fuzz --locked
+cd core
 cargo +nightly fuzz run state_transition fuzz/corpus/state_transition -- \
   -max_total_time=60 -timeout=10 -rss_limit_mb=2048
 ```
@@ -47,5 +48,5 @@ Run the network-independent core benchmark with:
 cargo bench --bench core_consensus
 ```
 
-Set `PAQUS_CORE_BENCH_ITERATIONS` to change the default sample count. Dedicated
+Set `XPARQ_CORE_BENCH_ITERATIONS` to change the default sample count. Dedicated
 SQIsign benchmarks remain available behind their corresponding feature flags.
