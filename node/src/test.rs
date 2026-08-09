@@ -115,7 +115,7 @@ fn parses_rpc_security_controls() {
 
 #[test]
 #[cfg(feature = "mainnet")]
-fn parse_run_config_combines_default_and_operator_peers() {
+fn parse_run_config_accepts_operator_peer_without_defaults() {
     let config = parse_run_config(&args(&[
         "--config",
         "/tmp/xparq-missing-test-config.json",
@@ -123,16 +123,15 @@ fn parse_run_config_combines_default_and_operator_peers() {
         "192.0.2.20:5555",
     ]))
     .unwrap();
-    assert!(config.peers.contains(&"192.0.2.20:5555".parse().unwrap()));
-    assert!(config.peers.len() > 1);
+    assert_eq!(config.peers, vec!["192.0.2.20:5555".parse().unwrap()]);
 }
 
 #[test]
 #[cfg(feature = "mainnet")]
-fn run_config_defaults_to_local_rpc_with_mainnet_peers() {
+fn mainnet_defaults_to_local_rpc_without_peers() {
     let config = RunConfig::default();
     assert!(config.rpc_addr.ip().is_loopback());
-    assert!(!config.peers.is_empty());
+    assert!(config.peers.is_empty());
 }
 
 #[test]

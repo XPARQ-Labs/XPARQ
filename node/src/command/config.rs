@@ -27,11 +27,6 @@ pub(crate) const PUBLIC_ADDR_ENV: &str = "XPARQ_PUBLIC_ADDR";
 pub(crate) const CONFIG_FILE_ENV: &str = "XPARQ_CONFIG";
 
 #[cfg(feature = "mainnet")]
-const DEFAULT_PEERS: &[&str] = &["[2404:8000:1044:4d8:e5c4:5b9:93bc:656d]:5555"];
-#[cfg(any(feature = "testnet", feature = "devnet"))]
-const DEFAULT_PEERS: &[&str] = &[];
-
-#[cfg(feature = "mainnet")]
 pub(crate) const DEFAULT_P2P_PORT: u16 = 5555;
 #[cfg(feature = "testnet")]
 pub(crate) const DEFAULT_P2P_PORT: u16 = 15555;
@@ -143,7 +138,7 @@ struct RunConfigFile {
     rpc_rate_limit_per_second: u64,
     #[serde(default = "default_rpc_rate_limit_burst")]
     rpc_rate_limit_burst: u64,
-    #[serde(default = "default_peer_strings")]
+    #[serde(default)]
     peers: Vec<String>,
     peers_file: Option<String>,
     #[serde(default)]
@@ -229,13 +224,7 @@ impl Default for RunConfig {
             rpc_max_connections: default_rpc_max_connections(),
             rpc_rate_limit_per_second: default_rpc_rate_limit_per_second(),
             rpc_rate_limit_burst: default_rpc_rate_limit_burst(),
-            peers: DEFAULT_PEERS
-                .iter()
-                .map(|peer| {
-                    peer.parse()
-                        .expect("built-in peer must be a socket address")
-                })
-                .collect(),
+            peers: Vec::new(),
             peers_file: Some(DEFAULT_PEERS_FILE.to_string()),
             dns_seeds: Vec::new(),
             gateway_url: None,
@@ -287,11 +276,7 @@ impl Default for RunConfigFile {
             rpc_max_connections: defaults.rpc_max_connections,
             rpc_rate_limit_per_second: defaults.rpc_rate_limit_per_second,
             rpc_rate_limit_burst: defaults.rpc_rate_limit_burst,
-            peers: defaults
-                .peers
-                .into_iter()
-                .map(|peer| peer.to_string())
-                .collect(),
+            peers: Vec::new(),
             peers_file: Some(DEFAULT_PEERS_FILE.to_string()),
             dns_seeds: defaults.dns_seeds,
             gateway_url: None,
@@ -726,13 +711,6 @@ fn apply_environment(config: &mut RunConfig) -> Result<(), String> {
         config.public_addrs = parse_environment_sockets(&value, PUBLIC_ADDR_ENV)?;
     }
     Ok(())
-}
-
-fn default_peer_strings() -> Vec<String> {
-    DEFAULT_PEERS
-        .iter()
-        .map(|peer| (*peer).to_string())
-        .collect()
 }
 
 fn parse_environment_sockets(value: &str, name: &str) -> Result<Vec<SocketAddr>, String> {

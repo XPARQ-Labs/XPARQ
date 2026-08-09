@@ -4463,7 +4463,7 @@ dependencies = [
 
 [[package]]
 name = "xparq"
-version = "0.1.0"
+version = "0.2.9"
 dependencies = [
  "argon2",
  "bech32",
@@ -4482,7 +4482,7 @@ dependencies = [
 
 [[package]]
 name = "xparq-node"
-version = "0.1.0"
+version = "0.2.9"
 dependencies = [
  "async-trait",
  "axum",
@@ -4530,7 +4530,7 @@ dependencies = [
 
 [[package]]
 name = "xparq-wallet"
-version = "0.1.0"
+version = "0.2.9"
 dependencies = [
  "argon2",
  "bip39",
