@@ -217,26 +217,32 @@ impl Ledger {
         address: Address,
         balance: Balance,
     ) -> Result<(), LedgerError> {
-        self.create_account_with_authorization(
-            address,
-            PublicKey([0; crate::crypto::PUBLIC_KEY_SIZE]),
-            balance,
-        )
+        self.create_account_record(Account::new(address), balance)
     }
 
     pub fn create_account_with_authorization(
         &mut self,
         address: Address,
+        owner_public_key: PublicKey,
         auth_public_key: PublicKey,
         balance: Balance,
     ) -> Result<(), LedgerError> {
+        let account = Account::new_with_authorization(address, owner_public_key, auth_public_key)?;
+        self.create_account_record(account, balance)
+    }
+
+    fn create_account_record(
+        &mut self,
+        account: Account,
+        balance: Balance,
+    ) -> Result<(), LedgerError> {
+        let address = account.address;
         if self.accounts.contains_key(&address) {
             return Err(LedgerError::AccountAlreadyExists);
         }
         self.reject_non_consensus_issuance(balance)?;
 
         let mut staged = self.clone();
-        let account = Account::new_with_authorization(address, auth_public_key);
         staged.accounts.insert(address, account);
         if balance.0 > 0 {
             let origin = domain_hash(

@@ -344,7 +344,15 @@ impl QCashUtxoSet {
         metadata
             .validate()
             .map_err(|_| QCashUtxoError::InvalidMetadata)?;
+        if self
+            .journals
+            .get(&block_hash)
+            .is_some_and(|journal| journal.block_height != height)
+        {
+            return Err(QCashUtxoError::InvalidMetadata);
+        }
         let previous_journal_tip = self.active_journal_tip;
+        let ids = self.apply_withdraw(withdrawer, withdraw_tx_hash, metadata, height)?;
         let journal = self
             .journals
             .entry(block_hash)
@@ -355,14 +363,6 @@ impl QCashUtxoSet {
                 issued_coin_ids: Vec::new(),
                 redeemed_utxos: Vec::new(),
             });
-        if journal.block_height != height {
-            return Err(QCashUtxoError::InvalidMetadata);
-        }
-        let ids = self.apply_withdraw(withdrawer, withdraw_tx_hash, metadata, height)?;
-        let journal = self
-            .journals
-            .get_mut(&block_hash)
-            .ok_or(QCashUtxoError::MissingBlockJournal)?;
         journal.issued_coin_ids.extend(ids.iter().copied());
         self.active_journal_tip = Some(block_hash);
         Ok(ids)
@@ -670,5 +670,48 @@ mod tests {
         set.rollback_block(tip).unwrap();
         set.rollback_block(retained).unwrap();
         assert_eq!(set.active_journal_tip, None);
+    }
+
+    #[test]
+    fn failed_block_withdraw_leaves_coins_and_journal_state_unchanged() {
+        let parent = BlockHash([0x41; crate::crypto::HASH_SIZE]);
+        let block_hash = BlockHash([0x42; crate::crypto::HASH_SIZE]);
+        let withdraw_tx_hash = TransactionHash([0x43; crate::crypto::HASH_SIZE]);
+        let metadata = QCashWithdrawalMetadata::with_denominations(
+            QCashDenomination::Ten.amount(),
+            &[QCashDenomination::Ten],
+            &[[0x44; 32]],
+        )
+        .unwrap();
+        let collision_id = QCashCoinId::derive(withdraw_tx_hash, &metadata.outputs[0]).unwrap();
+        let mut existing = coin(0x45);
+        existing.id = collision_id;
+
+        let mut set = QCashUtxoSet::default();
+        set.coins.insert(collision_id, existing);
+        set.journals.insert(
+            parent,
+            QCashBlockJournal {
+                block_hash: parent,
+                block_height: Height(10),
+                previous_journal_tip: None,
+                issued_coin_ids: Vec::new(),
+                redeemed_utxos: Vec::new(),
+            },
+        );
+        set.active_journal_tip = Some(parent);
+        let before = set.clone();
+
+        assert_eq!(
+            set.apply_withdraw_in_block(
+                block_hash,
+                Height(11),
+                Address([0x46; crate::crypto::ADDRESS_SIZE]),
+                withdraw_tx_hash,
+                &metadata,
+            ),
+            Err(QCashUtxoError::CoinIdCollision)
+        );
+        assert_eq!(set, before);
     }
 }

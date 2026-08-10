@@ -961,6 +961,9 @@ impl Storage {
             }
         }
 
+        xparq::ledger::validate_ledger_invariants(&ledger)
+            .map_err(|_| StorageError::Integrity("stored ledger invariants are invalid"))?;
+
         Ok(ledger)
     }
 

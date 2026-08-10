@@ -551,7 +551,12 @@ mod miner_fee_output_tests {
         let sender = dual_address_from_public_keys(&owner.public_key, &authorization.public_key);
         let mut ledger = Ledger::new();
         ledger
-            .create_account_with_authorization(sender, authorization.public_key, Amount(100_000))
+            .create_account_with_authorization(
+                sender,
+                owner.public_key,
+                authorization.public_key,
+                Amount(100_000),
+            )
             .unwrap();
 
         let sign_transfer = |transaction: Transfer| {

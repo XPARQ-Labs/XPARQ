@@ -22,7 +22,12 @@ pub fn protocol_fixtures() -> &'static [SignedProtocolTransaction; 2] {
         let signer = signer_address(&primary, &authorization);
         let mut ledger = Ledger::new();
         ledger
-            .create_account_with_authorization(signer, authorization.public_key, Amount(10 * XPQ))
+            .create_account_with_authorization(
+                signer,
+                primary.public_key,
+                authorization.public_key,
+                Amount(10 * XPQ),
+            )
             .expect("fixture account");
 
         let input = ledger
@@ -70,10 +75,21 @@ pub fn protocol_fixtures() -> &'static [SignedProtocolTransaction; 2] {
 
 pub fn ledger_for(transaction: &SignedProtocolTransaction) -> Ledger {
     let mut ledger = Ledger::new();
-    let auth_public_key = transaction.authorization_proof().auth_public_key;
-    ledger
-        .create_account_with_authorization(transaction.signer(), auth_public_key, Amount(10 * XPQ))
-        .expect("fixture account");
+    let authorization_proof = transaction.authorization_proof();
+    if authorization_proof.carries_registration_keys() {
+        ledger
+            .create_account_with_authorization(
+                transaction.signer(),
+                authorization_proof.public_key,
+                authorization_proof.auth_public_key,
+                Amount(10 * XPQ),
+            )
+            .expect("fixture account");
+    } else {
+        ledger
+            .create_account(transaction.signer(), Amount(10 * XPQ))
+            .expect("fixture account");
+    }
     ledger
 }
 
@@ -90,6 +106,7 @@ pub fn qcash_lifecycle_fixture() -> (Ledger, SignedQCashTransaction, SignedQCash
             ledger
                 .create_account_with_authorization(
                     signer,
+                    primary.public_key,
                     authorization.public_key,
                     Amount(10 * XPQ),
                 )

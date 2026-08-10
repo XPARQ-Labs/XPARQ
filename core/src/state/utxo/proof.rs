@@ -189,6 +189,9 @@ fn qcash_leaf_hash(coin: &QCashUtxo) -> Result<Hash, crate::error::CodecError> {
 }
 
 fn qcash_empty_hash(depth: usize) -> Hash {
+    // Empty subtrees inside a non-empty sparse tree use depth-separated
+    // hashes. The whole-tree-empty case deliberately uses the frozen legacy
+    // commitment returned by `empty_qcash_state_root`.
     let mut bytes = Vec::with_capacity(9);
     bytes.push(1);
     bytes.extend_from_slice(&(depth as u64).to_le_bytes());

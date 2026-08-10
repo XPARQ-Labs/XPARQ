@@ -13,7 +13,12 @@ fn funded_ledger(amount: u64) -> (Ledger, crate::crypto::KeyPair, crate::crypto:
     let sender = dual_address_from_public_keys(&owner.public_key, &authorization.public_key);
     let mut ledger = Ledger::new();
     ledger
-        .create_account_with_authorization(sender, authorization.public_key, Amount(amount))
+        .create_account_with_authorization(
+            sender,
+            owner.public_key,
+            authorization.public_key,
+            Amount(amount),
+        )
         .unwrap();
     (ledger, owner, authorization, sender)
 }
@@ -56,6 +61,27 @@ fn transfer_consumes_old_coin_and_creates_recipient_and_change_coins() {
     assert_eq!(ledger.balance(&sender), Some(Amount(70)));
     assert!(ledger.xpq_utxos.coin(XpqCoinId::derive(txid, 0).unwrap()).is_some());
     assert!(ledger.xpq_utxos.coin(XpqCoinId::derive(txid, 1).unwrap()).is_some());
+}
+
+#[test]
+fn stored_key_transfer_uses_registered_account_authorization() {
+    let (mut ledger, owner, authorization, sender) = funded_ledger(100);
+    let recipient = Address([0x6c; crate::crypto::ADDRESS_SIZE]);
+    let input = ledger.xpq_utxos.coins_for_owner(sender).next().unwrap().id;
+    let transaction = Transfer::new(sender, vec![input], recipient, Amount(100));
+    let payload = transaction.signing_bytes().unwrap();
+    let signed = SignedTransfer::new_stored_authorized(
+        transaction,
+        sign(&owner.secret_key, &payload),
+        sign(&authorization.secret_key, &payload),
+    );
+
+    ledger
+        .apply_signed_transaction_at(&signed, Height(0))
+        .unwrap();
+
+    assert!(signed.authorization_proof.uses_stored_keys());
+    assert_eq!(ledger.balance(&recipient), Some(Amount(100)));
 }
 
 #[test]

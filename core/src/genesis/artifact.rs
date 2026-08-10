@@ -585,6 +585,8 @@ pub fn ledger_from_authenticated_snapshot(
         snapshot.qcash_utxos,
         headers,
     )?;
+    crate::ledger::validate_ledger_invariants(&ledger)
+        .map_err(|_| GenesisError::InvalidStateCommitment)?;
     let commitment = ledger
         .tip_state_commitment()?
         .ok_or(GenesisError::InvalidStateCommitment)?;

@@ -148,14 +148,11 @@ impl XpqCoinId {
         ))
     }
 
+    /// Synthetic issuance origins share the canonical `(hash, output_index)`
+    /// namespace with transaction outpoints. A source discriminator would
+    /// change every issuance coin ID and requires an explicit state migration.
     pub fn derive_issuance(origin: Hash, output_index: u32) -> Result<Self, CodecError> {
-        Ok(Self(
-            domain_hash(
-                HashDomain::XpqCoin,
-                &canonical_bytes(&(origin, output_index))?,
-            )
-            .0,
-        ))
+        Self::derive(TransactionHash(origin.0), output_index)
     }
 }
 
@@ -228,7 +225,7 @@ impl XpqUtxoSet {
         Ok(Amount(total))
     }
 
-    pub fn spend_and_create(
+    pub(crate) fn spend_and_create(
         &mut self,
         owner: Address,
         inputs: &[XpqCoinId],
@@ -246,7 +243,11 @@ impl XpqUtxoSet {
         )
     }
 
-    pub fn spend_and_create_with_consumed(
+    /// Atomically moves inputs into ordinary outputs plus value accounted for
+    /// by another committed protocol state, currently QCash withdrawal state.
+    /// `consumed` is not an unrestricted burn allowance; its caller must prove
+    /// the corresponding value transition.
+    pub(crate) fn spend_and_create_with_consumed(
         &mut self,
         owner: Address,
         inputs: &[XpqCoinId],
@@ -301,7 +302,9 @@ impl XpqUtxoSet {
         Ok(ids)
     }
 
-    pub fn issue(
+    /// Low-level consensus issuance. The ledger caller must validate the
+    /// emission schedule or other value-preserving source before invoking it.
+    pub(crate) fn issue(
         &mut self,
         origin: Hash,
         owner: Address,
@@ -312,7 +315,7 @@ impl XpqUtxoSet {
         self.issue_at(origin, 0, owner, amount, maturity_height, source)
     }
 
-    pub fn issue_at(
+    pub(crate) fn issue_at(
         &mut self,
         origin: Hash,
         output_index: u32,
@@ -350,5 +353,21 @@ impl XpqUtxoSet {
             HashDomain::XpqState,
             &canonical_bytes(&self.coins)?,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transaction_and_issuance_ids_share_one_outpoint_namespace() {
+        let bytes = [0x3d; HASH_SIZE];
+        let output_index = 7;
+
+        assert_eq!(
+            XpqCoinId::derive(TransactionHash(bytes), output_index).unwrap(),
+            XpqCoinId::derive_issuance(Hash(bytes), output_index).unwrap()
+        );
     }
 }
