@@ -1,4 +1,5 @@
 fn interactive_menu() -> Result<(), String> {
+    cli_log("INFO", format_args!("interactive session started"));
     loop {
         println!();
         println!("XPARQ Wallet CLI");
@@ -26,7 +27,7 @@ fn interactive_menu() -> Result<(), String> {
             Ok(true) => pause_for_menu()?,
             Ok(false) => {}
             Err(error) => {
-                println!("error: {error}");
+                cli_log("ERROR", format_args!("{error}"));
                 println!("Returning to menu.");
                 pause_for_menu()?;
             }
@@ -56,10 +57,11 @@ fn handle_menu_choice(choice: &str) -> Result<bool, String> {
             else {
                 return Ok(false);
             };
-            let Some(mnemonic) = prompt_back("Mnemonic")? else {
+            let mnemonic = prompt_hidden("Mnemonic")?;
+            if is_back(&mnemonic) {
                 return Ok(false);
-            };
-            wallet_restore_mnemonic(&[path, "--mnemonic".to_string(), mnemonic])?;
+            }
+            wallet_restore_mnemonic(&[path, "--mnemonic".to_string(), mnemonic.to_string()])?;
             return Ok(true);
         }
         "3" => return menu_accounts(),
@@ -77,10 +79,7 @@ fn handle_menu_choice(choice: &str) -> Result<bool, String> {
         "11" => return menu_protocol_events(),
         "12" => return menu_rollback_recovery(),
         "13" => return menu_trusted_proof(),
-        value => {
-            println!("Unknown menu `{value}`");
-            return Ok(false);
-        }
+        value => return Err(format!("unknown menu `{value}`; choose 1-14")),
     }
     Ok(true)
 }
@@ -88,18 +87,39 @@ fn handle_menu_choice(choice: &str) -> Result<bool, String> {
 fn menu_accounts() -> Result<bool, String> {
     println!("Accounts");
     println!("1. My Accounts");
-    println!("2. Global Accounts");
-    println!("3. Address Explorer");
+    println!("2. Wallet balance");
+    println!("3. Wallet activity and statistics");
+    println!("4. Global Accounts");
+    println!("5. Address Explorer");
     let Some(choice) = prompt_back("Select")? else {
         return Ok(false);
     };
     match choice.as_str() {
         "1" => menu_my_accounts(),
         "2" => {
-            menu_rpc_get("/accounts")?;
+            let Some(wallet) = prompt_default_back("Wallet file", DEFAULT_WALLET_PATH)? else {
+                return Ok(false);
+            };
+            wallet_balance(&["--wallet".into(), wallet, "--rpc".into(), default_rpc_addr()])?;
             Ok(true)
         }
         "3" => {
+            let Some(wallet) = prompt_default_back("Wallet file", DEFAULT_WALLET_PATH)? else {
+                return Ok(false);
+            };
+            wallet_address_stats(&[
+                "--wallet".into(),
+                wallet,
+                "--rpc".into(),
+                default_rpc_addr(),
+            ])?;
+            Ok(true)
+        }
+        "4" => {
+            menu_rpc_get("/accounts")?;
+            Ok(true)
+        }
+        "5" => {
             let Some(address) =
                 prompt_default_back("Address", &default_wallet_address_or_empty())?
             else {
@@ -111,7 +131,7 @@ fn menu_accounts() -> Result<bool, String> {
             menu_rpc_get(&format!("/address/{address}"))?;
             Ok(true)
         }
-        value => Err(format!("unknown accounts selection `{value}`; choose 1-3")),
+        value => Err(format!("unknown accounts selection `{value}`; choose 1-5")),
     }
 }
 
@@ -221,18 +241,15 @@ fn menu_rollback_recovery() -> Result<bool, String> {
     println!("Rollback Recovery");
     println!("1. List issues by account");
     println!("2. Inspect issue");
-    println!("3. Retry original transaction");
+    println!("3. Verify issue proof");
     let Some(choice) = prompt_back("Select")? else {
         return Ok(false);
     };
     let (action, label, default) = match choice.as_str() {
         "1" => ("list", "Account address", default_wallet_address_or_empty()),
         "2" => ("show", "Rollback issue ID", String::new()),
-        "3" => ("retry", "Rollback issue ID", String::new()),
-        _ => {
-            println!("Unknown rollback recovery menu `{choice}`");
-            return Ok(false);
-        }
+        "3" => ("verify", "Rollback issue ID", String::new()),
+        _ => return Err(format!("unknown rollback recovery selection `{choice}`; choose 1-3")),
     };
     let Some(value) = prompt_default_back(label, &default)? else {
         return Ok(false);
@@ -258,10 +275,7 @@ fn menu_protocol_events() -> Result<bool, String> {
         "2" => ("tx", "Transaction hash", String::new()),
         "3" => ("address", "Address", default_wallet_address_or_empty()),
         "4" => ("id", "Event ID", String::new()),
-        _ => {
-            println!("Unknown event explorer selection.");
-            return Ok(false);
-        }
+        _ => return Err(format!("unknown event explorer selection `{choice}`; choose 1-4")),
     };
     let Some(value) = prompt_default_back(label, &default_value)? else {
         return Ok(false);
@@ -276,8 +290,7 @@ fn menu_protocol_events() -> Result<bool, String> {
         println!("1. Transfer");
         println!("2. QCash withdrawn");
         println!("3. QCash redeemed");
-        println!("4. Legacy QCash recovery event");
-        println!("5. Coinbase paid");
+        println!("4. Emission distributed");
         let Some(selection) = prompt_default_back("Select kind", "0")? else {
             return Ok(false);
         };
@@ -289,6 +302,22 @@ fn menu_protocol_events() -> Result<bool, String> {
             return Ok(false);
         };
         args.extend(["--limit".to_string(), limit]);
+        let Some(offset) = prompt_default_back("Offset", "0")? else {
+            return Ok(false);
+        };
+        args.extend(["--offset".to_string(), offset]);
+        let Some(from_height) = prompt_back("From height (optional)")? else {
+            return Ok(false);
+        };
+        if !from_height.is_empty() {
+            args.extend(["--from-height".to_string(), from_height]);
+        }
+        let Some(to_height) = prompt_back("To height (optional)")? else {
+            return Ok(false);
+        };
+        if !to_height.is_empty() {
+            args.extend(["--to-height".to_string(), to_height]);
+        }
     }
     args.extend(["--rpc".to_string(), default_rpc_addr()]);
     wallet_events(&args)?;
@@ -301,9 +330,8 @@ fn event_kind_from_menu_selection(selection: &str) -> Result<Option<String>, Str
         "1" => Ok(Some("transfer".to_string())),
         "2" => Ok(Some("qcash_withdrawn".to_string())),
         "3" => Ok(Some("qcash_redeemed".to_string())),
-        "4" => Ok(Some("qcash_recover_redeemed".to_string())),
-        "5" => Ok(Some("coinbase_paid".to_string())),
-        value => Err(format!("unknown event kind selection `{value}`; choose 0-5")),
+        "4" => Ok(Some("emission_distributed".to_string())),
+        value => Err(format!("unknown event kind selection `{value}`; choose 0-4")),
     }
 }
 
@@ -517,7 +545,7 @@ fn menu_qcash() -> Result<bool, String> {
         "8" => {
             wallet_cash_utxos(&["--rpc".into(), default_rpc_addr()])?;
         }
-        _ => println!("Unknown QCash selection."),
+        value => return Err(format!("unknown QCash selection `{value}`; choose 1-8")),
     }
     Ok(true)
 }
@@ -641,6 +669,12 @@ fn submit_menu_transfer(to: String, amount: String) -> Result<bool, String> {
     args.push(wallet_path);
     args.push("--rpc".to_string());
     args.push(rpc_addr);
+    let Some(confirm) = prompt_default_back("Submit transaction? (yes/no)", "no")? else {
+        return Ok(false);
+    };
+    if !matches!(confirm.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return Err("transaction cancelled before signing".to_string());
+    }
     wallet_send_short(&args)?;
     Ok(true)
 }

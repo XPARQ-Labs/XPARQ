@@ -7,10 +7,24 @@ use crate::consensus::{
 use crate::crypto::Address;
 use crate::crypto::{BlockHash, StateRoot, TransactionHash};
 use crate::event::{ProtocolEvent, ProtocolEventKind};
-use crate::ledger::{CONFIRMATION_DEPTH, Ledger, LedgerError};
+use crate::ledger::{CONFIRMATION_DEPTH, Ledger, LedgerError, SparseStateTree};
 use crate::state::{Account, XpqCoinSource, XpqUtxoSet};
 use crate::transaction::{OutputTarget, QCashTransactionKind, SignedTransfer, Transfer};
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+fn refresh_staged_account(
+    tree: &mut Arc<SparseStateTree>,
+    accounts: &BTreeMap<Address, Account>,
+    address: &Address,
+) -> Result<(), LedgerError> {
+    if let Some(account) = accounts.get(address) {
+        Arc::make_mut(tree).update_account(account)?;
+    } else {
+        Arc::make_mut(tree).remove_account(address);
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransactionExecution {
@@ -279,20 +293,28 @@ impl Ledger {
         height: BlockHeight,
         miner_address: Address,
     ) -> Result<(), LedgerError> {
-        let mut staged = self.clone();
+        let mut staged_accounts = self.accounts.clone();
+        let mut staged_utxos = self.xpq_utxos.clone();
         apply_signed_transaction_to_state_with_miner(
-            &mut staged.accounts,
-            &mut staged.xpq_utxos,
+            &mut staged_accounts,
+            &mut staged_utxos,
             transaction,
             height,
             miner_address,
         )?;
-        staged.refresh_account_state(&transaction.transaction.from)?;
+        let mut staged_tree = self.account_state_tree.clone();
+        refresh_staged_account(
+            &mut staged_tree,
+            &staged_accounts,
+            &transaction.transaction.from,
+        )?;
         for output in &transaction.transaction.outputs {
             let recipient = resolve_output_target(output.to, miner_address);
-            staged.refresh_account_state(&recipient)?;
+            refresh_staged_account(&mut staged_tree, &staged_accounts, &recipient)?;
         }
-        *self = staged;
+        self.accounts = staged_accounts;
+        self.account_state_tree = staged_tree;
+        self.xpq_utxos = staged_utxos;
         Ok(())
     }
 

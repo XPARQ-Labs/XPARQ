@@ -2,8 +2,10 @@ use crate::runtime::network::message::RejectReason;
 use crate::runtime::network::{NetworkMessage, PeerInfo, handle_message};
 use crate::runtime::node::Node;
 use crate::runtime::params::MAX_NETWORK_MESSAGE_SIZE;
+use crate::{node_debug, node_info, node_warn};
 use borsh::{BorshDeserialize, BorshSerialize};
 use futures_util::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
+use libp2p::connection_limits;
 use libp2p::identify;
 use libp2p::kad::{self, store::MemoryStore};
 use libp2p::ping;
@@ -17,27 +19,48 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
-use tokio::sync::mpsc;
+use std::time::{Duration, Instant};
+use tokio::sync::{Semaphore, mpsc};
 
 const XPARQ_PROTOCOL: StreamProtocol = StreamProtocol::new("/xparq/borsh/1");
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(300);
 const COMMAND_BUFFER: usize = 1024;
+const MAX_INBOUND_REQUESTS_PER_WINDOW: u32 = 64;
+const INBOUND_REQUEST_WINDOW: Duration = Duration::from_secs(10);
 
 static GLOBAL_SWARM: OnceLock<SwarmHandle> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct SwarmHandle {
     commands: mpsc::Sender<Command>,
+    connections: Arc<Mutex<HashMap<PeerId, EstablishedPeer>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionStats {
+    pub outbound: usize,
+    pub inbound: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EstablishedPeer {
+    addr: SocketAddr,
+    outbound: bool,
+    handshaken: bool,
+}
+
+struct RequestWindow {
+    started: Instant,
+    count: u32,
 }
 
 impl SwarmHandle {
     pub fn connect(&self, addr: SocketAddr) -> Result<(), String> {
         let (tx, rx) = std_mpsc::sync_channel(1);
         self.commands
-            .blocking_send(Command::Connect { addr, result: tx })
-            .map_err(|_| "libp2p swarm stopped".to_string())?;
+            .try_send(Command::Connect { addr, result: tx })
+            .map_err(|error| format!("libp2p command queue unavailable: {error}"))?;
         rx.recv_timeout(REQUEST_TIMEOUT)
             .map_err(|_| format!("libp2p connection timed out: {addr}"))?
     }
@@ -49,22 +72,54 @@ impl SwarmHandle {
     ) -> Result<Option<NetworkMessage>, String> {
         let (tx, rx) = std_mpsc::sync_channel(1);
         self.commands
-            .blocking_send(Command::Request {
+            .try_send(Command::Request {
                 addr,
-                message,
+                message: Box::new(message),
                 result: tx,
             })
-            .map_err(|_| "libp2p swarm stopped".to_string())?;
+            .map_err(|error| format!("libp2p command queue unavailable: {error}"))?;
         rx.recv_timeout(REQUEST_TIMEOUT)
             .map_err(|_| format!("libp2p request timed out: {addr}"))?
     }
 
     pub fn disconnect(&self, addr: SocketAddr) {
-        let _ = self.commands.blocking_send(Command::Disconnect(addr));
+        let _ = self.commands.try_send(Command::Disconnect(addr));
     }
 
     pub fn shutdown(&self) {
-        let _ = self.commands.blocking_send(Command::Shutdown);
+        let _ = self.commands.try_send(Command::Shutdown);
+    }
+
+    pub fn connection_stats(&self) -> ConnectionStats {
+        self.connections
+            .lock()
+            .map(|connections| ConnectionStats {
+                outbound: connections
+                    .values()
+                    .filter(|peer| peer.outbound && peer.handshaken)
+                    .count(),
+                inbound: connections
+                    .values()
+                    .filter(|peer| !peer.outbound && peer.handshaken)
+                    .count(),
+            })
+            .unwrap_or(ConnectionStats {
+                outbound: 0,
+                inbound: 0,
+            })
+    }
+
+    pub fn handshaken_peers(&self) -> Vec<SocketAddr> {
+        self.connections
+            .lock()
+            .map(|connections| {
+                connections
+                    .values()
+                    .filter(|peer| peer.handshaken)
+                    .map(|peer| peer.addr)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -82,9 +137,14 @@ pub fn start(
     identity_path: PathBuf,
     node: Arc<Mutex<Node>>,
     peers: Arc<Mutex<HashMap<SocketAddr, super::PeerState>>>,
+    max_peers: usize,
 ) -> Result<SwarmHandle, String> {
     let (commands, receiver) = mpsc::channel(COMMAND_BUFFER);
-    let handle = SwarmHandle { commands };
+    let connections = Arc::new(Mutex::new(HashMap::new()));
+    let handle = SwarmHandle {
+        commands,
+        connections: connections.clone(),
+    };
     let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
     let listen_addrs = listen_addrs.to_vec();
     let bootstrap_addrs = bootstrap_addrs.to_vec();
@@ -104,12 +164,16 @@ pub fn start(
                 }
             };
             runtime.block_on(run_swarm(
-                listen_addrs,
-                bootstrap_addrs,
-                public_addrs,
-                identity_path,
-                node,
-                peers,
+                SwarmRuntimeConfig {
+                    listen_addrs,
+                    bootstrap_addrs,
+                    public_addrs,
+                    identity_path,
+                    node,
+                    peers,
+                    connections,
+                    max_peers,
+                },
                 receiver,
                 ready_tx,
             ));
@@ -229,6 +293,18 @@ struct XparqBehaviour {
     identify: identify::Behaviour,
     kad: kad::Behaviour<MemoryStore>,
     ping: ping::Behaviour,
+    limits: connection_limits::Behaviour,
+}
+
+struct SwarmRuntimeConfig {
+    listen_addrs: Vec<SocketAddr>,
+    bootstrap_addrs: Vec<SocketAddr>,
+    public_addrs: Vec<SocketAddr>,
+    identity_path: PathBuf,
+    node: Arc<Mutex<Node>>,
+    peers: Arc<Mutex<HashMap<SocketAddr, super::PeerState>>>,
+    connections: Arc<Mutex<HashMap<PeerId, EstablishedPeer>>>,
+    max_peers: usize,
 }
 
 enum Command {
@@ -238,7 +314,7 @@ enum Command {
     },
     Request {
         addr: SocketAddr,
-        message: NetworkMessage,
+        message: Box<NetworkMessage>,
         result: std_mpsc::SyncSender<Result<Option<NetworkMessage>, String>>,
     },
     Disconnect(SocketAddr),
@@ -250,17 +326,38 @@ struct PendingRequest {
     result: std_mpsc::SyncSender<Result<Option<NetworkMessage>, String>>,
 }
 
+struct OutstandingRequest {
+    result: std_mpsc::SyncSender<Result<Option<NetworkMessage>, String>>,
+    handshake: bool,
+}
+
+struct InboundWorkResult {
+    peer: PeerId,
+    channel: request_response::ResponseChannel<WireResponse>,
+    response: WireResponse,
+}
+
 async fn run_swarm(
-    listen_addrs: Vec<SocketAddr>,
-    bootstrap_addrs: Vec<SocketAddr>,
-    public_addrs: Vec<SocketAddr>,
-    identity_path: PathBuf,
-    node: Arc<Mutex<Node>>,
-    peers: Arc<Mutex<HashMap<SocketAddr, super::PeerState>>>,
+    config: SwarmRuntimeConfig,
     mut commands: mpsc::Receiver<Command>,
     ready: std_mpsc::SyncSender<Result<(), String>>,
 ) {
-    let mut swarm = match build_swarm(&identity_path) {
+    let SwarmRuntimeConfig {
+        listen_addrs,
+        bootstrap_addrs,
+        public_addrs,
+        identity_path,
+        node,
+        peers,
+        connections,
+        max_peers,
+    } = config;
+    let self_addrs = listen_addrs
+        .iter()
+        .chain(public_addrs.iter())
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut swarm = match build_swarm(&identity_path, max_peers) {
         Ok(swarm) => swarm,
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -278,8 +375,9 @@ async fn run_swarm(
         match tokio::time::timeout(Duration::from_secs(10), swarm.select_next_some()).await {
             Ok(libp2p::swarm::SwarmEvent::NewListenAddr { address, .. }) => {
                 bound_listeners = bound_listeners.saturating_add(1);
-                println!(
-                    "[P2P] libp2p_listening peer_id={} addr={address}",
+                node_info!(
+                    "P2P",
+                    "listening peer_id={} addr={address}",
                     swarm.local_peer_id()
                 );
             }
@@ -305,9 +403,17 @@ async fn run_swarm(
     let mut queued = HashMap::<SocketAddr, Vec<PendingRequest>>::new();
     let mut outstanding = HashMap::new();
     let mut dialing = HashSet::<SocketAddr>::new();
+    let mut handshaken = HashSet::<PeerId>::new();
+    let mut inbound_request_windows = HashMap::<PeerId, RequestWindow>::new();
+    let inbound_worker_limit = Arc::new(Semaphore::new(max_peers.clamp(4, 32)));
+    let (inbound_results_tx, mut inbound_results_rx) =
+        mpsc::channel::<InboundWorkResult>(max_peers.clamp(16, 256));
 
     loop {
         tokio::select! {
+            Some(result) = inbound_results_rx.recv() => {
+                send_wire_response(&mut swarm, result.peer, result.channel, result.response);
+            }
             command = commands.recv() => {
                 let Some(command) = command else { break };
                 match command {
@@ -328,9 +434,9 @@ async fn run_swarm(
                     }
                     Command::Request { addr, message, result } => {
                         if let Some(peer) = addr_to_peer.get(&addr).copied() {
-                            send_request(&mut swarm, peer, message, result, &mut outstanding);
+                            send_request(&mut swarm, peer, *message, result, &mut outstanding);
                         } else {
-                            queued.entry(addr).or_default().push(PendingRequest { message, result });
+                            queued.entry(addr).or_default().push(PendingRequest { message: *message, result });
                             if dialing.insert(addr)
                                 && let Err(error) = swarm.dial(socket_to_multiaddr(addr))
                             {
@@ -344,6 +450,7 @@ async fn run_swarm(
                     Command::Disconnect(addr) => {
                         if let Some(peer) = addr_to_peer.remove(&addr) {
                             peer_to_addr.remove(&peer);
+                            addr_to_peer.retain(|_, mapped_peer| *mapped_peer != peer);
                             let _ = swarm.disconnect_peer_id(peer);
                         }
                     }
@@ -357,9 +464,27 @@ async fn run_swarm(
                         if let Some(addr) = multiaddr_to_socket(endpoint.get_remote_address()) {
                             dialing.remove(&addr);
                             addr_to_peer.insert(addr, peer_id);
-                            peer_to_addr.insert(peer_id, addr);
-                            if let Ok(mut peers) = peers.lock() {
-                                peers.entry(addr).or_insert_with(|| super::PeerState::new(addr));
+                            let outbound = endpoint.is_dialer();
+                            if outbound {
+                                peer_to_addr.insert(peer_id, addr);
+                            } else {
+                                peer_to_addr.entry(peer_id).or_insert(addr);
+                            }
+                            cache_established_peer(&peers, addr, outbound);
+                            if let Ok(mut connections) = connections.lock() {
+                                connections
+                                    .entry(peer_id)
+                                    .and_modify(|peer| {
+                                        if outbound {
+                                            peer.addr = addr;
+                                            peer.outbound = true;
+                                        }
+                                    })
+                                    .or_insert(EstablishedPeer {
+                                        addr,
+                                        outbound,
+                                        handshaken: handshaken.contains(&peer_id),
+                                    });
                             }
                             if let Some(waiters) = connect_waiters.remove(&addr) {
                                 for waiter in waiters { let _ = waiter.send(Ok(())); }
@@ -369,13 +494,18 @@ async fn run_swarm(
                                     send_request(&mut swarm, peer_id, request.message, request.result, &mut outstanding);
                                 }
                             }
-                            println!("[P2P] libp2p_connected peer_id={peer_id} addr={addr}");
+                            node_info!("P2P", "connected peer_id={peer_id} addr={addr}");
                         }
                     }
-                    SwarmEvent::ConnectionClosed { peer_id, num_established, .. } if num_established == 0 => {
+                    SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
                         if let Some(addr) = peer_to_addr.remove(&peer_id) {
-                            addr_to_peer.remove(&addr);
-                            println!("[P2P] libp2p_disconnected peer_id={peer_id} addr={addr}");
+                            addr_to_peer.retain(|_, mapped_peer| *mapped_peer != peer_id);
+                            handshaken.remove(&peer_id);
+                            inbound_request_windows.remove(&peer_id);
+                            if let Ok(mut connections) = connections.lock() {
+                                connections.remove(&peer_id);
+                            }
+                            node_info!("P2P", "disconnected peer_id={peer_id} addr={addr}");
                         }
                     }
                     SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
@@ -401,43 +531,41 @@ async fn run_swarm(
                         if let Some(peer_id) = peer_id
                             && let Some(addr) = peer_to_addr.remove(&peer_id)
                         {
-                            addr_to_peer.remove(&addr);
+                            addr_to_peer.retain(|_, mapped_peer| *mapped_peer != peer_id);
                             fail_connect(&mut connect_waiters, addr, message.clone());
                             fail_queued(&mut queued, addr, message);
                         }
                     }
                     SwarmEvent::NewListenAddr { address, .. } => {
-                        println!("[P2P] libp2p_listening peer_id={} addr={address}", swarm.local_peer_id());
+                        node_info!("P2P", "listening peer_id={} addr={address}", swarm.local_peer_id());
                     }
                     SwarmEvent::Behaviour(XparqBehaviourEvent::Requests(event)) => {
-                        handle_request_event(event, &mut swarm, &node, &peers, &peer_to_addr, &mut outstanding);
+                        handle_request_event(event, &mut swarm, RequestEventContext {
+                            node: &node,
+                            peers: &peers,
+                            peer_to_addr: &peer_to_addr,
+                            outstanding: &mut outstanding,
+                            handshaken: &mut handshaken,
+                            inbound_request_windows: &mut inbound_request_windows,
+                            connections: &connections,
+                            inbound_worker_limit: &inbound_worker_limit,
+                            inbound_results: &inbound_results_tx,
+                        });
                     }
                     SwarmEvent::Behaviour(XparqBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
                         for address in info.listen_addrs {
+                            let Some(addr) = multiaddr_to_socket(&address) else {
+                                continue;
+                            };
+                            if !super::is_admissible_discovered_peer(&addr)
+                                || self_addrs.contains(&addr)
+                            {
+                                continue;
+                            }
                             swarm.behaviour_mut().kad.add_address(&peer_id, address.clone());
                             swarm.add_peer_address(peer_id, address.clone());
-                            if let Some(addr) = multiaddr_to_socket(&address) {
-                                addr_to_peer.insert(addr, peer_id);
-                                peer_to_addr.entry(peer_id).or_insert(addr);
-                                if let Ok(mut peers) = peers.lock() {
-                                    peers.entry(addr).or_insert_with(|| super::PeerState::new(addr));
-                                }
-                                if let Some(waiters) = connect_waiters.remove(&addr) {
-                                    for waiter in waiters {
-                                        let _ = waiter.send(Ok(()));
-                                    }
-                                }
-                                if let Some(requests) = queued.remove(&addr) {
-                                    for request in requests {
-                                        send_request(
-                                            &mut swarm,
-                                            peer_id,
-                                            request.message,
-                                            request.result,
-                                            &mut outstanding,
-                                        );
-                                    }
-                                }
+                            if let Ok(mut peers) = peers.lock() {
+                                peers.entry(addr).or_insert_with(|| super::PeerState::new(addr));
                             }
                         }
                         let _ = swarm.behaviour_mut().kad.bootstrap();
@@ -448,13 +576,17 @@ async fn run_swarm(
                         ..
                     })) => {
                         for address in addresses.iter() {
+                            let Some(addr) = multiaddr_to_socket(address) else {
+                                continue;
+                            };
+                            if !super::is_admissible_discovered_peer(&addr)
+                                || self_addrs.contains(&addr)
+                            {
+                                continue;
+                            }
                             swarm.add_peer_address(peer, address.clone());
-                            if let Some(addr) = multiaddr_to_socket(address) {
-                                addr_to_peer.insert(addr, peer);
-                                peer_to_addr.entry(peer).or_insert(addr);
-                                if let Ok(mut peers) = peers.lock() {
-                                    peers.entry(addr).or_insert_with(|| super::PeerState::new(addr));
-                                }
+                            if let Ok(mut peers) = peers.lock() {
+                                peers.entry(addr).or_insert_with(|| super::PeerState::new(addr));
                             }
                         }
                     }
@@ -465,7 +597,19 @@ async fn run_swarm(
     }
 }
 
-fn build_swarm(identity_path: &Path) -> Result<Swarm<XparqBehaviour>, String> {
+fn cache_established_peer(
+    peers: &Arc<Mutex<HashMap<SocketAddr, super::PeerState>>>,
+    addr: SocketAddr,
+    outbound: bool,
+) {
+    if outbound && let Ok(mut peers) = peers.lock() {
+        peers
+            .entry(addr)
+            .or_insert_with(|| super::PeerState::new(addr));
+    }
+}
+
+fn build_swarm(identity_path: &Path, max_peers: usize) -> Result<Swarm<XparqBehaviour>, String> {
     let identity = load_or_create_identity(identity_path)?;
     SwarmBuilder::with_existing_identity(identity)
         .with_tokio()
@@ -494,11 +638,23 @@ fn build_swarm(identity_path: &Path) -> Result<Swarm<XparqBehaviour>, String> {
                     .with_interval(Duration::from_secs(15))
                     .with_timeout(Duration::from_secs(20)),
             );
+            let max_peers = u32::try_from(max_peers).unwrap_or(u32::MAX).max(1);
+            let max_inbound = max_peers.saturating_mul(3).saturating_div(4).max(1);
+            let limits = connection_limits::Behaviour::new(
+                connection_limits::ConnectionLimits::default()
+                    .with_max_pending_incoming(Some(max_inbound))
+                    .with_max_pending_outgoing(Some(max_peers))
+                    .with_max_established_incoming(Some(max_inbound))
+                    .with_max_established_outgoing(Some(max_peers))
+                    .with_max_established(Some(max_peers))
+                    .with_max_established_per_peer(Some(2)),
+            );
             XparqBehaviour {
                 requests,
                 identify,
                 kad,
                 ping,
+                limits,
             }
         })
         .map_err(|error| error.to_string())
@@ -557,79 +713,163 @@ fn send_request(
     peer: PeerId,
     message: NetworkMessage,
     result: std_mpsc::SyncSender<Result<Option<NetworkMessage>, String>>,
-    outstanding: &mut HashMap<
-        request_response::OutboundRequestId,
-        std_mpsc::SyncSender<Result<Option<NetworkMessage>, String>>,
-    >,
+    outstanding: &mut HashMap<request_response::OutboundRequestId, OutstandingRequest>,
 ) {
+    let handshake = matches!(&message, NetworkMessage::Version(_));
     let request_id = swarm
         .behaviour_mut()
         .requests
         .send_request(&peer, WireRequest { message });
-    outstanding.insert(request_id, result);
+    outstanding.insert(request_id, OutstandingRequest { result, handshake });
+}
+
+struct RequestEventContext<'a> {
+    node: &'a Arc<Mutex<Node>>,
+    peers: &'a Arc<Mutex<HashMap<SocketAddr, super::PeerState>>>,
+    peer_to_addr: &'a HashMap<PeerId, SocketAddr>,
+    outstanding: &'a mut HashMap<request_response::OutboundRequestId, OutstandingRequest>,
+    handshaken: &'a mut HashSet<PeerId>,
+    inbound_request_windows: &'a mut HashMap<PeerId, RequestWindow>,
+    connections: &'a Arc<Mutex<HashMap<PeerId, EstablishedPeer>>>,
+    inbound_worker_limit: &'a Arc<Semaphore>,
+    inbound_results: &'a mpsc::Sender<InboundWorkResult>,
 }
 
 fn handle_request_event(
     event: request_response::Event<WireRequest, WireResponse>,
     swarm: &mut Swarm<XparqBehaviour>,
-    node: &Arc<Mutex<Node>>,
-    peers: &Arc<Mutex<HashMap<SocketAddr, super::PeerState>>>,
-    peer_to_addr: &HashMap<PeerId, SocketAddr>,
-    outstanding: &mut HashMap<
-        request_response::OutboundRequestId,
-        std_mpsc::SyncSender<Result<Option<NetworkMessage>, String>>,
-    >,
+    context: RequestEventContext<'_>,
 ) {
+    let RequestEventContext {
+        node,
+        peers,
+        peer_to_addr,
+        outstanding,
+        handshaken,
+        inbound_request_windows,
+        connections,
+        inbound_worker_limit,
+        inbound_results,
+    } = context;
     match event {
         request_response::Event::Message { peer, message } => match message {
             request_response::Message::Request {
                 request, channel, ..
             } => {
-                let response = if matches!(request.message, NetworkMessage::GetPeers) {
+                let is_version = matches!(&request.message, NetworkMessage::Version(_));
+                if !allow_inbound_request(inbound_request_windows, peer) {
+                    send_wire_response(
+                        swarm,
+                        peer,
+                        channel,
+                        rejection("peer request rate limit exceeded"),
+                    );
+                    return;
+                }
+                if !is_version && !handshaken.contains(&peer) {
+                    send_wire_response(swarm, peer, channel, rejection("peer handshake required"));
+                    return;
+                }
+                if matches!(request.message, NetworkMessage::GetPeers) {
                     let infos = peers
                         .lock()
                         .map(|peers| {
                             peers
-                                .keys()
+                                .values()
+                                .filter(|peer| {
+                                    peer.last_success.is_some()
+                                        && super::is_admissible_discovered_peer(&peer.addr)
+                                })
                                 .take(64)
-                                .map(|addr| PeerInfo {
-                                    address: addr.to_string(),
+                                .map(|peer| PeerInfo {
+                                    address: peer.addr.to_string(),
                                 })
                                 .collect()
                         })
                         .unwrap_or_default();
-                    Ok(Some(NetworkMessage::Peers(infos)))
-                } else {
-                    node.lock()
+                    send_wire_response(
+                        swarm,
+                        peer,
+                        channel,
+                        WireResponse {
+                            message: Some(NetworkMessage::Peers(infos)),
+                        },
+                    );
+                    return;
+                }
+                if is_version {
+                    let response = node
+                        .lock()
                         .map_err(|_| "node state lock poisoned".to_string())
                         .and_then(|mut node| {
                             handle_message(&mut node, request.message)
                                 .map_err(|error| error.to_string())
-                        })
-                };
-                let response = WireResponse {
-                    message: response.unwrap_or_else(|error| {
-                        Some(NetworkMessage::Reject {
-                            reason: RejectReason::InvalidMessage,
-                            message: error,
-                        })
-                    }),
-                };
-                if swarm
-                    .behaviour_mut()
-                    .requests
-                    .send_response(channel, response)
-                    .is_err()
-                {
-                    eprintln!("[P2P] libp2p_response_failed peer_id={peer}");
+                        });
+                    if matches!(&response, Ok(Some(NetworkMessage::VerAck(_)))) {
+                        mark_peer_handshaken(peer, handshaken, connections);
+                    }
+                    send_wire_response(
+                        swarm,
+                        peer,
+                        channel,
+                        WireResponse {
+                            message: response.unwrap_or_else(|error| {
+                                Some(NetworkMessage::Reject {
+                                    reason: RejectReason::InvalidMessage,
+                                    message: error,
+                                })
+                            }),
+                        },
+                    );
+                    return;
                 }
+
+                let Ok(permit) = inbound_worker_limit.clone().try_acquire_owned() else {
+                    send_wire_response(
+                        swarm,
+                        peer,
+                        channel,
+                        rejection("node inbound request capacity reached"),
+                    );
+                    return;
+                };
+                let node = node.clone();
+                let inbound_results = inbound_results.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    let response = node
+                        .lock()
+                        .map_err(|_| "node state lock poisoned".to_string())
+                        .and_then(|mut node| {
+                            handle_message(&mut node, request.message)
+                                .map_err(|error| error.to_string())
+                        });
+                    let response = WireResponse {
+                        message: response.unwrap_or_else(|error| {
+                            Some(NetworkMessage::Reject {
+                                reason: RejectReason::InvalidMessage,
+                                message: error,
+                            })
+                        }),
+                    };
+                    let _ = inbound_results.blocking_send(InboundWorkResult {
+                        peer,
+                        channel,
+                        response,
+                    });
+                });
             }
             request_response::Message::Response {
                 request_id,
                 response,
             } => {
-                if let Some(result) = outstanding.remove(&request_id) {
-                    let _ = result.send(Ok(response.message));
+                if let Some(pending) = outstanding.remove(&request_id) {
+                    if pending.handshake
+                        && matches!(&response.message, Some(NetworkMessage::VerAck(_)))
+                    {
+                        mark_peer_handshaken(peer, handshaken, connections);
+                    }
+                    let _ = pending.result.send(Ok(response.message));
                 }
             }
         },
@@ -638,18 +878,72 @@ fn handle_request_event(
             request_id,
             error,
         } => {
-            if let Some(result) = outstanding.remove(&request_id) {
+            if let Some(pending) = outstanding.remove(&request_id) {
                 let addr = peer_to_addr
                     .get(&peer)
                     .map(ToString::to_string)
                     .unwrap_or_else(|| peer.to_string());
-                let _ = result.send(Err(format!("libp2p request failed peer={addr}: {error}")));
+                let _ = pending
+                    .result
+                    .send(Err(format!("libp2p request failed peer={addr}: {error}")));
             }
         }
         request_response::Event::InboundFailure { peer, error, .. } => {
-            eprintln!("[P2P] libp2p_inbound_failed peer_id={peer} error=\"{error}\"");
+            node_warn!("P2P", "inbound_failed peer_id={peer} error={error:?}");
         }
         request_response::Event::ResponseSent { .. } => {}
+    }
+}
+
+fn rejection(message: &str) -> WireResponse {
+    WireResponse {
+        message: Some(NetworkMessage::Reject {
+            reason: RejectReason::InvalidMessage,
+            message: message.to_string(),
+        }),
+    }
+}
+
+fn send_wire_response(
+    swarm: &mut Swarm<XparqBehaviour>,
+    peer: PeerId,
+    channel: request_response::ResponseChannel<WireResponse>,
+    response: WireResponse,
+) {
+    if swarm
+        .behaviour_mut()
+        .requests
+        .send_response(channel, response)
+        .is_err()
+    {
+        node_debug!("P2P", "response_failed peer_id={peer}");
+    }
+}
+
+fn allow_inbound_request(windows: &mut HashMap<PeerId, RequestWindow>, peer: PeerId) -> bool {
+    let now = Instant::now();
+    let window = windows.entry(peer).or_insert(RequestWindow {
+        started: now,
+        count: 0,
+    });
+    if now.duration_since(window.started) >= INBOUND_REQUEST_WINDOW {
+        window.started = now;
+        window.count = 0;
+    }
+    window.count = window.count.saturating_add(1);
+    window.count <= MAX_INBOUND_REQUESTS_PER_WINDOW
+}
+
+fn mark_peer_handshaken(
+    peer: PeerId,
+    handshaken: &mut HashSet<PeerId>,
+    connections: &Arc<Mutex<HashMap<PeerId, EstablishedPeer>>>,
+) {
+    handshaken.insert(peer);
+    if let Ok(mut connections) = connections.lock()
+        && let Some(connection) = connections.get_mut(&peer)
+    {
+        connection.handshaken = true;
     }
 }
 
@@ -716,6 +1010,31 @@ mod tests {
     }
 
     #[test]
+    fn inbound_source_port_is_not_cached_as_a_dialable_peer() {
+        let peers = Arc::new(Mutex::new(HashMap::new()));
+        let inbound = "182.253.148.123:61871".parse().unwrap();
+        let outbound = "208.94.113.170:5555".parse().unwrap();
+
+        cache_established_peer(&peers, inbound, false);
+        assert!(!peers.lock().unwrap().contains_key(&inbound));
+
+        cache_established_peer(&peers, outbound, true);
+        assert!(peers.lock().unwrap().contains_key(&outbound));
+    }
+
+    #[test]
+    fn inbound_request_window_has_a_hard_cap() {
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let mut windows = HashMap::new();
+        for _ in 0..MAX_INBOUND_REQUESTS_PER_WINDOW {
+            assert!(allow_inbound_request(&mut windows, peer));
+        }
+        assert!(!allow_inbound_request(&mut windows, peer));
+    }
+
+    #[test]
     fn node_identity_is_persistent_and_private() {
         let unique = format!(
             "xparq-libp2p-{}-{}",
@@ -755,8 +1074,8 @@ mod tests {
         let directory = std::env::temp_dir().join(unique);
         let first_path = directory.join("first.key");
         let second_path = directory.join("second.key");
-        let mut first = build_swarm(&first_path).unwrap();
-        let mut second = build_swarm(&second_path).unwrap();
+        let mut first = build_swarm(&first_path, 16).unwrap();
+        let mut second = build_swarm(&second_path, 16).unwrap();
         let second_peer = *second.local_peer_id();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

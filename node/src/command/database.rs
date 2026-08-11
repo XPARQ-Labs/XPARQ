@@ -16,21 +16,21 @@ pub fn run(args: &[String], default_database: &str) -> Result<(), String> {
         }
         Some("backup") => {
             let source = args.get(1).map(String::as_str).unwrap_or(default_database);
-            let destination = args.get(2).ok_or_else(|| {
-                "usage: xparq-node node db backup <database> <backup>".to_string()
-            })?;
+            let destination = args
+                .get(2)
+                .ok_or_else(|| "usage: node node db backup <database> <backup>".to_string())?;
             backup(source, destination)
         }
         Some("restore") => {
-            let backup = args.get(1).ok_or_else(|| {
-                "usage: xparq-node node db restore <backup> <database>".to_string()
-            })?;
-            let destination = args.get(2).ok_or_else(|| {
-                "usage: xparq-node node db restore <backup> <database>".to_string()
-            })?;
+            let backup = args
+                .get(1)
+                .ok_or_else(|| "usage: node node db restore <backup> <database>".to_string())?;
+            let destination = args
+                .get(2)
+                .ok_or_else(|| "usage: node node db restore <backup> <database>".to_string())?;
             restore(backup, destination)
         }
-        _ => Err("usage: xparq-node node db <check|backup|restore> [paths]".to_string()),
+        _ => Err("usage: node node db <check|backup|restore> [paths]".to_string()),
     }
 }
 

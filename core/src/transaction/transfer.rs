@@ -476,7 +476,10 @@ impl SignedTransfer {
         dual_address_from_public_keys(&self.authorization_proof.public_key, auth_public_key)
     }
 
-    fn validate_dual_authorization(&self) -> Result<(), TransactionError> {
+    fn validate_dual_authorization_at_height(
+        &self,
+        height: crate::block::BlockHeight,
+    ) -> Result<(), TransactionError> {
         if !self.authorization_proof.carries_registration_keys() {
             return Err(TransactionError::EmptyPublicKey);
         }
@@ -484,7 +487,8 @@ impl SignedTransfer {
             return Err(TransactionError::SenderAddressMismatch);
         }
         let payload = self.transaction.signing_bytes()?;
-        let (owner_valid, auth_valid) = crate::crypto::verify_dual_parallel(
+        let (owner_valid, auth_valid) = crate::crypto::verify_dual_parallel_at_height(
+            height,
             &self.authorization_proof.public_key,
             &self.authorization_proof.auth_public_key,
             &payload,
@@ -502,7 +506,7 @@ impl SignedTransfer {
 
     pub fn validate_signed(&self) -> Result<(), TransactionError> {
         self.validate()?;
-        self.validate_dual_authorization()
+        self.validate_dual_authorization_at_height(crate::block::Height(0))
     }
 
     pub fn validate_signed_for_height(
@@ -511,7 +515,7 @@ impl SignedTransfer {
     ) -> Result<(), TransactionError> {
         self.validate_for_height(height)?;
 
-        self.validate_dual_authorization()
+        self.validate_dual_authorization_at_height(height)
     }
 
     pub fn validate_stored_keys_for_height(
@@ -526,7 +530,8 @@ impl SignedTransfer {
             return Err(TransactionError::InvalidAuthorizationSignature);
         }
         let payload_bytes = self.transaction.signing_bytes()?;
-        let (owner_valid, auth_valid) = crate::crypto::verify_dual_parallel(
+        let (owner_valid, auth_valid) = crate::crypto::verify_dual_parallel_at_height(
+            height,
             owner_public_key,
             auth_public_key,
             &payload_bytes,

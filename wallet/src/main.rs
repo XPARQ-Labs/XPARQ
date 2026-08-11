@@ -1,18 +1,17 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::process::{Command, ExitCode};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use time::{OffsetDateTime, macros::format_description};
 use xparq::{
     codec::{canonical_bytes, canonical_deserialize, signed_protocol_transaction_bytes},
     consensus::supply::{Amount, DECIMALS, XPQ},
     crypto::{
         Address, PublicKey, SIGNATURE_SIZE, SecretKey, Signature, address_from_string,
-        address_to_string, authorization_keypair_from_password, derive_public_key,
-        dual_address_from_public_keys,
+        address_to_string, derive_public_key,
     },
     ledger::{
         BLOCK_REWARD_MATURITY, QCASH_REDEEM_DELAY, decode_account_non_membership_proof_bundle,
@@ -58,7 +57,8 @@ const WALLET_NETWORK: &str = "devnet";
 #[derive(Deserialize)]
 struct SharedRpcConfig {
     network: String,
-    rpc_addr: String,
+    rpc_addr_ipv4: Option<String>,
+    rpc_addr_ipv6: Option<String>,
 }
 
 mod memory;
@@ -84,12 +84,15 @@ include!("commands.rs");
 
 fn main() -> ExitCode {
     if let Err(error) = memory::harden_process_memory() {
-        eprintln!("warning: process memory hardening is incomplete: {error}");
+        cli_log(
+            "WARN",
+            format_args!("process memory hardening is incomplete: {error}"),
+        );
     }
     match run(env::args().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error}");
+            cli_log("ERROR", format_args!("{error}"));
             ExitCode::FAILURE
         }
     }
@@ -107,19 +110,15 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
             Ok(())
         }
         Some("new") => wallet_new(&args[1..]),
-        Some("new-mnemonic") | Some("mnemonic-new") => wallet_new_mnemonic(&args[1..]),
         Some("restore-mnemonic")
         | Some("mnemonic-restore")
         | Some("import")
         | Some("import-wallet") => wallet_restore_mnemonic(&args[1..]),
-        Some("address") => wallet_address(&args[1..]),
         Some("balance") => wallet_balance(&args[1..]),
         Some("stats") | Some("tracking") => wallet_global_stats(&args[1..]),
         Some("address-stats") | Some("address-tracking") => wallet_address_stats(&args[1..]),
         Some("hashrate") => wallet_hashrate(&args[1..]),
-        Some("pay") => wallet_pay(&args[1..]),
         Some("send") => wallet_send(&args[1..]),
-        Some("pool-payout") => wallet_pool_payout(&args[1..]),
         Some("cash") | Some("qcash") => wallet_cash(&args[1..]),
         Some("events") | Some("event") => wallet_events(&args[1..]),
         Some("rollback") | Some("recovery") => wallet_rollback(&args[1..]),
@@ -130,6 +129,15 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
     result
 }
 
+fn cli_log(level: &str, message: std::fmt::Arguments<'_>) {
+    let timestamp = OffsetDateTime::now_utc()
+        .format(format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        ))
+        .unwrap_or_else(|_| "timestamp-unavailable".to_string());
+    eprintln!("{timestamp} {level:<5} WALLET    {message}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,8 +145,11 @@ mod tests {
     #[test]
     fn wrong_authorization_password_does_not_modify_wallet_file() {
         let owner = xparq::crypto::keypair_from_seed(&[0x51; 32]);
-        let authorization =
-            authorization_keypair_from_password(b"correct password", &owner.public_key).unwrap();
+        let authorization = xparq::crypto::authorization_keypair_from_password(
+            b"correct password",
+            &owner.public_key,
+        )
+        .unwrap();
         let wallet = Wallet::from_keys_with_authorization(
             owner.public_key,
             owner.secret_key,
@@ -150,7 +161,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let wallet_path = std::env::temp_dir().join(format!(
-            "xparq-wallet-wrong-auth-{}-{unique}.json",
+            "wallet-wrong-auth-{}-{unique}.json",
             std::process::id()
         ));
         let wallet_path_string = wallet_path.to_string_lossy().into_owned();
@@ -186,7 +197,7 @@ mod tests {
         )])
         .unwrap();
         let wallet_path = std::env::temp_dir().join(format!(
-            "xparq-wallet-checkpoint-{}-{}",
+            "wallet-checkpoint-{}-{}",
             std::process::id(),
             unix_timestamp().unwrap()
         ));
@@ -224,7 +235,8 @@ mod tests {
     fn shared_config_supplies_rpc_only_for_the_compiled_network() {
         let matching = serde_json::to_vec(&serde_json::json!({
             "network": WALLET_NETWORK,
-            "rpc_addr": "127.0.0.1:7777",
+            "rpc_addr_ipv4": "127.0.0.1:7777",
+            "rpc_addr_ipv6": "[::1]:7777",
             "miner_secret_key": "ignored"
         }))
         .unwrap();
@@ -233,7 +245,7 @@ mod tests {
             Some("127.0.0.1:7777".to_string())
         );
 
-        let mismatched = br#"{"network":"another-network","rpc_addr":"127.0.0.1:7777"}"#;
+        let mismatched = br#"{"network":"another-network","rpc_addr_ipv4":"127.0.0.1:7777"}"#;
         assert_eq!(rpc_addr_from_shared_config_bytes(mismatched), None);
     }
 
@@ -305,7 +317,7 @@ mod tests {
             "QCashWithdrawn",
             "QCashRedeemed",
             "QCashRecoverRedeemed",
-            "CoinbasePaid",
+            "EmissionDistributed",
         ];
         assert_eq!(names.len(), 5);
         assert!(
@@ -324,13 +336,9 @@ mod tests {
         );
         assert_eq!(
             event_kind_from_menu_selection("4"),
-            Ok(Some("qcash_recover_redeemed".to_string()))
+            Ok(Some("emission_distributed".to_string()))
         );
-        assert_eq!(
-            event_kind_from_menu_selection("5"),
-            Ok(Some("coinbase_paid".to_string()))
-        );
-        assert!(event_kind_from_menu_selection("6").is_err());
+        assert!(event_kind_from_menu_selection("5").is_err());
     }
 
     #[test]

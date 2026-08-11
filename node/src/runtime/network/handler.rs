@@ -9,8 +9,8 @@ use crate::runtime::node::Node;
 use crate::runtime::params::MAX_NETWORK_MESSAGE_SIZE;
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
-use xparq::block::Height;
-use xparq::crypto::{HashDomain, TransactionHash, domain_hash};
+use xparq::block::{Block, Height};
+use xparq::crypto::{BlockHash, HashDomain, TransactionHash, domain_hash};
 
 const MAX_RANGE_RESPONSE_ITEMS: u32 = 64;
 const RANGE_RESPONSE_HEADROOM: usize = 64 * 1024;
@@ -94,9 +94,7 @@ pub fn handle_message(
             Ok(Some(NetworkMessage::CommonAncestor(ancestor)))
         }
         NetworkMessage::CommonAncestor(_) => Ok(None),
-        NetworkMessage::GetBlockByHash { hash } => Ok(node
-            .cache
-            .block_by_hash(&hash)
+        NetworkMessage::GetBlockByHash { hash } => Ok(known_block_by_hash(node, &hash)
             .cloned()
             .map(NetworkMessage::Block)
             .or_else(|| {
@@ -174,7 +172,7 @@ pub fn handle_message(
             let missing = items
                 .into_iter()
                 .filter(|item| match item {
-                    InventoryItem::Block(hash) => node.cache.block_by_hash(hash).is_none(),
+                    InventoryItem::Block(hash) => known_block_by_hash(node, hash).is_none(),
                     InventoryItem::Transaction(hash) => !node.mempool.contains(hash),
                 })
                 .collect::<Vec<_>>();
@@ -190,7 +188,7 @@ pub fn handle_message(
             for item in items {
                 match item {
                     InventoryItem::Block(hash) => {
-                        if let Some(block) = node.cache.block_by_hash(&hash).cloned() {
+                        if let Some(block) = known_block_by_hash(node, &hash).cloned() {
                             blocks.push(block);
                         }
                     }
@@ -282,7 +280,7 @@ pub fn handle_message(
                     }));
                 }
             };
-            if node.cache.block_by_hash(&block_hash).is_some() {
+            if known_block_by_hash(node, &block_hash).is_some() {
                 return Ok(None);
             }
             match compact.reconstruct(&node.mempool, &[]) {
@@ -317,7 +315,7 @@ pub fn handle_message(
                     message: "duplicate compact block transaction index".to_string(),
                 }));
             }
-            let Some(block) = node.cache.block_by_hash(&block_hash) else {
+            let Some(block) = known_block_by_hash(node, &block_hash) else {
                 return Ok(Some(NetworkMessage::Reject {
                     reason: RejectReason::InvalidMessage,
                     message: "compact block is unavailable".to_string(),
@@ -362,6 +360,14 @@ pub fn handle_message(
             }
         }
     }
+}
+
+fn known_block_by_hash<'a>(node: &'a Node, hash: &BlockHash) -> Option<&'a Block> {
+    if let Some(block) = node.cache.block_by_hash(hash) {
+        return Some(block);
+    }
+    let height = node.fork_choice.get(hash)?.height;
+    node.ledger.block(&height)
 }
 
 fn local_version(node: &Node) -> VersionInfo {

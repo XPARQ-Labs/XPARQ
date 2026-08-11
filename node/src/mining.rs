@@ -27,6 +27,9 @@ pub fn mine_once(
     mining_stats: &MiningStats,
     shutdown_requested: &AtomicBool,
 ) -> Result<Option<Block>, String> {
+    let miner_address = config
+        .miner_address
+        .ok_or_else(|| "mining reward address is not configured".to_string())?;
     let now = unix_timestamp()?;
     let (candidate, consensus, mining_config) = {
         let mut node = node_state
@@ -50,7 +53,7 @@ pub fn mine_once(
         let candidate = prepare_candidate_block(
             &node.mempool,
             &node.ledger,
-            config.miner_address,
+            miner_address,
             timestamp,
             MAX_BLOCK_TXS,
             miner_min_fee_rate,
@@ -115,8 +118,6 @@ pub fn mine_once(
     }
     node.apply_block(result.block.clone())
         .map_err(|error| format!("failed to apply mined block: {error}"))?;
-    node.flush_to_storage()
-        .map_err(|error| format!("failed to flush mined block: {error}"))?;
     block_mined(&result.block, result.attempts);
     Ok(Some(result.block))
 }

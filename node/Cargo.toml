@@ -1,5 +1,5 @@
 [package]
-name = "xparq-node"
+name = "node"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ publish = false
 build = "build.rs"
 
 [[bin]]
-name = "xparq-node"
+name = "node"
 path = "src/main.rs"
 
 [features]
@@ -35,6 +35,7 @@ serde.workspace = true
 serde_json.workspace = true
 socket2.workspace = true
 tokio.workspace = true
+time.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
 tower.workspace = true

@@ -10,33 +10,40 @@ async fn rpc_submit_qcash_tx(
         Ok(hash) => hash,
         Err(error) => return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     };
-    match state.node.lock() {
+    let node = Arc::clone(&state.node);
+    let submission = state
+        .state_pipeline
+        .run(move || match node.lock() {
         Ok(mut node) => {
             let already_pending = node.mempool.contains(&hash);
             if let Err(error) = node.submit_qcash_transaction(transaction) {
                 if already_pending && is_duplicate_submission(&error) {
-                    return Json(serde_json::json!({
-                        "accepted": true,
-                        "already_pending": true,
-                        "hash": hex::encode(hash.0),
-                        "status": "pending",
-                    }))
-                    .into_response();
+                    return Ok(true);
                 }
-                return rpc_transaction_rejected(
+                return Err((
                     transaction_rejection_status(&error),
                     error.to_string(),
-                );
+                ));
             }
+            Ok(false)
         }
-        Err(_) => return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+        Err(_) => Err(("internal", "state_lock_failed".to_string())),
+    })
+        .await;
+    match submission {
+        Ok(Ok(already_pending)) => Json(serde_json::json!({
+                "accepted": true,
+                "already_pending": already_pending,
+                "hash": hex::encode(hash.0),
+                "status": "pending",
+            }))
+            .into_response(),
+        Ok(Err(("internal", error))) => {
+            rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error)
+        }
+        Ok(Err((status, error))) => rpc_transaction_rejected(status, error),
+        Err(error) => rpc_state_pipeline_error(error),
     }
-    Json(serde_json::json!({
-        "accepted": true,
-        "hash": hex::encode(hash.0),
-        "status": "pending",
-    }))
-    .into_response()
 }
 
 #[cfg(any(feature = "devnet", feature = "testnet"))]
@@ -134,9 +141,6 @@ async fn rpc_faucet(
                     error.to_string(),
                 );
             }
-            if let Err(error) = node.flush_to_storage() {
-                return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
-            }
         }
         Err(_) => return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
     }
@@ -172,45 +176,52 @@ async fn rpc_submit_tx(
         Ok(hash) => hash,
         Err(error) => return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     };
-    match state.node.lock() {
+    let node = Arc::clone(&state.node);
+    let peers = Arc::clone(&state.peers);
+    let peer_connections = Arc::clone(&state.peer_connections);
+    let inbound_connections = Arc::clone(&state.inbound_connections);
+    let transaction_for_job = transaction.clone();
+    let submission = state.state_pipeline.run(move || match node.lock() {
         Ok(mut node) => {
             let already_pending = node.mempool.contains(&hash);
-            if let Err(error) = node.submit_transaction(transaction.clone()) {
+            if let Err(error) = node.submit_transaction(transaction_for_job.clone()) {
                 if already_pending && is_duplicate_submission(&error) {
-                    return Json(SubmitTxResponse {
-                        accepted: true,
-                        hash: hex::encode(hash.0),
-                    })
-                    .into_response();
+                    return Ok(false);
                 }
-                return rpc_transaction_rejected(
+                return Err((
                     transaction_rejection_status(&error),
                     error.to_string(),
-                );
+                ));
             }
-            if let Err(error) = node.flush_to_storage() {
-                return rpc_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to flush transaction: {error}"),
-                );
-            }
+            drop(node);
+            let _ = broadcast_to_peers(
+                &peers,
+                &peer_connections,
+                &inbound_connections,
+                NetworkMessage::Transaction(transaction_for_job.into()),
+            );
+            Ok(true)
         }
-        Err(_) => return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+        Err(_) => Err(("internal", "state_lock_failed".to_string())),
+    }).await;
+    let broadcasted = match submission {
+        Ok(Ok(broadcasted)) => broadcasted,
+        Ok(Err(("internal", error))) => {
+            return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error);
+        }
+        Ok(Err((status, error))) => return rpc_transaction_rejected(status, error),
+        Err(error) => return rpc_state_pipeline_error(error),
+    };
+    if broadcasted {
+        state
+            .log_counters
+            .accepted_tx_total
+            .fetch_add(1, Ordering::Relaxed);
+        state
+            .log_counters
+            .broadcast_tx_total
+            .fetch_add(1, Ordering::Relaxed);
     }
-    state
-        .log_counters
-        .accepted_tx_total
-        .fetch_add(1, Ordering::Relaxed);
-    let _report = broadcast_to_peers(
-        &state.peers,
-        &state.peer_connections,
-        &state.inbound_connections,
-        NetworkMessage::Transaction(transaction.into()),
-    );
-    state
-        .log_counters
-        .broadcast_tx_total
-        .fetch_add(1, Ordering::Relaxed);
     Json(SubmitTxResponse {
         accepted: true,
         hash: hex::encode(hash.0),
@@ -230,37 +241,42 @@ async fn rpc_submit_protocol_tx(
         Ok(hash) => hash,
         Err(error) => return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     };
-    match state.node.lock() {
+    let node = Arc::clone(&state.node);
+    let peers = Arc::clone(&state.peers);
+    let peer_connections = Arc::clone(&state.peer_connections);
+    let inbound_connections = Arc::clone(&state.inbound_connections);
+    let transaction_for_job = transaction.clone();
+    let submission = state.state_pipeline.run(move || match node.lock() {
         Ok(mut node) => {
             let already_pending = node.mempool.contains(&hash);
-            if let Err(error) = node.submit_protocol_transaction(transaction.clone()) {
+            if let Err(error) = node.submit_protocol_transaction(transaction_for_job.clone()) {
                 if already_pending && is_duplicate_submission(&error) {
-                    return Json(SubmitTxResponse {
-                        accepted: true,
-                        hash: hex::encode(hash.0),
-                    })
-                    .into_response();
+                    return Ok(());
                 }
-                return rpc_transaction_rejected(
+                return Err((
                     transaction_rejection_status(&error),
                     error.to_string(),
-                );
+                ));
             }
-            if let Err(error) = node.flush_to_storage() {
-                return rpc_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to flush transaction: {error}"),
-                );
-            }
+            drop(node);
+            let _ = broadcast_to_peers(
+                &peers,
+                &peer_connections,
+                &inbound_connections,
+                NetworkMessage::Transaction(transaction_for_job),
+            );
+            Ok(())
         }
-        Err(_) => return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+        Err(_) => Err(("internal", "state_lock_failed".to_string())),
+    }).await;
+    match submission {
+        Ok(Ok(())) => {}
+        Ok(Err(("internal", error))) => {
+            return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error);
+        }
+        Ok(Err((status, error))) => return rpc_transaction_rejected(status, error),
+        Err(error) => return rpc_state_pipeline_error(error),
     }
-    let _report = broadcast_to_peers(
-        &state.peers,
-        &state.peer_connections,
-        &state.inbound_connections,
-        NetworkMessage::Transaction(transaction),
-    );
     Json(SubmitTxResponse {
         accepted: true,
         hash: hex::encode(hash.0),

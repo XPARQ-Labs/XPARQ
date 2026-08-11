@@ -2,17 +2,17 @@
 
 `wallet/` contains two related products:
 
-- the `xparq-wallet` reusable Rust library for wallet key material and files;
+- the `wallet` reusable Rust library for wallet key material and files;
 - the `wallet` command-line executable for accounts, payments, QCash, proofs,
   explorer queries, protocol events, and rollback recovery.
 
 The wallet does not embed a node or open the node database. It communicates
-with `xparq-node` over HTTP RPC.
+with `node` over HTTP RPC.
 
 ## Build and start
 
 ```bash
-cargo build --release -p xparq-wallet
+cargo build --release -p wallet
 ./target/release/wallet
 ```
 
@@ -27,7 +27,7 @@ available for scripting:
 ./target/release/wallet stats
 ./target/release/wallet address-stats
 ./target/release/wallet hashrate
-./target/release/wallet pay ADDRESS AMOUNT_XPQ
+./target/release/wallet send ADDRESS AMOUNT_XPQ
 ./target/release/wallet cash list cash
 ./target/release/wallet proof status
 ```
@@ -39,13 +39,15 @@ key derived from its authorization password. The stored address is bound to
 both public keys. Entering a wrong authorization password fails the operation;
 it does not replace or reinitialize the wallet's authorization identity.
 
-`wallet.json`, its mnemonic, its owner secret, and the authorization password
+Mnemonic and authorization-password prompts disable terminal echo. If the
+terminal cannot be placed in hidden-input mode, the wallet fails closed rather
+than echoing secrets. `wallet.json`, its mnemonic, its owner secret, and the authorization password
 are sensitive. Keep backups offline and never commit wallet files to Git. A
 mining node needs only the public payout address, not this file.
 
 ## Shared configuration and RPC
 
-The wallet reads `network` and `rpc_addr` from the same generated configuration
+The wallet reads `network` and prefers `rpc_addr_ipv4`, then `rpc_addr_ipv6`, from the same generated configuration
 used by the node:
 
 ```text
@@ -96,7 +98,7 @@ Useful commands are:
 ./target/release/wallet cash withdraw AMOUNT_XPQ --out cash
 ./target/release/wallet cash inspect cash/100XPQ_<COIN_ID>.QCash
 ./target/release/wallet cash redeem cash/100XPQ_<COIN_ID>.QCash --to ADDRESS --fee auto
-./target/release/wallet cash track cash
+./target/release/wallet cash track 100XPQ_<COIN_ID>.QCash
 ./target/release/wallet cash list cash
 ./target/release/wallet cash backup cash backup-cash
 ./target/release/wallet cash recover backup-cash recovered-cash
@@ -110,5 +112,13 @@ from the ledger.
 
 `wallet proof account`, `wallet proof qcash`, and `wallet proof status` verify
 state against authenticated header checkpoints saved beside the wallet as
-`<wallet-path>.checkpoint`. Rollback commands inspect and verify node-reported
-recovery issues before retrying an affected transaction.
+`<wallet-path>.checkpoint`. Public wallet rollback commands can list, inspect,
+and locally verify node-reported recovery proofs. Retrying a rollback issue is
+an authenticated node-admin operation and is intentionally not exposed by the
+wallet CLI.
+
+## Timestamped diagnostics
+
+Wallet result output, including JSON intended for scripts, remains stable on
+standard output. Warnings and errors are written to standard error with a UTC
+RFC 3339 timestamp, severity, and `WALLET` component label.

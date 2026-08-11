@@ -524,12 +524,18 @@ mod tests {
         assert_eq!(borsh::to_vec(&header).unwrap().len(), 113);
     }
 
-    fn invalid_signed_transfer(seed: u64) -> SignedTransfer {
-        let mut coin_id = [0_u8; crate::crypto::HASH_SIZE];
-        coin_id[..8].copy_from_slice(&seed.to_le_bytes());
+    fn invalid_signed_transfer(seed: u64, input_count: usize) -> SignedTransfer {
+        let inputs = (0..input_count)
+            .map(|input_index| {
+                let mut coin_id = [0_u8; crate::crypto::HASH_SIZE];
+                coin_id[..8].copy_from_slice(&seed.to_le_bytes());
+                coin_id[8..16].copy_from_slice(&(input_index as u64).to_le_bytes());
+                crate::state::XpqCoinId(coin_id)
+            })
+            .collect();
         let transaction = Transfer::new(
             Address([0xff; crate::crypto::ADDRESS_SIZE]),
-            vec![crate::state::XpqCoinId(coin_id)],
+            inputs,
             Address([seed as u8; crate::crypto::ADDRESS_SIZE]),
             Amount(1),
         );
@@ -542,14 +548,22 @@ mod tests {
 
     #[test]
     fn oversized_transaction_count_hits_block_size_limit() {
-        let encoded_size = SignedProtocolTransaction::from(invalid_signed_transfer(0))
-            .to_bytes()
-            .unwrap()
-            .len();
+        let minimum_encoded_size = MAX_BLOCK_WEIGHT / MAX_BLOCK_DECODE_ITEMS + 1;
+        let mut input_count = 1;
+        let encoded_size = loop {
+            let size = SignedProtocolTransaction::from(invalid_signed_transfer(0, input_count))
+                .to_bytes()
+                .unwrap()
+                .len();
+            if size >= minimum_encoded_size {
+                break size;
+            }
+            input_count += 1;
+        };
         let transaction_count = (MAX_BLOCK_WEIGHT / encoded_size).saturating_add(2);
         assert!(transaction_count <= MAX_BLOCK_DECODE_ITEMS);
         let transactions: Vec<SignedTransfer> = (0..transaction_count as u64)
-            .map(invalid_signed_transfer)
+            .map(|seed| invalid_signed_transfer(seed, input_count))
             .collect();
         let miner = Address([4; crate::crypto::ADDRESS_SIZE]);
         let block = Block::from_protocol_transactions(

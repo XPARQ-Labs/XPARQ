@@ -1,10 +1,11 @@
 use crate::command::config::current_network;
+use crate::p2p::swarm::SwarmHandle;
 use crate::runtime::node::Node;
 use crate::runtime::params::{CHAIN_NAME, COIN_NAME, PROTOCOL_STAGE, PROTOCOL_VERSION};
-use crate::{PeerConnection, PeerState};
-use std::collections::HashMap;
+use crate::{node_error, node_info};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tonic::{Request, Response, Status};
 use xparq::block::Height;
 
@@ -18,8 +19,7 @@ use proto::{GetStatusRequest, GetStatusResponse};
 #[derive(Clone)]
 struct GrpcNodeService {
     node: Arc<Mutex<Node>>,
-    peers: Arc<Mutex<HashMap<SocketAddr, PeerState>>>,
-    peer_connections: Arc<Mutex<HashMap<SocketAddr, PeerConnection>>>,
+    p2p_swarm: SwarmHandle,
     mining: bool,
     min_relay_fee: u64,
     market_fee: u64,
@@ -35,16 +35,8 @@ impl NodeRpc for GrpcNodeService {
             .node
             .lock()
             .map_err(|_| Status::internal("node state lock poisoned"))?;
-        let peer_count = self
-            .peers
-            .lock()
-            .map(|peers| peers.len())
-            .unwrap_or_default()
-            + self
-                .peer_connections
-                .lock()
-                .map(|connections| connections.len())
-                .unwrap_or_default();
+        let connection_stats = self.p2p_swarm.connection_stats();
+        let peer_count = connection_stats.outbound + connection_stats.inbound;
         let height = node.tip_height().unwrap_or(Height(0)).0;
         let tip_hash = node
             .tip_hash()
@@ -69,40 +61,64 @@ impl NodeRpc for GrpcNodeService {
 pub fn start_grpc_server(
     addr: SocketAddr,
     node: Arc<Mutex<Node>>,
-    peers: Arc<Mutex<HashMap<SocketAddr, PeerState>>>,
-    peer_connections: Arc<Mutex<HashMap<SocketAddr, PeerConnection>>>,
+    p2p_swarm: SwarmHandle,
     mining: bool,
     min_relay_fee: u64,
     market_fee: u64,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                eprintln!("[GRPC] runtime_failed error=\"{error}\"");
-                return;
-            }
-        };
-        runtime.block_on(async move {
-            let service = GrpcNodeService {
-                node,
-                peers,
-                peer_connections,
-                mining,
-                min_relay_fee,
-                market_fee,
-            };
-            println!("[GRPC] listening addr={addr}");
-            if let Err(error) = tonic::transport::Server::builder()
-                .add_service(NodeRpcServer::new(service))
-                .serve(addr)
-                .await
+) -> Result<std::thread::JoinHandle<()>, String> {
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let handle = std::thread::Builder::new()
+        .name("xparq-grpc".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
             {
-                eprintln!("[GRPC] failed error=\"{error}\"");
-            }
-        });
-    })
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(format!("gRPC runtime failed: {error}")));
+                    node_error!("GRPC", "runtime_failed error={error:?}");
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                let service = GrpcNodeService {
+                    node,
+                    p2p_swarm,
+                    mining,
+                    min_relay_fee,
+                    market_fee,
+                };
+                let listener = match tokio::net::TcpListener::bind(addr).await {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        let _ = ready_tx
+                            .send(Err(format!("failed to bind gRPC listener {addr}: {error}")));
+                        return;
+                    }
+                };
+                let incoming = futures_util::stream::unfold(listener, |listener| async move {
+                    Some((listener.accept().await.map(|(stream, _)| stream), listener))
+                });
+                node_info!("GRPC", "listening addr={addr}");
+                let _ = ready_tx.send(Ok(()));
+                if let Err(error) = tonic::transport::Server::builder()
+                    .add_service(NodeRpcServer::new(service))
+                    .serve_with_incoming_shutdown(incoming, async {
+                        while !crate::SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                    })
+                    .await
+                {
+                    node_error!("GRPC", "server_failed error={error:?}");
+                }
+            });
+        })
+        .map_err(|error| format!("failed to spawn gRPC server: {error}"))?;
+    match ready_rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(())) => Ok(handle),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(format!("timed out starting gRPC listener {addr}")),
+    }
 }

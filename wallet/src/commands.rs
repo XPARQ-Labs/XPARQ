@@ -46,10 +46,6 @@ fn wallet_new(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn wallet_new_mnemonic(args: &[String]) -> Result<(), String> {
-    wallet_new(args)
-}
-
 fn parse_mnemonic_words(value: Option<&String>) -> Result<usize, String> {
     let value = value.ok_or_else(|| "missing value for --words".to_string())?;
     match value.as_str() {
@@ -83,7 +79,7 @@ fn wallet_restore_mnemonic(args: &[String]) -> Result<(), String> {
     }
     let mnemonic = Zeroizing::new(match mnemonic {
         Some(value) => value,
-        None => prompt("Mnemonic")?,
+        None => prompt_hidden("Mnemonic")?.to_string(),
     });
     let auth_password = match auth_password {
         Some(password) => Zeroizing::new(password),
@@ -96,16 +92,6 @@ fn wallet_restore_mnemonic(args: &[String]) -> Result<(), String> {
     let wallet = result?;
     println!("Wallet successfully restored to `{output_path}`");
     println!("address: {}", wallet_address_string(&wallet));
-    Ok(())
-}
-
-fn wallet_address(args: &[String]) -> Result<(), String> {
-    let secret_key = parse_secret_key(args.first())?;
-    let public_key = derive_public_key(&secret_key);
-    let auth_password = prompt_hidden("Authorization password")?;
-    let authorization = authorization_from_password(&auth_password, &public_key)?;
-    let address = dual_address_from_public_keys(&public_key, &authorization.public_key);
-    println!("{}", address_to_string(&address));
     Ok(())
 }
 
@@ -435,55 +421,6 @@ fn optional_u64_text(value: Option<u64>) -> String {
         .unwrap_or_else(|| "none".to_string())
 }
 
-fn wallet_pay(args: &[String]) -> Result<(), String> {
-    let to = parse_address(args.first())?;
-    let amount = parse_amount(args.get(1), "amount")?;
-    let mut wallet_path = DEFAULT_WALLET_PATH.to_string();
-    let mut rpc_addr = default_rpc_addr();
-    let mut fee = TransferFee::Automatic;
-    let mut authorization = None;
-    let mut index = 2;
-
-    while index < args.len() {
-        match args[index].as_str() {
-            "--wallet" => {
-                index += 1;
-                wallet_path = args
-                    .get(index)
-                    .ok_or_else(|| "missing value for --wallet".to_string())?
-                    .clone();
-            }
-            "--rpc" | "--rpc-addr" => {
-                index += 1;
-                rpc_addr = args
-                    .get(index)
-                    .ok_or_else(|| "missing value for --rpc".to_string())?
-                    .clone();
-            }
-            "--fee" => {
-                index += 1;
-                fee = parse_fee(args.get(index))?;
-            }
-            "--auth-secret-key" => {
-                index += 1;
-                authorization = Some(AuthorizationInput::Keys(Box::new(
-                    authorization_from_secret_key(parse_secret_key(args.get(index))?),
-                )));
-            }
-            "--auth-password" => {
-                index += 1;
-                authorization = Some(AuthorizationInput::Password(Zeroizing::new(
-                    required_option(args, index, "--auth-password")?,
-                )));
-            }
-            value => return Err(format!("unknown wallet pay option `{value}`")),
-        }
-        index += 1;
-    }
-
-    submit_wallet_payment(&wallet_path, to, amount, fee, &rpc_addr, authorization)
-}
-
 fn wallet_send(args: &[String]) -> Result<(), String> {
     let short_form = args.len() >= 2 && !args[0].starts_with('-') && !args[1].starts_with('-');
     if short_form {
@@ -558,225 +495,6 @@ fn wallet_send(args: &[String]) -> Result<(), String> {
         submit,
         authorization,
     )
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct PoolAccountingRound {
-    pool_address: String,
-    height: u64,
-    block_hash: String,
-    maturity_height: u64,
-    gross_reward: u64,
-    payouts: Vec<PoolWorkerPayout>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PoolWorkerPayout {
-    worker: String,
-    address: String,
-    amount: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PoolPayoutReceipt {
-    round_block_hash: String,
-    round_height: u64,
-    worker: String,
-    address: String,
-    amount: u64,
-    tx_hash: String,
-    submitted_at_height: u64,
-}
-
-fn wallet_pool_payout(args: &[String]) -> Result<(), String> {
-    let mut ledger = "pool-accounting.jsonl".to_string();
-    let mut receipts = "pool-payout-receipts.jsonl".to_string();
-    let mut wallet_path = DEFAULT_WALLET_PATH.to_string();
-    let mut rpc_addr = default_rpc_addr();
-    let mut execute = false;
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--ledger" => {
-                index += 1;
-                ledger = required_option(args, index, "--ledger")?;
-            }
-            "--receipts" => {
-                index += 1;
-                receipts = required_option(args, index, "--receipts")?;
-            }
-            "--wallet" => {
-                index += 1;
-                wallet_path = required_option(args, index, "--wallet")?;
-            }
-            "--rpc" | "--rpc-addr" => {
-                index += 1;
-                rpc_addr = required_option(args, index, "--rpc")?;
-            }
-            "--execute" => execute = true,
-            value => return Err(format!("unknown pool-payout option `{value}`")),
-        }
-        index += 1;
-    }
-
-    let height = status_value(&rpc_addr)?
-        .get("height")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or("rpc status is missing height")?;
-    let rounds = read_json_lines::<PoolAccountingRound>(&ledger)?;
-    let prior_receipts = if std::path::Path::new(&receipts).exists() {
-        read_json_lines::<PoolPayoutReceipt>(&receipts)?
-    } else {
-        Vec::new()
-    };
-    let paid = prior_receipts
-        .iter()
-        .map(receipt_key)
-        .collect::<HashSet<_>>();
-    let wallet_address = address_to_string(&load_wallet_address(&wallet_path)?);
-    let mut pending = Vec::new();
-    for round in rounds
-        .iter()
-        .filter(|round| round.maturity_height <= height)
-    {
-        if round.pool_address != wallet_address {
-            return Err(format!(
-                "round {} belongs to pool {}, but wallet address is {}",
-                round.block_hash, round.pool_address, wallet_address
-            ));
-        }
-        let _payout_total = round
-            .payouts
-            .iter()
-            .try_fold(0u64, |total, payout| total.checked_add(payout.amount))
-            .ok_or("round payout total overflow")?;
-        for payout in &round.payouts {
-            if payout.amount > 0 && !paid.contains(&payout_key(round, payout)) {
-                let address = parse_address_string(&payout.address).map_err(|error| {
-                    format!(
-                        "invalid payout address for worker {}: {error}",
-                        payout.worker
-                    )
-                })?;
-                pending.push((round, payout, address));
-            }
-        }
-    }
-
-    if !execute {
-        println!(
-            "{}",
-            serde_json::json!({
-                "execute": false,
-                "height": height,
-                "mature_unpaid_payouts": pending.len(),
-                "amount": pending.iter().map(|(_, payout, _)| payout.amount).sum::<u64>(),
-                "hint": "review this preview, then repeat with --execute"
-            })
-        );
-        return Ok(());
-    }
-
-    let wallet = load_wallet(&wallet_path)?;
-    let authorization = resolve_authorization_for_wallet(&wallet, None)?;
-    if pending.len() > 1 {
-        return Err(
-            "pool-payout submits one transfer at a time; wait for each spend to confirm before the next payout"
-                .to_string(),
-        );
-    }
-    let account_state = resolve_wallet_account_state(&wallet.address, &rpc_addr)?;
-    ensure_no_pending_outgoing(&account_state)?;
-    for (round, payout, address) in pending {
-        let (inputs, total) = select_xpq_inputs(&account_state.spendable_utxos, payout.amount)?;
-        let mut outputs = vec![TransferOutput::new(address, Amount(payout.amount))];
-        if total > payout.amount {
-            outputs.push(TransferOutput::new(
-                wallet.address,
-                Amount(total - payout.amount),
-            ));
-        }
-        let transaction = Transaction::from_outputs(wallet.address, inputs, outputs);
-        let signed = wallet.sign_transaction(
-            transaction,
-            Some(authorization.clone()),
-            account_state.authorization_registered,
-        )?;
-        let tx_hash = hex::encode(signed.hash().map_err(|error| error.to_string())?.0);
-        let body = format!("{{\"tx\":\"{}\"}}", signed_transaction_to_hex(&signed)?);
-        let response = http_post_json(&rpc_addr, "/tx", &body)?;
-        let accepted = serde_json::from_str::<serde_json::Value>(&response)
-            .ok()
-            .and_then(|value| value.get("accepted").and_then(serde_json::Value::as_bool));
-        if accepted != Some(true) {
-            return Err(format!(
-                "node rejected payout for {}: {response}",
-                payout.worker
-            ));
-        }
-        append_payout_receipt(
-            &receipts,
-            &PoolPayoutReceipt {
-                round_block_hash: round.block_hash.clone(),
-                round_height: round.height,
-                worker: payout.worker.clone(),
-                address: payout.address.clone(),
-                amount: payout.amount,
-                tx_hash,
-                submitted_at_height: height,
-            },
-        )?;
-    }
-    println!("{{\"accepted\":true,\"height\":{height}}}");
-    Ok(())
-}
-
-fn read_json_lines<T: for<'de> Deserialize<'de>>(path: &str) -> Result<Vec<T>, String> {
-    let file = fs::File::open(path).map_err(|error| format!("failed to open {path}: {error}"))?;
-    BufReader::new(file)
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| match line {
-            Ok(line) if line.trim().is_empty() => None,
-            result => Some((index, result)),
-        })
-        .map(|(index, line)| {
-            let line = line.map_err(|error| format!("failed to read {path}: {error}"))?;
-            serde_json::from_str(&line)
-                .map_err(|error| format!("invalid JSON in {path} line {}: {error}", index + 1))
-        })
-        .collect()
-}
-
-fn payout_key(round: &PoolAccountingRound, payout: &PoolWorkerPayout) -> String {
-    format!(
-        "{}:{}:{}:{}",
-        round.block_hash, payout.worker, payout.address, payout.amount
-    )
-}
-
-fn receipt_key(receipt: &PoolPayoutReceipt) -> String {
-    format!(
-        "{}:{}:{}:{}",
-        receipt.round_block_hash, receipt.worker, receipt.address, receipt.amount
-    )
-}
-
-fn append_payout_receipt(path: &str, receipt: &PoolPayoutReceipt) -> Result<(), String> {
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|error| format!("open receipt file: {error}"))?;
-    serde_json::to_writer(&mut file, receipt).map_err(|error| error.to_string())?;
-    file.write_all(b"\n").map_err(|error| error.to_string())?;
-    file.sync_data().map_err(|error| error.to_string())
 }
 
 fn wallet_cash(args: &[String]) -> Result<(), String> {
@@ -1157,7 +875,7 @@ fn wallet_rollback(args: &[String]) -> Result<(), String> {
         [action, value, options @ ..] => (action.as_str(), value.as_str(), options),
         _ => {
             return Err(
-                "usage: rollback <list address|show issue-id|verify issue-id|retry issue-id> [--rpc host:port]"
+                "usage: rollback <list address|show issue-id|verify issue-id> [--rpc host:port]"
                     .to_string(),
             );
         }
@@ -1198,12 +916,6 @@ fn wallet_rollback(args: &[String]) -> Result<(), String> {
             println!("Losing tip    : {}", hex::encode(verified.losing_tip.0));
             println!("Canonical tip : {}", hex::encode(verified.canonical_tip.0));
             Ok(())
-        }
-        "retry" | "claim" => {
-            let _ = fetch_and_verify_rollback_proof(&rpc_addr, value)?;
-            let path = format!("/rollback-issues/{value}/retry");
-            let body = http_post_json(&rpc_addr, &path, "{}")?;
-            print_rpc_response(&path, &body)
         }
         _ => Err(format!("unknown rollback action `{action}`")),
     }
@@ -2200,25 +1912,6 @@ fn wallet_send_short(args: &[String]) -> Result<(), String> {
     )
 }
 
-fn submit_wallet_payment(
-    wallet_path: &str,
-    to: Address,
-    amount: Amount,
-    fee: TransferFee,
-    rpc_addr: &str,
-    authorization: Option<AuthorizationInput>,
-) -> Result<(), String> {
-    submit_wallet_transfer(
-        wallet_path,
-        to.into(),
-        amount,
-        fee,
-        rpc_addr,
-        true,
-        authorization,
-    )
-}
-
 fn submit_wallet_transfer(
     wallet_path: &str,
     to: xparq::transaction::OutputTarget,
@@ -2626,18 +2319,6 @@ fn authorization_from_secret_key(secret_key: SecretKey) -> AuthorizationKeys {
     }
 }
 
-fn authorization_from_password(
-    password: &str,
-    primary_public_key: &PublicKey,
-) -> Result<AuthorizationKeys, String> {
-    let keypair = authorization_keypair_from_password(password.as_bytes(), primary_public_key)
-        .map_err(|error| format!("authorization key derivation failed: {error}"))?;
-    Ok(AuthorizationKeys {
-        public_key: keypair.public_key,
-        secret_key: keypair.secret_key,
-    })
-}
-
 fn resolve_authorization_for_wallet(
     wallet: &Wallet,
     input: Option<AuthorizationInput>,
@@ -2703,16 +2384,11 @@ fn prompt_hidden(label: &str) -> Result<Zeroizing<String>, String> {
         read_result.map_err(|error| format!("failed to read password: {error}"))?;
         return String::from_utf8(value.to_vec())
             .map(Zeroizing::new)
-            .map_err(|_| "authorization password must be valid UTF-8".to_string());
+            .map_err(|_| "hidden input must be valid UTF-8".to_string());
     }
-
-    let mut value = Zeroizing::new(String::new());
-    io::stdin()
-        .read_line(&mut value)
-        .map_err(|error| format!("failed to read input: {error}"))?;
-    let trimmed_len = value.trim_end_matches(['\r', '\n']).len();
-    value.truncate(trimmed_len);
-    Ok(value)
+    Err(format!(
+        "cannot disable terminal echo for {label}; use the corresponding command option in a protected environment"
+    ))
 }
 
 fn fee_rate_from_status(status: &serde_json::Value) -> Result<u64, String> {
@@ -2986,8 +2662,9 @@ fn rpc_addr_from_shared_config_bytes(bytes: &[u8]) -> Option<String> {
     if config.network != WALLET_NETWORK {
         return None;
     }
-    config.rpc_addr.parse::<SocketAddr>().ok()?;
-    Some(config.rpc_addr)
+    let rpc_addr = config.rpc_addr_ipv4.or(config.rpc_addr_ipv6)?;
+    rpc_addr.parse::<SocketAddr>().ok()?;
+    Some(rpc_addr)
 }
 
 fn default_wallet_address_or_empty() -> String {
@@ -3061,22 +2738,17 @@ Usage:
   wallet
   wallet menu
   wallet new [wallet-path] [--words 12|24] [--auth-password password] [--show-secret]
-  wallet new-mnemonic [wallet-path] [--words 12|24] [--auth-password password] [--show-secret]
-  wallet import [wallet-path] [--mnemonic words]
+  wallet import [wallet-path] [--mnemonic words] [--auth-password password]
   wallet restore-mnemonic [wallet-path] [--mnemonic words] [--auth-password password]
-  wallet address <secret-key-hex>
   wallet balance [address] [--wallet path] [--rpc host:port]
   wallet stats [--rpc host:port]
   wallet address-stats [address] [--wallet path] [--rpc host:port]
   wallet hashrate [--rpc host:port]
-  wallet pay <address> <amount-xpq> [--wallet path] [--fee auto|xpq] [--auth-secret-key hex | --auth-password text] [--rpc host:port]
   wallet send <address> <amount-xpq> [--wallet path] [--fee auto|xpq] [--auth-secret-key hex | --auth-password text] [--rpc host:port]
   wallet send --to <address> --amount <xpq> [--wallet path] [--fee auto|xpq] [--auth-secret-key hex | --auth-password text] [--submit] [--rpc host:port]
-  wallet pool-payout [--ledger file] [--receipts file] [--wallet path] [--rpc host:port] [--execute]
   wallet cash withdraw <amount-xpq> [--denoms 1000,500,100 | 1000x1,500x2] [--out directory] [--wallet path] [--rpc host:port]
   wallet cash inspect <coin.QCash>
   wallet cash redeem <coin.QCash> --to <address> [--fee auto|0|amount-xpq] [--wallet path] [--rpc host:port]
-  wallet cash track <coin-file-or-directory> [--rpc host:port]
   wallet cash track <file-name-or-full-coin-id> [--rpc host:port]
   wallet cash list [cash-directory]
   wallet cash backup <cash-directory> <new-backup-directory>
@@ -3085,7 +2757,6 @@ Usage:
   wallet rollback list <address> [--rpc host:port]
   wallet rollback show <issue-id> [--rpc host:port]
   wallet rollback verify <issue-id> [--rpc host:port]
-  wallet rollback retry <issue-id> [--rpc host:port]
   wallet proof account [address] [--wallet path] [--rpc host:port]
   wallet proof qcash <coin-id> [--wallet path] [--rpc host:port]
   wallet proof status [--wallet path]

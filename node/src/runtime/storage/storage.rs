@@ -15,7 +15,10 @@ use xparq::crypto::{Address, BlockHash, Hash, TransactionHash};
 use xparq::event::{EventId, ProtocolEvent, ProtocolEventKind};
 use xparq::ledger::Ledger;
 use xparq::qcash::recovery::ChainHeader;
-use xparq::state::{Account, QCashUtxoSet, XpqUtxoSet};
+use xparq::state::{
+    Account, QCashCoinId, QCashJournalState, QCashUtxo, QCashUtxoSet, XpqCoinId, XpqUtxo,
+    XpqUtxoSet,
+};
 use xparq::transaction::{SignedProtocolTransaction, SignedTransfer, TransactionFamily};
 
 const BLOCKS_BY_HEIGHT: &str = "blocks_by_height";
@@ -29,6 +32,7 @@ const ADDRESS_TX_INDEX: &str = "address_tx_index";
 const MINER_BLOCK_INDEX: &str = "miner_block_index";
 const META: &str = "meta";
 const PROTOCOL_STATE: &str = "protocol_state";
+const STATE_DIFFS: &str = "state_diffs";
 const EVENTS_BY_ID: &str = "events_by_id";
 const BLOCK_EVENT_INDEX: &str = "block_event_index";
 const TRANSACTION_EVENT_INDEX: &str = "transaction_event_index";
@@ -40,6 +44,19 @@ const TIP_HEIGHT_KEY: &[u8] = b"tip_height";
 const TIP_HASH_KEY: &[u8] = b"tip_hash";
 const STORAGE_VERSION_KEY: &[u8] = b"storage_version";
 const CHECKPOINT_HEIGHT_KEY: &[u8] = b"checkpoint_height";
+#[cfg(target_pointer_width = "64")]
+const DEFAULT_LMDB_MAP_SIZE: usize = 4 * 1024 * 1024 * 1024;
+#[cfg(not(target_pointer_width = "64"))]
+const DEFAULT_LMDB_MAP_SIZE: usize = 1024 * 1024 * 1024;
+const STATE_SNAPSHOT_INTERVAL: u64 = 2_048;
+
+fn lmdb_map_size() -> usize {
+    std::env::var("XPARQ_LMDB_MAP_SIZE_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value >= 64 * 1024 * 1024)
+        .unwrap_or(DEFAULT_LMDB_MAP_SIZE)
+}
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransactionLocation {
@@ -72,6 +89,17 @@ struct StoredProtocolState {
     events_by_block: BTreeMap<BlockHash, Vec<ProtocolEvent>>,
 }
 
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+struct StoredStateDiff {
+    block_hash: BlockHash,
+    removed_xpq: Vec<XpqCoinId>,
+    upserted_xpq: Vec<XpqUtxo>,
+    removed_qcash: Vec<QCashCoinId>,
+    upserted_qcash: Vec<QCashUtxo>,
+    qcash_journal_state: QCashJournalState,
+    events: Vec<ProtocolEvent>,
+}
+
 impl StoredProtocolState {
     fn from_ledger(ledger: &Ledger) -> Self {
         Self {
@@ -88,6 +116,56 @@ impl StoredProtocolState {
     }
 }
 
+fn protocol_state_diff(
+    previous: &Ledger,
+    current: &Ledger,
+    block_hash: BlockHash,
+) -> StoredStateDiff {
+    let previous_xpq = previous.xpq_utxos.coins();
+    let current_xpq = current.xpq_utxos.coins();
+    let removed_xpq = previous_xpq
+        .keys()
+        .filter(|id| !current_xpq.contains_key(id))
+        .copied()
+        .collect();
+    let upserted_xpq = current_xpq
+        .iter()
+        .filter(|(id, coin)| previous_xpq.get(id) != Some(*coin))
+        .map(|(_, coin)| coin.clone())
+        .collect();
+
+    let previous_qcash = previous
+        .qcash_utxos
+        .coins()
+        .map(|coin| (coin.id, coin))
+        .collect::<BTreeMap<_, _>>();
+    let current_qcash = current
+        .qcash_utxos
+        .coins()
+        .map(|coin| (coin.id, coin))
+        .collect::<BTreeMap<_, _>>();
+    let removed_qcash = previous_qcash
+        .keys()
+        .filter(|id| !current_qcash.contains_key(id))
+        .copied()
+        .collect();
+    let upserted_qcash = current_qcash
+        .iter()
+        .filter(|(id, coin)| previous_qcash.get(id) != Some(*coin))
+        .map(|(_, coin)| (*coin).clone())
+        .collect();
+
+    StoredStateDiff {
+        block_hash,
+        removed_xpq,
+        upserted_xpq,
+        removed_qcash,
+        upserted_qcash,
+        qcash_journal_state: current.qcash_utxos.persistence_journal_state(),
+        events: current.events_for_block(&block_hash).to_vec(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Storage {
     env: Arc<Environment>,
@@ -101,6 +179,7 @@ pub struct Storage {
     address_tx_index: Database,
     miner_block_index: Database,
     protocol_state: Database,
+    state_diffs: Database,
     events_by_id: Database,
     block_event_index: Database,
     transaction_event_index: Database,
@@ -115,8 +194,8 @@ impl Storage {
         fs::create_dir_all(path.as_ref()).map_err(StorageError::from_std_io)?;
         let env = Arc::new(
             Environment::new()
-                .set_max_dbs(19)
-                .set_map_size(1024 * 1024 * 1024)
+                .set_max_dbs(20)
+                .set_map_size(lmdb_map_size())
                 .open(path.as_ref())?,
         );
         let storage = Self::from_env(env)?;
@@ -148,6 +227,7 @@ impl Storage {
             address_tx_index: env.create_db(Some(ADDRESS_TX_INDEX), DatabaseFlags::empty())?,
             miner_block_index: env.create_db(Some(MINER_BLOCK_INDEX), DatabaseFlags::empty())?,
             protocol_state: env.create_db(Some(PROTOCOL_STATE), DatabaseFlags::empty())?,
+            state_diffs: env.create_db(Some(STATE_DIFFS), DatabaseFlags::empty())?,
             events_by_id: env.create_db(Some(EVENTS_BY_ID), DatabaseFlags::empty())?,
             block_event_index: env.create_db(Some(BLOCK_EVENT_INDEX), DatabaseFlags::empty())?,
             transaction_event_index: env
@@ -804,6 +884,7 @@ impl Storage {
         txn.clear_db(self.block_event_index)?;
         txn.clear_db(self.transaction_event_index)?;
         txn.clear_db(self.address_event_index)?;
+        txn.clear_db(self.state_diffs)?;
 
         for account in ledger.accounts().values() {
             put_value(&mut txn, self.accounts, &account.address.0, account)?;
@@ -865,6 +946,92 @@ impl Storage {
         Ok(())
     }
 
+    /// Atomically persists a block that directly extends the active tip without rebuilding all
+    /// historical indexes. Reorganizations still use `save_ledger` because they must remove
+    /// entries belonging to the disconnected branch.
+    pub fn save_active_extension(
+        &self,
+        previous: &Ledger,
+        ledger: &Ledger,
+        block: &Block,
+    ) -> Result<(), StorageError> {
+        validate_block_for_storage(block)?;
+        let block_hash = block.hash()?;
+        let bytes = block_bytes(block)?;
+        let mut txn = self.env.begin_rw_txn()?;
+
+        for (address, previous_account) in previous.accounts() {
+            match ledger.accounts().get(address) {
+                Some(account) if account == previous_account => {}
+                Some(account) => put_value(&mut txn, self.accounts, &address.0, account)?,
+                None => {
+                    let _ = txn.del(self.accounts, &address.0, None);
+                }
+            }
+        }
+        for (address, account) in ledger.accounts() {
+            if !previous.accounts().contains_key(address) {
+                put_value(&mut txn, self.accounts, &address.0, account)?;
+            }
+        }
+
+        txn.put(
+            self.blocks_by_height,
+            &height_key(block.height()),
+            &block_hash.0,
+            WriteFlags::empty(),
+        )?;
+        txn.put(
+            self.blocks_by_hash,
+            &block_hash.0,
+            &bytes,
+            WriteFlags::empty(),
+        )?;
+        put_value(
+            &mut txn,
+            self.headers_by_height,
+            &height_key(block.height()),
+            &ChainHeader::new(block.height(), block.header.clone()),
+        )?;
+        self.index_block_transactions(&mut txn, block)?;
+        self.index_miner_block(&mut txn, block)?;
+        self.index_protocol_events(&mut txn, ledger.events_for_block(&block_hash))?;
+
+        put_value(&mut txn, self.meta, TIP_HEIGHT_KEY, &block.height())?;
+        txn.put(self.meta, &TIP_HASH_KEY, &block_hash.0, WriteFlags::empty())?;
+        match ledger.chain.checkpoint_height {
+            Some(height) => put_value(&mut txn, self.meta, CHECKPOINT_HEIGHT_KEY, &height)?,
+            None => {
+                let _ = txn.del(self.meta, &CHECKPOINT_HEIGHT_KEY, None);
+            }
+        }
+        if block.is_genesis() || block.height().0.is_multiple_of(STATE_SNAPSHOT_INTERVAL) {
+            put_value(
+                &mut txn,
+                self.protocol_state,
+                PROTOCOL_STATE_KEY,
+                &StoredProtocolState::from_ledger(ledger),
+            )?;
+            txn.clear_db(self.state_diffs)?;
+        } else {
+            let diff = protocol_state_diff(previous, ledger, block_hash);
+            put_value(
+                &mut txn,
+                self.state_diffs,
+                &height_key(block.height()),
+                &diff,
+            )?;
+        }
+        if block.is_genesis() {
+            let accounts = genesis_accounts_from_ledger(ledger, block)?;
+            put_value(&mut txn, self.genesis_accounts, b"accounts", &accounts)?;
+        }
+
+        txn.commit()?;
+        self.flush()?;
+        Ok(())
+    }
+
     pub fn load_ledger(&self) -> Result<Ledger, StorageError> {
         self.ensure_storage_version()?;
         self.validate_chain_integrity()?;
@@ -895,6 +1062,20 @@ impl Storage {
                 read_value::<StoredProtocolState>(&txn, self.protocol_state, PROTOCOL_STATE_KEY)?
             {
                 state.restore(&mut ledger);
+            }
+            let mut cursor = txn.open_ro_cursor(self.state_diffs)?;
+            for item in cursor.iter() {
+                let (_key, bytes) = item;
+                let diff: StoredStateDiff = decode(bytes)?;
+                ledger
+                    .xpq_utxos
+                    .apply_persistence_diff(&diff.removed_xpq, diff.upserted_xpq);
+                ledger.qcash_utxos.apply_persistence_diff(
+                    &diff.removed_qcash,
+                    diff.upserted_qcash,
+                    diff.qcash_journal_state,
+                );
+                ledger.events_by_block.insert(diff.block_hash, diff.events);
             }
         }
 
@@ -1361,4 +1542,33 @@ fn invalid_data(message: &'static str) -> StorageError {
         std::io::ErrorKind::InvalidData,
         message,
     ))
+}
+
+#[cfg(test)]
+mod incremental_tests {
+    use super::*;
+
+    #[test]
+    fn active_extension_persists_tip_and_block_atomically() {
+        let ledger = xparq::genesis::genesis_ledger().unwrap();
+        let block = ledger.chain.block(&Height(0)).unwrap().clone();
+        let storage = Storage::temporary().unwrap();
+
+        storage
+            .save_active_extension(&Ledger::new(), &ledger, &block)
+            .unwrap();
+
+        assert_eq!(
+            storage.load_tip().unwrap(),
+            Some((Height(0), block.hash().unwrap()))
+        );
+        assert_eq!(
+            storage.load_block_by_height(Height(0)).unwrap(),
+            Some(block)
+        );
+        let loaded = storage.load_ledger().unwrap();
+        assert_eq!(loaded.state_root(), ledger.state_root());
+        assert_eq!(loaded.xpq_utxos, ledger.xpq_utxos);
+        assert_eq!(loaded.qcash_utxos, ledger.qcash_utxos);
+    }
 }

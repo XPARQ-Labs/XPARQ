@@ -1,5 +1,11 @@
 use super::*;
 
+#[test]
+fn protocol_event_filter_accepts_current_emission_name() {
+    assert!(rpc::api::is_protocol_event_kind("emission_distributed"));
+    assert!(!rpc::api::is_protocol_event_kind("coinbase_paid"));
+}
+
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| value.to_string()).collect()
 }
@@ -33,7 +39,7 @@ fn parse_address_accepts_wallet_address_string() {
 #[test]
 fn public_rpc_requires_tls_outside_loopback() {
     let mut config = RunConfig {
-        rpc_addr: "0.0.0.0:6666".parse().unwrap(),
+        rpc_addrs: vec!["0.0.0.0:6666".parse().unwrap()],
         ..RunConfig::default()
     };
     assert!(validate_rpc_security(&config).is_err());
@@ -45,7 +51,7 @@ fn public_rpc_requires_tls_outside_loopback() {
 #[test]
 fn admin_rpc_requires_a_strong_token() {
     let mut config = RunConfig {
-        rpc_admin_addr: Some("127.0.0.1:6667".parse().unwrap()),
+        rpc_admin_addrs: vec!["127.0.0.1:6667".parse().unwrap()],
         ..RunConfig::default()
     };
     assert!(validate_rpc_security(&config).is_err());
@@ -63,7 +69,7 @@ fn mining_requires_an_explicit_reward_recipient() {
     };
     assert!(validate_mining_config(&config).is_err());
 
-    config.miner_configured = true;
+    config.miner_address = Some(Address([9; 20]));
     assert!(validate_mining_config(&config).is_ok());
 }
 
@@ -101,8 +107,8 @@ fn parses_rpc_security_controls() {
     ]))
     .unwrap();
     assert_eq!(
-        config.rpc_admin_addr,
-        Some("127.0.0.1:7777".parse().unwrap())
+        config.rpc_admin_addrs,
+        vec!["127.0.0.1:7777".parse().unwrap()]
     );
     assert_eq!(config.rpc_cors_origins, vec!["https://wallet.example"]);
     assert_eq!(config.rpc_max_body_bytes, 4096);
@@ -130,7 +136,7 @@ fn parse_run_config_accepts_operator_peer_without_defaults() {
 #[cfg(feature = "mainnet")]
 fn mainnet_defaults_to_local_rpc_without_peers() {
     let config = RunConfig::default();
-    assert!(config.rpc_addr.ip().is_loopback());
+    assert!(config.rpc_addrs.iter().all(|addr| addr.ip().is_loopback()));
     assert!(config.peers.is_empty());
 }
 

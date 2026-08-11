@@ -10,19 +10,17 @@ async fn rpc_mining_template(
         Ok(timestamp) => timestamp,
         Err(error) => return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error),
     };
-    let candidate = match state.node.lock() {
+    let node = Arc::clone(&state.node);
+    let candidate = match state.state_pipeline.run(move || match node.lock() {
         Ok(mut node) => {
             if let Err(error) = node.mempool.evict_by_policy(now) {
-                return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+                return Err(error.to_string());
             }
             let timestamp = crate::mining::candidate_timestamp(&node, now);
             let difficulty = match node.next_difficulty_at(timestamp) {
                 Ok(difficulty) => difficulty,
                 Err(error) => {
-                    return rpc_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("difficulty_unavailable: {error}"),
-                    );
+                    return Err(format!("difficulty_unavailable: {error}"));
                 }
             };
             match prepare_candidate_block(
@@ -34,16 +32,15 @@ async fn rpc_mining_template(
                 node.mempool.dynamic_market_fee_rate(),
                 difficulty,
             ) {
-                Ok(candidate) => candidate,
-                Err(error) => {
-                    return rpc_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("template_failed: {error}"),
-                    );
-                }
+                Ok(candidate) => Ok(candidate),
+                Err(error) => Err(format!("template_failed: {error}")),
             }
         }
-        Err(_) => return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+        Err(_) => Err("state_lock_failed".to_string()),
+    }).await {
+        Ok(Ok(candidate)) => candidate,
+        Ok(Err(error)) => return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+        Err(error) => return rpc_state_pipeline_error(error),
     };
     let (candidate_hash, candidate_bytes) = match (candidate.hash(), block_bytes(&candidate)) {
         (Ok(hash), Ok(bytes)) => (hash, bytes),
@@ -81,26 +78,35 @@ async fn rpc_submit_mined_block(
         Ok(hash) => hash,
         Err(error) => return rpc_error(StatusCode::BAD_REQUEST, error.to_string()),
     };
-    match state.node.lock() {
+    let node = Arc::clone(&state.node);
+    let peers = Arc::clone(&state.peers);
+    let peer_connections = Arc::clone(&state.peer_connections);
+    let inbound_connections = Arc::clone(&state.inbound_connections);
+    let block_for_job = block.clone();
+    let submission = state.state_pipeline.run(move || match node.lock() {
         Ok(mut node) => {
-            if let Err(error) = node.apply_block(block.clone()) {
-                return rpc_error(StatusCode::BAD_REQUEST, format!("block_rejected: {error}"));
+            if let Err(error) = node.apply_block(block_for_job.clone()) {
+                return Err(format!("block_rejected: {error}"));
             }
-            if let Err(error) = node.flush_to_storage() {
-                return rpc_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("block_flush_failed: {error}"),
-                );
-            }
+            drop(node);
+            let _ = broadcast_to_peers(
+                &peers,
+                &peer_connections,
+                &inbound_connections,
+                NetworkMessage::Block(block_for_job),
+            );
+            Ok(())
         }
-        Err(_) => return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+        Err(_) => Err("state_lock_failed".to_string()),
+    }).await;
+    match submission {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if error == "state_lock_failed" => {
+            return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error);
+        }
+        Ok(Err(error)) => return rpc_error(StatusCode::BAD_REQUEST, error),
+        Err(error) => return rpc_state_pipeline_error(error),
     }
-    let _report = broadcast_to_peers(
-        &state.peers,
-        &state.peer_connections,
-        &state.inbound_connections,
-        NetworkMessage::Block(block),
-    );
     Json(SubmitBlockResponse {
         accepted: true,
         height,

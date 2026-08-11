@@ -12,6 +12,7 @@ pub struct NatMapping {
 }
 
 pub fn map_tcp_listener(local_addr: SocketAddr, lease: Duration) -> Result<NatMapping, String> {
+    let local_addr = mapping_listener_addr(local_addr);
     if !local_addr.ip().is_ipv4() {
         return Err("NAT traversal only supports IPv4 listener addresses".to_string());
     }
@@ -32,6 +33,26 @@ pub fn map_tcp_listener(local_addr: SocketAddr, lease: Duration) -> Result<NatMa
         Err(error) => errors.push(error),
     }
     Err(errors.join("; "))
+}
+
+fn mapping_listener_addr(local_addr: SocketAddr) -> SocketAddr {
+    match local_addr {
+        SocketAddr::V6(addr) if addr.ip().is_unspecified() => {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), addr.port())
+        }
+        addr => addr,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unspecified_ipv6_listener_maps_through_ipv4_nat() {
+        let addr = mapping_listener_addr("[::]:5555".parse().unwrap());
+        assert_eq!(addr, "0.0.0.0:5555".parse().unwrap());
+    }
 }
 
 fn map_upnp(local_addr: SocketAddr, lease_secs: u32) -> Result<NatMapping, String> {

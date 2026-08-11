@@ -145,6 +145,13 @@ pub struct QCashUtxoSet {
     active_journal_tip: Option<BlockHash>,
 }
 
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct QCashJournalState {
+    journals: BTreeMap<BlockHash, QCashBlockJournal>,
+    active_journal_tip: Option<BlockHash>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QCashUtxoError {
     InvalidMetadata,
@@ -206,6 +213,31 @@ impl QCashUtxoSet {
 
     pub fn coins(&self) -> impl Iterator<Item = &QCashUtxo> {
         self.coins.values()
+    }
+
+    #[doc(hidden)]
+    pub fn persistence_journal_state(&self) -> QCashJournalState {
+        QCashJournalState {
+            journals: self.journals.clone(),
+            active_journal_tip: self.active_journal_tip,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn apply_persistence_diff(
+        &mut self,
+        removed: &[QCashCoinId],
+        upserted: impl IntoIterator<Item = QCashUtxo>,
+        journal_state: QCashJournalState,
+    ) {
+        for id in removed {
+            self.coins.remove(id);
+        }
+        for coin in upserted {
+            self.coins.insert(coin.id, coin);
+        }
+        self.journals = journal_state.journals;
+        self.active_journal_tip = journal_state.active_journal_tip;
     }
 
     pub fn journal(&self, block_hash: BlockHash) -> Option<&QCashBlockJournal> {

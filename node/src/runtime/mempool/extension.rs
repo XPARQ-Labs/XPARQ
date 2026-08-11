@@ -6,7 +6,7 @@ use crate::runtime::params::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use xparq::block::{Block, BlockHeight, MAX_BLOCK_SIZE, MAX_BLOCK_WEIGHT};
-use xparq::crypto::TransactionHash;
+use xparq::crypto::{BlockHash, TransactionHash};
 use xparq::ledger::Ledger;
 use xparq::state::{QCashCoinId, XpqCoinId};
 use xparq::transaction::{QCashTransactionKind, SignedProtocolTransaction, TransactionFamily};
@@ -21,6 +21,16 @@ pub struct Mempool {
     inserted_at: BTreeMap<TransactionHash, u64>,
     total_bytes: usize,
     config: MempoolConfig,
+    staged: Option<StagedMempoolState>,
+    #[cfg(test)]
+    staged_rebuilds: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StagedMempoolState {
+    base_tip: Option<BlockHash>,
+    height: BlockHeight,
+    ledger: Ledger,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,13 +124,16 @@ impl Mempool {
             .tip_height()
             .map(|height| xparq::block::Height(height.0.saturating_add(1)))
             .unwrap_or(xparq::block::Height(0));
-        let mut staged = ledger.clone();
-        for pending_hash in &self.insertion_order {
-            if let Some(pending_transaction) = self.transactions.get(pending_hash) {
-                apply_extension(&mut staged, pending_transaction, height)?;
-            }
-        }
-        apply_extension(&mut staged, &transaction, height)?;
+        self.ensure_staged(ledger, height)?;
+        apply_extension(
+            &mut self
+                .staged
+                .as_mut()
+                .expect("staged mempool state must exist")
+                .ledger,
+            &transaction,
+            height,
+        )?;
 
         for coin_id in qcash_coin_ids {
             self.reserved_qcash_coins.insert(coin_id, hash);
@@ -133,6 +146,34 @@ impl Mempool {
         self.inserted_at.insert(hash, current_unix_timestamp());
         self.total_bytes = self.total_bytes.saturating_add(transaction_size);
         Ok(hash)
+    }
+
+    fn ensure_staged(&mut self, ledger: &Ledger, height: BlockHeight) -> Result<(), MempoolError> {
+        let base_tip = ledger.tip_hash();
+        if self
+            .staged
+            .as_ref()
+            .is_some_and(|staged| staged.base_tip == base_tip && staged.height == height)
+        {
+            return Ok(());
+        }
+
+        let mut staged = ledger.transaction_staging_clone();
+        for pending_hash in &self.insertion_order {
+            if let Some(pending_transaction) = self.transactions.get(pending_hash) {
+                apply_extension(&mut staged, pending_transaction, height)?;
+            }
+        }
+        self.staged = Some(StagedMempoolState {
+            base_tip,
+            height,
+            ledger: staged,
+        });
+        #[cfg(test)]
+        {
+            self.staged_rebuilds = self.staged_rebuilds.saturating_add(1);
+        }
+        Ok(())
     }
 
     fn evict_for_capacity(
@@ -185,6 +226,7 @@ impl Mempool {
         transaction: SignedProtocolTransaction,
     ) -> Result<(), xparq::error::CodecError> {
         self.transactions.insert(transaction.hash()?, transaction);
+        self.staged = None;
         Ok(())
     }
 
@@ -234,6 +276,7 @@ impl Mempool {
                 self.reserved_xpq_coins.remove(&coin_id);
             }
         }
+        self.staged = None;
         Ok(Some(transaction))
     }
 
@@ -334,7 +377,7 @@ impl Mempool {
                 .then_with(|| left.signer().cmp(&right.signer()))
                 .then_with(|| left.hash().ok().cmp(&right.hash().ok()))
         });
-        let mut staged = ledger.clone();
+        let mut staged = ledger.transaction_staging_clone();
         let mut candidates = Vec::new();
         let mut remaining = ordered;
         while !remaining.is_empty() && candidates.len() < limit {
@@ -544,6 +587,38 @@ mod miner_fee_output_tests {
     use xparq::crypto::{Address, dual_address_from_public_keys, generate_keypair, sign};
     use xparq::transaction::{OutputTarget, SignedTransfer, Transfer, TransferOutput};
 
+    fn funded_payment(ledger: &mut Ledger, recipient: u8) -> SignedProtocolTransaction {
+        let owner = generate_keypair();
+        let authorization = generate_keypair();
+        let sender = dual_address_from_public_keys(&owner.public_key, &authorization.public_key);
+        ledger
+            .create_account_with_authorization(
+                sender,
+                owner.public_key,
+                authorization.public_key,
+                Amount(100_000),
+            )
+            .unwrap();
+        let input = ledger.xpq_utxos.coins_for_owner(sender).next().unwrap().id;
+        let transaction = Transfer::from_outputs(
+            sender,
+            vec![input],
+            vec![
+                TransferOutput::new(Address([recipient; 20]), Amount(1)),
+                TransferOutput::new(sender, Amount(99_999)),
+            ],
+        );
+        let payload = transaction.signing_bytes().unwrap();
+        SignedTransfer::new_authorized(
+            transaction,
+            owner.public_key,
+            sign(&owner.secret_key, &payload),
+            authorization.public_key,
+            sign(&authorization.secret_key, &payload),
+        )
+        .into()
+    }
+
     #[test]
     fn payment_with_miner_fee_output_is_selected_by_fee_rate() {
         let owner = generate_keypair();
@@ -588,5 +663,24 @@ mod miner_fee_output_tests {
             .unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(miner_bounty(&selected[0]), 10_000);
+    }
+
+    #[test]
+    fn staged_state_is_reused_and_invalidated_after_removal() {
+        let mut ledger = Ledger::new();
+        let first = funded_payment(&mut ledger, 7);
+        let second = funded_payment(&mut ledger, 8);
+        let third = funded_payment(&mut ledger, 9);
+        let first_hash = first.hash().unwrap();
+        let mut mempool = Mempool::new();
+
+        mempool.insert_validated(&ledger, first).unwrap();
+        mempool.insert_validated(&ledger, second).unwrap();
+        assert_eq!(mempool.staged_rebuilds, 1);
+
+        mempool.remove(&first_hash).unwrap();
+        assert!(mempool.staged.is_none());
+        mempool.insert_validated(&ledger, third).unwrap();
+        assert_eq!(mempool.staged_rebuilds, 2);
     }
 }

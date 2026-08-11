@@ -16,14 +16,14 @@ fn protocol_event_kind_name(kind: &ProtocolEventKind) -> &'static str {
     }
 }
 
-fn is_protocol_event_kind(kind: &str) -> bool {
+pub(crate) fn is_protocol_event_kind(kind: &str) -> bool {
     matches!(
         kind,
         "transfer"
             | "qcash_withdrawn"
             | "qcash_redeemed"
             | "qcash_recover_redeemed"
-            | "coinbase_paid"
+            | "emission_distributed"
     )
 }
 
@@ -180,14 +180,16 @@ async fn rpc_event_stream(
                                     })
                                 }));
                             }
-                            Err(error) => eprintln!(
-                                "failed to load protocol events at height {}: {error}",
+                            Err(error) => node_warn!(
+                                "RPC",
+                                "protocol_events_load_failed height={} error={error:?}",
                                 height.0
                             ),
                         },
                         Ok(None) => {}
-                        Err(error) => eprintln!(
-                            "failed to load protocol event block at height {}: {error}",
+                        Err(error) => node_warn!(
+                            "RPC",
+                            "protocol_event_block_load_failed height={} error={error:?}",
                             height.0
                         ),
                     }
@@ -221,7 +223,8 @@ async fn rpc_event(
         Ok(hash) => EventId(hash.0),
         Err(error) => return rpc_error(StatusCode::BAD_REQUEST, error),
     };
-    match state.node.lock() {
+    let node = Arc::clone(&state.node);
+    match state.state_pipeline.run(move || match node.lock() {
         Ok(node) => match node.storage.load_protocol_event(&id) {
             Ok(Some(event)) => match protocol_event_response(event) {
                 Ok(response) => Json(response).into_response(),
@@ -234,6 +237,9 @@ async fn rpc_event(
             ),
         },
         Err(_) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+    }).await {
+        Ok(response) => response,
+        Err(error) => rpc_state_pipeline_error(error),
     }
 }
 
@@ -242,7 +248,8 @@ async fn rpc_block_events(
     AxumPath(height): AxumPath<u64>,
     Query(query): Query<EventQuery>,
 ) -> impl IntoResponse {
-    match state.node.lock() {
+    let node = Arc::clone(&state.node);
+    match state.state_pipeline.run(move || match node.lock() {
         Ok(node) => {
             let block = match node.storage.load_block_by_height(Height(height)) {
                 Ok(Some(block)) => block,
@@ -272,6 +279,9 @@ async fn rpc_block_events(
             }
         }
         Err(_) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+    }).await {
+        Ok(response) => response,
+        Err(error) => rpc_state_pipeline_error(error),
     }
 }
 
@@ -284,7 +294,8 @@ async fn rpc_transaction_events(
         Ok(hash) => TransactionHash::from(hash),
         Err(error) => return rpc_error(StatusCode::BAD_REQUEST, error),
     };
-    match state.node.lock() {
+    let node = Arc::clone(&state.node);
+    match state.state_pipeline.run(move || match node.lock() {
         Ok(node) => match node.storage.load_transaction_events(&hash) {
             Ok(events) => match protocol_event_list(events, query) {
                 Ok(response) => Json(response).into_response(),
@@ -296,6 +307,9 @@ async fn rpc_transaction_events(
             ),
         },
         Err(_) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+    }).await {
+        Ok(response) => response,
+        Err(error) => rpc_state_pipeline_error(error),
     }
 }
 
@@ -308,7 +322,8 @@ async fn rpc_address_events(
         Ok(address) => address,
         Err(error) => return rpc_error(StatusCode::BAD_REQUEST, error),
     };
-    match state.node.lock() {
+    let node = Arc::clone(&state.node);
+    match state.state_pipeline.run(move || match node.lock() {
         Ok(node) => match node.storage.load_address_events(&address) {
             Ok(events) => match protocol_event_list(events, query) {
                 Ok(response) => Json(response).into_response(),
@@ -320,5 +335,8 @@ async fn rpc_address_events(
             ),
         },
         Err(_) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+    }).await {
+        Ok(response) => response,
+        Err(error) => rpc_state_pipeline_error(error),
     }
 }

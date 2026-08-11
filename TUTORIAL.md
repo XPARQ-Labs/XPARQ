@@ -21,21 +21,21 @@ two lanes. Mining performance depends on both CPU and memory performance.
 Mainnet is the default build profile:
 
 ```bash
-cargo build --release -p xparq-node -p xparq-wallet
+cargo build --release -p node -p wallet
 ```
 
 The resulting binaries are:
 
 ```text
-target/release/xparq-node
+target/release/node
 target/release/wallet
 ```
 
 Confirm that the node was built for the expected network:
 
 ```bash
-./target/release/xparq-node version
-./target/release/xparq-node node info
+./target/release/node version
+./target/release/node node info
 ```
 
 Do not use the same database for different networks.
@@ -65,7 +65,7 @@ secret keys. Copy the lowercase Bech32 address beginning with `x1` from the
 wallet creation output, then generate the default mainnet configuration:
 
 ```bash
-./target/release/xparq-node node config
+./target/release/node node config
 ```
 
 Edit `data/mainnet/config.json` and set the mining fields:
@@ -74,11 +74,16 @@ Edit `data/mainnet/config.json` and set the mining fields:
 {
   "network": "mainnet",
   "db_path": "./data/mainnet",
-  "listen_addr": [
+  "listen_addr_ipv4": [
+    "0.0.0.0:5555"
+  ],
+  "listen_addr_ipv6": [
     "[::]:5555"
   ],
-  "rpc_addr": "127.0.0.1:6666",
-  "rpc_admin_addr": null,
+  "rpc_addr_ipv4": "127.0.0.1:6666",
+  "rpc_addr_ipv6": "[::1]:6666",
+  "rpc_admin_addr_ipv4": null,
+  "rpc_admin_addr_ipv6": null,
   "rpc_admin_token": null,
   "rpc_tls_cert": null,
   "rpc_tls_key": null,
@@ -89,17 +94,18 @@ Edit `data/mainnet/config.json` and set the mining fields:
   "rpc_max_connections": 128,
   "rpc_rate_limit_per_second": 50,
   "rpc_rate_limit_burst": 100,
-  "peers": [
-    "[2404:8000:1044:4d8:e5c4:5b9:93bc:656d]:5555"
-  ],
+  "peers_ipv4": [],
+  "peers_ipv6": [],
   "peers_file": "./data/mainnet/peers.json",
   "dns_seeds": [],
   "gateway_url": null,
-  "public_addr": null,
+  "public_addr_ipv4": null,
+  "public_addr_ipv6": null,
   "gateway_heartbeat_secs": 60,
   "nat_traversal": false,
   "nat_lease_secs": 3600,
-  "grpc_addr": null,
+  "grpc_addr_ipv4": null,
+  "grpc_addr_ipv6": null,
   "shutdown_file": "./data/mainnet/STOP",
   "max_peers": 128,
   "fast_sync": false,
@@ -117,14 +123,15 @@ Edit `data/mainnet/config.json` and set the mining fields:
 }
 ```
 
-Replace `YOUR_XPARQ_ADDRESS` with the actual reward address. Keep
-`public_addr` as `null` for an outbound-only node, or set it to the externally
-reachable P2P address such as `"203.0.113.10:5555"`. Add operator-selected
-peers to `peers`; do not remove every generated peer unless another reliable
-entry point is configured. Then start mining:
+Replace `YOUR_XPARQ_ADDRESS` with the actual reward address. Keep both public
+address fields as `null` for an outbound-only node, or set
+`public_addr_ipv4` and/or `public_addr_ipv6` to externally reachable P2P
+addresses. Add operator-selected peers to `peers_ipv4` and `peers_ipv6`; do
+not leave every entry-point source empty unless `peers_file`, a DNS seed, or a
+gateway already provides a reliable entry point. Then start mining:
 
 ```bash
-./target/release/xparq-node mine
+./target/release/node mine
 ```
 
 The command reads `data/mainnet/config.json` and enables mining. The mining
@@ -140,7 +147,7 @@ new blocks. Initially set `"mine": false` in `data/mainnet/config.json`, then
 start the node without the mining shortcut:
 
 ```bash
-./target/release/xparq-node node run
+./target/release/node node run
 ```
 
 In another terminal, inspect its status:
@@ -155,14 +162,14 @@ Wait until the node has active peers and its height agrees with independent
 mainnet peers. Stop it cleanly with `Ctrl+C`, set `"mine": true`, then run:
 
 ```bash
-./target/release/xparq-node mine
+./target/release/node mine
 ```
 
 Authenticated fast sync may be requested only for a database path that does
 not exist yet:
 
 ```bash
-./target/release/xparq-node node run --fast-sync
+./target/release/node node run --fast-sync
 ```
 
 Fast sync requires a reachable peer that provides a valid authenticated
@@ -179,24 +186,25 @@ testnet   data/testnet/config.json
 devnet    data/devnet/config.json
 ```
 
-The node reads the complete file. The wallet reads only `network` and
-`rpc_addr`; it ignores P2P, mining, admin, and secret fields.
+The node reads the complete file. The wallet reads only `network` and prefers
+`rpc_addr_ipv4`, falling back to `rpc_addr_ipv6`; it ignores P2P, mining,
+admin, and secret fields.
 
 The file name and location may be changed. For a one-off node invocation,
 generate and use an explicit path:
 
 ```bash
-./target/release/xparq-node node config config.json
-./target/release/xparq-node mine --config config.json
+./target/release/node node config config.json
+./target/release/node mine --config config.json
 ```
 
 To make both node and wallet use the same custom file on Linux or macOS:
 
 ```bash
 export XPARQ_CONFIG=/opt/xparq/config.json
-./target/release/xparq-node node config
+./target/release/node node config
 # Edit miner_address before starting mining.
-./target/release/xparq-node mine
+./target/release/node mine
 ./target/release/wallet balance
 ```
 
@@ -204,16 +212,16 @@ PowerShell uses the same JSON format:
 
 ```powershell
 $env:XPARQ_CONFIG = "C:\XPARQ\config.json"
-.\xparq-node.exe node config
+.\node.exe node config
 # Edit miner_address before starting mining.
-.\xparq-node.exe mine
+.\node.exe mine
 .\wallet.exe balance
 ```
 
 Config-path precedence is explicit node `--config`, `XPARQ_CONFIG`, then the
 network default path. Value precedence is defaults, the JSON file, environment,
 then command-line options. The `mine` command always enables mining, even if
-the JSON field is `false`; the field controls ordinary `xparq-node node run`.
+the JSON field is `false`; the field controls ordinary `node node run`.
 
 ### Mining controls
 
@@ -225,8 +233,8 @@ the JSON field is `false`; the field controls ordinary `xparq-node node run`.
   candidate rebuild interval.
 - `miner_min_fee_rate`: optional local minimum fee-output rate for transactions
   selected by this miner. When omitted, the node uses its dynamic rate.
-- `grpc_addr`: enables the optional status-only gRPC service. Keep it `null`
-  when unused, or bind it to loopback such as `"127.0.0.1:6668"`. The current
+- `grpc_addr_ipv4` / `grpc_addr_ipv6`: enable the optional status-only gRPC
+  service. Keep them `null` when unused, or bind them to loopback. The current
   gRPC server has no TLS or authentication and must not be exposed publicly.
 
 These are local operational settings and do not change consensus rules.
@@ -245,7 +253,8 @@ the public P2P address in `config.json`:
 
 ```json
 {
-  "public_addr": "PUBLIC_IP:5555"
+  "public_addr_ipv4": "PUBLIC_IPV4:5555",
+  "public_addr_ipv6": "[PUBLIC_IPV6]:5555"
 }
 ```
 
@@ -258,7 +267,7 @@ If the router supports automatic mapping, use:
 ```
 
 Keep all other generated configuration fields, then start with
-`./target/release/xparq-node mine`.
+`./target/release/node mine`.
 
 The node uses encrypted Noise sessions, Yamux multiplexing, Identify, ping,
 and Kademlia discovery over libp2p. Outbound-only mining works without opening
@@ -277,8 +286,9 @@ curl http://127.0.0.1:6666/status
 ```
 
 When the wallet runs beside the node, `--rpc` may be omitted: the wallet reads
-`rpc_addr` from the matching `data/<network>/config.json`. Explicit `--rpc` and
-`XPARQ_RPC_ADDR` values take precedence.
+`rpc_addr_ipv4`, or `rpc_addr_ipv6` when IPv4 is disabled, from the matching
+`data/<network>/config.json`. Explicit `--rpc` and `XPARQ_RPC_ADDR` values take
+precedence.
 
 Check the reward address balance and mining history from the wallet machine:
 
@@ -288,8 +298,9 @@ Check the reward address balance and mining history from the wallet machine:
 
 Use `--rpc HOST:PORT` only when an explicit per-command override is needed.
 
-The node logs a successful block as `[BLOCK <height>] ...` and announces it to
-connected peers. A locally found block is only economically useful if it is
+The node logs a successful block as a timestamped `INFO BLOCK mined ...` event
+and announces it to connected peers. Set `XPARQ_LOG=debug` when detailed P2P
+handshake or sync-batch diagnostics are needed. A locally found block is only economically useful if it is
 accepted into the canonical greatest-work chain.
 
 ## 9. Rewards and maturity
@@ -314,7 +325,7 @@ Build testnet binaries with:
 cargo build --release \
   --no-default-features \
   --features testnet \
-  -p xparq-node -p xparq-wallet
+  -p node -p wallet
 ```
 
 Testnet uses P2P port `15555`, RPC port `16666`, and a separate database such
@@ -326,16 +337,17 @@ Build devnet binaries with:
 cargo build --release \
   --no-default-features \
   --features devnet \
-  -p xparq-node -p xparq-wallet
+  -p node -p wallet
 ```
 
 Devnet uses P2P port `25555`, RPC port `26666`, and a separate database such
 as `./data/devnet`. Testnet and devnet do not include built-in peers, so supply
-at least one with `--peer HOST:PORT`, the `peers` array, or a peers file.
+at least one with `--peer HOST:PORT`, `peers_ipv4`, `peers_ipv6`, or a peers
+file.
 
 Building a different network profile into the default `target/release`
-directory replaces the previous `xparq-node` and `wallet` binaries. Always
-verify the compiled network with `./target/release/xparq-node node info` before
+directory replaces the previous `node` and `wallet` binaries. Always
+verify the compiled network with `./target/release/node node info` before
 starting it.
 
 ## 11. Safe shutdown and recovery
@@ -350,8 +362,8 @@ Do not terminate the process during database writes unless necessary. Useful
 maintenance commands include:
 
 ```bash
-./target/release/xparq-node node db check ./data/mainnet
-./target/release/xparq-node node db backup ./data/mainnet ./backup/mainnet
+./target/release/node node db check ./data/mainnet
+./target/release/node node db backup ./data/mainnet ./backup/mainnet
 ```
 
 Never restore a testnet or devnet database into the mainnet path. After a
@@ -362,7 +374,7 @@ supported migration rather than opening incompatible data.
 
 ### Mining is off
 
-Start with `./target/release/xparq-node mine` and confirm that the startup log
+Start with `./target/release/node mine` and confirm that the startup log
 contains `mining=true`. Also verify that `config.json` contains either a valid
 `miner_address` or `wallet` path.
 
@@ -375,7 +387,7 @@ verify that the process has CPU time and was started with the `mine` command.
 
 - Confirm outbound internet access.
 - Confirm that the binary uses the intended network.
-- Check the configured `peers`, `peers_file`, and optional DNS seeds.
+- Check `peers_ipv4`, `peers_ipv6`, `peers_file`, and optional DNS seeds.
 - Open or forward the network's P2P TCP port when accepting inbound peers.
 - Do not use an RPC port as a P2P peer address.
 

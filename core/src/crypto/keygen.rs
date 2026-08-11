@@ -7,7 +7,9 @@ use ml_dsa::{
 };
 use static_assertions::const_assert_eq;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::Instant;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use serde::de::{Error as DeError, Visitor};
@@ -17,6 +19,7 @@ type XPARQSigningKey = SigningKey<MlDsa44>;
 type XPARQExpandedSigningKey = ExpandedSigningKey<MlDsa44>;
 type XPARQVerifyingKey = VerifyingKey<MlDsa44>;
 type XPARQSignature = MlDsaSignature<MlDsa44>;
+const VERIFICATION_QUEUE_CAPACITY: usize = 256;
 
 pub const PUBLIC_KEY_SIZE: usize = 1_312;
 pub const SECRET_KEY_SIZE: usize = 2_560;
@@ -248,10 +251,35 @@ struct VerificationJob {
     message: Vec<u8>,
     signature: Signature,
     result: mpsc::SyncSender<bool>,
+    queued_at: Instant,
 }
 
-fn verification_workers() -> Option<&'static mpsc::Sender<VerificationJob>> {
-    static WORKERS: OnceLock<Option<mpsc::Sender<VerificationJob>>> = OnceLock::new();
+static VERIFICATION_QUEUE_DEPTH: AtomicU64 = AtomicU64::new(0);
+static VERIFICATION_QUEUE_QUEUED: AtomicU64 = AtomicU64::new(0);
+static VERIFICATION_QUEUE_FALLBACK: AtomicU64 = AtomicU64::new(0);
+static VERIFICATION_QUEUE_WAIT_MICROS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VerificationQueueSnapshot {
+    pub depth: u64,
+    pub capacity: usize,
+    pub queued_total: u64,
+    pub fallback_total: u64,
+    pub wait_micros_total: u64,
+}
+
+pub fn verification_queue_snapshot() -> VerificationQueueSnapshot {
+    VerificationQueueSnapshot {
+        depth: VERIFICATION_QUEUE_DEPTH.load(Ordering::Relaxed),
+        capacity: VERIFICATION_QUEUE_CAPACITY,
+        queued_total: VERIFICATION_QUEUE_QUEUED.load(Ordering::Relaxed),
+        fallback_total: VERIFICATION_QUEUE_FALLBACK.load(Ordering::Relaxed),
+        wait_micros_total: VERIFICATION_QUEUE_WAIT_MICROS.load(Ordering::Relaxed),
+    }
+}
+
+fn verification_workers() -> Option<&'static mpsc::SyncSender<VerificationJob>> {
+    static WORKERS: OnceLock<Option<mpsc::SyncSender<VerificationJob>>> = OnceLock::new();
     WORKERS
         .get_or_init(|| {
             let worker_count = std::thread::available_parallelism()
@@ -261,7 +289,8 @@ fn verification_workers() -> Option<&'static mpsc::Sender<VerificationJob>> {
             if worker_count == 0 {
                 return None;
             }
-            let (sender, receiver) = mpsc::channel::<VerificationJob>();
+            let (sender, receiver) =
+                mpsc::sync_channel::<VerificationJob>(VERIFICATION_QUEUE_CAPACITY);
             let receiver = Arc::new(Mutex::new(receiver));
             for index in 0..worker_count {
                 let receiver = Arc::clone(&receiver);
@@ -278,6 +307,15 @@ fn verification_workers() -> Option<&'static mpsc::Sender<VerificationJob>> {
                                 };
                                 job
                             };
+                            VERIFICATION_QUEUE_DEPTH.fetch_sub(1, Ordering::Relaxed);
+                            VERIFICATION_QUEUE_WAIT_MICROS.fetch_add(
+                                job.queued_at
+                                    .elapsed()
+                                    .as_micros()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                                Ordering::Relaxed,
+                            );
                             let valid = verify(&job.public_key, &job.message, &job.signature);
                             let _ = job.result.send(valid);
                         }
@@ -314,12 +352,21 @@ pub fn verify_dual_parallel(
         message: message.to_vec(),
         signature: *auth_signature,
         result: result_sender,
+        queued_at: Instant::now(),
     };
-    if workers.send(job).is_err() {
-        return (
-            verify(owner_public_key, message, owner_signature),
-            verify(auth_public_key, message, auth_signature),
-        );
+    VERIFICATION_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
+    match workers.try_send(job) {
+        Ok(()) => {
+            VERIFICATION_QUEUE_QUEUED.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(_) => {
+            VERIFICATION_QUEUE_DEPTH.fetch_sub(1, Ordering::Relaxed);
+            VERIFICATION_QUEUE_FALLBACK.fetch_add(1, Ordering::Relaxed);
+            return (
+                verify(owner_public_key, message, owner_signature),
+                verify(auth_public_key, message, auth_signature),
+            );
+        }
     }
     let owner_valid = verify(owner_public_key, message, owner_signature);
     let auth_valid = result_receiver

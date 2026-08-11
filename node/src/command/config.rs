@@ -72,8 +72,8 @@ pub struct RunConfig {
     pub network: String,
     pub db_path: String,
     pub listen_addrs: Vec<SocketAddr>,
-    pub rpc_addr: SocketAddr,
-    pub rpc_admin_addr: Option<SocketAddr>,
+    pub rpc_addrs: Vec<SocketAddr>,
+    pub rpc_admin_addrs: Vec<SocketAddr>,
     pub rpc_admin_token: Option<Zeroizing<String>>,
     pub rpc_tls_cert: Option<String>,
     pub rpc_tls_key: Option<String>,
@@ -92,7 +92,7 @@ pub struct RunConfig {
     pub gateway_heartbeat: Duration,
     pub nat_traversal: bool,
     pub nat_lease: Duration,
-    pub grpc_addr: Option<SocketAddr>,
+    pub grpc_addrs: Vec<SocketAddr>,
     pub shutdown_file: String,
     pub max_peers: usize,
     pub fast_sync: bool,
@@ -100,8 +100,7 @@ pub struct RunConfig {
     pub market_fee: u64,
     pub low_fee_expiry: Duration,
     pub mempool_expiry: Duration,
-    pub miner_address: Address,
-    pub miner_configured: bool,
+    pub miner_address: Option<Address>,
     pub miner_secret_key: Option<SecretKey>,
     pub miner_min_fee_rate: Option<u64>,
     pub mine: bool,
@@ -110,14 +109,21 @@ pub struct RunConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RunConfigFile {
     #[serde(default = "current_network_string")]
     network: String,
     db_path: String,
-    listen_addr: OneOrMany<String>,
-    rpc_addr: String,
+    listen_addr_ipv4: OneOrMany<String>,
+    listen_addr_ipv6: OneOrMany<String>,
     #[serde(default)]
-    rpc_admin_addr: Option<String>,
+    rpc_addr_ipv4: Option<String>,
+    #[serde(default)]
+    rpc_addr_ipv6: Option<String>,
+    #[serde(default)]
+    rpc_admin_addr_ipv4: Option<String>,
+    #[serde(default)]
+    rpc_admin_addr_ipv6: Option<String>,
     #[serde(default)]
     rpc_admin_token: Option<SensitiveString>,
     #[serde(default)]
@@ -139,19 +145,25 @@ struct RunConfigFile {
     #[serde(default = "default_rpc_rate_limit_burst")]
     rpc_rate_limit_burst: u64,
     #[serde(default)]
-    peers: Vec<String>,
+    peers_ipv4: Vec<String>,
+    #[serde(default)]
+    peers_ipv6: Vec<String>,
     peers_file: Option<String>,
     #[serde(default)]
     dns_seeds: Vec<String>,
     gateway_url: Option<String>,
-    public_addr: Option<OneOrMany<String>>,
+    public_addr_ipv4: Option<OneOrMany<String>>,
+    #[serde(default)]
+    public_addr_ipv6: Option<OneOrMany<String>>,
     gateway_heartbeat_secs: u64,
     #[serde(default)]
     nat_traversal: bool,
     #[serde(default = "default_nat_lease_secs")]
     nat_lease_secs: u64,
     #[serde(default)]
-    grpc_addr: Option<String>,
+    grpc_addr_ipv4: Option<String>,
+    #[serde(default)]
+    grpc_addr_ipv6: Option<String>,
     shutdown_file: String,
     max_peers: usize,
     #[serde(default)]
@@ -211,9 +223,15 @@ impl Default for RunConfig {
         Self {
             network: current_network().to_string(),
             db_path: DEFAULT_NODE_DB.to_string(),
-            listen_addrs: vec![std::net::SocketAddr::from(([0_u16; 8], DEFAULT_P2P_PORT))],
-            rpc_addr: std::net::SocketAddr::from(([127, 0, 0, 1], DEFAULT_RPC_PORT)),
-            rpc_admin_addr: None,
+            listen_addrs: vec![
+                std::net::SocketAddr::from(([0, 0, 0, 0], DEFAULT_P2P_PORT)),
+                std::net::SocketAddr::from(([0_u16; 8], DEFAULT_P2P_PORT)),
+            ],
+            rpc_addrs: vec![
+                std::net::SocketAddr::from(([127, 0, 0, 1], DEFAULT_RPC_PORT)),
+                std::net::SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], DEFAULT_RPC_PORT)),
+            ],
+            rpc_admin_addrs: Vec::new(),
             rpc_admin_token: None,
             rpc_tls_cert: None,
             rpc_tls_key: None,
@@ -232,7 +250,7 @@ impl Default for RunConfig {
             gateway_heartbeat: DEFAULT_GATEWAY_HEARTBEAT,
             nat_traversal: false,
             nat_lease: Duration::from_secs(default_nat_lease_secs()),
-            grpc_addr: None,
+            grpc_addrs: Vec::new(),
             shutdown_file: DEFAULT_SHUTDOWN_FILE.to_string(),
             max_peers: DEFAULT_MAX_PEERS,
             fast_sync: false,
@@ -240,8 +258,7 @@ impl Default for RunConfig {
             market_fee: runtime::params::DEFAULT_MARKET_FEE,
             low_fee_expiry: Duration::from_secs(runtime::params::LOW_FEE_EXPIRY_SECS),
             mempool_expiry: Duration::from_secs(runtime::params::MEMPOOL_EXPIRY_SECS),
-            miner_address: Address([9; 20]),
-            miner_configured: false,
+            miner_address: None,
             miner_secret_key: None,
             miner_min_fee_rate: None,
             mine: false,
@@ -257,15 +274,12 @@ impl Default for RunConfigFile {
         Self {
             network: defaults.network,
             db_path: defaults.db_path,
-            listen_addr: OneOrMany::Many(
-                defaults
-                    .listen_addrs
-                    .into_iter()
-                    .map(|addr| addr.to_string())
-                    .collect(),
-            ),
-            rpc_addr: defaults.rpc_addr.to_string(),
-            rpc_admin_addr: None,
+            listen_addr_ipv4: OneOrMany::Many(vec![format!("0.0.0.0:{DEFAULT_P2P_PORT}")]),
+            listen_addr_ipv6: OneOrMany::Many(vec![format!("[::]:{DEFAULT_P2P_PORT}")]),
+            rpc_addr_ipv4: Some(format!("127.0.0.1:{DEFAULT_RPC_PORT}")),
+            rpc_addr_ipv6: Some(format!("[::1]:{DEFAULT_RPC_PORT}")),
+            rpc_admin_addr_ipv4: None,
+            rpc_admin_addr_ipv6: None,
             rpc_admin_token: None,
             rpc_tls_cert: None,
             rpc_tls_key: None,
@@ -276,15 +290,18 @@ impl Default for RunConfigFile {
             rpc_max_connections: defaults.rpc_max_connections,
             rpc_rate_limit_per_second: defaults.rpc_rate_limit_per_second,
             rpc_rate_limit_burst: defaults.rpc_rate_limit_burst,
-            peers: Vec::new(),
+            peers_ipv4: Vec::new(),
+            peers_ipv6: Vec::new(),
             peers_file: Some(DEFAULT_PEERS_FILE.to_string()),
             dns_seeds: defaults.dns_seeds,
             gateway_url: None,
-            public_addr: None,
+            public_addr_ipv4: None,
+            public_addr_ipv6: None,
             gateway_heartbeat_secs: defaults.gateway_heartbeat.as_secs(),
             nat_traversal: defaults.nat_traversal,
             nat_lease_secs: defaults.nat_lease.as_secs(),
-            grpc_addr: defaults.grpc_addr.map(|addr| addr.to_string()),
+            grpc_addr_ipv4: None,
+            grpc_addr_ipv6: None,
             shutdown_file: defaults.shutdown_file,
             max_peers: defaults.max_peers,
             fast_sync: false,
@@ -329,6 +346,7 @@ pub fn parse(args: &[String]) -> Result<RunConfig, String> {
     }
     apply_environment(&mut config)?;
     let mut listen_overridden = false;
+    let mut rpc_overridden = false;
     let mut public_overridden = false;
     let mut index = 0;
     while index < args.len() {
@@ -358,11 +376,19 @@ pub fn parse(args: &[String]) -> Result<RunConfig, String> {
             }
             "--rpc-listen" => {
                 index += 1;
-                config.rpc_addr = socket(args.get(index), "--rpc-listen")?;
+                if !rpc_overridden {
+                    config.rpc_addrs.clear();
+                    rpc_overridden = true;
+                }
+                config
+                    .rpc_addrs
+                    .push(socket(args.get(index), "--rpc-listen")?);
             }
             "--rpc-admin-listen" => {
                 index += 1;
-                config.rpc_admin_addr = Some(socket(args.get(index), "--rpc-admin-listen")?);
+                config
+                    .rpc_admin_addrs
+                    .push(socket(args.get(index), "--rpc-admin-listen")?);
             }
             "--rpc-admin-token" => {
                 index += 1;
@@ -453,7 +479,9 @@ pub fn parse(args: &[String]) -> Result<RunConfig, String> {
             }
             "--grpc-listen" => {
                 index += 1;
-                config.grpc_addr = Some(socket(args.get(index), "--grpc-listen")?);
+                config
+                    .grpc_addrs
+                    .push(socket(args.get(index), "--grpc-listen")?);
             }
             "--shutdown-file" => {
                 index += 1;
@@ -485,13 +513,11 @@ pub fn parse(args: &[String]) -> Result<RunConfig, String> {
             }
             "--miner" => {
                 index += 1;
-                config.miner_address = address(args.get(index))?;
-                config.miner_configured = true;
+                config.miner_address = Some(address(args.get(index))?);
             }
             "--wallet" => {
                 index += 1;
-                config.miner_address = wallet_address(required(&args, index, "--wallet")?)?;
-                config.miner_configured = true;
+                config.miner_address = Some(wallet_address(required(&args, index, "--wallet")?)?);
             }
             "--miner-secret-key" => {
                 index += 1;
@@ -524,7 +550,10 @@ pub fn parse(args: &[String]) -> Result<RunConfig, String> {
         index += 1;
     }
     dedupe(&mut config.listen_addrs);
+    dedupe(&mut config.rpc_addrs);
+    dedupe(&mut config.rpc_admin_addrs);
     dedupe(&mut config.public_addrs);
+    dedupe(&mut config.grpc_addrs);
     if config.rpc_admin_token.is_none()
         && let Ok(token) = std::env::var(RPC_ADMIN_TOKEN_ENV)
     {
@@ -585,19 +614,33 @@ fn load_file(path: &str) -> Result<Option<RunConfigFile>, String> {
 fn apply_file(config: &mut RunConfig, file: RunConfigFile) -> Result<(), String> {
     config.network = file.network.to_ascii_lowercase();
     config.db_path = file.db_path;
-    config.listen_addrs = parse_sockets(file.listen_addr.into_vec(), "listen_addr")?;
-    config.rpc_addr = file
-        .rpc_addr
-        .parse()
-        .map_err(|error| format!("invalid rpc_addr in config: {error}"))?;
-    config.rpc_admin_addr = file
-        .rpc_admin_addr
-        .map(|value| {
-            value
-                .parse()
-                .map_err(|error| format!("invalid rpc_admin_addr in config: {error}"))
-        })
-        .transpose()?;
+    config.listen_addrs = parse_family_sockets(
+        file.listen_addr_ipv4.into_vec(),
+        "listen_addr_ipv4",
+        IpFamily::V4,
+    )?;
+    config.listen_addrs.extend(parse_family_sockets(
+        file.listen_addr_ipv6.into_vec(),
+        "listen_addr_ipv6",
+        IpFamily::V6,
+    )?);
+    config.rpc_addrs =
+        parse_optional_family_socket(file.rpc_addr_ipv4, "rpc_addr_ipv4", IpFamily::V4)?;
+    config.rpc_addrs.extend(parse_optional_family_socket(
+        file.rpc_addr_ipv6,
+        "rpc_addr_ipv6",
+        IpFamily::V6,
+    )?);
+    config.rpc_admin_addrs = parse_optional_family_socket(
+        file.rpc_admin_addr_ipv4,
+        "rpc_admin_addr_ipv4",
+        IpFamily::V4,
+    )?;
+    config.rpc_admin_addrs.extend(parse_optional_family_socket(
+        file.rpc_admin_addr_ipv6,
+        "rpc_admin_addr_ipv6",
+        IpFamily::V6,
+    )?);
     config.rpc_admin_token = file
         .rpc_admin_token
         .map(|value| Zeroizing::new(value.0.clone()));
@@ -610,27 +653,39 @@ fn apply_file(config: &mut RunConfig, file: RunConfigFile) -> Result<(), String>
     config.rpc_max_connections = file.rpc_max_connections;
     config.rpc_rate_limit_per_second = file.rpc_rate_limit_per_second;
     config.rpc_rate_limit_burst = file.rpc_rate_limit_burst;
-    config.peers = parse_sockets(file.peers, "peer")?;
+    config.peers = parse_family_sockets(file.peers_ipv4, "peers_ipv4", IpFamily::V4)?;
+    config.peers.extend(parse_family_sockets(
+        file.peers_ipv6,
+        "peers_ipv6",
+        IpFamily::V6,
+    )?);
     config.peers_file = file.peers_file;
     config.dns_seeds = file.dns_seeds;
     config.gateway_url = file.gateway_url;
-    config.public_addrs = parse_sockets(
-        file.public_addr
+    config.public_addrs = parse_family_sockets(
+        file.public_addr_ipv4
             .map(OneOrMany::into_vec)
             .unwrap_or_default(),
-        "public_addr",
+        "public_addr_ipv4",
+        IpFamily::V4,
     )?;
+    config.public_addrs.extend(parse_family_sockets(
+        file.public_addr_ipv6
+            .map(OneOrMany::into_vec)
+            .unwrap_or_default(),
+        "public_addr_ipv6",
+        IpFamily::V6,
+    )?);
     config.gateway_heartbeat = Duration::from_secs(file.gateway_heartbeat_secs.max(1));
     config.nat_traversal = file.nat_traversal;
     config.nat_lease = Duration::from_secs(file.nat_lease_secs.max(60));
-    config.grpc_addr = file
-        .grpc_addr
-        .map(|value| {
-            value
-                .parse()
-                .map_err(|error| format!("invalid grpc_addr in config: {error}"))
-        })
-        .transpose()?;
+    config.grpc_addrs =
+        parse_optional_family_socket(file.grpc_addr_ipv4, "grpc_addr_ipv4", IpFamily::V4)?;
+    config.grpc_addrs.extend(parse_optional_family_socket(
+        file.grpc_addr_ipv6,
+        "grpc_addr_ipv6",
+        IpFamily::V6,
+    )?);
     config.shutdown_file = file.shutdown_file;
     config.max_peers = file.max_peers.max(1);
     config.fast_sync = file.fast_sync;
@@ -646,12 +701,10 @@ fn apply_file(config: &mut RunConfig, file: RunConfigFile) -> Result<(), String>
     config.mine_interval = Duration::from_secs(file.mine_interval_secs);
     config.mine_attempts = file.mine_attempts;
     if let Some(path) = file.wallet {
-        config.miner_address = wallet_address(&path)?;
-        config.miner_configured = true;
+        config.miner_address = Some(wallet_address(&path)?);
     }
     if let Some(value) = file.miner_address {
-        config.miner_address = address(Some(&value))?;
-        config.miner_configured = true;
+        config.miner_address = Some(address(Some(&value))?);
     }
     if let Some(value) = file.miner_secret_key {
         config.miner_secret_key = Some(secret_key(Some(&value.0))?);
@@ -698,11 +751,56 @@ fn parse_sockets(values: Vec<String>, label: &str) -> Result<Vec<SocketAddr>, St
         .collect()
 }
 
+#[derive(Clone, Copy)]
+enum IpFamily {
+    V4,
+    V6,
+}
+
+impl IpFamily {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::V4 => "IPv4",
+            Self::V6 => "IPv6",
+        }
+    }
+
+    const fn matches(self, addr: &SocketAddr) -> bool {
+        matches!(
+            (self, addr),
+            (Self::V4, SocketAddr::V4(_)) | (Self::V6, SocketAddr::V6(_))
+        )
+    }
+}
+
+fn parse_family_sockets(
+    values: Vec<String>,
+    label: &str,
+    family: IpFamily,
+) -> Result<Vec<SocketAddr>, String> {
+    let addrs = parse_sockets(values, label)?;
+    for addr in &addrs {
+        if !family.matches(addr) {
+            return Err(format!(
+                "invalid {label} `{addr}` in config: expected {} address",
+                family.label()
+            ));
+        }
+    }
+    Ok(addrs)
+}
+
+fn parse_optional_family_socket(
+    value: Option<String>,
+    label: &str,
+    family: IpFamily,
+) -> Result<Vec<SocketAddr>, String> {
+    parse_family_sockets(value.into_iter().collect(), label, family)
+}
+
 fn apply_environment(config: &mut RunConfig) -> Result<(), String> {
     if let Ok(value) = std::env::var(NODE_RPC_LISTEN_ADDR_ENV) {
-        config.rpc_addr = value
-            .parse()
-            .map_err(|error| format!("invalid {NODE_RPC_LISTEN_ADDR_ENV} `{value}`: {error}"))?;
+        config.rpc_addrs = parse_environment_sockets(&value, NODE_RPC_LISTEN_ADDR_ENV)?;
     }
     if let Ok(value) = std::env::var(NODE_P2P_LISTEN_ADDR_ENV) {
         config.listen_addrs = parse_environment_sockets(&value, NODE_P2P_LISTEN_ADDR_ENV)?;
@@ -785,6 +883,90 @@ struct WalletFile {
 impl Drop for WalletFile {
     fn drop(&mut self) {
         self.secret_key.zeroize();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_config_separates_every_socket_ip_family() {
+        let value = serde_json::to_value(RunConfigFile::default()).unwrap();
+        let object = value.as_object().unwrap();
+
+        for key in [
+            "listen_addr_ipv4",
+            "listen_addr_ipv6",
+            "rpc_addr_ipv4",
+            "rpc_addr_ipv6",
+            "rpc_admin_addr_ipv4",
+            "rpc_admin_addr_ipv6",
+            "peers_ipv4",
+            "peers_ipv6",
+            "public_addr_ipv4",
+            "public_addr_ipv6",
+            "grpc_addr_ipv4",
+            "grpc_addr_ipv6",
+        ] {
+            assert!(
+                object.contains_key(key),
+                "generated config is missing {key}"
+            );
+        }
+        for legacy in [
+            "listen_addr",
+            "rpc_addr",
+            "rpc_admin_addr",
+            "peers",
+            "public_addr",
+            "grpc_addr",
+        ] {
+            assert!(
+                !object.contains_key(legacy),
+                "legacy field {legacy} remains"
+            );
+        }
+    }
+
+    #[test]
+    fn split_config_combines_families_for_runtime() {
+        let mut file = RunConfigFile::default();
+        file.peers_ipv4 = vec!["198.51.100.8:5555".to_string()];
+        file.peers_ipv6 = vec!["[2001:db8::8]:5555".to_string()];
+        file.public_addr_ipv4 = Some(OneOrMany::One("198.51.100.9:5555".to_string()));
+        file.public_addr_ipv6 = Some(OneOrMany::One("[2001:db8::9]:5555".to_string()));
+        file.wallet = None;
+        file.mine = false;
+
+        let mut config = RunConfig::default();
+        apply_file(&mut config, file).unwrap();
+
+        assert_eq!(config.listen_addrs.len(), 2);
+        assert_eq!(config.rpc_addrs.len(), 2);
+        assert_eq!(config.peers.len(), 2);
+        assert_eq!(config.public_addrs.len(), 2);
+        assert!(config.peers.iter().any(SocketAddr::is_ipv4));
+        assert!(config.peers.iter().any(SocketAddr::is_ipv6));
+    }
+
+    #[test]
+    fn split_config_rejects_address_in_wrong_family() {
+        let error =
+            parse_family_sockets(vec!["[::1]:5555".to_string()], "peers_ipv4", IpFamily::V4)
+                .unwrap_err();
+        assert!(error.contains("expected IPv4"));
+    }
+
+    #[test]
+    fn legacy_combined_address_fields_are_rejected() {
+        let mut value = serde_json::to_value(RunConfigFile::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("peers".to_string(), serde_json::json!([]));
+        let error = serde_json::from_value::<RunConfigFile>(value).unwrap_err();
+        assert!(error.to_string().contains("unknown field `peers`"));
     }
 }
 

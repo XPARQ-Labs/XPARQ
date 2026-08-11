@@ -8,6 +8,7 @@ pub mod keygen;
 pub mod keygen;
 #[cfg(feature = "sqisign-candidate")]
 pub mod sqisign_candidate;
+mod verification_cache;
 
 pub use crate::error::CryptoError;
 #[cfg(feature = "sqisign-candidate")]
@@ -31,12 +32,14 @@ pub use hash::{
 pub use keygen::{
     AuthorizationSeed, CachedVerifyingKey, KeyPair, PUBLIC_KEY_SIZE, PublicKey, PublicKeyBytes,
     SECRET_KEY_SIZE, SIGNATURE_SIZE, SecretKey, SecretKeyBytes, Signature, SignatureBytes,
-    authorization_keypair_from_password, authorization_seed_from_password, cached_verifying_key,
-    derive_public_key, generate_keypair, keypair_from_seed, public_key_from_seed, sign,
-    sign_from_seed, verify, verify_dual_parallel, verify_result,
+    VerificationQueueSnapshot, authorization_keypair_from_password,
+    authorization_seed_from_password, cached_verifying_key, derive_public_key, generate_keypair,
+    keypair_from_seed, public_key_from_seed, sign, sign_from_seed, verification_queue_snapshot,
+    verify, verify_dual_parallel, verify_result,
 };
 #[cfg(feature = "sqisign-blockchain-test")]
 pub use keygen::{
     SqisignVerificationWork, clear_verifying_key_cache, verify_batch_parallel,
     verify_batch_parallel_accounted,
 };
+pub use verification_cache::verify_dual_parallel_at_height;

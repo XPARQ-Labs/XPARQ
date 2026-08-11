@@ -4,14 +4,17 @@ use crate::runtime::network::{
     CompactBlock, CompactBlockReconstruction, NetworkMessage, PeerInfo, TipInfo, VersionInfo,
 };
 use crate::runtime::node::Node;
+use crate::{node_debug, node_info};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+#[cfg(feature = "mainnet")]
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use xparq::block::Block;
@@ -38,6 +41,31 @@ const MAX_BLOCKS_PER_BATCH: u64 = 32;
 const MAX_BLOCK_LOCATOR_HASHES: usize = 32;
 const MAX_MISSING_PARENT_FETCHES_PER_POLL: usize = 64;
 const MAX_MEMPOOL_INVENTORY_FETCH: usize = 128;
+const SYNC_RESULT_QUEUE_CAPACITY: usize = 8;
+
+pub struct SyncPipelineMetrics {
+    pub queue_depth: AtomicU64,
+    pub downloaded_ranges_total: AtomicU64,
+    pub download_micros_total: AtomicU64,
+    pub stateless_verify_micros_total: AtomicU64,
+    pub apply_micros_total: AtomicU64,
+    pub applied_blocks_total: AtomicU64,
+}
+
+impl SyncPipelineMetrics {
+    const fn new() -> Self {
+        Self {
+            queue_depth: AtomicU64::new(0),
+            downloaded_ranges_total: AtomicU64::new(0),
+            download_micros_total: AtomicU64::new(0),
+            stateless_verify_micros_total: AtomicU64::new(0),
+            apply_micros_total: AtomicU64::new(0),
+            applied_blocks_total: AtomicU64::new(0),
+        }
+    }
+}
+
+pub static SYNC_PIPELINE_METRICS: SyncPipelineMetrics = SyncPipelineMetrics::new();
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PeerCache {
@@ -242,9 +270,11 @@ impl PeerConnection {
             NetworkMessage::CompactBlock(compact) => return self.handle_compact_block(compact),
             message => message,
         };
-        println!(
-            "[P2P] unsolicited_message peer={} message={:?}",
-            self.addr, message
+        node_debug!(
+            "P2P",
+            "unsolicited_message peer={} variant={:?}",
+            self.addr,
+            std::mem::discriminant(&message)
         );
         let Some(node) = self.node.as_ref().cloned() else {
             return Ok(());
@@ -314,8 +344,9 @@ impl PeerConnection {
                 indexes
             }
             Err(error) => {
-                eprintln!(
-                    "[P2P] compact_reconstruction_failed peer={} hash={} error=\"{}\" fallback=full",
+                node_debug!(
+                    "P2P",
+                    "compact_reconstruction_failed peer={} hash={} error={:?} fallback=full",
                     self.addr,
                     hex::encode(block_hash.0),
                     error
@@ -329,8 +360,9 @@ impl PeerConnection {
         }) {
             Ok(response) => response,
             Err(error) => {
-                eprintln!(
-                    "[P2P] compact_missing_request_failed peer={} hash={} error=\"{}\" fallback=full",
+                node_debug!(
+                    "P2P",
+                    "compact_missing_request_failed peer={} hash={} error={:?} fallback=full",
                     self.addr,
                     hex::encode(block_hash.0),
                     error
@@ -416,10 +448,16 @@ pub fn load_peers_file(path: &str) -> Result<Vec<SocketAddr>, String> {
         return cache
             .peers
             .into_iter()
+            .filter(|peer| peer.last_success_unix.is_some())
             .map(|peer| {
                 peer.address
                     .parse()
                     .map_err(|error| format!("invalid peer `{}` in {path}: {error}", peer.address))
+            })
+            .filter(|peer| {
+                peer.as_ref()
+                    .map(is_admissible_discovered_peer)
+                    .unwrap_or(true)
             })
             .collect();
     }
@@ -442,7 +480,11 @@ pub fn save_peer_states_file(path: &str, peers: Vec<PeerState>) -> Result<(), St
     let cache = PeerCache {
         peers: peers
             .into_iter()
-            .filter(|peer| !peer.is_banned())
+            .filter(|peer| {
+                !peer.is_banned()
+                    && peer.last_success.is_some()
+                    && is_admissible_discovered_peer(&peer.addr)
+            })
             .map(|peer| CachedPeer {
                 address: peer.addr.to_string(),
                 score: peer.score,
@@ -471,6 +513,68 @@ pub fn dedupe_peers(peers: &mut Vec<SocketAddr>) {
     peers.retain(|peer| seen.insert(*peer));
 }
 
+/// Returns whether an address learned from an untrusted discovery mechanism may be dialed,
+/// cached, or relayed to other mainnet nodes. Operator-configured peers are intentionally not
+/// subject to this policy so local test setups remain possible.
+pub fn is_admissible_discovered_peer(addr: &SocketAddr) -> bool {
+    if addr.port() == 0 {
+        return false;
+    }
+
+    #[cfg(feature = "mainnet")]
+    {
+        is_public_ip(addr.ip())
+    }
+
+    #[cfg(any(feature = "testnet", feature = "devnet"))]
+    {
+        match addr.ip() {
+            IpAddr::V4(ip) => !ip.is_unspecified() && !ip.is_multicast(),
+            IpAddr::V6(ip) => !ip.is_unspecified() && !ip.is_multicast(),
+        }
+    }
+}
+
+#[cfg(feature = "mainnet")]
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_public_ipv4(ip),
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(is_public_ipv4)
+            .unwrap_or_else(|| is_public_ipv6(ip)),
+    }
+}
+
+#[cfg(feature = "mainnet")]
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !ip.is_unspecified()
+        && !ip.is_loopback()
+        && !ip.is_private()
+        && !ip.is_link_local()
+        && !ip.is_multicast()
+        && !ip.is_broadcast()
+        && !(a == 100 && (64..=127).contains(&b))
+        && !(a == 192 && b == 0 && c == 0)
+        && !(a == 192 && b == 0 && c == 2)
+        && !(a == 198 && (b == 18 || b == 19))
+        && !(a == 198 && b == 51 && c == 100)
+        && !(a == 203 && b == 0 && c == 113)
+        && a < 240
+}
+
+#[cfg(feature = "mainnet")]
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    !ip.is_unspecified()
+        && !ip.is_loopback()
+        && !ip.is_multicast()
+        && (segments[0] & 0xfe00) != 0xfc00
+        && (segments[0] & 0xffc0) != 0xfe80
+        && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+}
+
 pub fn poll_peer_connection(
     peer: &mut PeerConnection,
     node: &Arc<Mutex<Node>>,
@@ -478,18 +582,19 @@ pub fn poll_peer_connection(
     sync_window: u64,
 ) -> Result<PeerPoll, String> {
     if peer.is_handshaken() {
-        println!("[P2P] handshake_reuse peer={}", peer.addr());
+        node_debug!("P2P", "handshake_reuse peer={}", peer.addr());
     } else {
-        println!("[P2P] handshake_start peer={}", peer.addr());
+        node_debug!("P2P", "handshake_start peer={}", peer.addr());
         handshake_peer(peer, node, public_addrs)?;
         peer.mark_handshaken();
-        println!("[P2P] handshake_ok peer={}", peer.addr());
+        node_debug!("P2P", "handshake_ok peer={}", peer.addr());
     }
     let latency = ping_peer(peer)?;
     let remote_tip = request_tip(peer)?;
     let local_tip = local_tip_info(node)?;
-    println!(
-        "[P2P] tip_check peer={} local={} remote={} remote_work={}",
+    node_debug!(
+        "P2P",
+        "tip_check peer={} local_height={} remote_height={} remote_work={}",
         peer.addr(),
         local_tip
             .map(|tip| tip.height.0.to_string())
@@ -514,8 +619,9 @@ pub fn poll_peer_connection(
         return Err("local tip became unavailable during peer synchronization".to_string());
     };
     if !is_remote_tip_better(&local_tip, &remote_tip) {
-        println!(
-            "[SYNC] skip_weaker_peer peer={} local_work={} remote_work={} local_height={} remote_height={}",
+        node_debug!(
+            "SYNC",
+            "skip_weaker_peer peer={} local_work={} remote_work={} local_height={} remote_height={}",
             peer.addr(),
             work_hex(local_tip.work),
             work_hex(remote_tip.work),
@@ -534,8 +640,9 @@ pub fn poll_peer_connection(
         .height
         .0
         .min(ancestor.height.0.saturating_add(sync_window));
-    println!(
-        "[SYNC] plan peer={} ancestor={} target={} remote_tip={} window={}",
+    node_debug!(
+        "SYNC",
+        "plan peer={} ancestor={} target={} remote_tip={} window={}",
         peer.addr(),
         ancestor.height.0,
         target,
@@ -549,15 +656,17 @@ pub fn poll_peer_connection(
         });
     }
     let start = Height(ancestor.height.0.saturating_add(1));
-    println!(
-        "[SYNC] request_headers peer={} start={} target={}",
+    node_debug!(
+        "SYNC",
+        "request_headers peer={} start={} target={}",
         peer.addr(),
         start.0,
         target
     );
     let headers = request_headers(peer, start, target, ancestor.hash)?;
-    println!(
-        "[SYNC] headers_ok peer={} count={} start={} target={}",
+    node_debug!(
+        "SYNC",
+        "headers_received peer={} count={} start={} target={}",
         peer.addr(),
         headers.len(),
         start.0,
@@ -592,12 +701,18 @@ pub fn sync_from_peers_parallel(
         let mut peer = match PeerConnection::connect(addr) {
             Ok(peer) => peer,
             Err(error) => {
-                eprintln!("[SYNC] candidate_connect_failed peer={addr} error=\"{error}\"");
+                node_debug!(
+                    "SYNC",
+                    "candidate_connect_failed peer={addr} error={error:?}"
+                );
                 continue;
             }
         };
         if let Err(error) = handshake_peer(&mut peer, node, public_addrs) {
-            eprintln!("[SYNC] candidate_handshake_failed peer={addr} error=\"{error}\"");
+            node_debug!(
+                "SYNC",
+                "candidate_handshake_failed peer={addr} error={error:?}"
+            );
             continue;
         }
         match request_tip(&mut peer) {
@@ -605,7 +720,7 @@ pub fn sync_from_peers_parallel(
                 candidates.push((addr, tip, peer))
             }
             Ok(_) => {}
-            Err(error) => eprintln!("[SYNC] candidate_tip_failed peer={addr} error=\"{error}\""),
+            Err(error) => node_debug!("SYNC", "candidate_tip_failed peer={addr} error={error:?}"),
         }
     }
 
@@ -658,28 +773,120 @@ pub fn sync_from_peers_parallel(
         });
     }
 
+    type RangeResult = Result<(u64, SocketAddr, Vec<Block>, Vec<SocketAddr>), String>;
+    let range_count = ranges.len();
+    let (range_sender, range_receiver) =
+        mpsc::sync_channel::<RangeResult>(range_count.clamp(1, SYNC_RESULT_QUEUE_CAPACITY));
     let mut handles = Vec::new();
     for range in ranges {
         let node = Arc::clone(node);
         let public_addrs = public_addrs.to_vec();
         let candidates = candidate_tips.clone();
+        let range_sender = range_sender.clone();
         handles.push(thread::spawn(move || {
-            fetch_range_with_retries(range, candidates, &node, &public_addrs)
+            let downloaded_at = Instant::now();
+            let result = fetch_range_with_retries(range, candidates, &node, &public_addrs)
+                .and_then(|(start, peer, blocks, failed)| {
+                    SYNC_PIPELINE_METRICS.download_micros_total.fetch_add(
+                        downloaded_at
+                            .elapsed()
+                            .as_micros()
+                            .min(u128::from(u64::MAX)) as u64,
+                        AtomicOrdering::Relaxed,
+                    );
+                    let verify_started = Instant::now();
+                    for block in &blocks {
+                        for transaction in block.transactions() {
+                            transaction
+                                .validate_envelope_for_height(block.height())
+                                .map_err(|error| {
+                                    format!(
+                                        "stateless verification failed at height {}: {error}",
+                                        block.height().0
+                                    )
+                                })?;
+                        }
+                    }
+                    SYNC_PIPELINE_METRICS
+                        .stateless_verify_micros_total
+                        .fetch_add(
+                            verify_started
+                                .elapsed()
+                                .as_micros()
+                                .min(u128::from(u64::MAX)) as u64,
+                            AtomicOrdering::Relaxed,
+                        );
+                    Ok((start, peer, blocks, failed))
+                });
+            SYNC_PIPELINE_METRICS
+                .queue_depth
+                .fetch_add(1, AtomicOrdering::Relaxed);
+            if range_sender.send(result).is_err() {
+                SYNC_PIPELINE_METRICS
+                    .queue_depth
+                    .fetch_sub(1, AtomicOrdering::Relaxed);
+            }
         }));
     }
+    drop(range_sender);
 
     let mut downloaded = BTreeMap::new();
     let mut used_peers = HashSet::new();
     let mut failed_peers = HashSet::new();
-    for handle in handles {
-        let (start, peer, blocks, worker_failed_peers) = handle
-            .join()
-            .map_err(|_| "parallel sync worker panicked".to_string())??;
+    let mut expected_height = start.0;
+    let mut applied_blocks = 0_usize;
+    for _ in 0..range_count {
+        let result = range_receiver
+            .recv()
+            .map_err(|_| "parallel sync result channel closed".to_string())?;
+        SYNC_PIPELINE_METRICS
+            .queue_depth
+            .fetch_sub(1, AtomicOrdering::Relaxed);
+        let (range_start, peer, blocks, worker_failed_peers) = result?;
+        SYNC_PIPELINE_METRICS
+            .downloaded_ranges_total
+            .fetch_add(1, AtomicOrdering::Relaxed);
         used_peers.insert(peer);
         for failed_peer in worker_failed_peers {
             failed_peers.insert(failed_peer);
         }
-        downloaded.insert(start, blocks);
+        downloaded.insert(range_start, blocks);
+
+        while let Some(blocks) = downloaded.remove(&expected_height) {
+            let apply_started = Instant::now();
+            let mut node = node
+                .lock()
+                .map_err(|_| "node state lock poisoned".to_string())?;
+            for block in blocks {
+                let height = block.height();
+                if height.0 != expected_height {
+                    return Err(format!(
+                        "parallel sync downloaded height {} while applying height {}",
+                        height.0, expected_height
+                    ));
+                }
+                node.apply_block(block).map_err(|error| {
+                    format!(
+                        "failed to apply parallel synced block {}: {error}",
+                        height.0
+                    )
+                })?;
+                expected_height = expected_height.saturating_add(1);
+                applied_blocks += 1;
+            }
+            SYNC_PIPELINE_METRICS.apply_micros_total.fetch_add(
+                apply_started
+                    .elapsed()
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64,
+                AtomicOrdering::Relaxed,
+            );
+        }
+    }
+    for handle in handles {
+        handle
+            .join()
+            .map_err(|_| "parallel sync worker panicked".to_string())?;
     }
     let used_peer_addrs = used_peers.iter().copied().collect::<Vec<_>>();
     for peer in &used_peer_addrs {
@@ -687,33 +894,16 @@ pub fn sync_from_peers_parallel(
     }
     let failed_peer_addrs = failed_peers.iter().copied().collect::<Vec<_>>();
 
-    let mut node = node
+    let node = node
         .lock()
         .map_err(|_| "node state lock poisoned".to_string())?;
-    let mut expected_height = start.0;
-    let mut applied_blocks = 0;
-    for blocks in downloaded.into_values() {
-        for block in blocks {
-            let height = block.height();
-            if height.0 != expected_height {
-                return Err(format!(
-                    "parallel sync downloaded height {} while applying height {}",
-                    height.0, expected_height
-                ));
-            }
-            node.apply_block(block).map_err(|error| {
-                format!(
-                    "failed to apply parallel synced block {}: {error}",
-                    height.0
-                )
-            })?;
-            expected_height = expected_height.saturating_add(1);
-            applied_blocks += 1;
-        }
-    }
+    SYNC_PIPELINE_METRICS
+        .applied_blocks_total
+        .fetch_add(applied_blocks as u64, AtomicOrdering::Relaxed);
 
-    println!(
-        "[SYNC] applied through_height={} peers={} tip={}",
+    node_info!(
+        "SYNC",
+        "pipeline_applied through_height={} peers_used={} tip={}",
         expected_height.saturating_sub(1),
         used_peers.len(),
         node.tip_hash()
@@ -829,8 +1019,9 @@ fn submit_mempool_transactions(
     for transaction in transactions {
         match node.submit_protocol_transaction(transaction) {
             Ok(_) => accepted += 1,
-            Err(error) => eprintln!(
-                "mempool sync rejected transaction from {}: {error}",
+            Err(error) => node_debug!(
+                "MEMPOOL",
+                "sync_transaction_rejected peer={} error={error:?}",
                 peer.addr()
             ),
         }
@@ -913,7 +1104,7 @@ pub fn download_authenticated_snapshot(peers: &[SocketAddr]) -> Result<FastSyncD
         match candidate {
             Ok(candidate) => candidates.push(candidate),
             Err(error) => {
-                eprintln!("[FASTSYNC] candidate_rejected peer={addr} error=\"{error}\"")
+                node_debug!("FASTSYNC", "candidate_rejected peer={addr} error={error:?}")
             }
         }
     }
@@ -1079,8 +1270,9 @@ fn request_blocks(
             )
         })?;
     }
-    println!(
-        "synced blocks through height {} from {} |tip::{}|",
+    node_info!(
+        "SYNC",
+        "blocks_applied through_height={} peer={} tip={}",
         target,
         peer.addr(),
         node.tip_hash()
@@ -1105,8 +1297,9 @@ fn fetch_blocks(
         }
         let remaining = target.saturating_sub(next_height).saturating_add(1);
         let limit = remaining.min(MAX_BLOCKS_PER_BATCH) as u32;
-        println!(
-            "peer {} downloading blocks:: |start::{}|limit::{}|target::{}|",
+        node_debug!(
+            "SYNC",
+            "block_batch_request peer={} start={} limit={} target={}",
             peer.addr(),
             next_height,
             limit,
@@ -1201,9 +1394,13 @@ fn fetch_range_with_retries(
         match fetch_blocks(&mut peer, range.start, range.target, range.headers.clone()) {
             Ok(blocks) => {
                 if peer_addr != range.peer {
-                    println!(
-                        "parallel sync reassigned range {}..{} from {} to {}",
-                        range.start.0, range.target, range.peer, peer_addr
+                    node_debug!(
+                        "SYNC",
+                        "range_reassigned start={} target={} original_peer={} replacement_peer={}",
+                        range.start.0,
+                        range.target,
+                        range.peer,
+                        peer_addr
                     );
                 }
                 return Ok((range.start.0, peer_addr, blocks, failed_peers));
@@ -1424,8 +1621,9 @@ fn request_missing_parent_blocks(
             .tip_hash()
             .map(|hash| hex::encode(hash.0))
             .unwrap_or_else(|| "none".to_string());
-        println!(
-            "[SYNC] missing_parent_batch peer={} requested={} fetched={} missing={} first={} last={} tip={} limit={}",
+        node_debug!(
+            "SYNC",
+            "missing_parent_batch peer={} requested={} fetched={} missing={} first={} last={} tip={} limit={}",
             peer.addr(),
             fetched,
             fetched.saturating_sub(missing),
@@ -1452,8 +1650,9 @@ fn request_block_by_hash(
     let block = match response {
         NetworkMessage::Block(block) => block,
         NetworkMessage::Reject { reason, message } => {
-            println!(
-                "[SYNC] missing_parent_unavailable hash={} peer={} reason={reason:?} message=\"{}\"",
+            node_debug!(
+                "SYNC",
+                "missing_parent_unavailable hash={} peer={} reason={reason:?} message={:?}",
                 hex::encode(hash.0),
                 peer.addr(),
                 message
@@ -1514,5 +1713,62 @@ mod tests {
         let remote = tip(101, [0, 0, 0, 0, 0, 0, 0, 20], 1);
 
         assert!(is_remote_tip_better(&local, &remote));
+    }
+
+    #[test]
+    #[cfg(feature = "mainnet")]
+    fn mainnet_discovery_rejects_non_public_and_ephemeral_style_addresses() {
+        for addr in [
+            "127.0.0.1:5555",
+            "10.0.166.204:5555",
+            "[::1]:5555",
+            "[fe80::822b:f9ff:fee2:365]:5555",
+            "[fd00::1]:5555",
+            "192.0.2.10:5555",
+            "[2001:db8::1]:5555",
+            "208.94.113.170:0",
+        ] {
+            assert!(
+                !is_admissible_discovered_peer(&addr.parse().unwrap()),
+                "{addr}"
+            );
+        }
+
+        for addr in [
+            "208.94.113.170:5555",
+            "202.10.42.133:5555",
+            "[2001:df0:27b::3b0f:6907]:5555",
+        ] {
+            assert!(
+                is_admissible_discovered_peer(&addr.parse().unwrap()),
+                "{addr}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "mainnet")]
+    fn peer_cache_persists_only_successful_public_peers() {
+        let unique = format!(
+            "xparq-peer-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(unique);
+        let mut public = PeerState::new("208.94.113.170:5555".parse().unwrap());
+        public.mark_ok(None);
+        let mut loopback = PeerState::new("127.0.0.1:5555".parse().unwrap());
+        loopback.mark_ok(None);
+        let unverified = PeerState::new("202.10.42.133:5555".parse().unwrap());
+
+        save_peer_states_file(path.to_str().unwrap(), vec![public, loopback, unverified]).unwrap();
+        assert_eq!(
+            load_peers_file(path.to_str().unwrap()).unwrap(),
+            vec!["208.94.113.170:5555".parse().unwrap()]
+        );
+        std::fs::remove_file(path).unwrap();
     }
 }

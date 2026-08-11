@@ -20,7 +20,7 @@ use std::sync::Arc;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ledger {
     pub(crate) accounts: BTreeMap<Address, Account>,
-    account_state_tree: Arc<SparseStateTree>,
+    pub(crate) account_state_tree: Arc<SparseStateTree>,
     pub chain: Chain,
     pub xpq_utxos: XpqUtxoSet,
     pub qcash_utxos: QCashUtxoSet,
@@ -120,6 +120,24 @@ impl Ledger {
 
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Clones the authenticated state needed to validate pending transactions without copying
+    /// retained block bodies, protocol events, or rollback-only history.
+    pub fn transaction_staging_clone(&self) -> Self {
+        let mut chain = self.chain.clone();
+        chain.blocks.clear();
+        Self {
+            accounts: self.accounts.clone(),
+            account_state_tree: self.account_state_tree.clone(),
+            chain,
+            xpq_utxos: self.xpq_utxos.clone(),
+            qcash_utxos: self.qcash_utxos.clone(),
+            qcash_account_journals: BTreeMap::new(),
+            rollback_states: BTreeMap::new(),
+            events_by_block: BTreeMap::new(),
+            rollback_history: RollbackHistory::default(),
+        }
     }
 
     pub fn from_accounts_and_chain(
@@ -395,7 +413,13 @@ impl Ledger {
         signed: &SignedQCashTransaction,
         height: BlockHeight,
     ) -> Result<(), LedgerError> {
-        let mut staged = self.clone();
+        let mut staged = Self {
+            accounts: self.accounts.clone(),
+            account_state_tree: self.account_state_tree.clone(),
+            xpq_utxos: self.xpq_utxos.clone(),
+            qcash_utxos: self.qcash_utxos.clone(),
+            ..Self::default()
+        };
         if !staged.accounts.contains_key(&signed.transaction.signer)
             && signed.authorization_proof.carries_registration_keys()
         {
@@ -431,7 +455,10 @@ impl Ledger {
             Address([0; 20]),
         )?;
         staged.refresh_qcash_accounts(&signed.transaction, Address([0; 20]))?;
-        *self = staged;
+        self.accounts = staged.accounts;
+        self.account_state_tree = staged.account_state_tree;
+        self.xpq_utxos = staged.xpq_utxos;
+        self.qcash_utxos = staged.qcash_utxos;
         Ok(())
     }
 

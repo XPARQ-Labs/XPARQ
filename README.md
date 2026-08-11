@@ -6,7 +6,8 @@ transferable QCash bearer value.
 
 ## Monorepo Layout
 
-This repository is one Cargo workspace:
+This repository contains the primary L1 Cargo workspace and an independent
+sidechain workspace:
 
 ```text
 XPARQ/
@@ -14,25 +15,31 @@ XPARQ/
 ├── core/                      consensus primitives (`xparq`)
 ├── node/                      node, P2P, RPC, and application configuration
 ├── wallet/                    reusable wallet library and wallet CLI
+├── sidechain/                 independent sidechain workspace
 └── depend/                    standalone vendored-dependency workspace
 ```
 
 Run workspace commands from the repository root, for example
 `cargo check --workspace --locked` or `cargo test --workspace --locked`.
-`core`, `node`, and `wallet` are the three primary workspace packages.
+`core`, `node`, and `wallet` are the three primary L1 workspace packages.
 Dependency versions and path overrides are controlled by the root manifest.
 `depend` has its own virtual workspace manifest and is excluded from the
 application workspace; vendored packages retain the upstream manifests Cargo
-needs to compile them.
+needs to compile them. `sidechain` is also excluded deliberately and is built
+from its own manifest so its execution and storage boundaries remain separate
+from L1.
 
 The current implementation is the **Sharksphere** patch of protocol version 1.
 Consensus parameters are defined by the `core` crate and summarized below.
 Operator and component documentation is organized as follows:
 
-- [Mining and node tutorial](tutorial.md)
+- [Mining and node tutorial](TUTORIAL.md)
 - [Core crate](core/README.md)
 - [Node binary](node/README.md)
 - [Wallet library and CLI](wallet/README.md)
+- [Independent sidechain architecture](SIDECHAIN.md)
+- [Sidechain whitepaper](WHITEPAPER.md)
+- [Core decomposition roadmap](ROADMAP.md)
 - [Fuzzing](FUZZING.md)
 - [Vendored dependency boundary](depend/README.md)
 
@@ -118,6 +125,35 @@ Networking, RPC, mining orchestration, mempool policy,
 snapshot transport, and database storage belong to the separate node crate.
 Those policies are not consensus parameters unless explicitly stated in the
 chain specification.
+
+## Current Node Implementation Status
+
+The workspace application packages and binaries are named `node` and
+`wallet`. The retired package and binary names must not be used in build,
+release, or operator commands.
+
+The node currently provides:
+
+- a bounded 256-job cryptographic verification queue with explicit inline
+  fallback when saturated;
+- an in-memory, height-scoped stateless authorization cache capped at 4,096
+  successful verification entries;
+- a bounded 128-job blocking state pipeline for transaction validation,
+  mining submission, and LMDB-backed RPC work;
+- parallel block-range download, parallel stateless prevalidation, bounded
+  result buffering, and ordered state application during synchronization;
+- account and XPQ/QCash dirty-state persistence in the same atomic LMDB
+  transaction as the accepted block, with a full state snapshot at genesis
+  and every 2,048 blocks;
+- a recent-block cache capped at 32 blocks and 64 MiB, storing one block object
+  with a secondary hash-to-height index and falling back to canonical chain
+  storage for evicted historical blocks;
+- Prometheus metrics for RPC latency, state and crypto queue pressure, sync
+  download/verification/application latency, and block-cache occupancy.
+
+These caches and queues are process-local operational mechanisms. They do not
+change consensus validity, canonical hashes, state roots, fork choice, or the
+LMDB atomic-commit boundary.
 
 ## Node P2P Transport
 

@@ -32,8 +32,8 @@ jobs:
 
           expected_version="${BASH_REMATCH[1]}"
           metadata="$(cargo metadata --locked --no-deps --format-version 1)"
-          node_version="$(jq -r '.packages[] | select(.name == "xparq-node") | .version' <<<"${metadata}")"
-          wallet_version="$(jq -r '.packages[] | select(.name == "xparq-wallet") | .version' <<<"${metadata}")"
+          node_version="$(jq -r '.packages[] | select(.name == "node") | .version' <<<"${metadata}")"
+          wallet_version="$(jq -r '.packages[] | select(.name == "wallet") | .version' <<<"${metadata}")"
 
           if [[ "${node_version}" != "${expected_version}" || "${wallet_version}" != "${expected_version}" ]]; then
             echo "tag ${GITHUB_REF_NAME} does not match node=${node_version} wallet=${wallet_version}" >&2
@@ -74,22 +74,22 @@ jobs:
         run: >-
           cargo test --locked
           --target ${{ matrix.target }}
-          -p xparq-node
-          -p xparq-wallet
+          -p node
+          -p wallet
 
       - name: Build mainnet binaries
         run: >-
           cargo build --release --locked
           --target ${{ matrix.target }}
-          -p xparq-node
-          -p xparq-wallet
+          -p node
+          -p wallet
 
       - name: Smoke test Linux binaries
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          target/${{ matrix.target }}/release/xparq-node version
+          target/${{ matrix.target }}/release/node version
           target/${{ matrix.target }}/release/wallet --version
 
       - name: Package Linux release
@@ -100,7 +100,7 @@ jobs:
           package="xparq-${GITHUB_REF_NAME}-mainnet-${{ matrix.platform }}"
           package_dir="dist/${package}"
           mkdir -p "${package_dir}"
-          install -m 0755 "target/${{ matrix.target }}/release/xparq-node" "${package_dir}/xparq-node"
+          install -m 0755 "target/${{ matrix.target }}/release/node" "${package_dir}/node"
           install -m 0755 "target/${{ matrix.target }}/release/wallet" "${package_dir}/wallet"
           cp README.md "${package_dir}/README.md"
           cp LICENSE "${package_dir}/LICENSE"
@@ -115,7 +115,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & "target/${{ matrix.target }}/release/xparq-node.exe" version
+          & "target/${{ matrix.target }}/release/node.exe" version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "target/${{ matrix.target }}/release/wallet.exe" --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -128,7 +128,7 @@ jobs:
           $package = "xparq-$env:GITHUB_REF_NAME-mainnet-${{ matrix.platform }}"
           $packageDir = Join-Path "dist" $package
           New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/xparq-node.exe" $packageDir
+          Copy-Item "target/${{ matrix.target }}/release/node.exe" $packageDir
           Copy-Item "target/${{ matrix.target }}/release/wallet.exe" $packageDir
           Copy-Item "README.md" (Join-Path $packageDir "README.md")
           Copy-Item "LICENSE" (Join-Path $packageDir "LICENSE")

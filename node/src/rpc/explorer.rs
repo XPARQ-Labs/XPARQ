@@ -6,7 +6,8 @@ async fn rpc_tx(
         Ok(hash) => TransactionHash(hash.0),
         Err(error) => return rpc_error(StatusCode::BAD_REQUEST, error),
     };
-    match state.node.lock() {
+    let node = Arc::clone(&state.node);
+    match state.state_pipeline.run(move || match node.lock() {
         Ok(node) => {
             for transaction in node.mempool.transactions() {
                 if transaction.hash().is_ok_and(|txid| txid == hash) {
@@ -36,6 +37,9 @@ async fn rpc_tx(
             }
         }
         Err(_) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+    }).await {
+        Ok(response) => response,
+        Err(error) => rpc_state_pipeline_error(error),
     }
 }
 
@@ -61,7 +65,10 @@ async fn rpc_address(
     }
 }
 
-async fn rpc_accounts(State(state): State<RpcState>) -> impl IntoResponse {
+async fn rpc_accounts(
+    State(state): State<RpcState>,
+    Query(query): Query<ListQuery>,
+) -> impl IntoResponse {
     match state.node.lock() {
         Ok(node) => {
             let height = node.tip_height().unwrap_or(Height(0));
@@ -69,6 +76,8 @@ async fn rpc_accounts(State(state): State<RpcState>) -> impl IntoResponse {
                 .ledger
                 .accounts()
                 .values()
+                .skip(query.bounds().0)
+                .take(query.bounds().1)
                 .map(|account| {
                     let pending = node.pending_balance(&account.address);
                     account_response(&node, account, height, pending)
@@ -114,16 +123,23 @@ fn account_response(
 }
 
 
-async fn rpc_mempool(State(state): State<RpcState>) -> impl IntoResponse {
+async fn rpc_mempool(
+    State(state): State<RpcState>,
+    Query(query): Query<ListQuery>,
+) -> impl IntoResponse {
     match state.node.lock() {
         Ok(node) => {
+            let total = node.mempool.len();
+            let (offset, limit) = query.bounds();
             let transactions = node
                 .mempool
                 .transactions()
+                .skip(offset)
+                .take(limit)
                 .filter_map(|transaction| protocol_tx_response(transaction, None, None, None).ok())
                 .collect::<Vec<_>>();
             Json(MempoolResponse {
-                size: transactions.len(),
+                size: total,
                 transactions,
             })
             .into_response()
@@ -136,18 +152,25 @@ async fn rpc_qcash_mempool(State(_state): State<RpcState>) -> impl IntoResponse 
     Json(serde_json::json!({ "size": 0, "transactions": [] })).into_response()
 }
 
-async fn rpc_xpq_utxos(State(state): State<RpcState>) -> impl IntoResponse {
+async fn rpc_xpq_utxos(
+    State(state): State<RpcState>,
+    Query(query): Query<ListQuery>,
+) -> impl IntoResponse {
     match state.node.lock() {
         Ok(node) => {
             let height = node.tip_height().unwrap_or(Height(0));
+            let total = node.ledger.xpq_utxos.coins().len();
+            let (offset, limit) = query.bounds();
             let coins = node
                 .ledger
                 .xpq_utxos
                 .coins()
                 .values()
+                .skip(offset)
+                .take(limit)
                 .map(|coin| xpq_coin_json(coin, height))
                 .collect::<Vec<_>>();
-            Json(serde_json::json!({ "size": coins.len(), "coins": coins })).into_response()
+            Json(serde_json::json!({ "size": total, "offset": offset, "limit": limit, "coins": coins })).into_response()
         }
         Err(_) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
     }
@@ -283,19 +306,28 @@ fn chain_stats(node: &Node) -> Result<ChainStatsResponse, String> {
     })
 }
 
-async fn rpc_qcash_utxos(State(state): State<RpcState>) -> impl IntoResponse {
+async fn rpc_qcash_utxos(
+    State(state): State<RpcState>,
+    Query(query): Query<ListQuery>,
+) -> impl IntoResponse {
     match state.node.lock() {
         Ok(node) => {
             let height = node.tip_height().unwrap_or(Height(0));
+            let total = node.ledger.qcash_utxos.coins().count();
+            let (offset, limit) = query.bounds();
             let utxos = node
                 .ledger
                 .qcash_utxos
                 .coins()
+                .skip(offset)
+                .take(limit)
                 .map(|coin| qcash_utxo_value(coin, height))
                 .collect::<Vec<_>>();
             Json(serde_json::json!({
                 "height": height.0,
-                "total": utxos.len(),
+                "total": total,
+                "offset": offset,
+                "limit": limit,
                 "utxos": utxos,
             }))
             .into_response()

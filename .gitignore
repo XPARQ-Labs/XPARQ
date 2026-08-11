@@ -4,8 +4,13 @@
 /core/fuzz/target
 /depend/target
 /depend/**/target
+/sidechain/target
 /depend/sqisign/sqisign-rs/Cargo.lock
 xparq.cdx.json
+
+# Local profiling output
+/perf.data
+/*-flamegraph.svg
 
 # Local runtime state and bearer secrets
 /data/

@@ -99,7 +99,7 @@ fn print_protocol_event(response: &serde_json::Value) {
             print_field("Claimant", event_address_value(fields.get("claimant")));
             print_amount_field("Amount", fields.get("amount"));
         }
-        "CoinbasePaid" => {
+        "EmissionDistributed" => {
             print_field("Miner", event_address_value(fields.get("miner")));
             print_amount_field("Subsidy", fields.get("subsidy"));
         }
@@ -113,7 +113,7 @@ fn protocol_event_label(name: &str) -> &'static str {
         "QCashWithdrawn" => "qcash withdrawn",
         "QCashRedeemed" => "qcash redeemed",
         "QCashRecoverRedeemed" => "legacy qcash recovery redeemed",
-        "CoinbasePaid" => "coinbase paid",
+        "EmissionDistributed" => "emission distributed",
         _ => "unknown",
     }
 }

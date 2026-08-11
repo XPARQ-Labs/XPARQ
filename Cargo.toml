@@ -8,14 +8,18 @@ members = [
 exclude = [
     "depend",
     "core/fuzz",
+    "sidechain",
 ]
 
 [workspace.package]
-version = "0.2.10"
+version = "0.2.11"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
 repository = "https://github.com/XPARQ-Labs/XPARQ"
+
+[profile.bench]
+debug = true
 
 [workspace.dependencies]
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc"], path = "depend/argon2/argon2" }
@@ -44,6 +48,7 @@ socket2 = "0.6"
 sqisign_rs = { package = "xparq-sqisign", version = "0.1.0", path = "depend/sqisign/sqisign-rs" }
 static_assertions = { version = "1.1.0", path = "depend/utils/static_assertions" }
 tokio = { version = "1", features = ["full"] }
+time = { version = "0.3.55", features = ["formatting", "macros"] }
 tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"

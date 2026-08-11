@@ -44,10 +44,11 @@ use mining::{MiningStats, mine_once as mine_once_unlocked};
 use p2p::gossip::broadcast_to_peers;
 use p2p::{
     PeerConnection, PeerPoll, PeerState, dedupe_peers, download_authenticated_snapshot,
-    load_peers_file, poll_peer_connection, request_peers_connection, save_peer_states_file,
-    sync_from_peers_parallel, sync_mempool_connection,
+    is_admissible_discovered_peer, load_peers_file, poll_peer_connection, request_peers_connection,
+    save_peer_states_file, sync_from_peers_parallel, sync_mempool_connection,
 };
 use rpc::api::{LogCounters, RpcMetrics, RpcServerConfig, RpcState, start_rpc_servers};
+use rpc::state_pipeline::StatePipeline;
 use runtime::mempool::MempoolConfig;
 use runtime::miner::prepare_candidate_block;
 use runtime::network::{CompactBlock, InventoryItem, NetworkMessage};
@@ -100,7 +101,7 @@ fn main() -> ExitCode {
     if let Err(error) = ctrlc::set_handler(|| {
         SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
     }) {
-        eprintln!("warning: failed to install shutdown signal handler: {error}");
+        node_warn!("NODE", "signal_handler_install_failed error={error:?}");
     }
     let mut args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() {
@@ -109,7 +110,7 @@ fn main() -> ExitCode {
     match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error}");
+            node_error!("NODE", "fatal error={error:?}");
             ExitCode::FAILURE
         }
     }
@@ -131,9 +132,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         }
         Some("mine") => run_mine_shortcut(&args[1..]),
         Some("node") => node_command(&args[1..]),
-        Some(command) => Err(format!(
-            "unknown command `{command}`. Try `xparq-node --help`."
-        )),
+        Some(command) => Err(format!("unknown command `{command}`. Try `node --help`.")),
     };
     args.zeroize();
     result
@@ -197,18 +196,23 @@ fn node_command(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("init") => {
             let path = args.get(1).map(String::as_str).unwrap_or(DEFAULT_NODE_DB);
-            let miner_address = parse_address(args.get(2)).unwrap_or(Address([9; 20]));
+            let miner_address = args
+                .get(2)
+                .map(|value| parse_address(Some(value)))
+                .transpose()?;
             if args.get(3).is_some() {
                 return Err(
                     "premine address is fixed by protocol and cannot be overridden".to_string(),
                 );
             }
-            let node = open_node(path, miner_address)?;
+            let node = open_node(path)?;
 
             println!("database: {path}");
             println!("tip_height: {:?}", node.tip_height());
             println!("tip_hash: {}", format_hash(node.tip_hash()));
-            println!("miner_address: {}", address_to_string(&miner_address));
+            if let Some(miner_address) = miner_address {
+                println!("miner_address: {}", address_to_string(&miner_address));
+            }
             println!("genesis: chain-spec anchored");
             Ok(())
         }
@@ -220,7 +224,7 @@ fn node_command(args: &[String]) -> Result<(), String> {
             print_network_info();
             Ok(())
         }
-        _ => Err("usage: xparq-node node <info|init|config|run|db> [options]".to_string()),
+        _ => Err("usage: node node <info|init|config|run|db> [options]".to_string()),
     }
 }
 
@@ -229,11 +233,11 @@ fn snapshot_command(args: &[String]) -> Result<(), String> {
         Some("export") => {
             let database = args
                 .get(1)
-                .ok_or("usage: xparq-node node snapshot export <database> <bundle>")?;
+                .ok_or("usage: node node snapshot export <database> <bundle>")?;
             let output = args
                 .get(2)
-                .ok_or("usage: xparq-node node snapshot export <database> <bundle>")?;
-            let node = open_node(database, Address([9; 20]))?;
+                .ok_or("usage: node node snapshot export <database> <bundle>")?;
+            let node = open_node(database)?;
             snapshot::export_to_file(&node.ledger, output)?;
             println!(
                 "authenticated snapshot exported: height={} tip={} file={output}",
@@ -245,10 +249,10 @@ fn snapshot_command(args: &[String]) -> Result<(), String> {
         Some("import") => {
             let database = args
                 .get(1)
-                .ok_or("usage: xparq-node node snapshot import <database> <bundle>")?;
+                .ok_or("usage: node node snapshot import <database> <bundle>")?;
             let bundle = args
                 .get(2)
-                .ok_or("usage: xparq-node node snapshot import <database> <bundle>")?;
+                .ok_or("usage: node node snapshot import <database> <bundle>")?;
             let (height, hash, work) = snapshot::import_file_atomic(database, bundle)?;
             println!(
                 "authenticated snapshot activated: height={} tip={} work={:016x?} database={database}",
@@ -258,12 +262,11 @@ fn snapshot_command(args: &[String]) -> Result<(), String> {
             );
             Ok(())
         }
-        _ => Err("usage: xparq-node node snapshot <export|import> <database> <bundle>".to_string()),
+        _ => Err("usage: node node snapshot <export|import> <database> <bundle>".to_string()),
     }
 }
 
-fn open_node(path: &str, miner_address: Address) -> Result<Node, String> {
-    let _ = miner_address;
+fn open_node(path: &str) -> Result<Node, String> {
     Node::init_or_load(path, Consensus::with_default_config()).map_err(|error| {
         let error = error.to_string();
         if error.contains("stored block failed validation") {
@@ -285,13 +288,16 @@ fn node_config_command(args: &[String]) -> Result<(), String> {
         .unwrap_or(DEFAULT_CONFIG_FILE);
     write_default_run_config(path)?;
     println!("node config written: {path}");
-    println!("edit miner_address/public_addr as needed, then run: ./xparq-node mine");
+    println!(
+        "edit miner_address/public_addr_ipv4/public_addr_ipv6 as needed, then run: ./node mine"
+    );
     Ok(())
 }
 
 fn print_core_startup_info() {
-    println!(
-        "[INFO] core network={} chain={} chain_id={} coin={} stage={} signature={} protocol={} storage={} magic={}",
+    node_info!(
+        "STARTUP",
+        "protocol network={} chain={} chain_id={} coin={} stage={} signature={} protocol={} storage={} magic={}",
         current_network(),
         CHAIN_NAME,
         CHAIN_ID,
@@ -302,8 +308,9 @@ fn print_core_startup_info() {
         STORAGE_VERSION,
         hex::encode(NETWORK_MAGIC)
     );
-    println!(
-        "[INFO] consensus confirmation={} finality={} reward_maturity={} difficulty_start={} difficulty_algorithm={}",
+    node_debug!(
+        "STARTUP",
+        "consensus confirmation={} finality={} reward_maturity={} difficulty_start={} difficulty_algorithm={}",
         CONFIRMATION_DEPTH,
         FINALITY_DEPTH,
         BLOCK_REWARD_MATURITY,
@@ -316,13 +323,17 @@ fn validate_rpc_security(config: &RunConfig) -> Result<(), String> {
     if config.rpc_tls_cert.is_some() != config.rpc_tls_key.is_some() {
         return Err("RPC TLS requires both --rpc-tls-cert and --rpc-tls-key".to_string());
     }
-    if !config.rpc_addr.ip().is_loopback() && config.rpc_tls_cert.is_none() {
-        return Err(format!(
-            "public RPC listener {} is non-loopback and requires TLS",
-            config.rpc_addr
-        ));
+    if config.rpc_addrs.is_empty() {
+        return Err("at least one RPC listener is required".to_string());
     }
-    if let Some(admin_addr) = config.rpc_admin_addr {
+    for rpc_addr in &config.rpc_addrs {
+        if !rpc_addr.ip().is_loopback() && config.rpc_tls_cert.is_none() {
+            return Err(format!(
+                "public RPC listener {rpc_addr} is non-loopback and requires TLS"
+            ));
+        }
+    }
+    if !config.rpc_admin_addrs.is_empty() {
         let token = config
             .rpc_admin_token
             .as_ref()
@@ -330,9 +341,18 @@ fn validate_rpc_security(config: &RunConfig) -> Result<(), String> {
         if token.len() < 32 {
             return Err("RPC admin token must contain at least 32 characters".to_string());
         }
-        if !admin_addr.ip().is_loopback() && config.rpc_tls_cert.is_none() {
+        for admin_addr in &config.rpc_admin_addrs {
+            if !admin_addr.ip().is_loopback() && config.rpc_tls_cert.is_none() {
+                return Err(format!(
+                    "admin RPC listener {admin_addr} is non-loopback and requires TLS"
+                ));
+            }
+        }
+    }
+    for grpc_addr in &config.grpc_addrs {
+        if !grpc_addr.ip().is_loopback() {
             return Err(format!(
-                "admin RPC listener {admin_addr} is non-loopback and requires TLS"
+                "gRPC listener {grpc_addr} must be loopback-only because gRPC TLS/authentication is not configured"
             ));
         }
     }
@@ -344,8 +364,9 @@ fn run_node(args: &[String]) -> Result<(), String> {
     let mut config = parse_run_config(args)?;
     validate_mining_config(&config)?;
     print_core_startup_info();
-    println!(
-        "[STARTUP] configuration loaded db={} mining={} peers={} elapsed={}ms",
+    node_info!(
+        "STARTUP",
+        "configuration_loaded db={} mining={} configured_peers={} elapsed_ms={}",
         config.db_path,
         config.mine,
         config.peers.len(),
@@ -358,10 +379,14 @@ fn run_node(args: &[String]) -> Result<(), String> {
     for seed in &config.dns_seeds {
         match resolve_dns_seed(seed, config.listen_addrs[0].port()) {
             Ok(mut addrs) => {
-                println!("[DISCOVERY] dns_seed seed={seed} peers={}", addrs.len());
+                node_info!(
+                    "DISCOVERY",
+                    "dns_seed_resolved seed={seed} peers={}",
+                    addrs.len()
+                );
                 config.peers.append(&mut addrs);
             }
-            Err(error) => eprintln!("[DISCOVERY] dns_seed_failed seed={seed} error=\"{error}\""),
+            Err(error) => node_warn!("DISCOVERY", "dns_seed_failed seed={seed} error={error:?}"),
         }
     }
     dedupe_peers(&mut config.peers);
@@ -375,8 +400,9 @@ fn run_node(args: &[String]) -> Result<(), String> {
     dedupe_socket_addrs(&mut config.public_addrs);
 
     if config.fast_sync && !Path::new(&config.db_path).exists() {
-        println!(
-            "[FASTSYNC] discovering authenticated header chains from {} peer(s)",
+        node_info!(
+            "FASTSYNC",
+            "discovering_authenticated_headers peers={}",
             config.peers.len()
         );
         let download = download_authenticated_snapshot(&config.peers)?;
@@ -387,28 +413,32 @@ fn run_node(args: &[String]) -> Result<(), String> {
         }
         .encode()?;
         let (height, hash, work) = snapshot::import_bytes_atomic(&config.db_path, &bundle)?;
-        println!(
-            "[FASTSYNC] activated peer={} height={} tip={} work={:016x?}",
+        node_info!(
+            "FASTSYNC",
+            "activated peer={} height={} tip={} work={:016x?}",
             download.peer,
             height.0,
             hex::encode(hash.0),
             work.to_be_limbs()
         );
     } else if config.fast_sync {
-        println!(
-            "[FASTSYNC] skipped: database path already exists ({})",
+        node_info!(
+            "FASTSYNC",
+            "skipped reason=database_exists db={}",
             config.db_path
         );
     }
 
     let database_started = Instant::now();
-    println!(
-        "[STARTUP] opening database={} action=validate_and_restore",
+    node_info!(
+        "STARTUP",
+        "database_opening db={} action=validate_and_restore",
         config.db_path
     );
-    let mut node = open_node(&config.db_path, config.miner_address)?;
-    println!(
-        "[STARTUP] database ready height={} tip={} elapsed={}ms",
+    let mut node = open_node(&config.db_path)?;
+    node_info!(
+        "STARTUP",
+        "database_ready height={} tip={} elapsed_ms={}",
         node.tip_height().unwrap_or(Height(0)).0,
         short_hash(node.tip_hash()),
         database_started.elapsed().as_millis()
@@ -424,34 +454,39 @@ fn run_node(args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("failed to calculate next difficulty: {error}"))?;
 
     let bound_addrs = config.listen_addrs.clone();
-    println!(
-        "[STARTUP] binding network p2p={} rpc={}",
+    node_info!(
+        "STARTUP",
+        "binding_services p2p={} rpc={}",
         format_socket_addrs(&config.listen_addrs),
-        config.rpc_addr
+        format_socket_addrs(&config.rpc_addrs)
     );
+    let mut nat_mappings = Vec::new();
     if config.nat_traversal {
         let lease = config.nat_lease;
         for local_addr in bound_addrs.clone() {
             match nat::map_tcp_listener(local_addr, lease) {
                 Ok(mapping) => {
-                    println!(
-                        "[NAT] mapped protocol=tcp local={} public={} lease={}s",
+                    node_info!(
+                        "NAT",
+                        "mapped protocol=tcp local={} public={} lease_secs={}",
                         mapping.local_addr,
                         mapping.public_addr,
                         mapping.lease.as_secs()
                     );
                     config.public_addrs.push(mapping.public_addr);
+                    nat_mappings.push(mapping);
                 }
                 Err(error) => {
-                    eprintln!("[NAT] mapping_failed local={local_addr} error=\"{error}\"")
+                    node_warn!("NAT", "mapping_failed local={local_addr} error={error:?}")
                 }
             }
         }
         dedupe_socket_addrs(&mut config.public_addrs);
     }
     for public_addr in &config.public_addrs {
-        println!("[P2P] advertised_addr={public_addr}");
+        node_info!("P2P", "advertised_addr={public_addr}");
     }
+    let config = Arc::new(config);
 
     let peers = Arc::new(Mutex::new(
         config
@@ -474,25 +509,28 @@ fn run_node(args: &[String]) -> Result<(), String> {
         Path::new(&config.db_path).join("p2p-identity.key"),
         node.clone(),
         peers.clone(),
+        config.max_peers,
     )?;
 
     {
         let node = node
             .lock()
             .map_err(|_| "node state lock poisoned".to_string())?;
-        println!(
-            "[OK] preflight height={} tip={} difficulty={} mempool={} mining={}",
+        node_info!(
+            "STARTUP",
+            "preflight_ok height={} tip={} difficulty={} mempool={} mining={}",
             node.tip_height().unwrap_or(Height(0)).0,
             short_hash(node.tip_hash()),
             format_difficulty(node.next_difficulty()),
             node.mempool.len(),
             config.mine
         );
-        println!(
-            "[NODE] db={} p2p={} rpc={} height={} tip={} difficulty={} peers={} mining={} relay_fee={} market_fee={} dynamic_fee={} miner_fee={} low_fee_retention={}s mempool_retention={}s",
+        node_debug!(
+            "STARTUP",
+            "configuration db={} p2p={} rpc={} height={} tip={} difficulty={} configured_peers={} mining={} relay_fee={} market_fee={} dynamic_fee={} miner_fee={} low_fee_retention_secs={} mempool_retention_secs={}",
             config.db_path,
             format_socket_addrs(&bound_addrs),
-            config.rpc_addr,
+            format_socket_addrs(&config.rpc_addrs),
             node.tip_height().unwrap_or(Height(0)).0,
             short_hash(node.tip_hash()),
             format_difficulty(node.next_difficulty()),
@@ -510,11 +548,15 @@ fn run_node(args: &[String]) -> Result<(), String> {
         );
     }
     if !config.mine {
-        println!("[HINT] mining=off set mine=true and wallet=wallet.json in config.json");
+        node_info!(
+            "MINER",
+            "disabled hint=\"set mine=true and wallet=wallet.json in config.json\""
+        );
     }
 
-    println!(
-        "[STARTUP] services starting elapsed={}ms",
+    node_info!(
+        "STARTUP",
+        "services_starting elapsed_ms={}",
         startup_started.elapsed().as_millis()
     );
 
@@ -524,15 +566,17 @@ fn run_node(args: &[String]) -> Result<(), String> {
             peers: peers.clone(),
             peer_connections: peer_connections.clone(),
             inbound_connections: inbound_connections.clone(),
+            p2p_swarm: p2p_swarm.clone(),
             mining: config.mine,
             log_counters: log_counters.clone(),
             mining_stats: mining_stats.clone(),
             metrics: rpc_metrics,
+            state_pipeline: StatePipeline::new(),
             db_path: config.db_path.clone(),
         },
         RpcServerConfig {
-            public_addr: config.rpc_addr,
-            admin_addr: config.rpc_admin_addr,
+            public_addrs: config.rpc_addrs.clone(),
+            admin_addrs: config.rpc_admin_addrs.clone(),
             admin_token: config
                 .rpc_admin_token
                 .as_ref()
@@ -548,46 +592,133 @@ fn run_node(args: &[String]) -> Result<(), String> {
             rate_limit_burst: config.rpc_rate_limit_burst,
         },
     )?;
-    let _grpc = config.grpc_addr.map(|addr| {
-        grpc::start_grpc_server(
-            addr,
-            node.clone(),
-            peers.clone(),
-            peer_connections.clone(),
-            config.mine,
-            config.min_relay_fee,
-            config.market_fee,
-        )
-    });
-    println!(
-        "[OK] node active rpc={} p2p={} mining={} startup={}ms",
-        config.rpc_addr,
+    let grpc_workers = config
+        .grpc_addrs
+        .iter()
+        .copied()
+        .map(|addr| {
+            grpc::start_grpc_server(
+                addr,
+                node.clone(),
+                p2p_swarm.clone(),
+                config.mine,
+                config.min_relay_fee,
+                config.market_fee,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    node_info!(
+        "NODE",
+        "ready rpc={} p2p={} mining={} startup_ms={}",
+        format_socket_addrs(&config.rpc_addrs),
         format_socket_addrs(&bound_addrs),
         config.mine,
         startup_started.elapsed().as_millis()
     );
 
+    let network_worker = {
+        let node = node.clone();
+        let config = config.clone();
+        let peers = peers.clone();
+        let peer_connections = peer_connections.clone();
+        let inbound_connections = inbound_connections.clone();
+        thread::Builder::new()
+            .name("xparq-network-service".to_string())
+            .spawn(move || {
+                let mut last_gateway = Instant::now()
+                    .checked_sub(config.gateway_heartbeat)
+                    .unwrap_or_else(Instant::now);
+                while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                    service_network_once(
+                        &node,
+                        &config,
+                        &peers,
+                        &peer_connections,
+                        &inbound_connections,
+                    );
+                    service_gateway_once(
+                        &node,
+                        &config,
+                        &peers,
+                        &mut last_gateway,
+                        bound_addrs.first().copied(),
+                    );
+                    interruptible_sleep(Duration::from_secs(1));
+                }
+            })
+            .map_err(|error| format!("failed to start network service: {error}"))?
+    };
+    let nat_worker = if nat_mappings.is_empty() {
+        None
+    } else {
+        let lease = config.nat_lease;
+        Some(
+            thread::Builder::new()
+                .name("xparq-nat-renewal".to_string())
+                .spawn(move || {
+                    let renew_interval = lease.div_f32(2.0).max(Duration::from_secs(30));
+                    while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                        interruptible_sleep(renew_interval);
+                        if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        for mapping in &mut nat_mappings {
+                            match nat::map_tcp_listener(mapping.local_addr, lease) {
+                                Ok(renewed) => {
+                                    node_debug!(
+                                        "NAT",
+                                        "mapping_renewed local={} public={} lease_secs={}",
+                                        renewed.local_addr,
+                                        renewed.public_addr,
+                                        renewed.lease.as_secs()
+                                    );
+                                    *mapping = renewed;
+                                }
+                                Err(error) => node_warn!(
+                                    "NAT",
+                                    "mapping_renewal_failed local={} error={:?}",
+                                    mapping.local_addr,
+                                    error
+                                ),
+                            }
+                        }
+                    }
+                })
+                .map_err(|error| format!("failed to start NAT renewal service: {error}"))?,
+        )
+    };
+    let shutdown_file_worker = {
+        let shutdown_file = config.shutdown_file.clone();
+        thread::Builder::new()
+            .name("xparq-shutdown-file".to_string())
+            .spawn(move || {
+                while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                    if Path::new(&shutdown_file).exists() {
+                        node_info!("NODE", "shutdown_file_detected path={shutdown_file}");
+                        let _ = fs::remove_file(&shutdown_file);
+                        SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                }
+            })
+            .map_err(|error| format!("failed to start shutdown file watcher: {error}"))?
+    };
+
     let mut last_network = Instant::now()
         .checked_sub(ACTIVITY_LOG_INTERVAL)
         .unwrap_or_else(Instant::now);
-    let mut last_gateway = Instant::now()
-        .checked_sub(config.gateway_heartbeat)
-        .unwrap_or_else(Instant::now);
     while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
-        service_network_once(
-            &node,
-            &config,
-            &peers,
-            &peer_connections,
-            &inbound_connections,
-        );
-        service_gateway_once(
-            &node,
-            &config,
-            &peers,
-            &mut last_gateway,
-            bound_addrs.first().copied(),
-        );
+        if Path::new(&config.shutdown_file).exists() {
+            node_info!(
+                "NODE",
+                "shutdown_file_detected path={}",
+                config.shutdown_file
+            );
+            let _ = fs::remove_file(&config.shutdown_file);
+            SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+            break;
+        }
         if config.mine {
             if let Some(block) =
                 mine_once_unlocked(&node, &config, &mining_stats, &SHUTDOWN_REQUESTED)?
@@ -596,8 +727,9 @@ fn run_node(args: &[String]) -> Result<(), String> {
                 let announcement = CompactBlock::from_block(&block)
                     .map(NetworkMessage::CompactBlock)
                     .unwrap_or_else(|error| {
-                        eprintln!(
-                            "[P2P] compact_block_build_failed hash={} error=\"{}\" fallback=inventory",
+                        node_warn!(
+                            "P2P",
+                            "compact_block_build_failed hash={} error={:?} fallback=inventory",
                             hex::encode(block_hash.0),
                             error
                         );
@@ -626,19 +758,14 @@ fn run_node(args: &[String]) -> Result<(), String> {
             let node = node
                 .lock()
                 .map_err(|_| "node state lock poisoned".to_string())?;
+            let connection_stats = p2p_swarm.connection_stats();
             mining_status(MiningStatus {
                 height: node.tip_height().unwrap_or(Height(0)).0,
                 tip: node.tip_hash(),
                 difficulty: format_difficulty(node.next_difficulty()),
                 peers: peers.lock().map(|peers| peers.len()).unwrap_or_default(),
-                outbound: peer_connections
-                    .lock()
-                    .map(|connections| connections.len())
-                    .unwrap_or_default(),
-                inbound: inbound_connections
-                    .lock()
-                    .map(|connections| connections.len())
-                    .unwrap_or_default(),
+                outbound: connection_stats.outbound,
+                inbound: connection_stats.inbound,
                 hashrate_hps: mining_stats
                     .last_hashrate_hps
                     .load(std::sync::atomic::Ordering::Relaxed),
@@ -665,12 +792,20 @@ fn run_node(args: &[String]) -> Result<(), String> {
         }
     }
     p2p_swarm.shutdown();
-    println!("[OK] shutdown complete");
+    let _ = network_worker.join();
+    if let Some(worker) = nat_worker {
+        let _ = worker.join();
+    }
+    let _ = shutdown_file_worker.join();
+    for worker in grpc_workers {
+        let _ = worker.join();
+    }
+    node_info!("NODE", "shutdown_complete");
     Ok(())
 }
 
 fn validate_mining_config(config: &RunConfig) -> Result<(), String> {
-    if config.mine && !config.miner_configured {
+    if config.mine && config.miner_address.is_none() {
         return Err(
             "mining requires `wallet` or `miner_address` in config.json, or --wallet/--miner"
                 .to_string(),
@@ -712,7 +847,7 @@ fn service_network_once(
         Ok(mut peers) => {
             for addr in &self_addrs {
                 if peers.remove(addr).is_some() {
-                    println!("[P2P] removed_self_peer peer={addr}");
+                    node_debug!("P2P", "removed_self_peer peer={addr}");
                 }
             }
             let mut candidates = peers
@@ -753,9 +888,12 @@ fn service_network_once(
         match sync_from_peers_parallel(addrs.clone(), node, &config.public_addrs, sync_window) {
             Ok(report) => {
                 if report.applied_blocks > 0 {
-                    println!(
-                        "[SYNC] remote_tip={} applied={} peers={}",
-                        report.remote_tip.0, report.applied_blocks, report.used_peers
+                    node_info!(
+                        "SYNC",
+                        "completed remote_tip={} applied_blocks={} peers_used={}",
+                        report.remote_tip.0,
+                        report.applied_blocks,
+                        report.used_peers
                     );
                 }
                 if let Ok(mut peers) = peers.lock() {
@@ -771,7 +909,7 @@ fn service_network_once(
                     }
                 }
             }
-            Err(error) => eprintln!("[SYNC] failed error=\"{error}\""),
+            Err(error) => node_warn!("SYNC", "round_failed error={error:?}"),
         }
     }
 
@@ -800,22 +938,24 @@ fn service_network_once(
                     if let Ok(mut inbound) = inbound_connections.lock()
                         && inbound.remove(&addr).is_some()
                     {
-                        println!("[P2P] outbound_deduped peer={addr} reason=\"inbound_exists\"");
+                        node_debug!("P2P", "outbound_deduped peer={addr} reason=inbound_exists");
                     }
                     if let Ok(mut connections) = peer_connections.lock() {
                         connections.insert(addr, connection);
                     }
                 }
                 Err(error) => {
-                    eprintln!("[P2P] connect_failed peer={addr} error=\"{error}\"");
+                    node_debug!("P2P", "connect_failed peer={addr} error={error:?}");
                     if let Ok(mut peers) = peers.lock()
                         && let Some(peer) = peers.get_mut(&addr)
                     {
                         peer.mark_failed();
                         if peer.is_banned() {
-                            eprintln!(
-                                "[P2P] peer_banned peer={addr} score={} failures={}",
-                                peer.score, peer.failures
+                            node_warn!(
+                                "P2P",
+                                "peer_banned peer={addr} score={} failures={}",
+                                peer.score,
+                                peer.failures
                             );
                         }
                     }
@@ -843,7 +983,8 @@ fn service_network_once(
                 if let Ok(mut peers) = peers.lock() {
                     for info in discovered {
                         if let Ok(addr) = info.address.parse::<SocketAddr>() {
-                            if config.public_addrs.contains(&addr)
+                            if !is_admissible_discovered_peer(&addr)
+                                || config.public_addrs.contains(&addr)
                                 || config.listen_addrs.contains(&addr)
                             {
                                 continue;
@@ -884,7 +1025,7 @@ fn service_network_once(
                 }
             }
             Err(error) => {
-                eprintln!("[P2P] poll_failed peer={addr} error=\"{error}\"");
+                node_debug!("P2P", "poll_failed peer={addr} error={error:?}");
                 if let Ok(mut peers) = peers.lock()
                     && let Some(peer) = peers.get_mut(&addr)
                 {
@@ -892,9 +1033,11 @@ fn service_network_once(
                     if peer.failures > MAX_PEER_FAILURES {
                         peers.remove(&addr);
                     } else if peer.is_banned() {
-                        eprintln!(
-                            "[P2P] peer_banned peer={addr} score={} failures={}",
-                            peer.score, peer.failures
+                        node_warn!(
+                            "P2P",
+                            "peer_banned peer={addr} score={} failures={}",
+                            peer.score,
+                            peer.failures
                         );
                     }
                 }
@@ -935,12 +1078,9 @@ fn service_gateway_once(
         return;
     }
     *last_gateway = Instant::now();
-    let public_addr = config
-        .public_addrs
-        .first()
-        .copied()
-        .or(public_fallback)
-        .unwrap_or(config.rpc_addr);
+    let Some(public_addr) = config.public_addrs.first().copied().or(public_fallback) else {
+        return;
+    };
     let (height, tip_hash) = match node.lock() {
         Ok(node) => (
             node.tip_height().map(|height| height.0),
@@ -954,13 +1094,17 @@ fn service_gateway_once(
         Ok(discovered) => {
             if let Ok(mut peers) = peers.lock() {
                 for info in discovered {
-                    if let Ok(addr) = info.address.parse::<SocketAddr>() {
+                    if let Ok(addr) = info.address.parse::<SocketAddr>()
+                        && is_admissible_discovered_peer(&addr)
+                        && !config.public_addrs.contains(&addr)
+                        && !config.listen_addrs.contains(&addr)
+                    {
                         peers.entry(addr).or_insert_with(|| PeerState::new(addr));
                     }
                 }
             }
         }
-        Err(error) => eprintln!("[GATEWAY] peer_request_failed error=\"{error}\""),
+        Err(error) => node_warn!("GATEWAY", "peer_request_failed error={error:?}"),
     }
 }
 

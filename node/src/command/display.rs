@@ -38,23 +38,23 @@ pub fn format_difficulty(difficulty: Result<u32, impl std::fmt::Display>) -> Str
 pub fn print_help() {
     println!(
         "\
-xparq-node
+node
 
 Usage:
-  xparq-node                         Run the node; auto-mines when ../wallet.json or wallet.json exists
-  xparq-node --help
-  xparq-node version
-  xparq-node mine [--config path]
-  xparq-node mine [wallet-path] [db-path]   Legacy wallet shortcut
-  xparq-node node info
-  xparq-node node config [config-path]
-  xparq-node node init [db-path] [miner-address]
-  xparq-node node db check [db-path]
-  xparq-node node db backup <db-path> <backup-path>
-  xparq-node node db restore <backup-path> <db-path>
-  xparq-node node snapshot export <db-path> <bundle-path>
-  xparq-node node snapshot import <new-db-path> <bundle-path>
-  xparq-node node run [db-path] [--network devnet|testnet|mainnet] [--fast-sync] [--config path] [--listen addr] [--rpc-listen addr] [--grpc-listen addr] [--rpc-admin-listen addr --rpc-admin-token token] [--rpc-tls-cert path --rpc-tls-key path] [--rpc-cors-origin origin] [--peer addr] [--peers-file path] [--dns-seed host[:port]] [--gateway host:port] [--public-addr host:port] [--nat-traversal] [--nat-lease-secs n] [--min-relay-fee xparq-per-byte] [--market-fee xparq-per-byte] [--miner-min-fee-rate xparq-per-byte] [--low-fee-expiry-secs n] [--mempool-expiry-secs n] [--wallet path] [--miner address] [--miner-secret-key key-hex] [--mine]
+  node                         Run the node; auto-mines when ../wallet.json or wallet.json exists
+  node --help
+  node version
+  node mine [--config path]
+  node mine [wallet-path] [db-path]   Legacy wallet shortcut
+  node node info
+  node node config [config-path]
+  node node init [db-path] [miner-address]
+  node node db check [db-path]
+  node node db backup <db-path> <backup-path>
+  node node db restore <backup-path> <db-path>
+  node node snapshot export <db-path> <bundle-path>
+  node node snapshot import <new-db-path> <bundle-path>
+  node node run [db-path] [--network devnet|testnet|mainnet] [--fast-sync] [--config path] [--listen addr] [--rpc-listen addr] [--grpc-listen addr] [--rpc-admin-listen addr --rpc-admin-token token] [--rpc-tls-cert path --rpc-tls-key path] [--rpc-cors-origin origin] [--peer addr] [--peers-file path] [--dns-seed host[:port]] [--gateway host:port] [--public-addr host:port] [--nat-traversal] [--nat-lease-secs n] [--min-relay-fee xparq-per-byte] [--market-fee xparq-per-byte] [--miner-min-fee-rate xparq-per-byte] [--low-fee-expiry-secs n] [--mempool-expiry-secs n] [--wallet path] [--miner address] [--miner-secret-key key-hex] [--mine]
 
 config.json defaults and environment overrides:
   Config path: data/<network>/config.json or ${CONFIG_FILE_ENV}
@@ -98,8 +98,8 @@ Mempool:
 
 To bootstrap mining with your own account:
   1. Create a wallet: wallet new wallet.json
-  2. Start with the editable config: xparq-node node config
-  3. Edit config.json, then run: xparq-node mine
+  2. Start with the editable config: node node config
+  3. Edit config.json, then run: node mine
 "
     );
 }

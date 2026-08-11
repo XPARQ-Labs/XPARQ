@@ -12,7 +12,7 @@ pub use proof::{
     verify_qcash_state_proof,
 };
 pub use qcash::{
-    QCashBlockJournal, QCashCoinId, QCashOutPoint, QCashRedeemability, QCashUtxo, QCashUtxoError,
-    QCashUtxoSet,
+    QCashBlockJournal, QCashCoinId, QCashJournalState, QCashOutPoint, QCashRedeemability,
+    QCashUtxo, QCashUtxoError, QCashUtxoSet,
 };
 pub use xpq::{XpqCoinId, XpqCoinSource, XpqOutPoint, XpqUtxo, XpqUtxoError, XpqUtxoSet};

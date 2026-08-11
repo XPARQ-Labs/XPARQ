@@ -1,4 +1,5 @@
 use super::{PeerConnection, PeerState};
+use crate::node_debug;
 use crate::runtime::network::NetworkMessage;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
@@ -76,105 +77,46 @@ fn mark_seen<T: Copy + Eq + std::hash::Hash>(
 }
 
 pub fn broadcast_to_peers(
-    peers: &Arc<Mutex<HashMap<SocketAddr, PeerState>>>,
-    peer_connections: &Arc<Mutex<HashMap<SocketAddr, PeerConnection>>>,
-    inbound_connections: &Arc<Mutex<HashMap<SocketAddr, PeerConnection>>>,
+    _peers: &Arc<Mutex<HashMap<SocketAddr, PeerState>>>,
+    _peer_connections: &Arc<Mutex<HashMap<SocketAddr, PeerConnection>>>,
+    _inbound_connections: &Arc<Mutex<HashMap<SocketAddr, PeerConnection>>>,
     message: NetworkMessage,
 ) -> BroadcastReport {
-    let peers = match peers.lock() {
-        Ok(peers) => peers.keys().copied().collect::<Vec<_>>(),
-        Err(_) => {
-            eprintln!("[P2P] peer_state_lock_poisoned");
+    let swarm = match super::swarm::global() {
+        Ok(swarm) => swarm,
+        Err(error) => {
+            node_debug!("P2P", "broadcast_unavailable error={error:?}");
             return BroadcastReport::default();
         }
     };
-
+    let peers = swarm.handshaken_peers();
     let mut report = BroadcastReport {
         attempted: peers.len(),
         sent: 0,
         failed: 0,
     };
-    let known_peers = peers
-        .iter()
-        .copied()
-        .collect::<std::collections::HashSet<_>>();
-    for peer in peers {
-        let result = {
-            let mut connections = match peer_connections.lock() {
-                Ok(connections) => connections,
-                Err(_) => {
-                    report.failed += 1;
-                    eprintln!("[P2P] peer_connection_lock_poisoned");
-                    continue;
-                }
-            };
-            let connect_result =
-                if let std::collections::hash_map::Entry::Vacant(e) = connections.entry(peer) {
-                    match PeerConnection::connect(peer) {
-                        Ok(connection) => {
-                            println!("[P2P] connected peer={peer}");
-                            e.insert(connection);
-                            Ok(())
-                        }
-                        Err(error) => Err(error),
+    for batch in peers.chunks(16) {
+        std::thread::scope(|scope| {
+            let mut requests = Vec::with_capacity(batch.len());
+            for peer in batch.iter().copied() {
+                let swarm = swarm.clone();
+                let message = message.clone();
+                requests.push((peer, scope.spawn(move || swarm.request(peer, message))));
+            }
+            for (peer, request) in requests {
+                match request.join() {
+                    Ok(Ok(_)) => report.sent += 1,
+                    Ok(Err(error)) => {
+                        report.failed += 1;
+                        node_debug!("P2P", "broadcast_failed peer={peer} error={error:?}");
                     }
-                } else {
-                    Ok(())
-                };
-            connect_result.and_then(|()| {
-                connections
-                    .get_mut(&peer)
-                    .ok_or_else(|| format!("missing peer connection for {peer}"))
-                    .and_then(|connection| connection.send(message.clone()))
-            })
-        };
-        match result {
-            Ok(()) => report.sent += 1,
-            Err(error) => {
-                report.failed += 1;
-                if let Ok(mut connections) = peer_connections.lock() {
-                    connections.remove(&peer);
+                    Err(_) => {
+                        report.failed += 1;
+                        node_debug!("P2P", "broadcast_failed peer={peer} error=worker_panicked");
+                    }
                 }
-                eprintln!("[P2P] broadcast_failed peer={peer} error=\"{error}\"");
             }
-        }
-    }
-    let inbound_peers = match inbound_connections.lock() {
-        Ok(connections) => connections.keys().copied().collect::<Vec<_>>(),
-        Err(_) => {
-            eprintln!("[P2P] inbound_connection_lock_poisoned");
-            Vec::new()
-        }
-    };
-    for peer in inbound_peers {
-        if known_peers.contains(&peer) {
-            continue;
-        }
-        report.attempted += 1;
-        let result = {
-            let mut connections = match inbound_connections.lock() {
-                Ok(connections) => connections,
-                Err(_) => {
-                    report.failed += 1;
-                    eprintln!("[P2P] inbound_connection_lock_poisoned");
-                    continue;
-                }
-            };
-            connections
-                .get_mut(&peer)
-                .ok_or_else(|| format!("missing inbound connection for {peer}"))
-                .and_then(|connection| connection.send(message.clone()))
-        };
-        match result {
-            Ok(()) => report.sent += 1,
-            Err(error) => {
-                report.failed += 1;
-                if let Ok(mut connections) = inbound_connections.lock() {
-                    connections.remove(&peer);
-                }
-                eprintln!("[P2P] broadcast_inbound_failed peer={peer} error=\"{error}\"");
-            }
-        }
+        });
     }
     report
 }

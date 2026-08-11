@@ -39,6 +39,19 @@ struct ProofQuery {
     checkpoint_hash: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ListQuery {
+    #[serde(default)]
+    offset: usize,
+    limit: Option<usize>,
+}
+
+impl ListQuery {
+    fn bounds(&self) -> (usize, usize) {
+        (self.offset, self.limit.unwrap_or(100).clamp(1, 1_000))
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SubmitBlockRequest {
@@ -135,10 +148,12 @@ pub(crate) struct RpcState {
     pub(crate) peers: Arc<Mutex<HashMap<SocketAddr, PeerState>>>,
     pub(crate) peer_connections: Arc<Mutex<HashMap<SocketAddr, PeerConnection>>>,
     pub(crate) inbound_connections: Arc<Mutex<HashMap<SocketAddr, PeerConnection>>>,
+    pub(crate) p2p_swarm: crate::p2p::swarm::SwarmHandle,
     pub(crate) mining: bool,
     pub(crate) log_counters: Arc<LogCounters>,
     pub(crate) mining_stats: Arc<MiningStats>,
     pub(crate) metrics: Arc<RpcMetrics>,
+    pub(crate) state_pipeline: crate::rpc::state_pipeline::StatePipeline,
     pub(crate) db_path: String,
 }
 
@@ -151,8 +166,8 @@ pub(crate) struct RpcMetrics {
 
 #[derive(Clone)]
 pub(crate) struct RpcServerConfig {
-    pub(crate) public_addr: SocketAddr,
-    pub(crate) admin_addr: Option<SocketAddr>,
+    pub(crate) public_addrs: Vec<SocketAddr>,
+    pub(crate) admin_addrs: Vec<SocketAddr>,
     pub(crate) admin_token: Option<Arc<Zeroizing<String>>>,
     pub(crate) tls_cert: Option<String>,
     pub(crate) tls_key: Option<String>,
@@ -174,7 +189,11 @@ struct RpcRateLimiter {
     buckets: Mutex<HashMap<IpAddr, RateBucket>>,
     rate_per_second: f64,
     burst: f64,
+    max_buckets: usize,
 }
+
+const MAX_RATE_LIMIT_BUCKETS: usize = 16_384;
+const RATE_BUCKET_IDLE_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone)]
 struct ConnectionLimitAcceptor {
@@ -263,6 +282,7 @@ impl RpcRateLimiter {
             buckets: Mutex::new(HashMap::new()),
             rate_per_second: rate_per_second as f64,
             burst: burst as f64,
+            max_buckets: MAX_RATE_LIMIT_BUCKETS,
         }
     }
 
@@ -271,6 +291,13 @@ impl RpcRateLimiter {
             return false;
         };
         let now = Instant::now();
+        if !buckets.contains_key(&ip) && buckets.len() >= self.max_buckets {
+            buckets
+                .retain(|_, bucket| now.duration_since(bucket.updated_at) < RATE_BUCKET_IDLE_TTL);
+            if buckets.len() >= self.max_buckets {
+                return false;
+            }
+        }
         let bucket = buckets.entry(ip).or_insert(RateBucket {
             tokens: self.burst,
             updated_at: now,
@@ -316,6 +343,8 @@ struct StatusResponse {
 #[derive(Serialize)]
 struct HealthResponse {
     ok: bool,
+    height: Option<u64>,
+    storage_version: Option<u8>,
 }
 
 #[derive(Serialize)]
@@ -620,17 +649,23 @@ pub(crate) fn start_rpc_servers(
         ))
         .with_state(state.clone());
 
-    let mut handles = vec![spawn_rpc_listener(
-        "xparq-rpc-public",
-        "public",
-        config.public_addr,
-        public,
-        config.tls_cert.clone(),
-        config.tls_key.clone(),
-        config.max_connections,
-    )?];
+    if config.public_addrs.is_empty() {
+        return Err("at least one public RPC listener is required".to_string());
+    }
+    let mut handles = Vec::with_capacity(config.public_addrs.len() + config.admin_addrs.len());
+    for (index, addr) in config.public_addrs.iter().copied().enumerate() {
+        handles.push(spawn_rpc_listener(
+            &format!("xparq-rpc-public-{index}"),
+            "public",
+            addr,
+            public.clone(),
+            config.tls_cert.clone(),
+            config.tls_key.clone(),
+            config.max_connections,
+        )?);
+    }
 
-    if let Some(admin_addr) = config.admin_addr {
+    if !config.admin_addrs.is_empty() {
         let token = config.admin_token.clone().ok_or_else(|| {
             "RPC admin listener requires --rpc-admin-token or rpc_admin_token".to_string()
         })?;
@@ -647,15 +682,17 @@ pub(crate) fn start_rpc_servers(
         let admin = secure_router(admin, &config)?
             .layer(middleware::from_fn_with_state(metrics, track_rpc_request))
             .with_state(state);
-        handles.push(spawn_rpc_listener(
-            "xparq-rpc-admin",
-            "admin",
-            admin_addr,
-            admin,
-            config.tls_cert,
-            config.tls_key,
-            config.max_connections,
-        )?);
+        for (index, addr) in config.admin_addrs.iter().copied().enumerate() {
+            handles.push(spawn_rpc_listener(
+                &format!("xparq-rpc-admin-{index}"),
+                "admin",
+                addr,
+                admin.clone(),
+                config.tls_cert.clone(),
+                config.tls_key.clone(),
+                config.max_connections,
+            )?);
+        }
     }
 
     Ok(handles)
@@ -718,52 +755,79 @@ fn spawn_rpc_listener(
         ));
     }
 
-    thread::Builder::new()
+    let listener = std::net::TcpListener::bind(addr)
+        .map_err(|error| format!("failed to bind {label} RPC listener {addr}: {error}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("failed to configure {label} RPC listener {addr}: {error}"))?;
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let handle = thread::Builder::new()
         .name(thread_name.to_string())
         .spawn(move || {
             let runtime = match tokio::runtime::Runtime::new() {
                 Ok(runtime) => runtime,
                 Err(error) => {
-                    eprintln!("[RPC] runtime_failed error=\"{error}\"");
+                    let _ = ready_tx.send(Err(format!("RPC runtime failed: {error}")));
+                    node_error!("RPC", "runtime_failed error={error:?}");
                     return;
                 }
             };
             runtime.block_on(async move {
+                let server = match axum_server::from_tcp(listener) {
+                    Ok(server) => server,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(format!(
+                            "failed to initialize {label} RPC listener {addr}: {error}"
+                        )));
+                        return;
+                    }
+                };
                 if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
                     let tls = match axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
                         .await
                     {
                         Ok(tls) => tls,
                         Err(error) => {
-                            eprintln!(
-                                "[RPC] tls_failed label={label} addr={addr} error=\"{error}\""
+                            let _ = ready_tx.send(Err(format!(
+                                "failed to load {label} RPC TLS configuration: {error}"
+                            )));
+                            node_error!(
+                                "RPC",
+                                "tls_failed label={label} addr={addr} error={error:?}"
                             );
                             return;
                         }
                     };
-                    println!("[RPC] listening label={label} addr={addr} tls=true");
+                    node_info!("RPC", "listening label={label} addr={addr} tls=true");
+                    let _ = ready_tx.send(Ok(()));
                     let acceptor = axum_server::tls_rustls::RustlsAcceptor::new(tls)
                         .acceptor(ConnectionLimitAcceptor::new(max_connections));
-                    if let Err(error) = axum_server::bind(addr)
+                    if let Err(error) = server
                         .acceptor(acceptor)
                         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                         .await
                     {
-                        eprintln!("[RPC] server_failed label={label} error=\"{error}\"");
+                        node_error!("RPC", "server_failed label={label} error={error:?}");
                     }
                 } else {
-                    println!("[RPC] listening label={label} addr={addr} tls=false");
-                    if let Err(error) = axum_server::bind(addr)
+                    node_info!("RPC", "listening label={label} addr={addr} tls=false");
+                    let _ = ready_tx.send(Ok(()));
+                    if let Err(error) = server
                         .acceptor(ConnectionLimitAcceptor::new(max_connections))
                         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                         .await
                     {
-                        eprintln!("[RPC] server_failed label={label} error=\"{error}\"");
+                        node_error!("RPC", "server_failed label={label} error={error:?}");
                     }
                 }
             });
         })
-        .map_err(|error| format!("failed to spawn rpc server: {error}"))
+        .map_err(|error| format!("failed to spawn rpc server: {error}"))?;
+    match ready_rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(())) => Ok(handle),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(format!("timed out starting {label} RPC listener {addr}")),
+    }
 }
 
 async fn enforce_rate_limit(
@@ -842,32 +906,30 @@ async fn track_rpc_request(
 }
 
 async fn rpc_metrics(State(state): State<RpcState>) -> impl IntoResponse {
-    let (height, mempool_size, validation_failures, reorgs) = state
-        .node
-        .lock()
-        .map(|node| {
-            (
-                node.tip_height().unwrap_or(Height(0)).0,
-                node.mempool.len(),
-                node.block_validation_failures_total(),
-                node.reorgs_total(),
-            )
-        })
-        .unwrap_or_default();
-    let peer_count = state
-        .peer_connections
-        .lock()
-        .map(|peers| peers.len())
-        .unwrap_or_default()
-        + state
-            .inbound_connections
+    let (height, mempool_size, validation_failures, reorgs, cached_blocks, cached_block_bytes) =
+        state
+            .node
             .lock()
-            .map(|peers| peers.len())
+            .map(|node| {
+                (
+                    node.tip_height().unwrap_or(Height(0)).0,
+                    node.mempool.len(),
+                    node.block_validation_failures_total(),
+                    node.reorgs_total(),
+                    node.cache.cached_block_count(),
+                    node.cache.cached_block_bytes(),
+                )
+            })
             .unwrap_or_default();
+    let connection_stats = state.p2p_swarm.connection_stats();
+    let peer_count = connection_stats.outbound + connection_stats.inbound;
     let database_bytes = fs::metadata(std::path::Path::new(&state.db_path).join("data.mdb"))
         .map(|metadata| metadata.len())
         .unwrap_or_default();
     let network = crate::runtime::network::metrics::NETWORK_METRICS.snapshot();
+    let state_pipeline = state.state_pipeline.snapshot();
+    let sync_pipeline = &crate::p2p::SYNC_PIPELINE_METRICS;
+    let crypto_queue = xparq::crypto::verification_queue_snapshot();
     let mut body = format!(
         concat!(
             "# TYPE xparq_chain_height gauge\nxparq_chain_height {height}\n",
@@ -880,10 +942,27 @@ async fn rpc_metrics(State(state): State<RpcState>) -> impl IntoResponse {
             "# TYPE xparq_rpc_latency_seconds summary\nxparq_rpc_latency_seconds_sum {latency_seconds:.6}\nxparq_rpc_latency_seconds_count {requests}\n",
             "# TYPE xparq_mining_hashrate_hps gauge\nxparq_mining_hashrate_hps {hashrate}\n",
             "# TYPE xparq_database_size_bytes gauge\nxparq_database_size_bytes {database_bytes}\n",
+            "# TYPE xparq_block_cache_blocks gauge\nxparq_block_cache_blocks {cached_blocks}\n",
+            "# TYPE xparq_block_cache_bytes gauge\nxparq_block_cache_bytes {cached_block_bytes}\n",
             "# TYPE xparq_tx_duplicate_total counter\nxparq_tx_duplicate_total {duplicate_transactions}\n",
             "# TYPE xparq_compact_block_success_total counter\nxparq_compact_block_success_total {compact_success}\n",
             "# TYPE xparq_compact_block_fallback_total counter\nxparq_compact_block_fallback_total {compact_fallback}\n",
-            "# TYPE xparq_compact_block_missing_tx_total counter\nxparq_compact_block_missing_tx_total {compact_missing}\n"
+            "# TYPE xparq_compact_block_missing_tx_total counter\nxparq_compact_block_missing_tx_total {compact_missing}\n",
+            "# TYPE xparq_state_queue_depth gauge\nxparq_state_queue_depth {state_queue_depth}\n",
+            "# TYPE xparq_state_queue_capacity gauge\nxparq_state_queue_capacity {state_queue_capacity}\n",
+            "# TYPE xparq_state_queue_queued_total counter\nxparq_state_queue_queued_total {state_queue_queued}\n",
+            "# TYPE xparq_state_queue_rejected_total counter\nxparq_state_queue_rejected_total {state_queue_rejected}\n",
+            "# TYPE xparq_state_queue_wait_seconds summary\nxparq_state_queue_wait_seconds_sum {state_wait_seconds:.6}\nxparq_state_queue_wait_seconds_count {state_completed}\n",
+            "# TYPE xparq_state_stage_seconds summary\nxparq_state_stage_seconds_sum {state_run_seconds:.6}\nxparq_state_stage_seconds_count {state_completed}\n",
+            "# TYPE xparq_sync_queue_depth gauge\nxparq_sync_queue_depth {sync_queue_depth}\n",
+            "# TYPE xparq_sync_download_seconds counter\nxparq_sync_download_seconds {sync_download_seconds:.6}\n",
+            "# TYPE xparq_sync_stateless_verify_seconds counter\nxparq_sync_stateless_verify_seconds {sync_verify_seconds:.6}\n",
+            "# TYPE xparq_sync_apply_seconds counter\nxparq_sync_apply_seconds {sync_apply_seconds:.6}\n",
+            "# TYPE xparq_sync_applied_blocks_total counter\nxparq_sync_applied_blocks_total {sync_applied_blocks}\n",
+            "# TYPE xparq_crypto_verify_queue_depth gauge\nxparq_crypto_verify_queue_depth {crypto_queue_depth}\n",
+            "# TYPE xparq_crypto_verify_queue_capacity gauge\nxparq_crypto_verify_queue_capacity {crypto_queue_capacity}\n",
+            "# TYPE xparq_crypto_verify_queue_fallback_total counter\nxparq_crypto_verify_queue_fallback_total {crypto_queue_fallback}\n",
+            "# TYPE xparq_crypto_verify_queue_wait_seconds counter\nxparq_crypto_verify_queue_wait_seconds {crypto_queue_wait_seconds:.6}\n"
         ),
         height = height,
         peer_count = peer_count,
@@ -896,6 +975,8 @@ async fn rpc_metrics(State(state): State<RpcState>) -> impl IntoResponse {
             state.metrics.latency_micros_total.load(Ordering::Relaxed) as f64 / 1_000_000.0,
         hashrate = state.mining_stats.last_hashrate_hps.load(Ordering::Relaxed),
         database_bytes = database_bytes,
+        cached_blocks = cached_blocks,
+        cached_block_bytes = cached_block_bytes,
         duplicate_transactions = crate::runtime::network::metrics::NETWORK_METRICS
             .duplicate_transactions
             .load(Ordering::Relaxed),
@@ -908,6 +989,27 @@ async fn rpc_metrics(State(state): State<RpcState>) -> impl IntoResponse {
         compact_missing = crate::runtime::network::metrics::NETWORK_METRICS
             .compact_missing_transactions
             .load(Ordering::Relaxed),
+        state_queue_depth = state_pipeline.depth,
+        state_queue_capacity = state_pipeline.capacity,
+        state_queue_queued = state_pipeline.queued_total,
+        state_queue_rejected = state_pipeline.rejected_total,
+        state_wait_seconds = state_pipeline.wait_micros_total as f64 / 1_000_000.0,
+        state_run_seconds = state_pipeline.run_micros_total as f64 / 1_000_000.0,
+        state_completed = state_pipeline.completed_total,
+        sync_queue_depth = sync_pipeline.queue_depth.load(Ordering::Relaxed),
+        sync_download_seconds =
+            sync_pipeline.download_micros_total.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+        sync_verify_seconds = sync_pipeline
+            .stateless_verify_micros_total
+            .load(Ordering::Relaxed) as f64
+            / 1_000_000.0,
+        sync_apply_seconds =
+            sync_pipeline.apply_micros_total.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+        sync_applied_blocks = sync_pipeline.applied_blocks_total.load(Ordering::Relaxed),
+        crypto_queue_depth = crypto_queue.depth,
+        crypto_queue_capacity = crypto_queue.capacity,
+        crypto_queue_fallback = crypto_queue.fallback_total,
+        crypto_queue_wait_seconds = crypto_queue.wait_micros_total as f64 / 1_000_000.0,
     );
     body.push_str("# TYPE xparq_network_rx_bytes_total counter\n");
     body.push_str("# TYPE xparq_network_tx_bytes_total counter\n");
@@ -924,13 +1026,9 @@ async fn rpc_metrics(State(state): State<RpcState>) -> impl IntoResponse {
 }
 
 async fn rpc_status(State(state): State<RpcState>) -> impl IntoResponse {
-    match (
-        state.node.lock(),
-        state.peers.lock(),
-        state.peer_connections.lock(),
-        state.inbound_connections.lock(),
-    ) {
-        (Ok(node), Ok(peers), Ok(outbound), Ok(inbound)) => {
+    let connection_stats = state.p2p_swarm.connection_stats();
+    match (state.node.lock(), state.peers.lock()) {
+        (Ok(node), Ok(peers)) => {
             let fee_market = node.mempool.fee_market_snapshot();
             Json(StatusResponse {
                 chain: CHAIN_NAME,
@@ -942,8 +1040,8 @@ async fn rpc_status(State(state): State<RpcState>) -> impl IntoResponse {
                 tip_hash: format_hash(node.tip_hash()),
                 peers: peers.len(),
                 known_peers: peers.len(),
-                outbound_peers: outbound.len(),
-                inbound_peers: inbound.len(),
+                outbound_peers: connection_stats.outbound,
+                inbound_peers: connection_stats.inbound,
                 mining: state.mining,
                 hashrate_hps: state.mining_stats.last_hashrate_hps.load(Ordering::Relaxed),
                 last_mine_attempts: state.mining_stats.last_attempts.load(Ordering::Relaxed),
@@ -993,8 +1091,38 @@ async fn rpc_fee_policy(State(state): State<RpcState>) -> impl IntoResponse {
     }
 }
 
-async fn rpc_health() -> impl IntoResponse {
-    Json(HealthResponse { ok: true })
+async fn rpc_health(State(state): State<RpcState>) -> impl IntoResponse {
+    let node = Arc::clone(&state.node);
+    let health = match state
+        .state_pipeline
+        .run(move || {
+            node.lock().ok().map(|node| {
+                let storage_version = node.storage.load_storage_version().ok().flatten();
+                HealthResponse {
+                    ok: storage_version == Some(STORAGE_VERSION),
+                    height: node.tip_height().map(|height| height.0),
+                    storage_version,
+                }
+            })
+        })
+        .await
+    {
+        Ok(health) => health,
+        Err(error) => return rpc_state_pipeline_error(error),
+    };
+    match health {
+        Some(health) if health.ok => Json(health).into_response(),
+        Some(health) => (StatusCode::SERVICE_UNAVAILABLE, Json(health)).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(HealthResponse {
+                ok: false,
+                height: None,
+                storage_version: None,
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn rpc_chain() -> impl IntoResponse {
@@ -1673,32 +1801,45 @@ async fn rpc_qcash_proof(
     .into_response()
 }
 
-async fn rpc_latest_blocks(State(state): State<RpcState>) -> impl IntoResponse {
-    match state.node.lock() {
-        Ok(node) => {
-            let tip = node.tip_height().unwrap_or(Height(0)).0;
-            let start = tip.saturating_sub(9);
-            let mut blocks = Vec::new();
-            for height in (start..=tip).rev() {
-                match node.storage.load_block_by_height(Height(height)) {
-                    Ok(Some(block)) => match block_response(&node, &block) {
-                        Ok(block) => blocks.push(block),
+async fn rpc_latest_blocks(
+    State(state): State<RpcState>,
+    Query(query): Query<ListQuery>,
+) -> impl IntoResponse {
+    let node = Arc::clone(&state.node);
+    match state
+        .state_pipeline
+        .run(move || match node.lock() {
+            Ok(node) => {
+                let tip = node.tip_height().unwrap_or(Height(0)).0;
+                let (offset, limit) = query.bounds();
+                let newest = tip.saturating_sub(offset as u64);
+                let start = newest.saturating_sub(limit.saturating_sub(1) as u64);
+                let mut blocks = Vec::new();
+                for height in (start..=newest).rev() {
+                    match node.storage.load_block_by_height(Height(height)) {
+                        Ok(Some(block)) => match block_response(&node, &block) {
+                            Ok(block) => blocks.push(block),
+                            Err(error) => {
+                                return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error);
+                            }
+                        },
+                        Ok(None) => {}
                         Err(error) => {
-                            return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error);
+                            return rpc_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("failed to load block: {error}"),
+                            );
                         }
-                    },
-                    Ok(None) => {}
-                    Err(error) => {
-                        return rpc_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("failed to load block: {error}"),
-                        );
                     }
                 }
+                Json(blocks).into_response()
             }
-            Json(blocks).into_response()
-        }
-        Err(_) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+            Err(_) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => rpc_state_pipeline_error(error),
     }
 }
 
@@ -1706,19 +1847,27 @@ async fn rpc_block_by_height(
     State(state): State<RpcState>,
     AxumPath(height): AxumPath<u64>,
 ) -> impl IntoResponse {
-    match state.node.lock() {
-        Ok(node) => match node.storage.load_block_by_height(Height(height)) {
-            Ok(Some(block)) => match block_response(&node, &block) {
-                Ok(response) => Json(response).into_response(),
-                Err(error) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    let node = Arc::clone(&state.node);
+    match state
+        .state_pipeline
+        .run(move || match node.lock() {
+            Ok(node) => match node.storage.load_block_by_height(Height(height)) {
+                Ok(Some(block)) => match block_response(&node, &block) {
+                    Ok(response) => Json(response).into_response(),
+                    Err(error) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+                },
+                Ok(None) => rpc_error(StatusCode::NOT_FOUND, "block_not_found"),
+                Err(error) => rpc_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to load block: {error}"),
+                ),
             },
-            Ok(None) => rpc_error(StatusCode::NOT_FOUND, "block_not_found"),
-            Err(error) => rpc_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to load block: {error}"),
-            ),
-        },
-        Err(_) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+            Err(_) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => rpc_state_pipeline_error(error),
     }
 }
 
@@ -1731,19 +1880,27 @@ async fn rpc_block_by_hash(
         Err(error) => return rpc_error(StatusCode::BAD_REQUEST, error),
     };
     let block_hash = BlockHash::from(hash);
-    match state.node.lock() {
-        Ok(node) => match node.storage.load_block_by_hash(&block_hash) {
-            Ok(Some(block)) => match block_response(&node, &block) {
-                Ok(response) => Json(response).into_response(),
-                Err(error) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    let node = Arc::clone(&state.node);
+    match state
+        .state_pipeline
+        .run(move || match node.lock() {
+            Ok(node) => match node.storage.load_block_by_hash(&block_hash) {
+                Ok(Some(block)) => match block_response(&node, &block) {
+                    Ok(response) => Json(response).into_response(),
+                    Err(error) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+                },
+                Ok(None) => rpc_error(StatusCode::NOT_FOUND, "block_not_found"),
+                Err(error) => rpc_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to load block: {error}"),
+                ),
             },
-            Ok(None) => rpc_error(StatusCode::NOT_FOUND, "block_not_found"),
-            Err(error) => rpc_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to load block: {error}"),
-            ),
-        },
-        Err(_) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+            Err(_) => rpc_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => rpc_state_pipeline_error(error),
     }
 }
 
@@ -1755,6 +1912,17 @@ fn rpc_error(status: StatusCode, error: impl Into<String>) -> axum::response::Re
         }),
     )
         .into_response()
+}
+
+fn rpc_state_pipeline_error(
+    error: crate::rpc::state_pipeline::StatePipelineError,
+) -> axum::response::Response {
+    let detail = match error {
+        crate::rpc::state_pipeline::StatePipelineError::Full => "state_queue_full",
+        crate::rpc::state_pipeline::StatePipelineError::Closed => "state_pipeline_closed",
+        crate::rpc::state_pipeline::StatePipelineError::Cancelled => "state_job_cancelled",
+    };
+    rpc_error(StatusCode::SERVICE_UNAVAILABLE, detail)
 }
 
 #[cfg(test)]
@@ -1775,6 +1943,14 @@ mod security_tests {
         assert!(limiter.allow(ip));
         assert!(limiter.allow(ip));
         assert!(!limiter.allow(ip));
+    }
+
+    #[test]
+    fn rate_limiter_caps_tracked_client_addresses() {
+        let mut limiter = RpcRateLimiter::new(1, 2);
+        limiter.max_buckets = 1;
+        assert!(limiter.allow(IpAddr::from([192, 0, 2, 1])));
+        assert!(!limiter.allow(IpAddr::from([192, 0, 2, 2])));
     }
 
     #[test]

@@ -161,6 +161,20 @@ impl XpqUtxoSet {
         &self.coins
     }
 
+    #[doc(hidden)]
+    pub fn apply_persistence_diff(
+        &mut self,
+        removed: &[XpqCoinId],
+        upserted: impl IntoIterator<Item = XpqUtxo>,
+    ) {
+        for id in removed {
+            self.coins.remove(id);
+        }
+        for coin in upserted {
+            self.coins.insert(coin.id, coin);
+        }
+    }
+
     pub fn coin(&self, id: XpqCoinId) -> Option<&XpqUtxo> {
         self.coins.get(&id)
     }

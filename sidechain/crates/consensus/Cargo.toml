@@ -1,0 +1,17 @@
+[package]
+name = "xparq-sidechain-consensus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Proof-of-stake consensus types for the experimental XPARQ sidechain"
+
+[dependencies]
+borsh.workspace = true
+thiserror.workspace = true
+xparq-sidechain-primitives.workspace = true
+
+[dev-dependencies]
+rand_10.workspace = true
+xparq-sqisign.workspace = true

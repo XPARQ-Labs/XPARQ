@@ -2481,6 +2481,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "node"
+version = "0.2.11"
+dependencies = [
+ "async-trait",
+ "axum",
+ "axum-server",
+ "borsh",
+ "ctrlc",
+ "futures-util",
+ "hex",
+ "igd-next 0.16.2",
+ "libp2p",
+ "lmdb",
+ "prost",
+ "protoc-bin-vendored",
+ "serde",
+ "serde_json",
+ "socket2 0.6.5",
+ "time",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+ "tower-http",
+ "xparq",
+ "zeroize 1.9.0",
+]
+
+[[package]]
 name = "nohash-hasher"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4079,6 +4109,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 
 [[package]]
+name = "wallet"
+version = "0.2.11"
+dependencies = [
+ "argon2",
+ "bip39",
+ "chacha20poly1305 0.11.0",
+ "getrandom 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "hex",
+ "serde",
+ "serde_json",
+ "time",
+ "xparq",
+ "zeroize 1.9.0",
+]
+
+[[package]]
 name = "want"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4463,7 +4509,7 @@ dependencies = [
 
 [[package]]
 name = "xparq"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "argon2",
  "bech32",
@@ -4477,35 +4523,6 @@ dependencies = [
  "sha3",
  "static_assertions 1.1.0",
  "xparq-sqisign",
- "zeroize 1.9.0",
-]
-
-[[package]]
-name = "xparq-node"
-version = "0.2.10"
-dependencies = [
- "async-trait",
- "axum",
- "axum-server",
- "borsh",
- "ctrlc",
- "futures-util",
- "hex",
- "igd-next 0.16.2",
- "libp2p",
- "lmdb",
- "prost",
- "protoc-bin-vendored",
- "serde",
- "serde_json",
- "socket2 0.6.5",
- "tokio",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
- "tower",
- "tower-http",
- "xparq",
  "zeroize 1.9.0",
 ]
 
@@ -4525,21 +4542,6 @@ dependencies = [
  "signature 3.0.0",
  "subtle",
  "typenum",
- "zeroize 1.9.0",
-]
-
-[[package]]
-name = "xparq-wallet"
-version = "0.2.10"
-dependencies = [
- "argon2",
- "bip39",
- "chacha20poly1305 0.11.0",
- "getrandom 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "hex",
- "serde",
- "serde_json",
- "xparq",
  "zeroize 1.9.0",
 ]
 

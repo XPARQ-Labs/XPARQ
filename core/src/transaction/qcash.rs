@@ -322,6 +322,13 @@ impl SignedQCashTransaction {
 
     pub fn validate_signed(&self) -> Result<(), TransactionError> {
         self.transaction.validate()?;
+        self.validate_registration_authorization_at_height(crate::block::Height(0))
+    }
+
+    fn validate_registration_authorization_at_height(
+        &self,
+        height: BlockHeight,
+    ) -> Result<(), TransactionError> {
         if self.to_bytes()?.len() > MAX_QCASH_TX_SIZE {
             return Err(TransactionError::TransactionTooLarge);
         }
@@ -360,7 +367,8 @@ impl SignedQCashTransaction {
             return Err(TransactionError::SenderAddressMismatch);
         }
         let payload = self.transaction.signing_bytes()?;
-        let (owner_valid, auth_valid) = crate::crypto::verify_dual_parallel(
+        let (owner_valid, auth_valid) = crate::crypto::verify_dual_parallel_at_height(
+            height,
             &self.authorization_proof.public_key,
             &self.authorization_proof.auth_public_key,
             &payload,
@@ -408,7 +416,8 @@ impl SignedQCashTransaction {
             return Err(TransactionError::EmptyAuthorizationSignature);
         }
         let payload = self.transaction.signing_bytes()?;
-        let (owner_valid, auth_valid) = crate::crypto::verify_dual_parallel(
+        let (owner_valid, auth_valid) = crate::crypto::verify_dual_parallel_at_height(
+            height,
             owner_public_key,
             auth_public_key,
             &payload,
@@ -440,8 +449,8 @@ impl SignedQCashTransaction {
     }
 
     pub fn validate_signed_for_height(&self, height: BlockHeight) -> Result<(), TransactionError> {
-        self.validate_signed()?;
-        self.transaction.validity.validate_at(height)
+        self.transaction.validate_for_height(height)?;
+        self.validate_registration_authorization_at_height(height)
     }
 
     pub fn hash(&self) -> Result<TransactionHash, crate::error::CodecError> {

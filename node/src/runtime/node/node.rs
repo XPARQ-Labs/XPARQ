@@ -339,7 +339,10 @@ impl Node {
             return self.reorg_to_best_tip();
         }
 
-        self.ledger = active_staged.ok_or(NodeError::MissingStagedLedger)?;
+        let previous_ledger = std::mem::replace(
+            &mut self.ledger,
+            active_staged.ok_or(NodeError::MissingStagedLedger)?,
+        );
         self.snapshot_cache = None;
         if block.is_genesis() {
             self.genesis_accounts = self.ledger.accounts().clone();
@@ -366,7 +369,8 @@ impl Node {
             self.cache.insert_account(miner.clone());
         }
         self.prune_finalized_state()?;
-        self.storage.save_ledger(&self.ledger)?;
+        self.storage
+            .save_active_extension(&previous_ledger, &self.ledger, &block)?;
         Ok(())
     }
 
