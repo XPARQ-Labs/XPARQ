@@ -1,8 +1,10 @@
 #![allow(clippy::module_inception)]
 
 pub mod chain;
+pub mod checkpoint;
 pub mod emission;
 pub mod fork_choice;
+pub mod header_chain;
 pub mod invariants;
 pub mod ledger;
 pub mod reorg;
@@ -13,6 +15,8 @@ pub use crate::error::LedgerError;
 
 pub const CONFIRMATION_DEPTH: u32 = 2;
 pub const BLOCK_REWARD_MATURITY: u32 = 50;
+/// Wallet/API transaction lifecycle threshold. This is not a PoW reorganization
+/// limit; only an explicitly authenticated trust anchor can pin older history.
 pub const FINALITY_DEPTH: u32 = 5;
 /// Minimum height difference between the confirming withdraw and a redeem.
 ///
@@ -52,16 +56,21 @@ pub const fn canonical_transaction_lifecycle(depth: u64) -> TransactionLifecycle
 }
 
 pub use chain::Chain;
+pub use checkpoint::{Checkpoint, CheckpointSet};
 pub use fork_choice::Work;
+pub use header_chain::{
+    ChainHeader, HEADER_CHAIN_CHUNK_VERSION, HeaderChainChunk, HeaderChainChunkError,
+    HeaderChainError, MAX_HEADER_CHAIN_CHUNK_HEADERS, MAX_HEADER_CHAIN_CHUNK_SIZE,
+    RECENT_HEADER_WINDOW, TrustedHeaderCheckpoint, advance_trusted_header_checkpoint,
+    decode_header_chain_chunk, trusted_header_checkpoint, verify_header_chain,
+    verify_header_chain_extension,
+};
 pub use invariants::validate_ledger_invariants;
 pub use ledger::{
     Ledger, QCashAccountJournal, calculate_protocol_state_root,
     calculate_protocol_state_root_from_roots,
 };
-pub use reorg::{
-    ReorgPlan, common_ancestor, plan_reorg, reorg_crosses_finality_boundary,
-    reorg_crosses_finality_height,
-};
+pub use reorg::{ReorgPlan, common_ancestor, plan_reorg, reorg_crosses_checkpoint};
 pub use state_proof::{
     ACCOUNT_STATE_PROOF_BUNDLE_VERSION, AccountNonMembershipProof, AccountNonMembershipProofBundle,
     AccountStateProof, AccountStateProofBundle, AccountStateProofBundleError,

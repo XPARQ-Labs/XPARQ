@@ -13,8 +13,10 @@ repository root.
 - A stable internet connection
 - TCP port `5555` reachable from the internet when accepting mainnet peers
 
-XPARQ proof of work uses Argon2id with 64 MiB of memory, one iteration, and
-two lanes. Mining performance depends on both CPU and memory performance.
+XPARQ proof of work uses network-bound Argon2id v1.3 with 64 MiB of memory,
+one iteration, two lanes, and a 32-byte output. The canonical header (including
+its nonce) supplies the seed; chain ID and previous block hash supply the
+deterministic salt. Mining performance depends on both CPU and memory.
 
 ## 2. Build the mainnet binaries
 
@@ -55,13 +57,15 @@ and recovery mnemonic. Store the following items securely and separately:
 - the recovery mnemonic
 - the authorization password
 
-The wallet file contains private material in plaintext. Never commit it to
-Git, publish it, or copy it to an untrusted mining server.
+The wallet file stores only its format version, public address, and recovery
+mnemonic. It does not store expanded public or private keys, but the mnemonic
+itself is plaintext and controls the signing key. Never commit it to Git, publish
+it, or copy it to an untrusted mining server.
 
 ## 4. Recommended secure mining setup
 
 Mining only needs the public reward address. It does not need the wallet's
-secret keys. Copy the lowercase Bech32 address beginning with `x1` from the
+secret keys. Copy the lowercase Bech32 address beginning with `z1` from the
 wallet creation output, then generate the default mainnet configuration:
 
 ```bash
@@ -109,8 +113,8 @@ Edit `data/mainnet/config.json` and set the mining fields:
   "shutdown_file": "./data/mainnet/STOP",
   "max_peers": 128,
   "fast_sync": false,
-  "min_relay_fee": 0,
-  "market_fee": 0,
+  "min_relay_fee": 1,
+  "market_fee": 1,
   "low_fee_expiry_secs": 0,
   "mempool_expiry_secs": 0,
   "wallet": null,
@@ -238,6 +242,11 @@ the JSON field is `false`; the field controls ordinary `node node run`.
   gRPC server has no TLS or authentication and must not be exposed publicly.
 
 These are local operational settings and do not change consensus rules.
+The standard node defaults `min_relay_fee` to one paqs (the smallest XPQ unit)
+per virtual byte and applies the configured rate uniformly to ordinary
+transfers and all QCash operations. Operators may set the rate to zero. Wallet
+`--fee auto` uses the node's current rate and the transaction's serialized
+virtual size.
 
 ## 7. P2P connectivity
 
@@ -300,14 +309,23 @@ Use `--rpc HOST:PORT` only when an explicit per-command override is needed.
 
 The node logs a successful block as a timestamped `INFO BLOCK mined ...` event
 and announces it to connected peers. Set `XPARQ_LOG=debug` when detailed P2P
-handshake or sync-batch diagnostics are needed. A locally found block is only economically useful if it is
-accepted into the canonical greatest-work chain.
+handshake or sync-batch diagnostics are needed. A locally found block is only
+economically useful if it is accepted into the canonical greatest-work chain.
+
+Two wallets connected to two synchronized nodes still observe one logical
+chain. Each node has its own local database and each wallet may control a
+different account, but the nodes must converge to the same height and tip hash.
+During a short fork, balances and transaction status can differ temporarily;
+validated cumulative-work fork choice and automatic reorganization reconcile
+them. One node showing one inbound connection while the other shows one
+outbound connection is normal because that connection carries traffic in both
+directions.
 
 ## 9. Rewards and maturity
 
-- The first WBDA epoch starts with a subsidy of `10 XPQ` per block.
-- The protocol may adjust the subsidy by `1 XPQ` per completed 2,048-block
-  epoch, within the `1 XPQ` to `20 XPQ` range.
+- The first WBDA epoch starts with a subsidy of `5 XPQ` per block.
+- The protocol may adjust the subsidy by `0.1 XPQ` per completed 4,100-block
+  epoch, within the `0.5 XPQ` to `10 XPQ` range.
 - Block subsidy outputs mature after 50 blocks.
 - A newly mined reward appears as immature until its maturity height.
 - Miner payments carried by ordinary transactions follow normal transaction

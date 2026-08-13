@@ -11,7 +11,9 @@ use borsh::{BorshDeserialize, BorshSerialize};
 #[repr(u8)]
 pub enum SignatureScheme {
     MlDsa44 = 1,
-    SqisignLevel5 = 2,
+    MlDsa65 = 2,
+    MlDsa87 = 3,
+    SqisignLevel5 = 4,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -177,8 +179,8 @@ mod tests {
 
     const SIGNATURE_UPGRADE: CryptoUpgradePlan = CryptoUpgradePlan {
         authorization_id: [7; 32],
-        from: CryptoPrimitive::Signature(SignatureScheme::SqisignLevel5),
-        to: CryptoPrimitive::Signature(SignatureScheme::MlDsa44),
+        from: CryptoPrimitive::Signature(SignatureScheme::MlDsa44),
+        to: CryptoPrimitive::Signature(SignatureScheme::MlDsa87),
         transition_height: 100,
         activation_height: 200,
         protocol_version: 1,
@@ -204,17 +206,17 @@ mod tests {
             CryptoUpgradePhase::UpgradedOnly
         );
         assert!(signature_scheme_active_at_height(
-            SignatureScheme::SqisignLevel5,
+            SignatureScheme::MlDsa44,
             99,
             Some(SIGNATURE_UPGRADE)
         ));
         assert!(signature_scheme_active_at_height(
-            SignatureScheme::MlDsa44,
+            SignatureScheme::MlDsa87,
             100,
             Some(SIGNATURE_UPGRADE)
         ));
         assert!(!signature_scheme_active_at_height(
-            SignatureScheme::SqisignLevel5,
+            SignatureScheme::MlDsa44,
             200,
             Some(SIGNATURE_UPGRADE)
         ));

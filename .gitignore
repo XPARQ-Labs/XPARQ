@@ -4,7 +4,6 @@
 /core/fuzz/target
 /depend/target
 /depend/**/target
-/sidechain/target
 /depend/sqisign/sqisign-rs/Cargo.lock
 xparq.cdx.json
 
@@ -20,6 +19,7 @@ xparq.cdx.json
 *.QCash
 .env
 .env.*
+/docker/config.mainnet.json
 
 # Editor-local settings
 /.vscode/

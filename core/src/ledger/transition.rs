@@ -134,13 +134,7 @@ pub(crate) fn apply_transaction_to_state(
     transaction: &Transfer,
     height: BlockHeight,
 ) -> Result<(), LedgerError> {
-    apply_transaction_to_state_with_miner(
-        accounts,
-        xpq_utxos,
-        transaction,
-        height,
-        Address([0; 20]),
-    )
+    apply_transaction_to_state_with_miner(accounts, xpq_utxos, transaction, height, Address::ZERO)
 }
 
 pub(crate) fn apply_signed_transaction_to_state_with_miner(
@@ -157,11 +151,11 @@ pub(crate) fn apply_signed_transaction_to_state_with_miner(
     let registration = protocol
         .validate_with_account_authorization(account, height)
         .map_err(LedgerError::from)?;
-    if let Some((owner, auth)) = registration {
+    if let Some(public_key) = registration {
         accounts
             .get_mut(&signed.transaction.from)
             .ok_or(LedgerError::AccountNotFound)?
-            .register_authorization(owner, auth)?;
+            .register_authorization(public_key)?;
     }
     apply_transaction_to_state_with_miner(
         accounts,
@@ -252,16 +246,18 @@ impl Ledger {
                         amount: *amount,
                     }
                 }
-                QCashTransactionKind::Redeem { .. } => {
-                    let (recipient, amount) = tx
-                        .redeem_recipient()
-                        .ok_or(LedgerError::EventInvariantViolation)?;
-                    ProtocolEventKind::QCashRedeemed {
+                QCashTransactionKind::Redeem { .. } => match tx.redeem_recipient() {
+                    Some((recipient, amount)) => ProtocolEventKind::QCashRedeemed {
                         signer: tx.signer,
                         recipient,
                         amount,
-                    }
-                }
+                        qcash_change_amount: tx.qcash_change_amount()?,
+                    },
+                    None => ProtocolEventKind::QCashSplit {
+                        signer: tx.signer,
+                        amount: tx.amount()?,
+                    },
+                },
             };
             emit(Some(tx.hash()?), kind);
         }
@@ -284,7 +280,7 @@ impl Ledger {
         transaction: &SignedTransfer,
         height: BlockHeight,
     ) -> Result<(), LedgerError> {
-        self.apply_signed_transaction_at_with_miner(transaction, height, Address([0; 20]))
+        self.apply_signed_transaction_at_with_miner(transaction, height, Address::ZERO)
     }
 
     pub fn apply_signed_transaction_at_with_miner(

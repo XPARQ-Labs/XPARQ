@@ -1,13 +1,16 @@
 #![allow(clippy::module_inception)]
 
 pub mod consensus;
+pub mod pow;
 pub mod supply;
 pub mod wbda;
 
 pub use crate::error::ConsensusError;
 pub use consensus::{
-    Consensus, ConsensusConfig, DIFFICULTY_START, GENESIS_DIFFICULTY, MIN_DIFFICULTY,
+    Consensus, ConsensusConfig, DIFFICULTY_START, GENESIS_DIFFICULTY, MAX_DIFFICULTY,
+    MIN_DIFFICULTY,
 };
+pub use pow::{POW_ALGORITHM, calculate_work, pow_salt, pow_seed, verify_pow};
 pub use supply::{
     BASE_BLOCK_REWARD, BLOCK_REWARD_STEP, MAX_BLOCK_REWARD, MIN_BLOCK_REWARD, base_block_reward,
 };

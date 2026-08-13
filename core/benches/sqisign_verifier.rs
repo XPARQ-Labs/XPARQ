@@ -3,7 +3,7 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 use xparq::crypto::{
     PublicKey, Signature, cached_verifying_key, clear_verifying_key_cache, keypair_from_seed, sign,
-    verify, verify_batch_parallel_accounted, verify_dual_parallel,
+    verify, verify_batch_parallel_accounted,
 };
 
 const MESSAGE: &[u8] = b"xparq SQIsign Level 5 verifier benchmark";
@@ -26,9 +26,7 @@ fn main() {
         .unwrap_or(10);
 
     let owner = keypair_from_seed(&[31; 32]);
-    let authorization = keypair_from_seed(&[47; 32]);
     let owner_signature = sign(&owner.secret_key, MESSAGE);
-    let auth_signature = sign(&authorization.secret_key, MESSAGE);
 
     let decode = measured(iterations, || {
         black_box(
@@ -53,24 +51,9 @@ fn main() {
                 .is_ok()
         );
     });
-    let dual = measured(iterations, || {
-        assert_eq!(
-            verify_dual_parallel(
-                black_box(&owner.public_key),
-                black_box(&authorization.public_key),
-                black_box(MESSAGE),
-                black_box(&owner_signature),
-                black_box(&auth_signature),
-            ),
-            (true, true)
-        );
-    });
-
-    let mut block_jobs =
-        Vec::<(PublicKey, Vec<u8>, Signature)>::with_capacity(BATCH_TRANSACTIONS * 2);
+    let mut block_jobs = Vec::<(PublicKey, Vec<u8>, Signature)>::with_capacity(BATCH_TRANSACTIONS);
     for _ in 0..BATCH_TRANSACTIONS {
         block_jobs.push((owner.public_key, MESSAGE.to_vec(), owner_signature));
-        block_jobs.push((authorization.public_key, MESSAGE.to_vec(), auth_signature));
     }
     let mut accounted_work = None;
     let batch = measured(iterations, || {
@@ -84,8 +67,7 @@ fn main() {
     println!("decode public key:             {decode:?}");
     println!("single verify, cold cache:     {cold_single:?}");
     println!("single verify, warm cache:     {warm_single:?}");
-    println!("dual verify, persistent pool:  {dual:?}");
-    println!("batch/block verify ({BATCH_TRANSACTIONS} dual tx): {batch:?}");
+    println!("batch/block verify ({BATCH_TRANSACTIONS} tx): {batch:?}");
     println!(
         "accounted work: {} signatures, {} worst-case key decodes, {} message bytes",
         accounted_work.signature_checks,

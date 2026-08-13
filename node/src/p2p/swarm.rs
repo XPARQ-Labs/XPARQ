@@ -10,7 +10,7 @@ use libp2p::identify;
 use libp2p::kad::{self, store::MemoryStore};
 use libp2p::ping;
 use libp2p::request_response::{self, ProtocolSupport};
-use libp2p::swarm::NetworkBehaviour;
+use libp2p::swarm::{ConnectionId, NetworkBehaviour};
 use libp2p::{Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder, noise, tcp, yamux};
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -39,6 +39,7 @@ pub struct SwarmHandle {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnectionStats {
+    pub total: usize,
     pub outbound: usize,
     pub inbound: usize,
 }
@@ -46,8 +47,16 @@ pub struct ConnectionStats {
 #[derive(Debug, Clone, Copy)]
 struct EstablishedPeer {
     addr: SocketAddr,
-    outbound: bool,
+    outbound_connections: usize,
+    inbound_connections: usize,
     handshaken: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EstablishedConnection {
+    peer_id: PeerId,
+    addr: SocketAddr,
+    outbound: bool,
 }
 
 struct RequestWindow {
@@ -93,17 +102,9 @@ impl SwarmHandle {
     pub fn connection_stats(&self) -> ConnectionStats {
         self.connections
             .lock()
-            .map(|connections| ConnectionStats {
-                outbound: connections
-                    .values()
-                    .filter(|peer| peer.outbound && peer.handshaken)
-                    .count(),
-                inbound: connections
-                    .values()
-                    .filter(|peer| !peer.outbound && peer.handshaken)
-                    .count(),
-            })
+            .map(|connections| connection_stats(&connections))
             .unwrap_or(ConnectionStats {
+                total: 0,
                 outbound: 0,
                 inbound: 0,
             })
@@ -120,6 +121,20 @@ impl SwarmHandle {
                     .collect()
             })
             .unwrap_or_default()
+    }
+}
+
+fn connection_stats(connections: &HashMap<PeerId, EstablishedPeer>) -> ConnectionStats {
+    ConnectionStats {
+        total: connections.values().filter(|peer| peer.handshaken).count(),
+        outbound: connections
+            .values()
+            .filter(|peer| peer.handshaken && peer.outbound_connections > 0)
+            .count(),
+        inbound: connections
+            .values()
+            .filter(|peer| peer.handshaken && peer.inbound_connections > 0)
+            .count(),
     }
 }
 
@@ -391,10 +406,6 @@ async fn run_swarm(
     for addr in public_addrs {
         swarm.add_external_address(socket_to_multiaddr(addr));
     }
-    for addr in bootstrap_addrs {
-        let _ = swarm.dial(socket_to_multiaddr(addr));
-    }
-    let _ = ready.send(Ok(()));
 
     let mut addr_to_peer = HashMap::<SocketAddr, PeerId>::new();
     let mut peer_to_addr = HashMap::<PeerId, SocketAddr>::new();
@@ -404,7 +415,18 @@ async fn run_swarm(
     let mut outstanding = HashMap::new();
     let mut dialing = HashSet::<SocketAddr>::new();
     let mut handshaken = HashSet::<PeerId>::new();
+    let mut established_connections = HashMap::<ConnectionId, EstablishedConnection>::new();
     let mut inbound_request_windows = HashMap::<PeerId, RequestWindow>::new();
+    for addr in bootstrap_addrs {
+        if dialing.insert(addr)
+            && let Err(error) = swarm.dial(socket_to_multiaddr(addr))
+        {
+            dialing.remove(&addr);
+            node_debug!("P2P", "bootstrap_dial_failed peer={addr} error={error:?}");
+        }
+    }
+    let _ = ready.send(Ok(()));
+
     let inbound_worker_limit = Arc::new(Semaphore::new(max_peers.clamp(4, 32)));
     let (inbound_results_tx, mut inbound_results_rx) =
         mpsc::channel::<InboundWorkResult>(max_peers.clamp(16, 256));
@@ -460,11 +482,15 @@ async fn run_swarm(
             event = swarm.select_next_some() => {
                 use libp2p::swarm::SwarmEvent;
                 match event {
-                    SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                    SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
                         if let Some(addr) = multiaddr_to_socket(endpoint.get_remote_address()) {
                             dialing.remove(&addr);
                             addr_to_peer.insert(addr, peer_id);
                             let outbound = endpoint.is_dialer();
+                            established_connections.insert(
+                                connection_id,
+                                EstablishedConnection { peer_id, addr, outbound },
+                            );
                             if outbound {
                                 peer_to_addr.insert(peer_id, addr);
                             } else {
@@ -477,12 +503,15 @@ async fn run_swarm(
                                     .and_modify(|peer| {
                                         if outbound {
                                             peer.addr = addr;
-                                            peer.outbound = true;
+                                            peer.outbound_connections = peer.outbound_connections.saturating_add(1);
+                                        } else {
+                                            peer.inbound_connections = peer.inbound_connections.saturating_add(1);
                                         }
                                     })
                                     .or_insert(EstablishedPeer {
                                         addr,
-                                        outbound,
+                                        outbound_connections: usize::from(outbound),
+                                        inbound_connections: usize::from(!outbound),
                                         handshaken: handshaken.contains(&peer_id),
                                     });
                             }
@@ -494,18 +523,54 @@ async fn run_swarm(
                                     send_request(&mut swarm, peer_id, request.message, request.result, &mut outstanding);
                                 }
                             }
-                            node_info!("P2P", "connected peer_id={peer_id} addr={addr}");
+                            node_info!(
+                                "P2P",
+                                "connected peer_id={peer_id} addr={addr} direction={}",
+                                if outbound { "outbound" } else { "inbound" }
+                            );
                         }
                     }
-                    SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
-                        if let Some(addr) = peer_to_addr.remove(&peer_id) {
+                    SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
+                        let closed = established_connections.remove(&connection_id);
+                        if let Some(closed) = closed
+                            && addr_to_peer.get(&closed.addr) == Some(&peer_id)
+                        {
+                            addr_to_peer.remove(&closed.addr);
+                        }
+                        if let Ok(mut connections) = connections.lock()
+                            && let Some(peer) = connections.get_mut(&peer_id)
+                            && let Some(closed) = closed
+                        {
+                            if closed.outbound {
+                                peer.outbound_connections = peer.outbound_connections.saturating_sub(1);
+                            } else {
+                                peer.inbound_connections = peer.inbound_connections.saturating_sub(1);
+                            }
+                        }
+                        if num_established == 0 {
+                            let addr = peer_to_addr.remove(&peer_id).or_else(|| closed.map(|entry| entry.addr));
                             addr_to_peer.retain(|_, mapped_peer| *mapped_peer != peer_id);
                             handshaken.remove(&peer_id);
                             inbound_request_windows.remove(&peer_id);
                             if let Ok(mut connections) = connections.lock() {
                                 connections.remove(&peer_id);
                             }
-                            node_info!("P2P", "disconnected peer_id={peer_id} addr={addr}");
+                            if let Some(addr) = addr {
+                                node_info!("P2P", "disconnected peer_id={peer_id} addr={addr}");
+                            }
+                        } else if let Some(replacement) = established_connections
+                            .values()
+                            .filter(|connection| connection.peer_id == peer_id)
+                            .max_by_key(|connection| connection.outbound)
+                            .copied()
+                        {
+                            peer_to_addr.insert(peer_id, replacement.addr);
+                            addr_to_peer.insert(replacement.addr, peer_id);
+                            if let Ok(mut connections) = connections.lock()
+                                && let Some(peer) = connections.get_mut(&peer_id)
+                            {
+                                peer.addr = replacement.addr;
+                            }
                         }
                     }
                     SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
@@ -1020,6 +1085,68 @@ mod tests {
 
         cache_established_peer(&peers, outbound, true);
         assert!(peers.lock().unwrap().contains_key(&outbound));
+    }
+
+    #[test]
+    fn connection_stats_preserve_both_directions_without_double_counting_peer() {
+        let peer_id = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let mut connections = HashMap::new();
+        connections.insert(
+            peer_id,
+            EstablishedPeer {
+                addr: "127.0.0.1:18181".parse().unwrap(),
+                outbound_connections: 1,
+                inbound_connections: 1,
+                handshaken: true,
+            },
+        );
+
+        assert_eq!(
+            connection_stats(&connections),
+            ConnectionStats {
+                total: 1,
+                outbound: 1,
+                inbound: 1,
+            }
+        );
+
+        let peer = connections.get_mut(&peer_id).unwrap();
+        peer.outbound_connections -= 1;
+        assert_eq!(
+            connection_stats(&connections),
+            ConnectionStats {
+                total: 1,
+                outbound: 0,
+                inbound: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn connection_stats_ignore_transport_before_protocol_handshake() {
+        let peer_id = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let connections = HashMap::from([(
+            peer_id,
+            EstablishedPeer {
+                addr: "127.0.0.1:18181".parse().unwrap(),
+                outbound_connections: 1,
+                inbound_connections: 0,
+                handshaken: false,
+            },
+        )]);
+
+        assert_eq!(
+            connection_stats(&connections),
+            ConnectionStats {
+                total: 0,
+                outbound: 0,
+                inbound: 0,
+            }
+        );
     }
 
     #[test]

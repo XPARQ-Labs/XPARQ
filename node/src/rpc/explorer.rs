@@ -455,10 +455,13 @@ fn pending_qcash_coins(node: &Node, height: Height) -> Vec<serde_json::Value> {
         let xparq::transaction::SignedProtocolTransaction::QCash(signed) = transaction else {
             continue;
         };
-        let xparq::transaction::QCashTransactionKind::Withdraw { metadata, .. } =
-            &signed.transaction.kind
-        else {
-            continue;
+        let metadata = match &signed.transaction.kind {
+            xparq::transaction::QCashTransactionKind::Withdraw { metadata, .. } => metadata,
+            xparq::transaction::QCashTransactionKind::Redeem {
+                qcash_outputs: Some(metadata),
+                ..
+            } => metadata,
+            _ => continue,
         };
         let Ok(withdraw_tx_hash) = signed.hash() else {
             continue;
@@ -470,8 +473,8 @@ fn pending_qcash_coins(node: &Node, height: Height) -> Vec<serde_json::Value> {
             coins.push(serde_json::json!({
                 "coin_id": hex::encode(id.0),
                 "short_coin_id": id.short_id(),
-                "file_name": id.file_name(output.denomination),
-                "denomination": output.denomination.xpq(),
+                "file_name": id.file_name(output.amount),
+                "amount": output.amount.0,
                 "status": "unredeemed",
                 "redeemability": "pending",
                 "transaction_status": "pending",
@@ -513,8 +516,8 @@ pub(crate) fn qcash_utxo_value(
     serde_json::json!({
         "coin_id": hex::encode(coin.id.0),
         "short_coin_id": coin.id.short_id(),
-        "file_name": coin.id.file_name(coin.denomination),
-        "denomination": coin.denomination.xpq(),
+        "file_name": coin.id.file_name(coin.amount),
+        "amount": coin.amount.0,
         "status": "unredeemed",
         "redeemability": redeemability,
         "height": height.0,
@@ -623,9 +626,15 @@ pub(crate) fn protocol_tx_response(
             xparq::transaction::QCashTransactionKind::Redeem { .. } => {
                 let recipient = tx.transaction.redeem_recipient();
                 (
-                    "qcash_redeem",
+                    if recipient.is_some() {
+                        "qcash_redeem"
+                    } else {
+                        "qcash_split"
+                    },
                     recipient.map(|(address, _)| address_to_string(&address)),
-                    recipient.map(|(_, amount)| amount.0),
+                    recipient
+                        .map(|(_, amount)| amount.0)
+                        .or_else(|| tx.transaction.amount().ok().map(|amount| amount.0)),
                 )
             }
         },

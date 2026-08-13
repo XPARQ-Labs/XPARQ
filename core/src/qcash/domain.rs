@@ -1,4 +1,4 @@
-use crate::consensus::supply::{Amount, XPQ};
+use crate::consensus::supply::Amount;
 use crate::crypto::{
     Address, HashDomain, PublicKey, Signature, TransactionHash, domain_hash, public_key_from_seed,
     sign_from_seed, verify,
@@ -16,105 +16,6 @@ pub const MAX_QCASH_FILE_SIZE: usize = 1024;
 pub const MAX_QCASH_WITHDRAWAL_OUTPUTS: usize = 256;
 pub const MAX_QCASH_REDEEM_INPUTS: usize = 4;
 
-/// Supported cash denominations, expressed in whole XPQ.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[repr(u32)]
-pub enum QCashDenomination {
-    One = 1,
-    Two = 2,
-    Five = 5,
-    Ten = 10,
-    Twenty = 20,
-    Fifty = 50,
-    OneHundred = 100,
-    FiveHundred = 500,
-    OneThousand = 1000,
-    FiveThousand = 5_000,
-    TenThousand = 10_000,
-    FiftyThousand = 50_000,
-    OneHundredThousand = 100_000,
-    FiveHundredThousand = 500_000,
-    OneMillion = 1_000_000,
-}
-
-impl QCashDenomination {
-    pub const DESCENDING: [Self; 15] = [
-        Self::OneMillion,
-        Self::FiveHundredThousand,
-        Self::OneHundredThousand,
-        Self::FiftyThousand,
-        Self::TenThousand,
-        Self::FiveThousand,
-        Self::OneThousand,
-        Self::FiveHundred,
-        Self::OneHundred,
-        Self::Fifty,
-        Self::Twenty,
-        Self::Ten,
-        Self::Five,
-        Self::Two,
-        Self::One,
-    ];
-
-    pub const fn xpq(self) -> u64 {
-        self as u32 as u64
-    }
-
-    pub const fn amount(self) -> Amount {
-        Amount(self.xpq() * XPQ)
-    }
-}
-
-impl BorshSerialize for QCashDenomination {
-    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        BorshSerialize::serialize(&(self.xpq() as u32), writer)
-    }
-}
-
-impl BorshDeserialize for QCashDenomination {
-    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
-        match u32::deserialize_reader(reader)? {
-            1 => Ok(Self::One),
-            2 => Ok(Self::Two),
-            5 => Ok(Self::Five),
-            10 => Ok(Self::Ten),
-            20 => Ok(Self::Twenty),
-            50 => Ok(Self::Fifty),
-            100 => Ok(Self::OneHundred),
-            500 => Ok(Self::FiveHundred),
-            1000 => Ok(Self::OneThousand),
-            5_000 => Ok(Self::FiveThousand),
-            10_000 => Ok(Self::TenThousand),
-            50_000 => Ok(Self::FiftyThousand),
-            100_000 => Ok(Self::OneHundredThousand),
-            500_000 => Ok(Self::FiveHundredThousand),
-            1_000_000 => Ok(Self::OneMillion),
-            value => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("unsupported QCash denomination {value}"),
-            )),
-        }
-    }
-}
-
-/// A compact run of identical QCash coins.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    BorshSerialize,
-    BorshDeserialize,
-)]
-pub struct QCashDenominationRun {
-    pub denomination: QCashDenomination,
-    pub count: u64,
-}
-
 /// One consensus-visible output created by a withdraw transaction.
 #[derive(
     Debug,
@@ -130,7 +31,8 @@ pub struct QCashDenominationRun {
 )]
 pub struct QCashWithdrawalOutput {
     pub coin_index: u32,
-    pub denomination: QCashDenomination,
+    /// Exact bearer value in paqs. Any positive amount is valid.
+    pub amount: Amount,
     /// Commitment to the wallet-held redeem key; the seed is never put on-chain.
     pub redeem_key_commitment: [u8; 32],
 }
@@ -143,13 +45,13 @@ pub struct QCashWithdrawalMetadata {
     pub outputs: Vec<QCashWithdrawalOutput>,
 }
 
-/// Automatic whole-XPQ cash selection with the unconverted on-chain remainder.
+/// Automatic cash selection. The default plan creates one flexible-value coin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QCashWithdrawalPlan {
     pub requested_amount: Amount,
     pub qcash_amount: Amount,
     pub remainder: Amount,
-    pub denominations: Vec<QCashDenomination>,
+    pub amounts: Vec<Amount>,
 }
 
 /// Portable bearer coin data stored by the wallet in a `.QCash` file.
@@ -159,7 +61,7 @@ pub struct QCashCoinFile {
     /// Opaque state lookup key. The originating transaction hash is not stored
     /// in the portable bearer file.
     pub coin_id: [u8; 32],
-    pub denomination: QCashDenomination,
+    pub amount: Amount,
     pub redeem_secret: [u8; 32],
 }
 
@@ -174,7 +76,7 @@ impl fmt::Debug for QCashCoinFile {
         f.debug_struct("QCashCoinFile")
             .field("version", &self.version)
             .field("coin_id", &self.coin_id)
-            .field("denomination", &self.denomination)
+            .field("amount", &self.amount)
             .field("redeem_secret", &"[REDACTED]")
             .finish()
     }
@@ -186,7 +88,7 @@ impl fmt::Debug for QCashCoinFile {
 pub struct QCashRedeemInput {
     pub version: u8,
     pub coin_id: [u8; 32],
-    pub denomination: QCashDenomination,
+    pub amount: Amount,
     pub redeem_public_key: PublicKey,
     pub authorization: Signature,
 }
@@ -199,7 +101,6 @@ pub struct QCashRedeemMetadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QCashError {
     ZeroAmount,
-    FractionalXpQ,
     EmptyCoins,
     ZeroCoinCount,
     NonCanonicalCoins,
@@ -208,8 +109,7 @@ pub enum QCashError {
     InvalidCoinIndex,
     DuplicateCommitment,
     CommitmentCountMismatch,
-    DenominationAmountMismatch,
-    NoCashableAmount,
+    OutputAmountMismatch,
     UnsupportedQCashFileVersion,
     EmptyRedeemInputs,
     DuplicateRedeemInput,
@@ -226,11 +126,10 @@ impl fmt::Display for QCashError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroAmount => f.write_str("QCash amount must be greater than zero"),
-            Self::FractionalXpQ => f.write_str("QCash amount must use whole XPQ units"),
             Self::EmptyCoins => f.write_str("QCash metadata must contain at least one coin"),
             Self::ZeroCoinCount => f.write_str("QCash coin count must be greater than zero"),
             Self::NonCanonicalCoins => {
-                f.write_str("QCash coins must be unique and ordered by descending denomination")
+                f.write_str("QCash coins must be ordered by descending amount")
             }
             Self::AmountOverflow => f.write_str("QCash amount exceeds the supported amount range"),
             Self::EmptyOutputs => f.write_str("withdraw must contain at least one QCash output"),
@@ -241,11 +140,8 @@ impl fmt::Display for QCashError {
             Self::CommitmentCountMismatch => {
                 f.write_str("wallet commitment count does not match QCash coin count")
             }
-            Self::DenominationAmountMismatch => {
-                f.write_str("QCash output denominations do not match withdraw amount")
-            }
-            Self::NoCashableAmount => {
-                f.write_str("requested amount contains less than one whole XPQ for QCash")
+            Self::OutputAmountMismatch => {
+                f.write_str("QCash output amounts do not match withdraw amount")
             }
             Self::UnsupportedQCashFileVersion => {
                 f.write_str("QCash coin file version is unsupported")
@@ -281,7 +177,7 @@ pub fn qcash_redeem_key_commitment(public_key: &PublicKey) -> [u8; 32] {
 
 fn redeem_authorization_bytes(
     coin_id: [u8; 32],
-    denomination: QCashDenomination,
+    amount: Amount,
     recipient: Address,
     transaction_commitment: [u8; 32],
 ) -> Result<Vec<u8>, QCashError> {
@@ -291,7 +187,7 @@ fn redeem_authorization_bytes(
         protocol_version: u8,
         operation: u8,
         coin_id: [u8; 32],
-        denomination: QCashDenomination,
+        amount: Amount,
         recipient: Address,
         transaction_commitment: [u8; 32],
     }
@@ -301,7 +197,7 @@ fn redeem_authorization_bytes(
         protocol_version: CURRENT_CHAIN_PARAMS.protocol_version,
         operation: 1,
         coin_id,
-        denomination,
+        amount,
         recipient,
         transaction_commitment,
     };
@@ -394,7 +290,7 @@ impl QCashCoinFile {
         let file = Self {
             version: QCASH_FILE_VERSION,
             coin_id: qcash_coin_id_bytes(withdraw_tx_hash, output)?,
-            denomination: output.denomination,
+            amount: output.amount,
             redeem_secret,
         };
         if qcash_redeem_key_commitment_from_secret(&file.redeem_secret)
@@ -415,7 +311,7 @@ impl QCashCoinFile {
         }
         QCashRedeemInput::authorize(
             self.coin_id,
-            self.denomination,
+            self.amount,
             &self.redeem_secret,
             recipient,
             transaction_commitment,
@@ -457,7 +353,7 @@ impl QCashRedeemMetadata {
         for input in &self.inputs {
             let message = redeem_authorization_bytes(
                 input.coin_id,
-                input.denomination,
+                input.amount,
                 recipient,
                 transaction_commitment,
             )?;
@@ -492,7 +388,7 @@ impl QCashRedeemMetadata {
         self.inputs.iter().try_fold(Amount(0), |total, input| {
             total
                 .0
-                .checked_add(input.denomination.amount().0)
+                .checked_add(input.amount.0)
                 .map(Amount)
                 .ok_or(QCashError::AmountOverflow)
         })
@@ -504,18 +400,18 @@ impl QCashRedeemInput {
     /// call this after decoding their private bearer-file format.
     pub fn authorize(
         coin_id: [u8; 32],
-        denomination: QCashDenomination,
+        amount: Amount,
         redeem_secret: &[u8; 32],
         recipient: Address,
         transaction_commitment: [u8; 32],
     ) -> Result<Self, QCashError> {
         let redeem_public_key = public_key_from_seed(redeem_secret);
         let message =
-            redeem_authorization_bytes(coin_id, denomination, recipient, transaction_commitment)?;
+            redeem_authorization_bytes(coin_id, amount, recipient, transaction_commitment)?;
         Ok(Self {
             version: QCASH_FILE_VERSION,
             coin_id,
-            denomination,
+            amount,
             redeem_public_key,
             authorization: sign_from_seed(redeem_secret, &message),
         })
@@ -527,28 +423,16 @@ impl QCashRedeemInput {
 }
 
 impl QCashWithdrawalMetadata {
-    /// Plans automatic denomination selection. Fractions remain on-chain.
+    /// Plans one flexible-value bearer coin for the complete requested amount.
     pub fn plan_automatic(amount: Amount) -> Result<QCashWithdrawalPlan, QCashError> {
-        let qcash_amount = Amount(amount.0 - (amount.0 % XPQ));
-        let remainder = Amount(amount.0 % XPQ);
-        if qcash_amount.0 == 0 {
-            return Err(QCashError::NoCashableAmount);
-        }
-
-        let runs = format_qcash_coins(qcash_amount)?;
-        let mut denominations = Vec::new();
-        for run in runs {
-            let count = usize::try_from(run.count).map_err(|_| QCashError::AmountOverflow)?;
-            if denominations.len().saturating_add(count) > MAX_QCASH_WITHDRAWAL_OUTPUTS {
-                return Err(QCashError::TooManyWithdrawalOutputs);
-            }
-            denominations.extend(std::iter::repeat_n(run.denomination, count));
+        if amount.0 == 0 {
+            return Err(QCashError::ZeroAmount);
         }
         Ok(QCashWithdrawalPlan {
             requested_amount: amount,
-            qcash_amount,
-            remainder,
-            denominations,
+            qcash_amount: amount,
+            remainder: Amount(0),
+            amounts: vec![amount],
         })
     }
 
@@ -556,63 +440,36 @@ impl QCashWithdrawalMetadata {
         plan: &QCashWithdrawalPlan,
         commitments: &[[u8; 32]],
     ) -> Result<Self, QCashError> {
-        Self::with_denominations(plan.qcash_amount, &plan.denominations, commitments)
+        Self::with_amounts(plan.qcash_amount, &plan.amounts, commitments)
     }
 
     pub fn new(amount: Amount, commitments: &[[u8; 32]]) -> Result<Self, QCashError> {
-        let runs = format_qcash_coins(amount)?;
-        let coin_count = runs.iter().try_fold(0u64, |total, run| {
-            total
-                .checked_add(run.count)
-                .ok_or(QCashError::AmountOverflow)
-        })?;
-        if coin_count != commitments.len() as u64 {
+        if commitments.len() != 1 {
             return Err(QCashError::CommitmentCountMismatch);
         }
-        let coin_count = usize::try_from(coin_count).map_err(|_| QCashError::AmountOverflow)?;
-        if coin_count > MAX_QCASH_WITHDRAWAL_OUTPUTS {
-            return Err(QCashError::TooManyWithdrawalOutputs);
-        }
-
-        let mut outputs = Vec::with_capacity(commitments.len());
-        let mut coin_index = 0u32;
-        for run in runs {
-            for _ in 0..run.count {
-                outputs.push(QCashWithdrawalOutput {
-                    coin_index,
-                    denomination: run.denomination,
-                    redeem_key_commitment: commitments[coin_index as usize],
-                });
-                coin_index = coin_index
-                    .checked_add(1)
-                    .ok_or(QCashError::AmountOverflow)?;
-            }
-        }
-        let metadata = Self { outputs };
-        metadata.validate()?;
-        Ok(metadata)
+        Self::with_amounts(amount, &[amount], commitments)
     }
 
-    pub fn with_denominations(
+    pub fn with_amounts(
         amount: Amount,
-        denominations: &[QCashDenomination],
+        amounts: &[Amount],
         commitments: &[[u8; 32]],
     ) -> Result<Self, QCashError> {
-        if denominations.len() != commitments.len() {
+        if amounts.len() != commitments.len() {
             return Err(QCashError::CommitmentCountMismatch);
         }
-        if denominations.len() > MAX_QCASH_WITHDRAWAL_OUTPUTS {
+        if amounts.len() > MAX_QCASH_WITHDRAWAL_OUTPUTS {
             return Err(QCashError::TooManyWithdrawalOutputs);
         }
-        let outputs = denominations
+        let outputs = amounts
             .iter()
             .copied()
             .zip(commitments.iter().copied())
             .enumerate()
             .map(
-                |(coin_index, (denomination, redeem_key_commitment))| QCashWithdrawalOutput {
+                |(coin_index, (amount, redeem_key_commitment))| QCashWithdrawalOutput {
                     coin_index: coin_index as u32,
-                    denomination,
+                    amount,
                     redeem_key_commitment,
                 },
             )
@@ -622,24 +479,22 @@ impl QCashWithdrawalMetadata {
         Ok(metadata)
     }
 
-    /// Builds withdraw metadata from exact user-selected denominations.
-    pub fn with_selected_denominations(
-        denominations: &[QCashDenomination],
+    /// Builds withdraw metadata from exact user-selected positive amounts.
+    pub fn with_selected_amounts(
+        amounts: &[Amount],
         commitments: &[[u8; 32]],
     ) -> Result<Self, QCashError> {
-        if denominations.len() != commitments.len() {
+        if amounts.len() != commitments.len() {
             return Err(QCashError::CommitmentCountMismatch);
         }
-        let expected = denominations
-            .iter()
-            .try_fold(Amount(0), |total, denomination| {
-                total
-                    .0
-                    .checked_add(denomination.amount().0)
-                    .map(Amount)
-                    .ok_or(QCashError::AmountOverflow)
-            })?;
-        Self::with_denominations(expected, denominations, commitments)
+        let expected = amounts.iter().try_fold(Amount(0), |total, amount| {
+            total
+                .0
+                .checked_add(amount.0)
+                .map(Amount)
+                .ok_or(QCashError::AmountOverflow)
+        })?;
+        Self::with_amounts(expected, amounts, commitments)
     }
 
     pub fn validate(&self) -> Result<(), QCashError> {
@@ -659,7 +514,10 @@ impl QCashWithdrawalMetadata {
             if !commitments.insert(output.redeem_key_commitment) {
                 return Err(QCashError::DuplicateCommitment);
             }
-            if index > 0 && output.denomination > self.outputs[index - 1].denomination {
+            if output.amount.0 == 0 {
+                return Err(QCashError::ZeroAmount);
+            }
+            if index > 0 && output.amount > self.outputs[index - 1].amount {
                 return Err(QCashError::NonCanonicalCoins);
             }
         }
@@ -670,7 +528,7 @@ impl QCashWithdrawalMetadata {
         self.outputs.iter().try_fold(Amount(0), |total, output| {
             total
                 .0
-                .checked_add(output.denomination.amount().0)
+                .checked_add(output.amount.0)
                 .map(Amount)
                 .ok_or(QCashError::AmountOverflow)
         })
@@ -679,37 +537,13 @@ impl QCashWithdrawalMetadata {
     pub fn validate_amount(&self, expected: Amount) -> Result<(), QCashError> {
         self.validate()?;
         if self.amount()? != expected {
-            return Err(QCashError::DenominationAmountMismatch);
+            return Err(QCashError::OutputAmountMismatch);
         }
         Ok(())
     }
 }
 
 impl Error for QCashError {}
-
-/// Formats a whole-XPQ amount using the fewest supported coins.
-pub fn format_qcash_coins(amount: Amount) -> Result<Vec<QCashDenominationRun>, QCashError> {
-    if amount.0 == 0 {
-        return Err(QCashError::ZeroAmount);
-    }
-    if !amount.0.is_multiple_of(XPQ) {
-        return Err(QCashError::FractionalXpQ);
-    }
-
-    let mut remaining = amount.0 / XPQ;
-    let mut coins = Vec::with_capacity(QCashDenomination::DESCENDING.len());
-    for denomination in QCashDenomination::DESCENDING {
-        let count = remaining / denomination.xpq();
-        if count > 0 {
-            coins.push(QCashDenominationRun {
-                denomination,
-                count,
-            });
-            remaining %= denomination.xpq();
-        }
-    }
-    Ok(coins)
-}
 
 #[cfg(test)]
 mod tests {

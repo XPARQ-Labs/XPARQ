@@ -1,4 +1,4 @@
-use crate::crypto::{Address, PublicKey, dual_address_from_public_keys};
+use crate::crypto::{Address, PublicKey, address_from_public_key};
 use crate::error::StateError;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -19,8 +19,7 @@ pub struct Account {
     Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash,
 )]
 pub struct AccountAuthorization {
-    pub owner_public_key: PublicKey,
-    pub auth_public_key: PublicKey,
+    pub public_key: PublicKey,
 }
 
 impl Account {
@@ -33,29 +32,21 @@ impl Account {
 
     pub fn new_with_authorization(
         address: Address,
-        owner_public_key: PublicKey,
-        auth_public_key: PublicKey,
+        public_key: PublicKey,
     ) -> Result<Self, StateError> {
         let mut account = Self::new(address);
-        account.register_authorization(owner_public_key, auth_public_key)?;
+        account.register_authorization(public_key)?;
         Ok(account)
     }
 
-    pub fn register_authorization(
-        &mut self,
-        owner_public_key: PublicKey,
-        auth_public_key: PublicKey,
-    ) -> Result<(), StateError> {
+    pub fn register_authorization(&mut self, public_key: PublicKey) -> Result<(), StateError> {
         if self.authorization.is_some() {
             return Err(StateError::InvalidAuthorization);
         }
-        if dual_address_from_public_keys(&owner_public_key, &auth_public_key) != self.address {
+        if address_from_public_key(&public_key) != self.address {
             return Err(StateError::AddressMismatch);
         }
-        self.authorization = Some(AccountAuthorization {
-            owner_public_key,
-            auth_public_key,
-        });
+        self.authorization = Some(AccountAuthorization { public_key });
         Ok(())
     }
 }
@@ -68,18 +59,14 @@ mod tests {
     #[test]
     fn new_with_authorization_registers_matching_keys() {
         let owner = generate_keypair();
-        let authorization = generate_keypair();
-        let address = dual_address_from_public_keys(&owner.public_key, &authorization.public_key);
+        let address = address_from_public_key(&owner.public_key);
 
-        let account =
-            Account::new_with_authorization(address, owner.public_key, authorization.public_key)
-                .unwrap();
+        let account = Account::new_with_authorization(address, owner.public_key).unwrap();
 
         assert_eq!(
             account.authorization,
             Some(AccountAuthorization {
-                owner_public_key: owner.public_key,
-                auth_public_key: authorization.public_key,
+                public_key: owner.public_key,
             })
         );
     }
@@ -87,11 +74,10 @@ mod tests {
     #[test]
     fn register_authorization_rejects_keys_for_another_address() {
         let owner = generate_keypair();
-        let authorization = generate_keypair();
         let mut account = Account::new(Address([0x5a; crate::crypto::ADDRESS_SIZE]));
 
         assert_eq!(
-            account.register_authorization(owner.public_key, authorization.public_key),
+            account.register_authorization(owner.public_key),
             Err(StateError::AddressMismatch)
         );
         assert!(account.authorization.is_none());

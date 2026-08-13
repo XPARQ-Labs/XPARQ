@@ -20,4 +20,4 @@ pub use builder::{
     genesis_hash_for_chain, genesis_ledger, genesis_ledger_for_chain, validate_genesis_identity,
 };
 #[cfg(any(feature = "devnet", feature = "testnet"))]
-pub use builder::{FAUCET_MAX_REQUEST, faucet_address, faucet_keypairs};
+pub use builder::{FAUCET_MAX_REQUEST, faucet_address, faucet_keypair};

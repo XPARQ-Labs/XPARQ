@@ -1,9 +1,8 @@
 use crate::block::Block;
 use crate::crypto::BlockHash;
 use crate::error::LedgerError;
-use crate::ledger::FINALITY_DEPTH;
-use crate::ledger::Ledger;
 use crate::ledger::fork_choice::ForkChoice;
+use crate::ledger::{CheckpointSet, Ledger};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReorgPlan {
@@ -16,12 +15,15 @@ pub struct ReorgPlan {
 pub fn plan_reorg(
     active: &Ledger,
     fork_choice: &ForkChoice,
+    checkpoints: &CheckpointSet,
     new_tip: BlockHash,
 ) -> Result<ReorgPlan, LedgerError> {
     let old_tip = active.tip_hash();
     let ancestor =
         common_ancestor(old_tip, new_tip, fork_choice).ok_or(LedgerError::InvalidParent)?;
-    if reorg_crosses_finality_boundary(active, fork_choice, ancestor) {
+    if !checkpoints.is_compatible(fork_choice, new_tip)
+        || reorg_crosses_checkpoint(fork_choice, checkpoints, ancestor)?
+    {
         return Err(LedgerError::FinalityViolation);
     }
     let apply = fork_choice
@@ -51,24 +53,18 @@ pub fn common_ancestor(
         .find(|hash| old_ancestors.contains(hash))
 }
 
-pub fn reorg_crosses_finality_boundary(
-    active: &Ledger,
+pub fn reorg_crosses_checkpoint(
     fork_choice: &ForkChoice,
+    checkpoints: &CheckpointSet,
     ancestor: BlockHash,
-) -> bool {
-    let Some(tip_height) = active.tip_height() else {
-        return false;
+) -> Result<bool, LedgerError> {
+    let Some(checkpoint) = checkpoints.highest() else {
+        return Ok(false);
     };
-    let Some(ancestor) = fork_choice.get(&ancestor) else {
-        return true;
-    };
-
-    reorg_crosses_finality_height(tip_height.0, ancestor.height.0)
-}
-
-pub const fn reorg_crosses_finality_height(tip_height: u64, ancestor_height: u64) -> bool {
-    let finalized_height = tip_height.saturating_sub(FINALITY_DEPTH as u64);
-    ancestor_height < finalized_height
+    let ancestor = fork_choice
+        .get(&ancestor)
+        .ok_or(LedgerError::InvalidParent)?;
+    Ok(ancestor.height.0 < checkpoint.height.0)
 }
 
 #[cfg(test)]
@@ -76,16 +72,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finality_boundary_accepts_exact_checkpoint_and_rejects_one_block_deeper() {
-        let tip = 100;
-        let finalized = tip - FINALITY_DEPTH as u64;
+    fn empty_checkpoints_do_not_create_local_finality() {
+        let checkpoints = CheckpointSet::empty();
+        let genesis = crate::genesis::genesis_block().unwrap();
+        let mut fork_choice = ForkChoice::new(genesis.hash().unwrap());
+        let genesis = fork_choice.insert_block(genesis).unwrap();
 
-        assert!(!reorg_crosses_finality_height(tip, finalized));
-        assert!(reorg_crosses_finality_height(tip, finalized - 1));
-    }
-
-    #[test]
-    fn short_chain_does_not_finalize_genesis_early() {
-        assert!(!reorg_crosses_finality_height(FINALITY_DEPTH as u64 - 1, 0));
+        assert!(!reorg_crosses_checkpoint(&fork_choice, &checkpoints, genesis).unwrap());
     }
 }

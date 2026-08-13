@@ -1,13 +1,11 @@
 #![allow(dead_code)]
 
-use xparq::block::{Block, CoinbaseTransaction, Height, Nonce};
+use xparq::block::{Block, EmissionTransaction, Height, Nonce};
 use xparq::consensus::DIFFICULTY_START;
 use xparq::consensus::supply::{Amount, XPQ};
-use xparq::crypto::{Address, Hash, KeyPair, dual_address_from_public_keys, generate_keypair, sign};
+use xparq::crypto::{Address, Hash, KeyPair, address_from_public_key, generate_keypair, sign};
 use xparq::ledger::Ledger;
-use xparq::qcash::{
-    QCashDenomination, QCashWithdrawalMetadata, qcash_redeem_key_commitment_from_secret,
-};
+use xparq::qcash::{QCashWithdrawalMetadata, qcash_redeem_key_commitment_from_secret};
 use xparq::transaction::{
     QCashTransaction, SignedProtocolTransaction, SignedQCashTransaction, SignedTransfer, Transfer,
     TransferOutput,
@@ -18,14 +16,12 @@ pub fn protocol_fixtures() -> &'static [SignedProtocolTransaction; 2] {
     static FIXTURES: OnceLock<[SignedProtocolTransaction; 2]> = OnceLock::new();
     FIXTURES.get_or_init(|| {
         let primary = generate_keypair();
-        let authorization = generate_keypair();
-        let signer = signer_address(&primary, &authorization);
+        let signer = signer_address(&primary);
         let mut ledger = Ledger::new();
         ledger
             .create_account_with_authorization(
                 signer,
                 primary.public_key,
-                authorization.public_key,
                 Amount(10 * XPQ),
             )
             .expect("fixture account");
@@ -38,7 +34,6 @@ pub fn protocol_fixtures() -> &'static [SignedProtocolTransaction; 2] {
             .id;
         let signed_transfer = signed_transfer(
             &primary,
-            &authorization,
             signer,
             input,
             Address([0x42; xparq::crypto::ADDRESS_SIZE]),
@@ -46,10 +41,10 @@ pub fn protocol_fixtures() -> &'static [SignedProtocolTransaction; 2] {
         );
 
         let redeem_secret = [0x31; 32];
-        let qcash_amount = QCashDenomination::One.amount();
-        let qcash_metadata = QCashWithdrawalMetadata::with_denominations(
+        let qcash_amount = Amount(XPQ);
+        let qcash_metadata = QCashWithdrawalMetadata::with_amounts(
             qcash_amount,
-            &[QCashDenomination::One],
+            &[qcash_amount],
             &[qcash_redeem_key_commitment_from_secret(&redeem_secret)],
         )
         .expect("valid QCash fixture");
@@ -61,12 +56,10 @@ pub fn protocol_fixtures() -> &'static [SignedProtocolTransaction; 2] {
             qcash_metadata,
         );
         let qcash_bytes = qcash.signing_bytes().expect("fixture serialization");
-        let signed_qcash = SignedQCashTransaction::new_authorized(
+        let signed_qcash = SignedQCashTransaction::new(
             qcash,
             primary.public_key,
             sign(&primary.secret_key, &qcash_bytes),
-            authorization.public_key,
-            sign(&authorization.secret_key, &qcash_bytes),
         );
 
         [signed_transfer.into(), signed_qcash.into()]
@@ -81,7 +74,6 @@ pub fn ledger_for(transaction: &SignedProtocolTransaction) -> Ledger {
             .create_account_with_authorization(
                 transaction.signer(),
                 authorization_proof.public_key,
-                authorization_proof.auth_public_key,
                 Amount(10 * XPQ),
             )
             .expect("fixture account");
@@ -99,24 +91,22 @@ pub fn qcash_lifecycle_fixture() -> (Ledger, SignedQCashTransaction, SignedQCash
     FIXTURE
         .get_or_init(|| {
             let primary = generate_keypair();
-            let authorization = generate_keypair();
-            let signer = signer_address(&primary, &authorization);
+            let signer = signer_address(&primary);
             let recipient = Address([0x91; xparq::crypto::ADDRESS_SIZE]);
             let mut ledger = Ledger::new();
             ledger
                 .create_account_with_authorization(
                     signer,
                     primary.public_key,
-                    authorization.public_key,
                     Amount(10 * XPQ),
                 )
                 .expect("fixture account");
 
             let redeem_secret = [0x31; 32];
-            let amount = QCashDenomination::One.amount();
-            let metadata = QCashWithdrawalMetadata::with_denominations(
+            let amount = Amount(XPQ);
+            let metadata = QCashWithdrawalMetadata::with_amounts(
                 amount,
-                &[QCashDenomination::One],
+                &[amount],
                 &[qcash_redeem_key_commitment_from_secret(&redeem_secret)],
             )
             .expect("withdraw metadata");
@@ -134,12 +124,10 @@ pub fn qcash_lifecycle_fixture() -> (Ledger, SignedQCashTransaction, SignedQCash
                 metadata,
             );
             let bytes = withdraw.signing_bytes().expect("withdraw signing bytes");
-            let withdraw = SignedQCashTransaction::new_authorized(
+            let withdraw = SignedQCashTransaction::new(
                 withdraw,
                 primary.public_key,
                 sign(&primary.secret_key, &bytes),
-                authorization.public_key,
-                sign(&authorization.secret_key, &bytes),
             );
 
             let output = match &withdraw.transaction.kind {
@@ -161,12 +149,10 @@ pub fn qcash_lifecycle_fixture() -> (Ledger, SignedQCashTransaction, SignedQCash
             )
             .expect("redeem transaction");
             let bytes = redeem.signing_bytes().expect("redeem signing bytes");
-            let redeem = SignedQCashTransaction::new_authorized(
+            let redeem = SignedQCashTransaction::new(
                 redeem,
                 primary.public_key,
                 sign(&primary.secret_key, &bytes),
-                authorization.public_key,
-                sign(&authorization.secret_key, &bytes),
             );
             (ledger, withdraw, redeem)
         })
@@ -181,7 +167,7 @@ pub fn mixed_family_block() -> Block {
         Hash([0x73; xparq::crypto::HASH_SIZE]),
         DIFFICULTY_START,
         Nonce(0),
-        Some(CoinbaseTransaction::new(miner, Amount(0))),
+        Some(EmissionTransaction::new(miner, Amount(0))),
         transactions,
     )
     .expect("mixed-family fixture")
@@ -192,19 +178,17 @@ pub fn mutate_transaction(transaction: &mut SignedProtocolTransaction, data: &[u
     match data.first().copied().unwrap_or(0) % 4 {
         0 => {}
         1 => proof.signature.0[0] ^= 1,
-        2 => proof.auth_signature.0[0] ^= 1,
-        _ if proof.carries_registration_keys() => proof.auth_public_key.0[0] ^= 1,
+        2 if proof.carries_registration_keys() => proof.public_key.0[0] ^= 1,
         _ => proof.signature.0[1] ^= 1,
     }
 }
 
-fn signer_address(primary: &KeyPair, authorization: &KeyPair) -> Address {
-    dual_address_from_public_keys(&primary.public_key, &authorization.public_key)
+fn signer_address(primary: &KeyPair) -> Address {
+    address_from_public_key(&primary.public_key)
 }
 
 fn signed_transfer(
     primary: &KeyPair,
-    authorization: &KeyPair,
     signer: Address,
     input: xparq::state::XpqCoinId,
     recipient: Address,
@@ -212,11 +196,9 @@ fn signed_transfer(
 ) -> SignedTransfer {
     let transaction = Transfer::new(signer, vec![input], recipient, amount);
     let transfer_bytes = transaction.signing_bytes().expect("fixture serialization");
-    SignedTransfer::new_authorized(
+    SignedTransfer::new(
         transaction,
         primary.public_key,
         sign(&primary.secret_key, &transfer_bytes),
-        authorization.public_key,
-        sign(&authorization.secret_key, &transfer_bytes),
     )
 }

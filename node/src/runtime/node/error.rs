@@ -16,8 +16,6 @@ pub enum NodeError {
     Mempool(MempoolError),
     Storage(StorageError),
     Codec(xparq::error::CodecError),
-    RollbackProof(xparq::qcash::recovery::RollbackProofError),
-    MiningExhausted,
     MissingGenesisState,
     MissingStagedLedger,
     MissingBestTip,
@@ -25,13 +23,8 @@ pub enum NodeError {
     MissingForkBranch,
     MissingActiveTip,
     MissingForkNode,
-    MissingLedgerBlock,
     MissingDifficultyAnchor,
     TransactionIndexOverflow,
-    MissingRollbackProofContext,
-    RollbackProofContextMismatch,
-    MissingDisconnectedBlock,
-    RollbackIssueMismatch,
 }
 
 impl fmt::Display for NodeError {
@@ -44,8 +37,6 @@ impl fmt::Display for NodeError {
             NodeError::Mempool(error) => write!(f, "mempool error: {error}"),
             NodeError::Storage(error) => write!(f, "storage error: {error}"),
             NodeError::Codec(error) => write!(f, "canonical encoding error: {error}"),
-            NodeError::RollbackProof(error) => write!(f, "rollback proof error: {error}"),
-            NodeError::MiningExhausted => f.write_str("mining attempt budget was exhausted"),
             NodeError::MissingGenesisState => {
                 f.write_str("node cannot reorg without the genesis account state")
             }
@@ -61,26 +52,11 @@ impl fmt::Display for NodeError {
             }
             NodeError::MissingActiveTip => f.write_str("active ledger tip is missing"),
             NodeError::MissingForkNode => f.write_str("required block is missing from fork graph"),
-            NodeError::MissingLedgerBlock => {
-                f.write_str("required block is missing from active ledger")
-            }
             NodeError::MissingDifficultyAnchor => {
                 f.write_str("WBDA difficulty weight anchor is missing")
             }
             NodeError::TransactionIndexOverflow => {
                 f.write_str("block transaction index exceeds supported range")
-            }
-            NodeError::MissingRollbackProofContext => {
-                f.write_str("rollback proof context was not found")
-            }
-            NodeError::RollbackProofContextMismatch => {
-                f.write_str("rollback proof branches do not share a valid ancestor")
-            }
-            NodeError::MissingDisconnectedBlock => {
-                f.write_str("rollback proof does not contain the disconnected block")
-            }
-            NodeError::RollbackIssueMismatch => {
-                f.write_str("rollback issue does not match its verified proof")
             }
         }
     }
@@ -96,8 +72,6 @@ impl Error for NodeError {
             NodeError::Mempool(error) => Some(error),
             NodeError::Storage(error) => Some(error),
             NodeError::Codec(error) => Some(error),
-            NodeError::RollbackProof(error) => Some(error),
-            NodeError::MiningExhausted => None,
             NodeError::MissingGenesisState => None,
             NodeError::MissingStagedLedger
             | NodeError::MissingBestTip
@@ -105,13 +79,8 @@ impl Error for NodeError {
             | NodeError::MissingForkBranch
             | NodeError::MissingActiveTip
             | NodeError::MissingForkNode
-            | NodeError::MissingLedgerBlock
             | NodeError::MissingDifficultyAnchor
-            | NodeError::TransactionIndexOverflow
-            | NodeError::MissingRollbackProofContext
-            | NodeError::RollbackProofContextMismatch
-            | NodeError::MissingDisconnectedBlock
-            | NodeError::RollbackIssueMismatch => None,
+            | NodeError::TransactionIndexOverflow => None,
         }
     }
 }
@@ -155,12 +124,6 @@ impl From<StorageError> for NodeError {
 impl From<xparq::error::CodecError> for NodeError {
     fn from(error: xparq::error::CodecError) -> Self {
         NodeError::Codec(error)
-    }
-}
-
-impl From<xparq::qcash::recovery::RollbackProofError> for NodeError {
-    fn from(error: xparq::qcash::recovery::RollbackProofError) -> Self {
-        NodeError::RollbackProof(error)
     }
 }
 

@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use xparq::genesis::artifact::{ledger_from_authenticated_snapshot, snapshot_xparq_bytes};
 use xparq::genesis::genesis_ledger;
+use xparq::ledger::ChainHeader;
 use xparq::ledger::{Ledger, Work};
-use xparq::qcash::recovery::ChainHeader;
 
 pub const FAST_SYNC_BUNDLE_VERSION: u8 = 1;
 pub const MAX_FAST_SYNC_BUNDLE_SIZE: u64 = 300 * 1024 * 1024;
@@ -226,6 +226,7 @@ fn staging_path(database_path: &Path) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "mainnet")]
     fn unique_target(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "xparq-{label}-{}-{}",

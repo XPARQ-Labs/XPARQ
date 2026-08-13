@@ -2,15 +2,15 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 use xparq::block::MAX_BLOCK_WEIGHT;
 use xparq::codec::{canonical_bytes, canonical_deserialize};
-use xparq::consensus::supply::{Amount, BASE_BLOCK_REWARD};
+use xparq::consensus::supply::{Amount, BASE_BLOCK_REWARD, XPQ};
 use xparq::consensus::{
-    DIFFICULTY_START, WBDA_WINDOW, next_difficulty_from_window, next_reward_from_window,
+    DIFFICULTY_START, WBDA_WINDOW, calculate_work, next_difficulty_from_window,
+    next_reward_from_window,
 };
-use xparq::crypto::{Address, address_from_string, address_to_string, argon2id_pow_hash};
-use xparq::genesis::{decode_genesis_xparq, genesis_xparq_bytes};
+use xparq::crypto::{Address, address_from_string, address_to_string};
+use xparq::genesis::{decode_genesis_xparq, genesis_block, genesis_xparq_bytes};
 use xparq::qcash::{
-    QCASH_FILE_VERSION, QCashCoinFile, QCashDenomination, decode_qcash_coin_file,
-    encode_qcash_coin_file, format_qcash_coins,
+    QCASH_FILE_VERSION, QCashCoinFile, decode_qcash_coin_file, encode_qcash_coin_file,
 };
 
 fn measure(iterations: u32, mut operation: impl FnMut()) -> Duration {
@@ -34,7 +34,7 @@ fn main() {
 
     println!("xparq core benchmark ({iterations} measured iterations)");
 
-    let address = Address([7; 20]);
+    let address = Address([7; xparq::crypto::ADDRESS_SIZE]);
     let encoded_address = address_to_string(&address);
     report(
         "address encode",
@@ -52,7 +52,7 @@ fn main() {
     let half_window = vec![MAX_BLOCK_WEIGHT / 2; WBDA_WINDOW];
     let full_window = vec![MAX_BLOCK_WEIGHT; WBDA_WINDOW];
     report(
-        "WBDA difficulty (2048 blocks)",
+        "WBDA difficulty window",
         measure(iterations, || {
             black_box(next_difficulty_from_window(
                 DIFFICULTY_START,
@@ -62,7 +62,7 @@ fn main() {
         }),
     );
     report(
-        "WBDA reward (2048 blocks)",
+        "WBDA reward window",
         measure(iterations, || {
             black_box(next_reward_from_window(
                 Amount(BASE_BLOCK_REWARD),
@@ -75,7 +75,7 @@ fn main() {
     let coin = QCashCoinFile {
         version: QCASH_FILE_VERSION,
         coin_id: [3; 32],
-        denomination: QCashDenomination::OneHundred,
+        amount: Amount(100 * XPQ + 500_000),
         redeem_secret: [9; 32],
     };
     let encoded_coin = encode_qcash_coin_file(&coin).unwrap();
@@ -91,13 +91,6 @@ fn main() {
             black_box(decode_qcash_coin_file(black_box(&encoded_coin))).unwrap();
         }),
     );
-    report(
-        "QCash denomination selection",
-        measure(iterations, || {
-            black_box(format_qcash_coins(black_box(Amount(1_234_567_000_000)))).unwrap();
-        }),
-    );
-
     let canonical = canonical_bytes(&coin).unwrap();
     report(
         "canonical QCash serialize",
@@ -124,10 +117,11 @@ fn main() {
     );
 
     let pow_iterations = iterations.min(3);
+    let pow_header = genesis_block().unwrap().header;
     report(
         "Argon2id proof-of-work hash",
         measure(pow_iterations, || {
-            black_box(argon2id_pow_hash(black_box(b"xparq-core-benchmark-header"))).unwrap();
+            black_box(calculate_work(black_box(&pow_header))).unwrap();
         }),
     );
 }

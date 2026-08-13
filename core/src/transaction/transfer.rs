@@ -3,7 +3,7 @@ use crate::codec::{signed_transaction_bytes, transaction_bytes, transaction_hash
 use crate::consensus::supply::Amount;
 use crate::crypto::{Address, PublicKey, Signature};
 use crate::crypto::{Hash, HashDomain, TransactionHash, domain_hash};
-use crate::crypto::{dual_address_from_public_keys, verify};
+use crate::crypto::{address_from_public_key, verify};
 pub use crate::error::TransactionError;
 use crate::genesis::CURRENT_CHAIN_PARAMS;
 use crate::state::XpqCoinId;
@@ -221,9 +221,7 @@ impl Transfer {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AuthorizationProof {
     pub public_key: PublicKey,
-    pub auth_public_key: PublicKey,
     pub signature: Signature,
-    pub auth_signature: Signature,
 }
 
 impl AuthorizationProof {
@@ -233,44 +231,23 @@ impl AuthorizationProof {
     pub fn new(public_key: PublicKey, signature: Signature) -> Self {
         Self {
             public_key,
-            auth_public_key: PublicKey([0; crate::crypto::PUBLIC_KEY_SIZE]),
             signature,
-            auth_signature: Signature([0; crate::crypto::SIGNATURE_SIZE]),
         }
     }
 
-    pub fn new_authorized(
-        public_key: PublicKey,
-        signature: Signature,
-        auth_public_key: PublicKey,
-        auth_signature: Signature,
-    ) -> Self {
-        Self {
-            public_key,
-            auth_public_key,
-            signature,
-            auth_signature,
-        }
-    }
-
-    pub fn new_stored(signature: Signature, auth_signature: Signature) -> Self {
+    pub fn new_stored(signature: Signature) -> Self {
         Self {
             public_key: PublicKey([0; crate::crypto::PUBLIC_KEY_SIZE]),
-            auth_public_key: PublicKey([0; crate::crypto::PUBLIC_KEY_SIZE]),
             signature,
-            auth_signature,
         }
     }
 
     pub fn carries_registration_keys(&self) -> bool {
-        let owner = self.public_key.0.iter().any(|byte| *byte != 0);
-        let auth = self.auth_public_key.0.iter().any(|byte| *byte != 0);
-        owner && auth
+        self.public_key.0.iter().any(|byte| *byte != 0)
     }
 
     pub fn uses_stored_keys(&self) -> bool {
         self.public_key.0.iter().all(|byte| *byte == 0)
-            && self.auth_public_key.0.iter().all(|byte| *byte == 0)
     }
 
     pub fn validate_shape(&self) -> Result<(), TransactionError> {
@@ -279,9 +256,6 @@ impl AuthorizationProof {
         }
         if self.signature.0.iter().all(|byte| *byte == 0) {
             return Err(TransactionError::EmptySignature);
-        }
-        if self.auth_signature.0.iter().all(|byte| *byte == 0) {
-            return Err(TransactionError::EmptyAuthorizationSignature);
         }
         Ok(())
     }
@@ -312,32 +286,24 @@ impl BorshSerialize for AuthorizationProof {
         if self.carries_registration_keys() {
             Self::REGISTER_KEYS_TAG.serialize(writer)?;
             self.public_key.serialize(writer)?;
-            self.auth_public_key.serialize(writer)?;
         } else if self.uses_stored_keys() {
             Self::STORED_KEYS_TAG.serialize(writer)?;
         } else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "authorization_proof must carry both public keys or neither",
+                "authorization proof must carry one public key or use the stored key",
             ));
         }
-        self.signature.serialize(writer)?;
-        self.auth_signature.serialize(writer)
+        self.signature.serialize(writer)
     }
 }
 
 impl BorshDeserialize for AuthorizationProof {
     fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
         let tag = u8::deserialize_reader(reader)?;
-        let (public_key, auth_public_key) = match tag {
-            Self::REGISTER_KEYS_TAG => (
-                PublicKey::deserialize_reader(reader)?,
-                PublicKey::deserialize_reader(reader)?,
-            ),
-            Self::STORED_KEYS_TAG => (
-                PublicKey([0; crate::crypto::PUBLIC_KEY_SIZE]),
-                PublicKey([0; crate::crypto::PUBLIC_KEY_SIZE]),
-            ),
+        let public_key = match tag {
+            Self::REGISTER_KEYS_TAG => PublicKey::deserialize_reader(reader)?,
+            Self::STORED_KEYS_TAG => PublicKey([0; crate::crypto::PUBLIC_KEY_SIZE]),
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -347,9 +313,7 @@ impl BorshDeserialize for AuthorizationProof {
         };
         Ok(Self {
             public_key,
-            auth_public_key,
             signature: Signature::deserialize_reader(reader)?,
-            auth_signature: Signature::deserialize_reader(reader)?,
         })
     }
 }
@@ -368,32 +332,10 @@ impl SignedTransfer {
         }
     }
 
-    pub fn new_authorized(
-        transaction: Transfer,
-        public_key: PublicKey,
-        signature: Signature,
-        auth_public_key: PublicKey,
-        auth_signature: Signature,
-    ) -> Self {
+    pub fn new_stored(transaction: Transfer, signature: Signature) -> Self {
         Self {
             transaction,
-            authorization_proof: AuthorizationProof::new_authorized(
-                public_key,
-                signature,
-                auth_public_key,
-                auth_signature,
-            ),
-        }
-    }
-
-    pub fn new_stored_authorized(
-        transaction: Transfer,
-        signature: Signature,
-        auth_signature: Signature,
-    ) -> Self {
-        Self {
-            transaction,
-            authorization_proof: AuthorizationProof::new_stored(signature, auth_signature),
+            authorization_proof: AuthorizationProof::new_stored(signature),
         }
     }
 
@@ -430,15 +372,6 @@ impl SignedTransfer {
         {
             return Err(TransactionError::EmptySignature);
         }
-        if self
-            .authorization_proof
-            .auth_signature
-            .0
-            .iter()
-            .all(|byte| *byte == 0)
-        {
-            return Err(TransactionError::EmptyAuthorizationSignature);
-        }
         Ok(())
     }
 
@@ -456,57 +389,34 @@ impl SignedTransfer {
         }
     }
 
-    pub fn verify_authorization(
-        &self,
-        auth_public_key: &PublicKey,
-    ) -> Result<(), TransactionError> {
-        let payload_bytes = self.transaction.signing_bytes()?;
-        if verify(
-            auth_public_key,
-            &payload_bytes,
-            &self.authorization_proof.auth_signature,
-        ) {
-            Ok(())
-        } else {
-            Err(TransactionError::InvalidAuthorizationSignature)
-        }
+    pub fn sender_address(&self) -> Address {
+        address_from_public_key(&self.authorization_proof.public_key)
     }
 
-    pub fn sender_address(&self, auth_public_key: &PublicKey) -> Address {
-        dual_address_from_public_keys(&self.authorization_proof.public_key, auth_public_key)
-    }
-
-    fn validate_dual_authorization_at_height(
+    fn validate_registration_signature_at_height(
         &self,
-        height: crate::block::BlockHeight,
+        _height: crate::block::BlockHeight,
     ) -> Result<(), TransactionError> {
         if !self.authorization_proof.carries_registration_keys() {
             return Err(TransactionError::EmptyPublicKey);
         }
-        if self.sender_address(&self.authorization_proof.auth_public_key) != self.transaction.from {
+        if self.sender_address() != self.transaction.from {
             return Err(TransactionError::SenderAddressMismatch);
         }
         let payload = self.transaction.signing_bytes()?;
-        let (owner_valid, auth_valid) = crate::crypto::verify_dual_parallel_at_height(
-            height,
+        if !verify(
             &self.authorization_proof.public_key,
-            &self.authorization_proof.auth_public_key,
             &payload,
             &self.authorization_proof.signature,
-            &self.authorization_proof.auth_signature,
-        );
-        if !owner_valid {
+        ) {
             return Err(TransactionError::InvalidSignature);
-        }
-        if !auth_valid {
-            return Err(TransactionError::InvalidAuthorizationSignature);
         }
         Ok(())
     }
 
     pub fn validate_signed(&self) -> Result<(), TransactionError> {
         self.validate()?;
-        self.validate_dual_authorization_at_height(crate::block::Height(0))
+        self.validate_registration_signature_at_height(crate::block::Height(0))
     }
 
     pub fn validate_signed_for_height(
@@ -515,34 +425,26 @@ impl SignedTransfer {
     ) -> Result<(), TransactionError> {
         self.validate_for_height(height)?;
 
-        self.validate_dual_authorization_at_height(height)
+        self.validate_registration_signature_at_height(height)
     }
 
     pub fn validate_stored_keys_for_height(
         &self,
         height: crate::block::BlockHeight,
-        owner_public_key: &PublicKey,
-        auth_public_key: &PublicKey,
+        public_key: &PublicKey,
     ) -> Result<(), TransactionError> {
         self.validate_for_height(height)?;
         self.validate_authorization_proof_and_size()?;
         if !self.authorization_proof.uses_stored_keys() {
-            return Err(TransactionError::InvalidAuthorizationSignature);
+            return Err(TransactionError::InvalidAuthorizationProofEncoding);
         }
         let payload_bytes = self.transaction.signing_bytes()?;
-        let (owner_valid, auth_valid) = crate::crypto::verify_dual_parallel_at_height(
-            height,
-            owner_public_key,
-            auth_public_key,
+        if !verify(
+            public_key,
             &payload_bytes,
             &self.authorization_proof.signature,
-            &self.authorization_proof.auth_signature,
-        );
-        if !owner_valid {
+        ) {
             return Err(TransactionError::InvalidSignature);
-        }
-        if !auth_valid {
-            return Err(TransactionError::InvalidAuthorizationSignature);
         }
         Ok(())
     }
@@ -598,16 +500,13 @@ mod transfer_tests {
             Address([1; crate::crypto::ADDRESS_SIZE]),
             Amount(1),
         );
-        let signed = SignedTransfer::new_stored_authorized(
-            transaction,
-            Signature([1; crate::crypto::SIGNATURE_SIZE]),
-            Signature([2; crate::crypto::SIGNATURE_SIZE]),
-        );
+        let signed =
+            SignedTransfer::new_stored(transaction, Signature([1; crate::crypto::SIGNATURE_SIZE]));
 
         assert!(signed.stripped_size().unwrap() > 74);
         assert_eq!(
             signed.authorization_proof_size().unwrap(),
-            1 + (2 * crate::crypto::SIGNATURE_SIZE)
+            1 + crate::crypto::SIGNATURE_SIZE
         );
         assert!(signed.serialized_size().unwrap() > signed.stripped_size().unwrap());
     }
@@ -649,17 +548,13 @@ mod transfer_tests {
 
     #[test]
     fn authorization_proof_hash_is_bound_to_transaction_hash() {
-        let proof = AuthorizationProof::new_authorized(
+        let proof = AuthorizationProof::new(
             PublicKey([1; crate::crypto::PUBLIC_KEY_SIZE]),
             Signature([2; crate::crypto::SIGNATURE_SIZE]),
-            PublicKey([3; crate::crypto::PUBLIC_KEY_SIZE]),
-            Signature([4; crate::crypto::SIGNATURE_SIZE]),
         );
-        let other_proof = AuthorizationProof::new_authorized(
+        let other_proof = AuthorizationProof::new(
             PublicKey([1; crate::crypto::PUBLIC_KEY_SIZE]),
             Signature([5; crate::crypto::SIGNATURE_SIZE]),
-            PublicKey([3; crate::crypto::PUBLIC_KEY_SIZE]),
-            Signature([4; crate::crypto::SIGNATURE_SIZE]),
         );
 
         assert_ne!(

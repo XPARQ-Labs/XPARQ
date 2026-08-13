@@ -1,16 +1,15 @@
-use crate::block::merkle::MerkleInclusionProof;
+//! Generic authenticated header-chain verification for PoW fork choice,
+//! checkpoints, snapshots, and wallet proofs.
+
 use crate::block::{Block, BlockHeight, Header};
-use crate::crypto::{BlockHash, HashDomain};
+use crate::crypto::BlockHash;
 use crate::genesis::genesis_hash;
 use crate::ledger::fork_choice::{ForkChoice, Work};
-use crate::transaction::{SignedProtocolTransaction, TransactionError};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::error::Error;
 use std::fmt;
 
-pub const ROLLBACK_PROOF_VERSION: u8 = 1;
 pub const RECENT_HEADER_WINDOW: usize = crate::consensus::WBDA_WINDOW;
-pub const MAX_ROLLBACK_PROOF_HEADERS: usize = 1_000_000;
 pub const HEADER_CHAIN_CHUNK_VERSION: u8 = 1;
 pub const MAX_HEADER_CHAIN_CHUNK_HEADERS: usize = 4_096;
 pub const MAX_HEADER_CHAIN_CHUNK_SIZE: usize = 1024 * 1024;
@@ -130,149 +129,39 @@ pub struct TrustedHeaderCheckpoint {
     pub recent_headers: Vec<ChainHeader>,
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RollbackProofBundle {
-    pub version: u8,
-    pub transaction: SignedProtocolTransaction,
-    pub disconnected_block_header: ChainHeader,
-    pub transaction_proof: MerkleInclusionProof,
-    /// Complete header path from configured genesis through the disconnected tip.
-    pub losing_headers: Vec<ChainHeader>,
-    /// Complete header path from configured genesis through the selected canonical tip.
-    pub canonical_headers: Vec<ChainHeader>,
-    pub common_ancestor: BlockHash,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VerifiedRollbackProof {
-    pub transaction_hash: crate::crypto::TransactionHash,
-    pub disconnected_block_hash: BlockHash,
-    pub common_ancestor: BlockHash,
-    pub losing_tip: BlockHash,
-    pub canonical_tip: BlockHash,
-    pub losing_work: Work,
-    pub canonical_work: Work,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RollbackProofError {
-    UnsupportedVersion,
-    HeaderLimitExceeded,
+pub enum HeaderChainError {
     EmptyHeaderChain,
     WrongGenesis,
     InvalidHeaderChain(crate::ledger::fork_choice::ForkChoiceError),
     InvalidCommonAncestor,
-    DisconnectedBlockNotOnLosingBranch,
-    TransactionInvalid(TransactionError),
-    TransactionProofInvalid,
-    CanonicalBranchDoesNotWin,
     Serialization(crate::error::CodecError),
 }
 
-impl fmt::Display for RollbackProofError {
+impl fmt::Display for HeaderChainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
-            Self::UnsupportedVersion => "unsupported rollback proof version",
-            Self::HeaderLimitExceeded => "rollback proof header limit exceeded",
-            Self::EmptyHeaderChain => "rollback proof contains an empty header chain",
-            Self::WrongGenesis => "rollback proof does not start at configured genesis",
-            Self::InvalidHeaderChain(_) => "rollback proof header chain is invalid",
-            Self::InvalidCommonAncestor => "rollback proof common ancestor is invalid",
-            Self::DisconnectedBlockNotOnLosingBranch => {
-                "disconnected block is not on the losing branch"
-            }
-            Self::TransactionInvalid(_) => "rollback proof transaction is invalid",
-            Self::TransactionProofInvalid => "rollback transaction inclusion proof is invalid",
-            Self::CanonicalBranchDoesNotWin => "rollback canonical branch does not win fork choice",
-            Self::Serialization(_) => "rollback proof serialization failed",
+            Self::EmptyHeaderChain => "header chain is empty",
+            Self::WrongGenesis => "header chain does not start at configured genesis",
+            Self::InvalidHeaderChain(_) => "header chain is invalid",
+            Self::InvalidCommonAncestor => "header chain common ancestor is invalid",
+            Self::Serialization(_) => "header chain serialization failed",
         };
         match self {
             Self::InvalidHeaderChain(error) => write!(f, "{message}: {error}"),
-            Self::TransactionInvalid(error) => write!(f, "{message}: {error}"),
             Self::Serialization(error) => write!(f, "{message}: {error}"),
             _ => f.write_str(message),
         }
     }
 }
 
-impl Error for RollbackProofError {
+impl Error for HeaderChainError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidHeaderChain(error) => Some(error),
-            Self::TransactionInvalid(error) => Some(error),
             Self::Serialization(error) => Some(error),
             _ => None,
         }
-    }
-}
-
-impl RollbackProofBundle {
-    pub fn verify(&self) -> Result<VerifiedRollbackProof, RollbackProofError> {
-        if self.version != ROLLBACK_PROOF_VERSION {
-            return Err(RollbackProofError::UnsupportedVersion);
-        }
-        if self.losing_headers.len() > MAX_ROLLBACK_PROOF_HEADERS
-            || self.canonical_headers.len() > MAX_ROLLBACK_PROOF_HEADERS
-        {
-            return Err(RollbackProofError::HeaderLimitExceeded);
-        }
-        let (losing_tip, losing_work) = verify_header_chain(&self.losing_headers)?;
-        let (canonical_tip, canonical_work) = verify_header_chain(&self.canonical_headers)?;
-        let shared_count = self
-            .losing_headers
-            .iter()
-            .zip(&self.canonical_headers)
-            .take_while(|(left, right)| left == right)
-            .count();
-        if shared_count == 0
-            || shared_count == self.losing_headers.len()
-            || shared_count == self.canonical_headers.len()
-        {
-            return Err(RollbackProofError::InvalidCommonAncestor);
-        }
-        let common_ancestor = self.losing_headers[shared_count - 1]
-            .hash()
-            .map_err(RollbackProofError::Serialization)?;
-        if common_ancestor != self.common_ancestor {
-            return Err(RollbackProofError::InvalidCommonAncestor);
-        }
-        let disconnected_block_hash = self
-            .disconnected_block_header
-            .header
-            .hash()
-            .map_err(RollbackProofError::Serialization)?;
-        if !self.losing_headers[shared_count..]
-            .iter()
-            .any(|header| header == &self.disconnected_block_header)
-        {
-            return Err(RollbackProofError::DisconnectedBlockNotOnLosingBranch);
-        }
-        validate_signed_transaction(&self.transaction, self.disconnected_block_header.height)?;
-        let transaction_hash = self
-            .transaction
-            .hash()
-            .map_err(RollbackProofError::Serialization)?;
-        if !self.transaction_proof.verify(
-            transaction_hash.as_hash(),
-            self.disconnected_block_header.header.merkle_root.as_hash(),
-            HashDomain::MerkleNode,
-        ) {
-            return Err(RollbackProofError::TransactionProofInvalid);
-        }
-        if canonical_work < losing_work
-            || (canonical_work == losing_work && canonical_tip >= losing_tip)
-        {
-            return Err(RollbackProofError::CanonicalBranchDoesNotWin);
-        }
-        Ok(VerifiedRollbackProof {
-            transaction_hash,
-            disconnected_block_hash,
-            common_ancestor,
-            losing_tip,
-            canonical_tip,
-            losing_work,
-            canonical_work,
-        })
     }
 }
 
@@ -282,50 +171,40 @@ impl RollbackProofBundle {
 /// The returned work is suitable for comparing independently obtained
 /// candidate chains. Callers must still bind any state data to the returned
 /// tip hash and the tip header's state commitment.
-pub fn verify_header_chain(
-    headers: &[ChainHeader],
-) -> Result<(BlockHash, Work), RollbackProofError> {
-    verify_chain_headers(headers)
-}
-
-pub fn verify_chain_headers(
-    headers: &[ChainHeader],
-) -> Result<(BlockHash, Work), RollbackProofError> {
-    let first = headers
-        .first()
-        .ok_or(RollbackProofError::EmptyHeaderChain)?;
-    let expected_genesis = genesis_hash().map_err(RollbackProofError::Serialization)?;
+pub fn verify_header_chain(headers: &[ChainHeader]) -> Result<(BlockHash, Work), HeaderChainError> {
+    let first = headers.first().ok_or(HeaderChainError::EmptyHeaderChain)?;
+    let expected_genesis = genesis_hash().map_err(HeaderChainError::Serialization)?;
     if first.height.0 != 0
-        || first.hash().map_err(RollbackProofError::Serialization)?.0 != expected_genesis.0
+        || first.hash().map_err(HeaderChainError::Serialization)?.0 != expected_genesis.0
     {
-        return Err(RollbackProofError::WrongGenesis);
+        return Err(HeaderChainError::WrongGenesis);
     }
     let mut fork_choice = ForkChoice::new(expected_genesis.into());
     for header in headers {
         let block = header.block();
         fork_choice
             .insert_block(block)
-            .map_err(RollbackProofError::InvalidHeaderChain)?;
+            .map_err(HeaderChainError::InvalidHeaderChain)?;
     }
     let tip = fork_choice
         .best_tip()
         .ok_or(crate::ledger::fork_choice::ForkChoiceError::MissingParent)
-        .map_err(RollbackProofError::InvalidHeaderChain)?;
+        .map_err(HeaderChainError::InvalidHeaderChain)?;
     Ok((tip.hash, tip.cumulative_work))
 }
 
 pub fn trusted_header_checkpoint(
     validated_headers: &[ChainHeader],
-) -> Result<TrustedHeaderCheckpoint, RollbackProofError> {
+) -> Result<TrustedHeaderCheckpoint, HeaderChainError> {
     let (_, cumulative_work) = verify_header_chain(validated_headers)?;
     let tip = validated_headers
         .last()
         .cloned()
-        .ok_or(RollbackProofError::EmptyHeaderChain)?;
+        .ok_or(HeaderChainError::EmptyHeaderChain)?;
     let difficulty_anchor = validated_headers
         .get(usize::from(tip.height.0 > 0))
         .cloned()
-        .ok_or(RollbackProofError::EmptyHeaderChain)?;
+        .ok_or(HeaderChainError::EmptyHeaderChain)?;
     let start = validated_headers.len().saturating_sub(RECENT_HEADER_WINDOW);
     Ok(TrustedHeaderCheckpoint {
         height: tip.height,
@@ -343,11 +222,11 @@ pub fn trusted_header_checkpoint(
 pub fn verify_header_chain_extension(
     checkpoint: &TrustedHeaderCheckpoint,
     headers: &[ChainHeader],
-) -> Result<(BlockHash, Work), RollbackProofError> {
+) -> Result<(BlockHash, Work), HeaderChainError> {
     let checkpoint_hash = checkpoint
         .header
         .hash()
-        .map_err(RollbackProofError::Serialization)?;
+        .map_err(HeaderChainError::Serialization)?;
     if checkpoint.recent_headers.is_empty()
         || checkpoint.recent_headers.len() > RECENT_HEADER_WINDOW
         || checkpoint
@@ -355,7 +234,7 @@ pub fn verify_header_chain_extension(
             .last()
             .is_none_or(|tip| tip.header != checkpoint.header)
     {
-        return Err(RollbackProofError::InvalidCommonAncestor);
+        return Err(HeaderChainError::InvalidCommonAncestor);
     }
     let mut previous_height = checkpoint.height;
     let mut previous = checkpoint.header.clone();
@@ -367,12 +246,12 @@ pub fn verify_header_chain_extension(
         if chain_header.height.0 != previous_height.0.saturating_add(1)
             || BlockHash(header.previous_hash.0) != previous_hash
         {
-            return Err(RollbackProofError::InvalidCommonAncestor);
+            return Err(HeaderChainError::InvalidCommonAncestor);
         }
         let expected_difficulty = if crate::consensus::is_wbda_epoch_boundary(chain_header.height.0)
         {
             if recent.len() < crate::consensus::WBDA_WINDOW {
-                return Err(RollbackProofError::InvalidHeaderChain(
+                return Err(HeaderChainError::InvalidHeaderChain(
                     crate::ledger::fork_choice::ForkChoiceError::MissingParent,
                 ));
             }
@@ -382,12 +261,12 @@ pub fn verify_header_chain_extension(
                 .map(|header| usize::try_from(header.header.block_weight))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| {
-                    RollbackProofError::InvalidHeaderChain(
+                    HeaderChainError::InvalidHeaderChain(
                         crate::ledger::fork_choice::ForkChoiceError::InvalidDifficulty,
                     )
                 })?;
             crate::consensus::next_difficulty_from_window(previous.difficulty, &weights).ok_or(
-                RollbackProofError::InvalidHeaderChain(
+                HeaderChainError::InvalidHeaderChain(
                     crate::ledger::fork_choice::ForkChoiceError::InvalidDifficulty,
                 ),
             )?
@@ -395,20 +274,20 @@ pub fn verify_header_chain_extension(
             previous.difficulty
         };
         if header.difficulty != expected_difficulty {
-            return Err(RollbackProofError::InvalidHeaderChain(
+            return Err(HeaderChainError::InvalidHeaderChain(
                 crate::ledger::fork_choice::ForkChoiceError::InvalidDifficulty,
             ));
         }
         let block = chain_header.block();
         crate::consensus::Consensus::validate_pow_at_difficulty(&block, expected_difficulty)
             .map_err(|error| {
-                RollbackProofError::InvalidHeaderChain(
+                HeaderChainError::InvalidHeaderChain(
                     crate::ledger::fork_choice::ForkChoiceError::InvalidProofOfWork(error),
                 )
             })?;
         cumulative_work = cumulative_work
             .saturating_add(crate::ledger::fork_choice::block_work(expected_difficulty));
-        previous_hash = header.hash().map_err(RollbackProofError::Serialization)?;
+        previous_hash = header.hash().map_err(HeaderChainError::Serialization)?;
         previous_height = chain_header.height;
         previous = header.clone();
         recent.push(chain_header.clone());
@@ -422,7 +301,7 @@ pub fn verify_header_chain_extension(
 pub fn advance_trusted_header_checkpoint(
     checkpoint: &TrustedHeaderCheckpoint,
     headers: &[ChainHeader],
-) -> Result<TrustedHeaderCheckpoint, RollbackProofError> {
+) -> Result<TrustedHeaderCheckpoint, HeaderChainError> {
     let (_, cumulative_work) = verify_header_chain_extension(checkpoint, headers)?;
     let mut recent_headers = checkpoint.recent_headers.clone();
     recent_headers.extend_from_slice(headers);
@@ -442,21 +321,6 @@ pub fn advance_trusted_header_checkpoint(
         difficulty_anchor: checkpoint.difficulty_anchor.clone(),
         recent_headers,
     })
-}
-
-fn validate_signed_transaction(
-    transaction: &SignedProtocolTransaction,
-    height: BlockHeight,
-) -> Result<(), RollbackProofError> {
-    let result = match transaction {
-        SignedProtocolTransaction::Transfer(transaction) => {
-            transaction.validate_signed_for_height(height)
-        }
-        SignedProtocolTransaction::QCash(transaction) => {
-            transaction.validate_signed_for_height(height)
-        }
-    };
-    result.map_err(RollbackProofError::TransactionInvalid)
 }
 
 #[cfg(test)]
@@ -493,7 +357,17 @@ mod tests {
         assert!(verify_header_chain(&headers).is_ok());
 
         let mut wrong_nonce = headers;
-        wrong_nonce[1].header.nonce = Nonce(0);
+        let mut invalid_nonce = 0_u64;
+        loop {
+            wrong_nonce[1].header.nonce = Nonce(invalid_nonce);
+            if wrong_nonce[1].header.nonce != block.header.nonce
+                && Consensus::validate_pow_at_difficulty(&wrong_nonce[1].block(), DIFFICULTY_START)
+                    .is_err()
+            {
+                break;
+            }
+            invalid_nonce = invalid_nonce.saturating_add(1);
+        }
         assert!(verify_header_chain(&wrong_nonce).is_err());
     }
 

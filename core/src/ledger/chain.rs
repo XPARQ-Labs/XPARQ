@@ -51,11 +51,10 @@ impl Chain {
     /// PoW verifier and pins its tip as the local snapshot checkpoint.
     pub(crate) fn install_verified_headers(
         &mut self,
-        headers: &[crate::qcash::recovery::ChainHeader],
+        headers: &[crate::ledger::ChainHeader],
         checkpoint_height: BlockHeight,
     ) -> Result<(), LedgerError> {
-        crate::qcash::recovery::verify_header_chain(headers)
-            .map_err(|_| LedgerError::InvalidParent)?;
+        crate::ledger::verify_header_chain(headers).map_err(|_| LedgerError::InvalidParent)?;
         self.headers.clear();
         self.blocks.clear();
         for header in headers {
@@ -84,15 +83,10 @@ impl Chain {
         Ok(())
     }
 
-    pub fn chain_headers(&self) -> Result<Vec<crate::qcash::recovery::ChainHeader>, LedgerError> {
+    pub fn chain_headers(&self) -> Result<Vec<crate::ledger::ChainHeader>, LedgerError> {
         self.headers
             .iter()
-            .map(|(height, header)| {
-                Ok(crate::qcash::recovery::ChainHeader::new(
-                    *height,
-                    header.clone(),
-                ))
-            })
+            .map(|(height, header)| Ok(crate::ledger::ChainHeader::new(*height, header.clone())))
             .collect()
     }
 

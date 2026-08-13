@@ -77,7 +77,7 @@ pub fn handle_message(
                 .map(Height)
                 .map_while(|height| {
                     let header = node.ledger.chain.header(&height)?.clone();
-                    Some(xparq::qcash::recovery::ChainHeader::new(height, header))
+                    Some(xparq::ledger::ChainHeader::new(height, header))
                 })
                 .collect::<Vec<_>>();
             Ok(Some(NetworkMessage::BlockHeaders(headers)))

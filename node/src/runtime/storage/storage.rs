@@ -1,25 +1,27 @@
 use crate::runtime::params::{ADDRESS_SIZE, HASH_SIZE, STORAGE_VERSION};
-use crate::runtime::recovery::{
-    RollbackIssue, RollbackIssueId, RollbackProofContext, RollbackProofContextId,
+use crate::runtime::reorg_journal::{
+    REORG_TRANSACTION_VERSION, ReorgTransaction, ReorgTransactionId,
 };
 use crate::runtime::storage::error::StorageError;
 use borsh::{BorshDeserialize, BorshSerialize};
 use lmdb::{Cursor, Database, DatabaseFlags, Environment, Transaction, WriteFlags};
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use std::{fs, time};
+#[cfg(test)]
+use std::time;
 use xparq::block::{Block, BlockHeader, BlockHeight, Height};
 use xparq::codec::{block_bytes, decode_block};
 use xparq::crypto::{Address, BlockHash, Hash, TransactionHash};
 use xparq::event::{EventId, ProtocolEvent, ProtocolEventKind};
+use xparq::ledger::ChainHeader;
 use xparq::ledger::Ledger;
-use xparq::qcash::recovery::ChainHeader;
 use xparq::state::{
     Account, QCashCoinId, QCashJournalState, QCashUtxo, QCashUtxoSet, XpqCoinId, XpqUtxo,
     XpqUtxoSet,
 };
-use xparq::transaction::{SignedProtocolTransaction, SignedTransfer, TransactionFamily};
+use xparq::transaction::{SignedProtocolTransaction, TransactionFamily};
 
 const BLOCKS_BY_HEIGHT: &str = "blocks_by_height";
 const BLOCKS_BY_HASH: &str = "blocks_by_hash";
@@ -33,12 +35,12 @@ const MINER_BLOCK_INDEX: &str = "miner_block_index";
 const META: &str = "meta";
 const PROTOCOL_STATE: &str = "protocol_state";
 const STATE_DIFFS: &str = "state_diffs";
+const UNDO_DIFFS: &str = "undo_diffs";
 const EVENTS_BY_ID: &str = "events_by_id";
 const BLOCK_EVENT_INDEX: &str = "block_event_index";
 const TRANSACTION_EVENT_INDEX: &str = "transaction_event_index";
 const ADDRESS_EVENT_INDEX: &str = "address_event_index";
-const ROLLBACK_ISSUES: &str = "rollback_issues";
-const ROLLBACK_PROOF_CONTEXTS: &str = "rollback_proof_contexts";
+const REORG_TRANSACTIONS: &str = "reorg_transactions";
 const PROTOCOL_STATE_KEY: &[u8] = b"current";
 const TIP_HEIGHT_KEY: &[u8] = b"tip_height";
 const TIP_HASH_KEY: &[u8] = b"tip_hash";
@@ -98,6 +100,15 @@ struct StoredStateDiff {
     upserted_qcash: Vec<QCashUtxo>,
     qcash_journal_state: QCashJournalState,
     events: Vec<ProtocolEvent>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+struct StoredUndoDiff {
+    block_hash: BlockHash,
+    block_height: BlockHeight,
+    previous_accounts: Vec<(Address, Option<Account>)>,
+    remove_xpq: Vec<XpqCoinId>,
+    restore_xpq: Vec<XpqUtxo>,
 }
 
 impl StoredProtocolState {
@@ -166,6 +177,45 @@ fn protocol_state_diff(
     }
 }
 
+fn undo_state_diff(
+    block_hash: BlockHash,
+    block_height: BlockHeight,
+    previous_accounts: &BTreeMap<Address, Account>,
+    previous_xpq: &XpqUtxoSet,
+    current_accounts: &BTreeMap<Address, Account>,
+    current_xpq: &XpqUtxoSet,
+) -> StoredUndoDiff {
+    let mut addresses = previous_accounts
+        .keys()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    addresses.extend(current_accounts.keys().copied());
+    let previous_accounts = addresses
+        .into_iter()
+        .filter(|address| previous_accounts.get(address) != current_accounts.get(address))
+        .map(|address| (address, previous_accounts.get(&address).cloned()))
+        .collect();
+    let remove_xpq = current_xpq
+        .coins()
+        .iter()
+        .filter(|(id, coin)| previous_xpq.coins().get(id) != Some(*coin))
+        .map(|(id, _)| *id)
+        .collect();
+    let restore_xpq = previous_xpq
+        .coins()
+        .iter()
+        .filter(|(id, coin)| current_xpq.coins().get(id) != Some(*coin))
+        .map(|(_, coin)| coin.clone())
+        .collect();
+    StoredUndoDiff {
+        block_hash,
+        block_height,
+        previous_accounts,
+        remove_xpq,
+        restore_xpq,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Storage {
     env: Arc<Environment>,
@@ -180,12 +230,12 @@ pub struct Storage {
     miner_block_index: Database,
     protocol_state: Database,
     state_diffs: Database,
+    undo_diffs: Database,
     events_by_id: Database,
     block_event_index: Database,
     transaction_event_index: Database,
     address_event_index: Database,
-    rollback_issues: Database,
-    rollback_proof_contexts: Database,
+    reorg_transactions: Database,
     meta: Database,
 }
 
@@ -194,7 +244,7 @@ impl Storage {
         fs::create_dir_all(path.as_ref()).map_err(StorageError::from_std_io)?;
         let env = Arc::new(
             Environment::new()
-                .set_max_dbs(20)
+                .set_max_dbs(21)
                 .set_map_size(lmdb_map_size())
                 .open(path.as_ref())?,
         );
@@ -203,6 +253,7 @@ impl Storage {
         Ok(storage)
     }
 
+    #[cfg(test)]
     pub fn temporary() -> Result<Self, StorageError> {
         let nanos = time::SystemTime::now()
             .duration_since(time::UNIX_EPOCH)
@@ -228,15 +279,14 @@ impl Storage {
             miner_block_index: env.create_db(Some(MINER_BLOCK_INDEX), DatabaseFlags::empty())?,
             protocol_state: env.create_db(Some(PROTOCOL_STATE), DatabaseFlags::empty())?,
             state_diffs: env.create_db(Some(STATE_DIFFS), DatabaseFlags::empty())?,
+            undo_diffs: env.create_db(Some(UNDO_DIFFS), DatabaseFlags::empty())?,
             events_by_id: env.create_db(Some(EVENTS_BY_ID), DatabaseFlags::empty())?,
             block_event_index: env.create_db(Some(BLOCK_EVENT_INDEX), DatabaseFlags::empty())?,
             transaction_event_index: env
                 .create_db(Some(TRANSACTION_EVENT_INDEX), DatabaseFlags::empty())?,
             address_event_index: env
                 .create_db(Some(ADDRESS_EVENT_INDEX), DatabaseFlags::empty())?,
-            rollback_issues: env.create_db(Some(ROLLBACK_ISSUES), DatabaseFlags::empty())?,
-            rollback_proof_contexts: env
-                .create_db(Some(ROLLBACK_PROOF_CONTEXTS), DatabaseFlags::empty())?,
+            reorg_transactions: env.create_db(Some(REORG_TRANSACTIONS), DatabaseFlags::empty())?,
             meta: env.create_db(Some(META), DatabaseFlags::empty())?,
             env,
         })
@@ -280,14 +330,15 @@ impl Storage {
             && is_db_empty(&txn, self.wtx_index)?
             && is_db_empty(&txn, self.address_tx_index)?
             && is_db_empty(&txn, self.miner_block_index)?
+            && is_db_empty(&txn, self.undo_diffs)?
             && is_db_empty(&txn, self.events_by_id)?
             && is_db_empty(&txn, self.block_event_index)?
             && is_db_empty(&txn, self.transaction_event_index)?
             && is_db_empty(&txn, self.address_event_index)?
-            && is_db_empty(&txn, self.rollback_issues)?
-            && is_db_empty(&txn, self.rollback_proof_contexts)?)
+            && is_db_empty(&txn, self.reorg_transactions)?)
     }
 
+    #[cfg(test)]
     pub fn save_block(&self, block: &Block) -> Result<(), StorageError> {
         validate_block_for_storage(block)?;
         let bytes = block_bytes(block)?;
@@ -428,6 +479,178 @@ impl Storage {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    fn remove_block_indexes(
+        &self,
+        txn: &mut lmdb::RwTransaction<'_>,
+        block: &Block,
+        events: &[ProtocolEvent],
+    ) -> Result<(), StorageError> {
+        let _ = txn.del(self.blocks_by_height, &height_key(block.height()), None);
+        let _ = txn.del(self.headers_by_height, &height_key(block.height()), None);
+        if block.coinbase().is_some() {
+            let _ = txn.del(
+                self.miner_block_index,
+                &miner_block_key(&block.miner_address(), block.height()),
+                None,
+            );
+        }
+        for (index, transaction) in protocol_transactions(block).into_iter().enumerate() {
+            let index = u32::try_from(index)
+                .map_err(|_| StorageError::Integrity("transaction index exceeds u32"))?;
+            let transaction_hash = transaction.hash()?;
+            let _ = txn.del(self.tx_index, &transaction_hash.0, None);
+            let _ = txn.del(self.wtx_index, &transaction_hash.0, None);
+            for (address, sent) in transaction_addresses(&transaction) {
+                let _ = txn.del(
+                    self.address_tx_index,
+                    &address_tx_key(&address, block.height(), index, sent),
+                    None,
+                );
+            }
+        }
+        for event in events {
+            let id = event.id()?;
+            let _ = txn.del(self.events_by_id, &id.0, None);
+            let _ = txn.del(
+                self.block_event_index,
+                &block_event_key(&event.block_hash, event.event_index),
+                None,
+            );
+            if let Some(transaction_hash) = event.transaction_hash {
+                let _ = txn.del(
+                    self.transaction_event_index,
+                    &transaction_event_key(&transaction_hash, event.event_index),
+                    None,
+                );
+            }
+            for address in event_addresses(&event.kind) {
+                let _ = txn.del(
+                    self.address_event_index,
+                    &address_event_key(&address, event.block_height, event.event_index),
+                    None,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn save_undo_diff(
+        &self,
+        txn: &mut lmdb::RwTransaction<'_>,
+        block: &Block,
+        previous_accounts: &BTreeMap<Address, Account>,
+        previous_xpq: &XpqUtxoSet,
+        current_accounts: &BTreeMap<Address, Account>,
+        current_xpq: &XpqUtxoSet,
+    ) -> Result<(), StorageError> {
+        let diff = undo_state_diff(
+            block.hash()?,
+            block.height(),
+            previous_accounts,
+            previous_xpq,
+            current_accounts,
+            current_xpq,
+        );
+        put_value(txn, self.undo_diffs, &height_key(block.height()), &diff)
+    }
+
+    /// Atomically replaces only the canonical suffix affected by a reorganization.
+    /// Losing blocks remain addressable by hash, but are removed from canonical
+    /// height, transaction, miner, and event indexes.
+    pub fn save_reorg(
+        &self,
+        ledger: &Ledger,
+        disconnected: &[(Block, Vec<ProtocolEvent>)],
+        connected: &[Block],
+    ) -> Result<(), StorageError> {
+        for block in connected {
+            validate_block_for_storage(block)?;
+        }
+        let tip_height = ledger
+            .tip_height()
+            .ok_or(StorageError::Integrity("reorganized ledger has no tip"))?;
+        let tip_hash = ledger.tip_hash().ok_or(StorageError::Integrity(
+            "reorganized ledger has no tip hash",
+        ))?;
+        let mut txn = self.env.begin_rw_txn()?;
+
+        for (block, events) in disconnected {
+            self.remove_block_indexes(&mut txn, block, events)?;
+            let _ = txn.del(self.undo_diffs, &height_key(block.height()), None);
+        }
+        for (index, block) in connected.iter().enumerate() {
+            let block_hash = block.hash()?;
+            let bytes = block_bytes(block)?;
+            txn.put(
+                self.blocks_by_height,
+                &height_key(block.height()),
+                &block_hash.0,
+                WriteFlags::empty(),
+            )?;
+            txn.put(
+                self.blocks_by_hash,
+                &block_hash.0,
+                &bytes,
+                WriteFlags::empty(),
+            )?;
+            put_value(
+                &mut txn,
+                self.headers_by_height,
+                &height_key(block.height()),
+                &ChainHeader::new(block.height(), block.header.clone()),
+            )?;
+            self.index_block_transactions(&mut txn, block)?;
+            self.index_miner_block(&mut txn, block)?;
+            self.index_protocol_events(&mut txn, ledger.events_for_block(&block_hash))?;
+            let (previous_accounts, previous_xpq) = ledger
+                .rollback_state_before(&block_hash)
+                .ok_or(StorageError::Integrity(
+                    "connected block rollback state is missing",
+                ))?;
+            let (current_accounts, current_xpq) =
+                match connected.get(index + 1) {
+                    Some(next) => ledger.rollback_state_before(&next.hash()?).ok_or(
+                        StorageError::Integrity(
+                            "connected block successor rollback state is missing",
+                        ),
+                    )?,
+                    None => (ledger.accounts(), &ledger.xpq_utxos),
+                };
+            self.save_undo_diff(
+                &mut txn,
+                block,
+                previous_accounts,
+                previous_xpq,
+                current_accounts,
+                current_xpq,
+            )?;
+        }
+
+        txn.clear_db(self.accounts)?;
+        for account in ledger.accounts().values() {
+            put_value(&mut txn, self.accounts, &account.address.0, account)?;
+        }
+        put_value(&mut txn, self.meta, TIP_HEIGHT_KEY, &tip_height)?;
+        txn.put(self.meta, &TIP_HASH_KEY, &tip_hash.0, WriteFlags::empty())?;
+        match ledger.chain.checkpoint_height {
+            Some(height) => put_value(&mut txn, self.meta, CHECKPOINT_HEIGHT_KEY, &height)?,
+            None => {
+                let _ = txn.del(self.meta, &CHECKPOINT_HEIGHT_KEY, None);
+            }
+        }
+        put_value(
+            &mut txn,
+            self.protocol_state,
+            PROTOCOL_STATE_KEY,
+            &StoredProtocolState::from_ledger(ledger),
+        )?;
+        txn.clear_db(self.state_diffs)?;
+
+        txn.commit()?;
+        self.flush()?;
         Ok(())
     }
 
@@ -588,28 +811,6 @@ impl Storage {
         read_value(&txn, self.tx_index, &hash.0)
     }
 
-    pub fn load_auth_transaction_location(
-        &self,
-        hash: &TransactionHash,
-    ) -> Result<Option<TransactionLocation>, StorageError> {
-        let txn = self.env.begin_ro_txn()?;
-        read_value(&txn, self.wtx_index, &hash.0)
-    }
-
-    pub fn load_transaction(
-        &self,
-        hash: &TransactionHash,
-    ) -> Result<Option<(TransactionLocation, SignedTransfer)>, StorageError> {
-        let Some((location, transaction)) = self.load_protocol_transaction(hash)? else {
-            return Ok(None);
-        };
-        if let SignedProtocolTransaction::Transfer(transaction) = transaction {
-            Ok(Some((location, *transaction)))
-        } else {
-            Ok(None)
-        }
-    }
-
     pub fn load_protocol_transaction(
         &self,
         hash: &TransactionHash,
@@ -641,185 +842,49 @@ impl Storage {
         Ok(Some((location, transaction)))
     }
 
-    pub fn load_protocol_transaction_by_auth_hash(
-        &self,
-        hash: &TransactionHash,
-    ) -> Result<Option<(TransactionLocation, SignedProtocolTransaction)>, StorageError> {
-        let Some(location) = self.load_auth_transaction_location(hash)? else {
-            return Ok(None);
-        };
-        let Some(block) = self.load_block_by_height(location.block_height)? else {
-            return Err(StorageError::Integrity(
-                "indexed authorization transaction block is missing",
-            ));
-        };
-        if block.hash()? != location.block_hash {
-            return Err(StorageError::Integrity(
-                "indexed authorization transaction block hash mismatch",
-            ));
-        }
-        let transaction = protocol_transactions(&block)
-            .get(location.tx_index as usize)
-            .ok_or(StorageError::Integrity(
-                "indexed authorization transaction position is missing",
-            ))?
-            .clone();
-        if transaction.hash()? != *hash || transaction.family() != location.family {
-            return Err(StorageError::Integrity(
-                "indexed authorization transaction does not match its location",
-            ));
-        }
-        Ok(Some((location, transaction)))
-    }
-
-    pub fn load_address_transaction_locations(
-        &self,
-        address: &Address,
-    ) -> Result<Vec<AddressTransactionLocation>, StorageError> {
-        let prefix = address.0;
-        let mut locations = Vec::new();
-        let txn = self.env.begin_ro_txn()?;
-        let mut cursor = txn.open_ro_cursor(self.address_tx_index)?;
-        for item in cursor.iter() {
-            let (key, bytes) = item;
-            if key < prefix.as_slice() {
-                continue;
-            }
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            locations.push(decode(bytes)?);
-        }
-        locations.sort_by_key(|location: &AddressTransactionLocation| {
-            (location.block_height, location.tx_index, location.sent)
-        });
-        Ok(locations)
-    }
-
-    pub fn load_miner_block_locations(
-        &self,
-        address: &Address,
-    ) -> Result<Vec<MinerBlockLocation>, StorageError> {
-        let prefix = address.0;
-        let mut locations = Vec::new();
-        let txn = self.env.begin_ro_txn()?;
-        let mut cursor = txn.open_ro_cursor(self.miner_block_index)?;
-        for item in cursor.iter() {
-            let (key, bytes) = item;
-            if key < prefix.as_slice() {
-                continue;
-            }
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            locations.push(decode(bytes)?);
-        }
-        locations.sort_by_key(|location: &MinerBlockLocation| location.block_height);
-        Ok(locations)
-    }
-
-    pub fn save_account(&self, account: &Account) -> Result<(), StorageError> {
+    pub fn save_reorg_transaction(&self, record: &ReorgTransaction) -> Result<(), StorageError> {
+        validate_reorg_transaction(record, None)?;
         let mut txn = self.env.begin_rw_txn()?;
-        put_value(&mut txn, self.accounts, &account.address.0, account)?;
+        put_value(&mut txn, self.reorg_transactions, &record.id.0, record)?;
         txn.commit()?;
         Ok(())
     }
 
-    pub fn load_account(&self, address: &Address) -> Result<Option<Account>, StorageError> {
-        let txn = self.env.begin_ro_txn()?;
-        read_value(&txn, self.accounts, &address.0)
-    }
-
-    pub fn save_rollback_issue(&self, issue: &RollbackIssue) -> Result<(), StorageError> {
-        validate_rollback_issue(issue, None)?;
-        let mut txn = self.env.begin_rw_txn()?;
-        put_value(&mut txn, self.rollback_issues, &issue.id.0, issue)?;
-        txn.commit()?;
-        Ok(())
-    }
-
-    pub fn load_rollback_issue(
+    pub fn load_reorg_transaction(
         &self,
-        id: &RollbackIssueId,
-    ) -> Result<Option<RollbackIssue>, StorageError> {
+        id: &ReorgTransactionId,
+    ) -> Result<Option<ReorgTransaction>, StorageError> {
         let txn = self.env.begin_ro_txn()?;
-        let issue: Option<RollbackIssue> = read_value(&txn, self.rollback_issues, &id.0)?;
-        if let Some(issue) = &issue {
-            validate_rollback_issue(issue, Some(id))?;
+        let record: Option<ReorgTransaction> = read_value(&txn, self.reorg_transactions, &id.0)?;
+        if let Some(record) = &record {
+            validate_reorg_transaction(record, Some(id))?;
         }
-        Ok(issue)
+        Ok(record)
     }
 
-    pub fn load_rollback_issues(&self) -> Result<Vec<RollbackIssue>, StorageError> {
+    pub fn load_reorg_transactions(&self) -> Result<Vec<ReorgTransaction>, StorageError> {
         let txn = self.env.begin_ro_txn()?;
-        let mut cursor = txn.open_ro_cursor(self.rollback_issues)?;
-        let mut issues = Vec::new();
+        let mut cursor = txn.open_ro_cursor(self.reorg_transactions)?;
+        let mut records = Vec::new();
         for item in cursor.iter() {
             let (key, bytes) = item;
-            let issue: RollbackIssue = decode(bytes)?;
-            validate_rollback_issue(&issue, None)?;
-            if key != issue.id.0 {
+            let record: ReorgTransaction = decode(bytes)?;
+            validate_reorg_transaction(&record, None)?;
+            if key != record.id.0 {
                 return Err(StorageError::Integrity(
-                    "stored rollback issue key is invalid",
+                    "stored reorg transaction key is invalid",
                 ));
             }
-            issues.push(issue);
+            records.push(record);
         }
-        issues.sort_by_key(|issue| {
+        records.sort_by_key(|record| {
             (
-                issue.disconnected_block_height,
-                issue.transaction_index,
-                issue.id,
+                record.disconnected_block_height,
+                record.transaction_index,
+                record.id,
             )
         });
-        Ok(issues)
-    }
-
-    pub fn save_rollback_proof_context(
-        &self,
-        context: &RollbackProofContext,
-    ) -> Result<(), StorageError> {
-        let expected = RollbackProofContext::new(
-            context.losing_headers.clone(),
-            context.canonical_headers.clone(),
-            context.common_ancestor,
-        )?;
-        if expected.id != context.id {
-            return Err(StorageError::Integrity(
-                "rollback proof context id is invalid",
-            ));
-        }
-        let mut txn = self.env.begin_rw_txn()?;
-        put_value(
-            &mut txn,
-            self.rollback_proof_contexts,
-            &context.id.0,
-            context,
-        )?;
-        txn.commit()?;
-        Ok(())
-    }
-
-    pub fn load_rollback_proof_context(
-        &self,
-        id: &RollbackProofContextId,
-    ) -> Result<Option<RollbackProofContext>, StorageError> {
-        let txn = self.env.begin_ro_txn()?;
-        let context: Option<RollbackProofContext> =
-            read_value(&txn, self.rollback_proof_contexts, &id.0)?;
-        if let Some(context) = &context {
-            let expected = RollbackProofContext::new(
-                context.losing_headers.clone(),
-                context.canonical_headers.clone(),
-                context.common_ancestor,
-            )?;
-            if expected.id != *id || context.id != *id {
-                return Err(StorageError::Integrity(
-                    "stored rollback proof context id is invalid",
-                ));
-            }
-        }
-        Ok(context)
+        Ok(records)
     }
 
     pub fn save_genesis_accounts(
@@ -837,14 +902,6 @@ impl Storage {
     ) -> Result<Option<BTreeMap<Address, Account>>, StorageError> {
         let txn = self.env.begin_ro_txn()?;
         read_value(&txn, self.genesis_accounts, b"accounts")
-    }
-
-    pub fn save_tip(&self, height: BlockHeight, hash: &BlockHash) -> Result<(), StorageError> {
-        let mut txn = self.env.begin_rw_txn()?;
-        put_value(&mut txn, self.meta, TIP_HEIGHT_KEY, &height)?;
-        txn.put(self.meta, &TIP_HASH_KEY, &hash.0, WriteFlags::empty())?;
-        txn.commit()?;
-        Ok(())
     }
 
     pub fn load_tip(&self) -> Result<Option<(BlockHeight, BlockHash)>, StorageError> {
@@ -885,6 +942,7 @@ impl Storage {
         txn.clear_db(self.transaction_event_index)?;
         txn.clear_db(self.address_event_index)?;
         txn.clear_db(self.state_diffs)?;
+        txn.clear_db(self.undo_diffs)?;
 
         for account in ledger.accounts().values() {
             put_value(&mut txn, self.accounts, &account.address.0, account)?;
@@ -919,6 +977,31 @@ impl Storage {
             self.index_miner_block(&mut txn, block)?;
             self.index_protocol_events(&mut txn, ledger.events_for_block(&block_hash))?;
         }
+        let canonical_blocks = ledger.chain.blocks.values().collect::<Vec<_>>();
+        for (index, block) in canonical_blocks.iter().enumerate() {
+            if block.is_genesis() {
+                continue;
+            }
+            let block_hash = block.hash()?;
+            let Some((previous_accounts, previous_xpq)) = ledger.rollback_state_before(&block_hash)
+            else {
+                continue;
+            };
+            let current_state = canonical_blocks
+                .get(index + 1)
+                .and_then(|next| next.hash().ok())
+                .and_then(|next_hash| ledger.rollback_state_before(&next_hash));
+            let (current_accounts, current_xpq) =
+                current_state.unwrap_or((ledger.accounts(), &ledger.xpq_utxos));
+            self.save_undo_diff(
+                &mut txn,
+                block,
+                previous_accounts,
+                previous_xpq,
+                current_accounts,
+                current_xpq,
+            )?;
+        }
 
         if let (Some(height), Some(hash)) = (ledger.tip_height(), ledger.tip_hash()) {
             put_value(&mut txn, self.meta, TIP_HEIGHT_KEY, &height)?;
@@ -947,8 +1030,7 @@ impl Storage {
     }
 
     /// Atomically persists a block that directly extends the active tip without rebuilding all
-    /// historical indexes. Reorganizations still use `save_ledger` because they must remove
-    /// entries belonging to the disconnected branch.
+    /// historical indexes.
     pub fn save_active_extension(
         &self,
         previous: &Ledger,
@@ -996,6 +1078,14 @@ impl Storage {
         self.index_block_transactions(&mut txn, block)?;
         self.index_miner_block(&mut txn, block)?;
         self.index_protocol_events(&mut txn, ledger.events_for_block(&block_hash))?;
+        self.save_undo_diff(
+            &mut txn,
+            block,
+            previous.accounts(),
+            &previous.xpq_utxos,
+            ledger.accounts(),
+            &ledger.xpq_utxos,
+        )?;
 
         put_value(&mut txn, self.meta, TIP_HEIGHT_KEY, &block.height())?;
         txn.put(self.meta, &TIP_HASH_KEY, &block_hash.0, WriteFlags::empty())?;
@@ -1119,6 +1209,46 @@ impl Storage {
             }
         }
 
+        let undo_diffs = {
+            let txn = self.env.begin_ro_txn()?;
+            let mut cursor = txn.open_ro_cursor(self.undo_diffs)?;
+            cursor
+                .iter()
+                .map(|(_, bytes)| decode::<StoredUndoDiff>(bytes))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut rollback_accounts = ledger.accounts().clone();
+        let mut rollback_xpq = ledger.xpq_utxos.clone();
+        for diff in undo_diffs.into_iter().rev() {
+            let canonical = ledger
+                .block(&diff.block_height)
+                .ok_or(StorageError::Integrity("undo block is not canonical"))?;
+            if canonical.hash()? != diff.block_hash {
+                return Err(StorageError::Integrity(
+                    "undo block hash does not match canonical block",
+                ));
+            }
+            for (address, previous) in diff.previous_accounts {
+                match previous {
+                    Some(account) => {
+                        rollback_accounts.insert(address, account);
+                    }
+                    None => {
+                        rollback_accounts.remove(&address);
+                    }
+                }
+            }
+            rollback_xpq.apply_persistence_diff(&diff.remove_xpq, diff.restore_xpq);
+            ledger
+                .restore_rollback_state(
+                    diff.block_hash,
+                    diff.block_height,
+                    rollback_accounts.clone(),
+                    rollback_xpq.clone(),
+                )
+                .map_err(|_| StorageError::Integrity("stored undo state is invalid"))?;
+        }
+
         ledger
             .validate_supply()
             .map_err(|_| StorageError::Integrity("stored ledger supply is invalid"))?;
@@ -1146,32 +1276,6 @@ impl Storage {
             .map_err(|_| StorageError::Integrity("stored ledger invariants are invalid"))?;
 
         Ok(ledger)
-    }
-
-    pub fn difficulty_window(
-        &self,
-        tip_height: BlockHeight,
-        window: u64,
-    ) -> Result<Option<(u64, u64, u64, u32)>, StorageError> {
-        if window == 0 || tip_height.0 < window {
-            return Ok(None);
-        }
-
-        let Some(tip) = self.load_header_by_height(tip_height)? else {
-            return Ok(None);
-        };
-        let first_height = Height(tip_height.0 - window);
-        let Some(_first) = self.load_header_by_height(first_height)? else {
-            return Ok(None);
-        };
-        let block_count = tip_height.0.saturating_sub(first_height.0);
-
-        Ok(Some((
-            first_height.0,
-            tip_height.0,
-            block_count,
-            tip.difficulty,
-        )))
     }
 
     pub fn validate_chain_integrity(&self) -> Result<(), StorageError> {
@@ -1278,15 +1382,6 @@ impl Storage {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_put_blocks_by_height<T: BorshSerialize>(
-        &self,
-        key: &[u8],
-        value: &T,
-    ) -> Result<(), StorageError> {
-        self.test_put(self.blocks_by_height, key, value)
-    }
-
-    #[cfg(test)]
     pub(crate) fn test_blocks_by_height_value_len(
         &self,
         height: BlockHeight,
@@ -1294,84 +1389,25 @@ impl Storage {
         let txn = self.env.begin_ro_txn()?;
         Ok(read_bytes(&txn, self.blocks_by_height, &height_key(height))?.map(|value| value.len()))
     }
-
-    #[cfg(test)]
-    pub(crate) fn test_put_blocks_by_hash<T: BorshSerialize>(
-        &self,
-        key: &[u8],
-        value: &T,
-    ) -> Result<(), StorageError> {
-        self.test_put(self.blocks_by_hash, key, value)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_put_meta<T: BorshSerialize>(
-        &self,
-        key: &[u8],
-        value: &T,
-    ) -> Result<(), StorageError> {
-        self.test_put(self.meta, key, value)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_put_account(&self, account: &Account) -> Result<(), StorageError> {
-        self.test_put(self.accounts, &account.address.0, account)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_remove_meta(&self, key: &[u8]) -> Result<(), StorageError> {
-        let mut txn = self.env.begin_rw_txn()?;
-        match txn.del(self.meta, &key, None) {
-            Ok(()) | Err(lmdb::Error::NotFound) => {}
-            Err(error) => return Err(error.into()),
-        }
-        txn.commit()?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_abort_tip_write(
-        &self,
-        height: BlockHeight,
-        hash: BlockHash,
-    ) -> Result<(), StorageError> {
-        let mut txn = self.env.begin_rw_txn()?;
-        put_value(&mut txn, self.meta, TIP_HEIGHT_KEY, &height)?;
-        put_value(&mut txn, self.meta, TIP_HASH_KEY, &hash)?;
-        txn.abort();
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn test_put<T: BorshSerialize>(
-        &self,
-        db: Database,
-        key: &[u8],
-        value: &T,
-    ) -> Result<(), StorageError> {
-        let mut txn = self.env.begin_rw_txn()?;
-        put_value(&mut txn, db, key, value)?;
-        txn.commit()?;
-        Ok(())
-    }
 }
 
 fn height_key(height: BlockHeight) -> [u8; 8] {
     height.0.to_be_bytes()
 }
 
-fn validate_rollback_issue(
-    issue: &RollbackIssue,
-    expected_id: Option<&RollbackIssueId>,
+fn validate_reorg_transaction(
+    record: &ReorgTransaction,
+    expected_id: Option<&ReorgTransactionId>,
 ) -> Result<(), StorageError> {
-    let transaction_hash = issue.transaction.hash()?;
-    let id = RollbackIssueId::for_transaction(issue.disconnected_block_hash, transaction_hash)?;
-    if issue.transaction_hash != transaction_hash
-        || issue.id != id
+    let transaction_hash = record.transaction.hash()?;
+    let id = ReorgTransactionId::for_transaction(record.disconnected_block_hash, transaction_hash)?;
+    if record.version != REORG_TRANSACTION_VERSION
+        || record.transaction_hash != transaction_hash
+        || record.id != id
         || expected_id.is_some_and(|expected| *expected != id)
     {
         return Err(StorageError::Integrity(
-            "stored rollback issue transaction identity is invalid",
+            "stored reorg transaction identity is invalid",
         ));
     }
     Ok(())
@@ -1414,9 +1450,7 @@ fn event_addresses(kind: &ProtocolEventKind) -> Vec<Address> {
         ProtocolEventKind::QCashRedeemed {
             signer, recipient, ..
         } => vec![*signer, *recipient],
-        ProtocolEventKind::QCashRecoverRedeemed {
-            signer, claimant, ..
-        } => vec![*signer, *claimant],
+        ProtocolEventKind::QCashSplit { signer, .. } => vec![*signer],
         ProtocolEventKind::EmissionDistributed { miner, .. } => vec![*miner],
     };
     let mut unique = std::collections::BTreeSet::new();

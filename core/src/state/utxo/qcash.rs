@@ -1,11 +1,11 @@
 //! Consensus UTXO set for QCash bearer outputs.
 
 use crate::block::{BlockHeight, Height};
-use crate::consensus::supply::Amount;
+use crate::consensus::supply::{Amount, XPQ};
 use crate::crypto::{Address, BlockHash, HASH_SIZE, Hash, TransactionHash};
 use crate::qcash::{
-    QCashDenomination, QCashError, QCashRedeemMetadata, QCashWithdrawalMetadata,
-    QCashWithdrawalOutput, qcash_coin_id_bytes, qcash_redeem_key_commitment,
+    QCashError, QCashRedeemMetadata, QCashWithdrawalMetadata, QCashWithdrawalOutput,
+    qcash_coin_id_bytes, qcash_redeem_key_commitment,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -76,15 +76,26 @@ impl QCashCoinId {
         value
     }
 
-    pub fn file_name(&self, denomination: QCashDenomination) -> String {
+    pub fn file_name(&self, amount: Amount) -> String {
         const HEX: &[u8; 16] = b"0123456789ABCDEF";
         let mut full_id = String::with_capacity(self.0.len() * 2);
         for byte in self.0 {
             full_id.push(HEX[(byte >> 4) as usize] as char);
             full_id.push(HEX[(byte & 0x0f) as usize] as char);
         }
-        format!("{}XPQ_{full_id}.QCash", denomination.xpq())
+        format!("{}XPQ_{full_id}.QCash", format_xpq_amount(amount))
     }
+}
+
+/// Canonical human-readable XPQ value with at most six fractional digits.
+pub fn format_xpq_amount(amount: Amount) -> String {
+    let whole = amount.0 / XPQ;
+    let fractional = amount.0 % XPQ;
+    if fractional == 0 {
+        return whole.to_string();
+    }
+    let fractional = format!("{fractional:06}");
+    format!("{whole}.{}", fractional.trim_end_matches('0'))
 }
 
 #[derive(
@@ -112,7 +123,7 @@ pub struct QCashUtxo {
     pub id: QCashCoinId,
     pub outpoint: QCashOutPoint,
     pub withdrawer: Address,
-    pub denomination: QCashDenomination,
+    pub amount: Amount,
     pub redeem_key_commitment: [u8; 32],
     pub issued_height: BlockHeight,
 }
@@ -159,7 +170,7 @@ pub enum QCashUtxoError {
     StateOverflow,
     UnknownCoin,
     DuplicateCoin,
-    DenominationMismatch,
+    AmountMismatch,
     CoinIdCollision,
     InvalidCoinProof,
     CoinDerivation(crate::qcash::QCashError),
@@ -178,9 +189,7 @@ impl fmt::Display for QCashUtxoError {
             Self::StateOverflow => f.write_str("QCash UTXO value overflow"),
             Self::UnknownCoin => f.write_str("QCash output is unknown or already redeemed"),
             Self::DuplicateCoin => f.write_str("QCash coin is repeated in the operation"),
-            Self::DenominationMismatch => {
-                f.write_str("QCash coin denominations do not match metadata")
-            }
+            Self::AmountMismatch => f.write_str("QCash coin amounts do not match metadata"),
             Self::CoinIdCollision => f.write_str("derived QCash coin ID already exists"),
             Self::InvalidCoinProof => f.write_str("QCash coin proof does not match issued output"),
             Self::CoinDerivation(error) => write!(f, "failed to derive QCash coin ID: {error}"),
@@ -275,7 +284,7 @@ impl QCashUtxoSet {
         self.redeemable_utxos().try_fold(Amount(0), |total, coin| {
             total
                 .0
-                .checked_add(coin.denomination.amount().0)
+                .checked_add(coin.amount.0)
                 .map(Amount)
                 .ok_or(QCashUtxoError::StateOverflow)
         })
@@ -286,7 +295,7 @@ impl QCashUtxoSet {
             .try_fold(Amount(0), |total, coin| {
                 total
                     .0
-                    .checked_add(coin.denomination.amount().0)
+                    .checked_add(coin.amount.0)
                     .map(Amount)
                     .ok_or(QCashUtxoError::StateOverflow)
             })
@@ -296,7 +305,7 @@ impl QCashUtxoSet {
         self.utxos().try_fold(Amount(0), |total, coin| {
             total
                 .0
-                .checked_add(coin.denomination.amount().0)
+                .checked_add(coin.amount.0)
                 .map(Amount)
                 .ok_or(QCashUtxoError::StateOverflow)
         })
@@ -337,7 +346,7 @@ impl QCashUtxoSet {
                         output_index: output.coin_index,
                     },
                     withdrawer,
-                    denomination: output.denomination,
+                    amount: output.amount,
                     redeem_key_commitment: output.redeem_key_commitment,
                     issued_height: height,
                 },
@@ -511,7 +520,7 @@ impl QCashUtxoSet {
             if !is_redeemable_at(coin, height) {
                 return Err(QCashUtxoError::CoinNotRedeemable);
             }
-            if coin.denomination != input.denomination
+            if coin.amount != input.amount
                 || coin.redeem_key_commitment
                     != qcash_redeem_key_commitment(&input.redeem_public_key)
             {
@@ -547,7 +556,7 @@ mod tests {
                 output_index: u32::from(byte),
             },
             withdrawer: Address([byte.wrapping_add(2); crate::crypto::ADDRESS_SIZE]),
-            denomination: QCashDenomination::Ten,
+            amount: Amount(10 * XPQ),
             redeem_key_commitment: [byte.wrapping_add(3); HASH_SIZE],
             issued_height: Height(u64::from(byte)),
         }
@@ -573,12 +582,20 @@ mod tests {
         let full_id = "AB".repeat(HASH_SIZE);
 
         assert_eq!(
-            coin_id.file_name(QCashDenomination::One),
+            coin_id.file_name(Amount(XPQ)),
             format!("1XPQ_{full_id}.QCash")
         );
         assert_eq!(
-            coin_id.file_name(QCashDenomination::OneMillion),
+            coin_id.file_name(Amount(1_000_000 * XPQ)),
             format!("1000000XPQ_{full_id}.QCash")
+        );
+        assert_eq!(
+            coin_id.file_name(Amount(29 * XPQ + 900_000)),
+            format!("29.9XPQ_{full_id}.QCash")
+        );
+        assert_eq!(
+            coin_id.file_name(Amount(1)),
+            format!("0.000001XPQ_{full_id}.QCash")
         );
     }
 
@@ -709,9 +726,9 @@ mod tests {
         let parent = BlockHash([0x41; crate::crypto::HASH_SIZE]);
         let block_hash = BlockHash([0x42; crate::crypto::HASH_SIZE]);
         let withdraw_tx_hash = TransactionHash([0x43; crate::crypto::HASH_SIZE]);
-        let metadata = QCashWithdrawalMetadata::with_denominations(
-            QCashDenomination::Ten.amount(),
-            &[QCashDenomination::Ten],
+        let metadata = QCashWithdrawalMetadata::with_amounts(
+            Amount(10 * XPQ),
+            &[Amount(10 * XPQ)],
             &[[0x44; 32]],
         )
         .unwrap();

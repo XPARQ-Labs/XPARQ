@@ -1,5 +1,3 @@
-#![cfg_attr(test, allow(dead_code))]
-
 mod command;
 mod gateway;
 mod grpc;
@@ -44,8 +42,9 @@ use mining::{MiningStats, mine_once as mine_once_unlocked};
 use p2p::gossip::broadcast_to_peers;
 use p2p::{
     PeerConnection, PeerPoll, PeerState, dedupe_peers, download_authenticated_snapshot,
-    is_admissible_discovered_peer, load_peers_file, poll_peer_connection, request_peers_connection,
-    save_peer_states_file, sync_from_peers_parallel, sync_mempool_connection,
+    is_admissible_discovered_peer, is_transport_error, load_peers_file, poll_peer_connection,
+    request_peers_connection, save_peer_states_file, sync_from_peers_parallel,
+    sync_mempool_connection,
 };
 use rpc::api::{LogCounters, RpcMetrics, RpcServerConfig, RpcState, start_rpc_servers};
 use rpc::state_pipeline::StatePipeline;
@@ -57,7 +56,6 @@ use runtime::params::{
     CHAIN_ID, CHAIN_NAME, COIN_NAME, MAX_BLOCK_TXS, NETWORK_MAGIC, PROTOCOL_STAGE,
     PROTOCOL_VERSION, SIGNATURE_SCHEME, STORAGE_VERSION,
 };
-use runtime::recovery::{RollbackIssue, RollbackIssueId, RollbackRecoveryStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
@@ -96,6 +94,7 @@ const DEFAULT_WALLET_CANDIDATES: &[&str] = &["../wallet.json", "wallet.json"];
 const MAX_PEER_FAILURES: u32 = 8;
 const ACTIVITY_LOG_INTERVAL: Duration = Duration::from_secs(60);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+static MINING_SYNC_READY: AtomicBool = AtomicBool::new(false);
 
 fn main() -> ExitCode {
     if let Err(error) = ctrlc::set_handler(|| {
@@ -436,6 +435,7 @@ fn run_node(args: &[String]) -> Result<(), String> {
         config.db_path
     );
     let mut node = open_node(&config.db_path)?;
+    MINING_SYNC_READY.store(config.peers.is_empty(), Ordering::SeqCst);
     node_info!(
         "STARTUP",
         "database_ready height={} tip={} elapsed_ms={}",
@@ -719,7 +719,7 @@ fn run_node(args: &[String]) -> Result<(), String> {
             SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
             break;
         }
-        if config.mine {
+        if config.mine && MINING_SYNC_READY.load(Ordering::SeqCst) {
             if let Some(block) =
                 mine_once_unlocked(&node, &config, &mining_stats, &SHUTDOWN_REQUESTED)?
             {
@@ -872,6 +872,12 @@ fn service_network_once(
         }
         Err(_) => return,
     };
+    if !addrs.is_empty() {
+        MINING_SYNC_READY.store(false, Ordering::SeqCst);
+    }
+    let peer_count = addrs.len();
+    let mut assessed_peers = 0_usize;
+    let mut all_peers_caught_up = true;
     let has_outbound = peer_connections
         .lock()
         .map(|connections| !connections.is_empty())
@@ -887,6 +893,8 @@ fn service_network_once(
             .unwrap_or(64);
         match sync_from_peers_parallel(addrs.clone(), node, &config.public_addrs, sync_window) {
             Ok(report) => {
+                assessed_peers = addrs.len();
+                all_peers_caught_up &= report.caught_up;
                 if report.applied_blocks > 0 {
                     node_info!(
                         "SYNC",
@@ -909,7 +917,11 @@ fn service_network_once(
                     }
                 }
             }
-            Err(error) => node_warn!("SYNC", "round_failed error={error:?}"),
+            Err(error) => {
+                assessed_peers = addrs.len();
+                all_peers_caught_up = false;
+                node_warn!("SYNC", "round_failed error={error:?}");
+            }
         }
     }
 
@@ -949,15 +961,7 @@ fn service_network_once(
                     if let Ok(mut peers) = peers.lock()
                         && let Some(peer) = peers.get_mut(&addr)
                     {
-                        peer.mark_failed();
-                        if peer.is_banned() {
-                            node_warn!(
-                                "P2P",
-                                "peer_banned peer={addr} score={} failures={}",
-                                peer.score,
-                                peer.failures
-                            );
-                        }
+                        peer.mark_unreachable();
                     }
                 }
             }
@@ -999,6 +1003,7 @@ fn service_network_once(
                 remote_tip,
                 latency,
             }) => {
+                assessed_peers = assessed_peers.saturating_add(1);
                 if let Ok(mut peers) = peers.lock()
                     && let Some(peer) = peers.get_mut(&addr)
                 {
@@ -1013,7 +1018,10 @@ fn service_network_once(
                 remote_tip,
                 synced_blocks,
                 latency,
+                caught_up,
             }) => {
+                assessed_peers = assessed_peers.saturating_add(1);
+                all_peers_caught_up &= caught_up;
                 if let Ok(mut peers) = peers.lock()
                     && let Some(peer) = peers.get_mut(&addr)
                 {
@@ -1025,25 +1033,36 @@ fn service_network_once(
                 }
             }
             Err(error) => {
+                assessed_peers = assessed_peers.saturating_add(1);
+                all_peers_caught_up = false;
                 node_debug!("P2P", "poll_failed peer={addr} error={error:?}");
                 if let Ok(mut peers) = peers.lock()
                     && let Some(peer) = peers.get_mut(&addr)
                 {
-                    peer.mark_failed();
-                    if peer.failures > MAX_PEER_FAILURES {
-                        peers.remove(&addr);
-                    } else if peer.is_banned() {
-                        node_warn!(
-                            "P2P",
-                            "peer_banned peer={addr} score={} failures={}",
-                            peer.score,
-                            peer.failures
-                        );
+                    if is_transport_error(&error) {
+                        peer.mark_unreachable();
+                    } else {
+                        peer.mark_failed();
+                        if peer.failures > MAX_PEER_FAILURES {
+                            peers.remove(&addr);
+                        } else if peer.is_banned() {
+                            node_warn!(
+                                "P2P",
+                                "peer_banned peer={addr} score={} failures={}",
+                                peer.score,
+                                peer.failures
+                            );
+                        }
                     }
                 }
             }
         }
     }
+
+    MINING_SYNC_READY.store(
+        peer_count == 0 || (assessed_peers >= peer_count && all_peers_caught_up),
+        Ordering::SeqCst,
+    );
 
     if let Some(path) = &config.peers_file
         && let Ok(peers) = peers.lock()

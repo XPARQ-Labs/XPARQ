@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use xparq::block::{Block, BlockHeight};
-use xparq::crypto::{Address, BlockHash};
+use xparq::crypto::BlockHash;
 use xparq::ledger::Ledger;
-use xparq::state::Account;
 
 pub const MAX_CACHED_BLOCKS: usize = 32;
 pub const MAX_CACHED_BLOCK_BYTES: usize = 64 * 1024 * 1024;
@@ -16,12 +15,9 @@ struct CachedBlock {
 
 #[derive(Clone, Debug, Default)]
 pub struct CoreCache {
-    accounts: BTreeMap<Address, Account>,
     blocks_by_height: BTreeMap<BlockHeight, CachedBlock>,
     block_heights_by_hash: BTreeMap<BlockHash, BlockHeight>,
     cached_block_bytes: usize,
-    tip_height: Option<BlockHeight>,
-    tip_hash: Option<BlockHash>,
 }
 
 impl CoreCache {
@@ -32,25 +28,10 @@ impl CoreCache {
     pub fn from_ledger(ledger: &Ledger) -> Result<Self, xparq::error::CodecError> {
         let mut cache = Self::new();
 
-        for account in ledger.accounts().values() {
-            cache.insert_account(account.clone());
-        }
-
         for block in ledger.chain.blocks.values() {
             cache.insert_block(block.clone())?;
         }
-
-        cache.tip_height = ledger.tip_height();
-        cache.tip_hash = ledger.tip_hash();
         Ok(cache)
-    }
-
-    pub fn insert_account(&mut self, account: Account) {
-        self.accounts.insert(account.address, account);
-    }
-
-    pub fn account(&self, address: &Address) -> Option<&Account> {
-        self.accounts.get(address)
     }
 
     pub fn insert_block(&mut self, block: Block) -> Result<(), xparq::error::CodecError> {
@@ -80,8 +61,6 @@ impl CoreCache {
         );
         self.block_heights_by_hash.insert(hash, height);
         self.cached_block_bytes = self.cached_block_bytes.saturating_add(serialized_size);
-        self.tip_height = Some(height);
-        self.tip_hash = Some(hash);
         self.evict_oldest_blocks();
         Ok(())
     }
@@ -104,14 +83,6 @@ impl CoreCache {
 
     pub fn cached_block_bytes(&self) -> usize {
         self.cached_block_bytes
-    }
-
-    pub fn tip_height(&self) -> Option<BlockHeight> {
-        self.tip_height
-    }
-
-    pub fn tip_hash(&self) -> Option<BlockHash> {
-        self.tip_hash
     }
 
     fn evict_oldest_blocks(&mut self) {

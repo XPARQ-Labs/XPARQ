@@ -440,7 +440,7 @@ struct QCashProofResponse {
     block_hash: String,
     protocol_state_root: String,
     qcash_state_root: String,
-    denomination_xpq: Option<u64>,
+    amount: Option<u64>,
     issued_height: Option<u64>,
     checkpoint_height: Option<u64>,
     checkpoint_hash: Option<String>,
@@ -620,11 +620,6 @@ pub(crate) fn start_rpc_servers(
         .route("/tx/{hash}/events", get(rpc_transaction_events))
         .route("/address/{address}", get(rpc_address))
         .route("/address/{address}/events", get(rpc_address_events))
-        .route(
-            "/account/{address}/rollback-issues",
-            get(rpc_account_rollback_issues),
-        )
-        .route("/rollback-issues/{id}", get(rpc_rollback_issue))
         .route("/events/stream", get(rpc_event_stream))
         .route("/events/{id}", get(rpc_event))
         .route("/accounts", get(rpc_accounts))
@@ -672,10 +667,6 @@ pub(crate) fn start_rpc_servers(
         let admin = Router::new()
             .route("/health", get(rpc_health))
             .route("/peers/add", post(rpc_add_peer))
-            .route(
-                "/rollback-issues/{id}/retry",
-                post(rpc_retry_rollback_issue),
-            )
             .route("/mining/template", get(rpc_mining_template))
             .route("/mining/submit", post(rpc_submit_mined_block))
             .layer(middleware::from_fn_with_state(token, require_admin_auth));
@@ -922,15 +913,14 @@ async fn rpc_metrics(State(state): State<RpcState>) -> impl IntoResponse {
             })
             .unwrap_or_default();
     let connection_stats = state.p2p_swarm.connection_stats();
-    let peer_count = connection_stats.outbound + connection_stats.inbound;
+    let peer_count = connection_stats.total;
     let database_bytes = fs::metadata(std::path::Path::new(&state.db_path).join("data.mdb"))
         .map(|metadata| metadata.len())
         .unwrap_or_default();
-    let network = crate::runtime::network::metrics::NETWORK_METRICS.snapshot();
     let state_pipeline = state.state_pipeline.snapshot();
     let sync_pipeline = &crate::p2p::SYNC_PIPELINE_METRICS;
     let crypto_queue = xparq::crypto::verification_queue_snapshot();
-    let mut body = format!(
+    let body = format!(
         concat!(
             "# TYPE xparq_chain_height gauge\nxparq_chain_height {height}\n",
             "# TYPE xparq_peer_count gauge\nxparq_peer_count {peer_count}\n",
@@ -1011,17 +1001,6 @@ async fn rpc_metrics(State(state): State<RpcState>) -> impl IntoResponse {
         crypto_queue_fallback = crypto_queue.fallback_total,
         crypto_queue_wait_seconds = crypto_queue.wait_micros_total as f64 / 1_000_000.0,
     );
-    body.push_str("# TYPE xparq_network_rx_bytes_total counter\n");
-    body.push_str("# TYPE xparq_network_tx_bytes_total counter\n");
-    for (index, category) in crate::runtime::network::metrics::NETWORK_CATEGORIES
-        .iter()
-        .enumerate()
-    {
-        body.push_str(&format!(
-            "xparq_network_rx_bytes_total{{type=\"{category}\"}} {}\nxparq_network_tx_bytes_total{{type=\"{category}\"}} {}\n",
-            network[index].0, network[index].1
-        ));
-    }
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body)
 }
 
@@ -1380,18 +1359,15 @@ async fn rpc_draft_transfer(
                 }
                 let candidate = Transaction::from_outputs(signer, inputs, outputs);
                 let size_template = if authorization_registered {
-                    xparq::transaction::SignedTransfer::new_stored_authorized(
+                    xparq::transaction::SignedTransfer::new_stored(
                         candidate.clone(),
-                        xparq::crypto::Signature([1; xparq::crypto::SIGNATURE_SIZE]),
                         xparq::crypto::Signature([1; xparq::crypto::SIGNATURE_SIZE]),
                     )
                 } else {
-                    xparq::transaction::SignedTransfer::new_authorized(
+                    xparq::transaction::SignedTransfer::new(
                         candidate.clone(),
                         xparq::crypto::PublicKey([1; xparq::crypto::PUBLIC_KEY_SIZE]),
                         xparq::crypto::Signature([1; xparq::crypto::SIGNATURE_SIZE]),
-                        xparq::crypto::PublicKey([2; xparq::crypto::PUBLIC_KEY_SIZE]),
-                        xparq::crypto::Signature([2; xparq::crypto::SIGNATURE_SIZE]),
                     )
                 };
                 estimated_virtual_size =
@@ -1510,7 +1486,7 @@ async fn rpc_header_chain_chunk(
         .into_response();
     }
     let end_height = start_height
-        .saturating_add(xparq::qcash::recovery::MAX_HEADER_CHAIN_CHUNK_HEADERS as u64 - 1)
+        .saturating_add(xparq::ledger::MAX_HEADER_CHAIN_CHUNK_HEADERS as u64 - 1)
         .min(tip_height.0);
     let mut headers = Vec::with_capacity((end_height - start_height + 1) as usize);
     for height in start_height..=end_height {
@@ -1532,9 +1508,9 @@ async fn rpc_header_chain_chunk(
     }
     drop(node);
     let header_count = headers.len();
-    let chunk = match xparq::qcash::recovery::HeaderChainChunk::new(headers).and_then(|chunk| {
+    let chunk = match xparq::ledger::HeaderChainChunk::new(headers).and_then(|chunk| {
         xparq::codec::canonical_bytes(&chunk)
-            .map_err(xparq::qcash::recovery::HeaderChainChunkError::Serialization)
+            .map_err(xparq::ledger::HeaderChainChunkError::Serialization)
     }) {
         Ok(bytes) => hex::encode(bytes),
         Err(error) => {
@@ -1791,7 +1767,7 @@ async fn rpc_qcash_proof(
         block_hash: hex::encode(tip_hash.0),
         protocol_state_root: hex::encode(bundle.state_commitment.protocol_state_root.0),
         qcash_state_root: hex::encode(bundle.state_commitment.qcash_state_root.0),
-        denomination_xpq: coin.map(|coin| coin.denomination.xpq()),
+        amount: coin.map(|coin| coin.amount.0),
         issued_height: coin.map(|coin| coin.issued_height.0),
         checkpoint_height: query.checkpoint_height,
         checkpoint_hash: Some(hex::encode(checkpoint_hash.0)),
@@ -1964,4 +1940,3 @@ include!("events.rs");
 include!("explorer.rs");
 include!("transactions.rs");
 include!("mining.rs");
-include!("recovery.rs");

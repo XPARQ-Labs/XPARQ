@@ -1,12 +1,12 @@
 # XPARQ Whitepaper
 
-## Proof of Work, Post-Quantum Dual Authorization, and QCash Bearer Value
+## Proof of Work, Post-Quantum Authorization, and QCash Bearer Value
 
 **Document status:** technical description of the active implementation and its security boundaries
 
-**Reference implementation:** XPARQ Sharksphere, protocol format `1`
+**Reference implementation:** XPARQ Sharksphere, protocol version `1`
 
-**Software version at publication:** `0.2.11`
+**Software version at publication:** `0.2.12`
 
 **Date:** August 10, 2026
 
@@ -23,13 +23,13 @@ state commitments, and transferable value through QCash bearer files.
 
 XPQ uses an owned-UTXO model. An address does not store a balance; its balance
 is derived from all unspent XPQ outputs owned by that address. Every address is
-bound to two keys with distinct roles—an `owner` key and an `authorization`
-key—and outgoing transactions require both signatures by default.
+bound to one post-quantum signing key, and outgoing transactions require one
+consensus signature.
 
 Blocks are secured by Argon2id proof of work. The canonical chain is selected
 by the greatest validated cumulative work, not by block height or peer claims.
 XPARQ uses Weight-Based Difficulty Adjustment (WBDA): difficulty and block
-subsidy are evaluated every 2,048 blocks from canonical block-weight
+subsidy are evaluated every 4,100 blocks from canonical block-weight
 utilization.
 
 QCash provides a bearer representation of XPQ. A withdrawal consumes owned
@@ -47,14 +47,14 @@ XPARQ is built around five primary principles:
 2. **Verification instead of peer trust.** Data obtained from peers, snapshot
    providers, and bootstrap nodes must be proven against proof of work and
    protocol commitments.
-3. **Layered authorization.** Account ownership and operational authorization
-   are separated into two keys that are both required to spend value.
+3. **Single-authority cryptographic agility.** Each account uses one active
+   signing key while the protocol defines deterministic signature-upgrade
+   phases.
 4. **Value conservation across representations.** XPQ may exist as an owned
    XPQ UTXO or an active QCash UTXO, but it must never be counted in both at
    once.
-5. **Explicit claim boundaries.** Local finality is not BFT finality, QCash is
-   not on-chain privacy, and sidechain designs are not part of active
-   consensus.
+5. **Explicit claim boundaries.** Local finality is not BFT finality and QCash
+   is not on-chain privacy.
 
 ## 2. Network Identity and Parameters
 
@@ -62,8 +62,8 @@ XPARQ is built around five primary principles:
 | --- | ---: | ---: | ---: |
 | Asset name | XPQ | tXPQ | dXPQ |
 | Chain ID | 747 | 717 | 707 |
-| Network magic | `XPQ\x01` | `TXPQ` | `DXPQ` |
-| Protocol format | 1 | 1 | 1 |
+| Network magic | `XPQ\x14` | `TXP\x14` | `DXP\x14` |
+| Protocol version | 1 | 1 | 1 |
 | Active signature scheme | ML-DSA-44 | ML-DSA-44 | Experimental SQIsign Level 5 |
 | Genesis | Frozen hash | Runtime-derived | Runtime-derived |
 
@@ -77,11 +77,11 @@ decimals = 6
 Mainnet launched without a premine. Every mainnet XPQ created after genesis
 must originate from a block subsidy validated by consensus.
 
-The active protocol format remains `1`. Software package versions may change
-without changing the consensus-format identifier. Conversely, a change to a
-canonical structure, field order, hash domain, genesis identity, proof of work,
-WBDA, state root, or validation rule may be consensus-breaking even when its
-version field remains `1`.
+The active protocol and every current top-level encoding use version `1`.
+Software package versions are independent from consensus identifiers. A layout
+change still requires an explicit compatibility decision and chain/database
+reset even when the active identifier remains `1`; incompatible bytes must
+never be reinterpreted as the current format.
 
 ## 3. Protocol Architecture
 
@@ -148,8 +148,28 @@ parameters:
 | Memory | 64 MiB |
 | Iterations | 1 |
 | Lanes | 2 |
-| PoW output | 64 bytes |
-| Salt/domain | `XPARQ_POW_ARGON2ID_V1` |
+| PoW output | 32 bytes |
+| Difficulty range | 1 to 256 leading zero bits |
+| Seed domain | `XPARQ_POW_SEED_V1` |
+| Salt domain | `XPARQ_POW_SALT_V1` |
+
+The memory-hard work construction is:
+
+```text
+canonical_header = Borsh(version, previous_hash, merkle_root,
+                         state_root, difficulty, block_weight, nonce)
+pow_seed = SHA3-256(domain = XPARQ_POW_SEED_V1, canonical_header)
+pow_salt = SHA3-256(domain = XPARQ_POW_SALT_V1,
+                    chain_id_le || previous_hash)
+work_hash = Argon2id-v1.3(pow_seed, pow_salt,
+                          memory = 64 MiB, iterations = 1,
+                          lanes = 2, output = 32 bytes)
+```
+
+The nonce is an explicit canonical-header field. Block identity and parent
+linkage continue to use the inexpensive domain-separated SHA3 header hash;
+Argon2id is evaluated only as the proof-of-work function. Mainnet, testnet,
+and devnet work are separated by their chain IDs.
 
 Every non-genesis block must declare the correct difficulty and produce valid
 proof of work at that difficulty. Per-block work is derived from difficulty
@@ -162,22 +182,21 @@ tip hash as a deterministic tie-breaker.
 
 ### 5.1 Weight-Based Difficulty Adjustment
 
-Difficulty is evaluated in epochs of 2,048 blocks. Utilization is calculated
+Difficulty is evaluated in epochs of 4,100 blocks. Utilization is calculated
 as:
 
 ```text
 utilization = average canonical block weight / 5 MiB
-            = total epoch block weight / (2,048 x 5 MiB)
-            = total epoch block weight / 10 GiB
+            = total epoch block weight / (4,100 x 5 MiB)
 ```
 
 The adjustment rules are:
 
 | Completed-epoch utilization | Next-epoch difficulty | Next-epoch subsidy |
 | --- | ---: | ---: |
-| Below 30% | +1 | +1 XPQ |
-| 30% through 70%, inclusive | unchanged | unchanged |
-| Above 70% | -1 | -1 XPQ |
+| Below 40% | +1 | +0.1 XPQ |
+| 40% through 60%, inclusive | unchanged | unchanged |
+| Above 60% | -1 | -0.1 XPQ |
 
 Minimum difficulty is `1`. XPARQ does not use block timestamps as a target
 interval in this WBDA formula; the active mechanism responds to block-weight
@@ -186,25 +205,25 @@ block interval or as fully preventing miners from influencing utilization.
 
 ## 6. XPQ Economics and Issuance
 
-The initial subsidy is 10 XPQ per block. After each completed epoch, the
+The initial subsidy is 5 XPQ per block. After each completed epoch, the
 subsidy moves in the same direction as WBDA and is constrained as follows:
 
 ```text
-minimum subsidy = 1 XPQ per block
-base subsidy    = 10 XPQ per block
-maximum subsidy = 20 XPQ per block
-step            = 1 XPQ per epoch
+minimum subsidy = 0.5 XPQ per block
+base subsidy    = 5 XPQ per block
+maximum subsidy = 10 XPQ per block
+step            = 0.1 XPQ per epoch
 maturity        = 50 blocks
 ```
 
 Only the subsidy valid for the current epoch is issued. If the subsidy falls
-from 10 XPQ to 9 XPQ, the one-XPQ difference is never created; it is not burned
-after issuance and is not assigned to a treasury. If the subsidy later rises,
-the additional issuance applies only to new blocks.
+from 5 XPQ to 4.9 XPQ, the 0.1-XPQ difference is never created; it is not
+burned after issuance and is not assigned to a treasury. If the subsidy later
+rises, the additional issuance applies only to new blocks.
 
 The active XPARQ implementation has no fixed hard supply cap. Total supply
 depends on the number of blocks and the adaptive subsidy path, subject to the
-per-block range of 1–20 XPQ. Mainnet genesis contains no allocation to a
+per-block range of 0.5–10 XPQ. Mainnet genesis contains no allocation to a
 founder, foundation, developer, treasury, or any other party.
 
 ### 6.1 Miner Payments
@@ -216,10 +235,14 @@ output targeting `BlockMiner`. A typical transfer is:
 XPQ inputs -> recipient output + change output + optional BlockMiner output
 ```
 
-Consensus validates value conservation, not a minimum price for block
-inclusion. Nodes and miners may prioritize transactions through local policy,
-but a transaction without a miner payment is not automatically invalid in
-core.
+Consensus validates value conservation and represents the miner payment as an
+output rather than a separate field. A zero-fee transaction remains valid at
+consensus. Standard nodes apply their configured rate per virtual byte equally
+to ordinary transfers, QCash withdrawals, full and partial redeems, and splits;
+QCash therefore cannot obtain a preferential rate by sending its redeemed XPQ
+directly to another address. The default node rate is one paqs per virtual byte,
+but an operator may set it to zero. Relay and miner selection are policy, not a
+consensus tax.
 
 ## 7. Owned XPQ UTXOs
 
@@ -236,39 +259,37 @@ new coin identifier. Replay and double-spend protection follow from the rule
 that each coin may be consumed only once. Accounts do not store a transaction
 nonce or a separate balance field.
 
-## 8. Addresses and Dual Authorization
+## 8. Addresses and Signature Authorization
 
-An XPARQ address is derived from an ordered pair of public keys. Conceptually:
+An XPARQ address is derived from one signing public key. Conceptually:
 
 ```text
-address = last_20_bytes(SHA3-256(
-    active_signature_domain || chain_id_le || owner_pk || authorization_pk
-))
+address = last_20_bytes(SHA3-256(signing_public_key))
 ```
 
-The canonical text representation is lowercase Bech32 with the `x` human-
-readable prefix. Key order matters: exchanging the owner and authorization
-roles produces a different identity.
+The final 20 bytes of the digest are the canonical address payload. The
+canonical text representation is 40-character lowercase Bech32 with the `z`
+human-readable prefix.
 
-Both signatures are required by default:
+One signature is required:
 
-- the **owner key** proves primary ownership;
-- the **authorization key** provides a second approval layer.
+- the signing public key hashes to the account address;
+- the corresponding secret key authorizes spending.
 
-The first outgoing transaction carries both public keys. After successful
-validation, the ledger stores the pair in authenticated account state. Later
-transactions carry only two signatures, while the node obtains both public
-keys from state. An address may receive XPQ before its authorization keys have
-been registered.
+The first outgoing transaction carries the public key. After successful
+validation, the ledger stores it in authenticated account state. Later
+transactions carry only one signature, while the node obtains the public key
+from state. An address may receive XPQ before its authorization key has been
+registered.
 
 Mainnet and testnet use ML-DSA-44. SQIsign Level 5 is available as an
 experimental blockchain-test backend on devnet and is not an active mainnet
 consensus scheme.
 
-The current wallet derives its owner key from a mnemonic and its authorization
-key from a password using Argon2id derivation. Hardware-wallet integration,
-address-preserving authorization-key rotation, and specialized recovery
-policies are not active consensus features.
+The current wallet derives one signing key from the mnemonic entropy together
+with the wallet passphrase. Hardware-wallet integration, address-preserving
+key rotation, and specialized recovery policies are not active consensus
+features.
 
 ## 9. QCash
 
@@ -281,21 +302,22 @@ active QCash UTXO --redeem--> owned XPQ UTXO
 
 ### 9.1 Withdrawal
 
-A withdrawal consumes owned XPQ inputs and creates one or more QCash UTXOs in
-canonical whole-XPQ denominations. Available denominations range from 1 XPQ to
-1,000,000 XPQ. Fractional XPQ cannot become QCash; any remainder stays in an
-owned XPQ change output.
+A withdrawal consumes owned XPQ inputs and creates one or more QCash UTXOs with
+exact positive amounts measured in paqs. There is no fixed note set: one QCash
+file can represent a whole or fractional XPQ amount down to `0.000001 XPQ`.
+Multiple output amounts are ordered from largest to smallest and must sum
+exactly to the withdrawn value.
 
-For every coin, the ledger stores its coin identifier, denomination, and a
+For every coin, the ledger stores its coin identifier, exact amount, and a
 commitment to the redeem key. The opening secret is not stored by the ledger.
 The wallet writes it to a bearer file with a name such as:
 
 ```text
-100XPQ_<FULL_COIN_ID>.QCash
+29.9XPQ_<FULL_COIN_ID>.QCash
 ```
 
 The file contains format version `1`, an opaque 32-byte coin identifier, its
-denomination, and a 32-byte `redeem_secret`. Anyone who obtains a valid,
+amount in paqs, and a 32-byte `redeem_secret`. Anyone who obtains a valid,
 unredeemed file can use it. The file must be protected like physical cash.
 
 ### 9.2 Redemption
@@ -307,9 +329,18 @@ immediately consumes the QCash UTXO and creates:
 - at most one `BlockMiner` output.
 
 Their sum must equal the gross QCash value. A redemption miner payment is
-therefore a division of the bearer denomination, not newly created value.
+therefore a division of the bearer amount, not newly created value.
 Owned XPQ produced by redemption becomes spendable after the normal
 confirmation depth.
+
+The same redeem transaction may create new QCash outputs. This enables an
+atomic partial redeem: the old bearer coin is consumed, an XPQ recipient output
+is created, and the remainder becomes a new bearer file. A pure split omits the
+XPQ recipient and creates two or more independently redeemable QCash outputs.
+Both operations permit at most one `BlockMiner` output, so each operation pays
+for one transaction rather than chaining a redeem and a second withdrawal.
+The `QCashRedeemed` protocol event records both the on-chain recipient amount
+and `qcash_change_amount`, the total value recreated as bearer outputs.
 
 ### 9.3 QCash Properties and Boundaries
 
@@ -335,18 +366,31 @@ The lifecycle of a transaction included at height `H` is:
 | --- | --- |
 | `H` | Included and still reorganization-sensitive |
 | Depth 2 | Confirmed; transfer and redemption outputs mature |
-| Depth 5 | Finalized under the local reorganization boundary |
+| Depth 5 | Finalized transaction lifecycle status |
 
-Mining subsidies mature after 50 blocks. In XPARQ, `finalized` means that a
-node rejects a reorganization crossing the five-block consensus boundary. It
-is not BFT or proof-of-stake finality and does not establish irreversibility
-against a majority-hashpower attack or a community-coordinated software
-change.
+Mining subsidies mature after 50 blocks. Transaction finality at depth 5 is an
+API and wallet lifecycle status, not an irreversible PoW boundary. Locally
+observed WBDA boundaries never become automatic hard checkpoints. This keeps
+long network partitions resolvable by validated cumulative work after peers
+reconnect. Only an explicitly activated, authenticated release snapshot or
+checkpoint trust anchor can pin older history.
 
 QCash rollback follows the canonical chain. A withdrawal on a disconnected
 branch is removed. A disconnected redemption restores the QCash UTXO it had
-consumed. Old rollback-only data may be pruned after the finality boundary,
-while explorer history can be retained separately.
+consumed, and the original signed redemption is automatically revalidated and
+returned to the mempool when it remains valid. The durable node reorganization
+journal retains that signed redemption independently of local bearer-file
+handling. The reference wallet keeps the source file after mempool acceptance
+and uses canonical ledger state to determine whether it remains spendable.
+Rollback-only state is pruned only below an explicitly trusted checkpoint;
+explorer history can be retained separately.
+
+The reference node executes a reorganization from the common ancestor: it
+disconnects only the losing suffix, applies only the winning suffix, and
+atomically replaces the canonical indexes for the affected heights. Per-block
+undo state is persisted so this incremental path remains available after a
+restart. Side blocks remain addressable by hash and do not occupy canonical
+height or transaction indexes.
 
 ## 11. Proofs, Snapshots, and Fast Sync
 
@@ -391,7 +435,7 @@ automatically protect RPC endpoints.
 
 - Transaction forgery requires signatures valid under authenticated account
   state.
-- Spending requires both owner and authorization signatures by default.
+- Spending requires a signature valid for the authenticated account key.
 - UTXO consumption prevents ordinary replay and double spending.
 - Per-height and per-epoch subsidy validation constrains XPQ issuance.
 - Snapshots must match a state root on a validated proof-of-work chain.
@@ -400,7 +444,7 @@ automatically protect RPC endpoints.
 
 ### 13.2 Threats Not Eliminated
 
-- majority-hashpower attacks or reorganizations before the finality boundary;
+- majority-hashpower attacks and deep proof-of-work reorganizations;
 - eclipse and isolation attacks against nodes that see only malicious peers;
 - malware, keyloggers, stolen mnemonics or passwords, and endpoint compromise;
 - theft, copying, or earlier redemption of a `.QCash` file;
@@ -410,9 +454,9 @@ automatically protect RPC endpoints.
 - metadata leakage and relationship analysis involving QCash activity;
 - permanent loss caused by inadequate key or bearer-file backups.
 
-The five-block finality depth is a local protocol rule, not economic proof that
-five confirmations are sufficient for every transaction value. Users must set
-their operational risk tolerance according to value and network conditions.
+The five-block transaction-finality status is not economic proof that five
+confirmations are sufficient for every transaction value. Users must set their
+operational risk tolerance according to value and network conditions.
 
 ## 14. Upgrades and Compatibility
 
@@ -444,49 +488,45 @@ owned XPQ UTXOs, QCash, proofs, snapshots, rollback, and fuzz targets.
 The following are not part of the active mainnet protocol at the time of this
 document:
 
-- a proof-of-stake sidechain or bridge chain;
 - a rollup with L1 data-availability and validity or fraud proofs;
 - a general-purpose smart-contract virtual machine;
 - shielded transactions or a zero-knowledge privacy pool;
-- hardware-wallet dual authorization;
+- hardware-wallet signing support;
 - address-preserving authorization-key rotation;
 - SQIsign as the mainnet consensus signature scheme.
-
-PoS research should be described as a **sidechain or bridge chain** until L1
-actually verifies checkpoints, data availability, and adequate exit rules. If
-implemented, its minimum economic invariant is that total L2 XPQ claims must
-never exceed finalized XPQ locked in the L1 bridge escrow.
 
 ## 16. Active Consensus Parameters
 
 | Parameter | Value |
 | --- | --- |
 | Mainnet chain ID | 747 |
-| Protocol format | 1 |
+| Protocol version | 1 |
 | Unit | 1 XPQ = 1,000,000 paqs |
-| Mainnet/testnet signature | ML-DSA-44 dual authorization |
+| Mainnet/testnet signature | Single-authority ML-DSA-44 |
 | Devnet signature | Experimental SQIsign Level 5 |
 | Hash | Domain-separated SHA3-256 |
 | PoW | Argon2id, 64 MiB, 1 iteration, 2 lanes |
 | Fork choice | Greatest validated cumulative work |
 | Maximum block size and weight | 5 MiB |
-| WBDA epoch | 2,048 blocks |
-| Neutral WBDA zone | 30%–70%, inclusive |
+| WBDA epoch | 4,100 blocks |
+| Neutral WBDA zone | 40%–60%, inclusive |
+| Automatic PoW checkpoint | Disabled |
+| Trusted checkpoint | Explicit authenticated release artifact only |
 | Minimum difficulty | 1 |
-| Initial subsidy | 10 XPQ per block |
-| Subsidy range | 1–20 XPQ per block |
+| Initial subsidy | 5 XPQ per block |
+| Subsidy range | 0.5–10 XPQ per block, adjusted by 0.1 XPQ per epoch |
 | Mainnet premine | None |
 | Hard supply cap | None |
 | Confirmation depth | 2 blocks |
-| Finality boundary | 5 blocks |
+| Transaction finality status | 5 blocks |
 | Mining-reward maturity | 50 blocks |
 | QCash redemption delay | 1 block |
-| Active transaction, QCash, and artifact formats | 1 |
+| Active protocol and object formats | 1 |
 
 ## 17. Conclusion
 
 XPARQ combines Argon2id proof of work, cumulative-work fork choice,
-post-quantum dual authorization, authenticated state commitments, and two UTXO
+post-quantum single-authority signatures, authenticated state commitments, and two UTXO
 representations to provide XPQ that can be directly owned or transferred as
 QCash bearer value.
 

@@ -46,10 +46,7 @@ impl SignedProtocolTransaction {
     pub fn authorization_proof_public_keys_all(&self) -> Vec<&PublicKey> {
         let authorization_proof = self.authorization_proof();
         if authorization_proof.carries_registration_keys() {
-            vec![
-                &authorization_proof.public_key,
-                &authorization_proof.auth_public_key,
-            ]
+            vec![&authorization_proof.public_key]
         } else {
             Vec::new()
         }
@@ -133,16 +130,14 @@ impl SignedProtocolTransaction {
         &self,
         account: &crate::state::Account,
         height: BlockHeight,
-    ) -> Result<Option<(PublicKey, PublicKey)>, TransactionError> {
+    ) -> Result<Option<PublicKey>, TransactionError> {
         self.authorization_proof().validate_shape()?;
         if self.to_bytes()?.len() > MAX_PROTOCOL_TRANSACTION_SIZE {
             return Err(TransactionError::TransactionTooLarge);
         }
         if let Some(authorization) = &account.authorization {
             if self.authorization_proof().carries_registration_keys() {
-                if self.authorization_proof().public_key != authorization.owner_public_key
-                    || self.authorization_proof().auth_public_key != authorization.auth_public_key
-                {
+                if self.authorization_proof().public_key != authorization.public_key {
                     return Err(TransactionError::SenderAddressMismatch);
                 }
                 match self {
@@ -151,16 +146,12 @@ impl SignedProtocolTransaction {
                 }
             } else {
                 match self {
-                    Self::Transfer(tx) => tx.validate_stored_keys_for_height(
-                        height,
-                        &authorization.owner_public_key,
-                        &authorization.auth_public_key,
-                    )?,
-                    Self::QCash(tx) => tx.validate_stored_keys_for_height(
-                        height,
-                        &authorization.owner_public_key,
-                        &authorization.auth_public_key,
-                    )?,
+                    Self::Transfer(tx) => {
+                        tx.validate_stored_keys_for_height(height, &authorization.public_key)?
+                    }
+                    Self::QCash(tx) => {
+                        tx.validate_stored_keys_for_height(height, &authorization.public_key)?
+                    }
                 }
             }
             Ok(None)
@@ -170,10 +161,7 @@ impl SignedProtocolTransaction {
                 Self::QCash(tx) => tx.validate_signed_for_height(height)?,
             }
             let authorization_proof = self.authorization_proof();
-            Ok(Some((
-                authorization_proof.public_key,
-                authorization_proof.auth_public_key,
-            )))
+            Ok(Some(authorization_proof.public_key))
         }
     }
 

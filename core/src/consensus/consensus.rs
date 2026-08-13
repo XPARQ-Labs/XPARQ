@@ -1,13 +1,15 @@
 use crate::block::Block;
 use crate::block::{BlockHeight, Height};
-use crate::crypto::{
-    BlockHash, HASH_SIZE, Hash, PoWHash, argon2id_pow_hash, hash_meets_difficulty,
-};
+use crate::crypto::{BlockHash, HASH_SIZE, Hash, PoWHash};
 
 use crate::error::ConsensusError;
 
 pub const MIN_DIFFICULTY: u32 = 1;
-pub const GENESIS_DIFFICULTY: u32 = DIFFICULTY_START;
+/// A 256-bit PoW output cannot represent a stricter leading-zero target.
+pub const MAX_DIFFICULTY: u32 = (crate::crypto::POW_HASH_SIZE * 8) as u32;
+/// Compatibility name for the height-zero difficulty. Unlike
+/// [`DIFFICULTY_START`], this value belongs to the stable genesis header.
+pub const GENESIS_DIFFICULTY: u32 = crate::block::GENESIS_BLOCK_DIFFICULTY;
 pub const DIFFICULTY_START: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,7 +42,7 @@ pub struct Consensus {
 
 impl Consensus {
     pub fn new(config: ConsensusConfig) -> Result<Self, ConsensusError> {
-        if config.difficulty < MIN_DIFFICULTY {
+        if !(MIN_DIFFICULTY..=MAX_DIFFICULTY).contains(&config.difficulty) {
             return Err(ConsensusError::InvalidDifficulty);
         }
 
@@ -158,8 +160,7 @@ impl Consensus {
     }
 
     pub fn validate_claimed_pow(&self, block: &Block) -> Result<(), ConsensusError> {
-        let hash = pow_hash(block)?;
-        self.validate_pow_hash_with_difficulty(&hash, block.difficulty())
+        crate::consensus::verify_pow(&block.header, block.difficulty())
     }
 
     pub fn validate_proof_of_work(&self, block: &Block) -> Result<(), ConsensusError> {
@@ -175,11 +176,11 @@ impl Consensus {
         hash: &PoWHash,
         difficulty: u32,
     ) -> Result<(), ConsensusError> {
-        if difficulty < MIN_DIFFICULTY {
+        if !(MIN_DIFFICULTY..=MAX_DIFFICULTY).contains(&difficulty) {
             return Err(ConsensusError::InvalidDifficulty);
         }
 
-        if hash_meets_difficulty(hash, difficulty) {
+        if crate::crypto::hash_meets_difficulty(hash, difficulty) {
             Ok(())
         } else {
             Err(ConsensusError::InsufficientPoW)
@@ -187,7 +188,7 @@ impl Consensus {
     }
 
     pub fn pow_hash(&self, block: &Block) -> Result<PoWHash, ConsensusError> {
-        pow_hash(block)
+        crate::consensus::calculate_work(&block.header)
     }
 
     pub fn proof_of_work_hash(&self, block: &Block) -> Result<PoWHash, ConsensusError> {
@@ -201,13 +202,4 @@ impl Consensus {
     ) -> Result<(), ConsensusError> {
         self.validate_pow_hash_with_difficulty(hash, difficulty)
     }
-}
-
-fn pow_hash(block: &Block) -> Result<PoWHash, ConsensusError> {
-    let bytes = borsh::to_vec(&block.header).map_err(|_| ConsensusError::PoWHashFailed)?;
-    argon2id_pow_hash(&bytes).map_err(|error| match error {
-        crate::error::CryptoError::InvalidPoWParameters => ConsensusError::InvalidPoWParameters,
-        crate::error::CryptoError::PoWHashFailed => ConsensusError::PoWHashFailed,
-        _ => ConsensusError::PoWHashFailed,
-    })
 }

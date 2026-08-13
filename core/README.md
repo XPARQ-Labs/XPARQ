@@ -8,14 +8,19 @@ wallet executable.
 
 - canonical block and protocol-transaction encoding;
 - Argon2id proof of work, WBDA difficulty, rewards, and cumulative chainwork;
-- ML-DSA authorization on mainnet/testnet and experimental SQIsign on devnet;
+- single-authority ML-DSA signatures on mainnet/testnet and experimental SQIsign on devnet;
 - owned-XPQ and QCash UTXO state transitions;
 - state commitments, proofs, genesis artifacts, snapshots, and rollback;
-- fork choice and bounded reorganization rules.
+- cumulative-work fork choice and checkpoint-aware reorganization rules.
 
 The node-specific database, P2P swarm, mempool policy, HTTP/gRPC servers, and
 mining loop live in `node/`. Wallet files, mnemonic handling, transaction
 construction, and the interactive CLI live in `wallet/`.
+
+Authorization uses one registered public key per account. Signature-scheme
+transitions are height-gated consensus policy, with ML-DSA active on
+mainnet/testnet and the SQIsign Level 5 blockchain-test backend available only
+on devnet.
 
 ## Source layout
 
@@ -26,7 +31,7 @@ core/
 ├── src/crypto/        hashes, addresses, ML-DSA, SQIsign candidate adapter
 ├── src/genesis/       frozen network parameters and authenticated artifacts
 ├── src/ledger/        transitions, fork choice, reorg, proofs, invariants
-├── src/qcash/         QCash domains, bearer files, recovery verification
+├── src/qcash/         QCash amounts, commitments, and bearer-file formats
 ├── src/state/         account, XPQ UTXO, QCash UTXO, state commitments
 ├── src/transaction/   transfer and QCash protocol envelopes
 ├── benches/           core and SQIsign benchmarks

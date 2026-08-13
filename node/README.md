@@ -29,11 +29,34 @@ Operational limits are explicit:
 | Parallel sync result queue | At most 8 completed ranges waiting for ordered application |
 | Recent-block cache | 32 blocks and 64 MiB, whichever limit is reached first |
 | LMDB state snapshots | Genesis and every 2,048 blocks; intervening blocks persist dirty account and UTXO diffs |
+| Reorganization rollback | Disconnects only the losing suffix to the common ancestor, then applies only the winning suffix |
+| Reorganization persistence | Canonical LMDB indexes are replaced only for affected heights; per-block undo state survives restart |
+| Reorg transaction journal | Signed transactions from disconnected blocks are persisted before chain activation and retried automatically, including after restart |
 
 The recent-block cache stores one `Arc<Block>` per cached height and a
 hash-to-height secondary index. Evicted historical blocks remain available
 from the canonical Ledger/LMDB path. All caches are process-local and are not
 consensus or persisted state.
+
+Reorganization recovery is internal. The node restores canonical ledger state,
+revalidates disconnected UTXO transfers and QCash redeem/split transforms, and
+returns valid transactions to the mempool using their original signatures.
+There is no public rollback-issue RPC or manual retry command.
+
+Mempool admission requires the miner payment to meet the configured rate for
+the transaction's serialized virtual size. The configured rate is
+applied identically to ordinary transfers and QCash withdraw,
+redeem/partial-redeem, and split transactions. Miner selection rechecks the
+same rule, so no transaction family receives a cheaper rate. Setting the local
+rate to zero explicitly permits fee-free transactions; this does not change
+consensus validity.
+
+Normal reorganization cost follows the disconnected and connected suffixes,
+not the full height from genesis. Losing blocks remain available by hash as
+side blocks, while canonical height, transaction, miner, and event indexes are
+updated atomically. Databases created before per-block undo persistence remain
+safe: a reorganization that reaches missing legacy undo data uses the slower
+full replay fallback.
 
 `GET /metrics` exposes queue pressure, per-stage sync timing, crypto fallback,
 database size, and block-cache occupancy. CPU profiles can be captured with
@@ -55,6 +78,62 @@ feature:
 cargo build --release -p node --no-default-features --features testnet
 cargo build --release -p node --no-default-features --features devnet
 ```
+
+## Docker
+
+The repository includes a multi-stage Docker image whose build and runtime
+stages both use Debian 12 (Bookworm). The runtime image contains only the node
+binary, CA certificates, and its required C runtime library, and runs as the
+unprivileged `xparq` user (UID/GID `10001`). The same Dockerfile can build all
+three networks on any Docker host with a supported architecture.
+
+Build and identify the default mainnet image:
+
+```bash
+docker build --tag xparq-node:mainnet .
+docker run --rm xparq-node:mainnet version
+```
+
+For testnet or devnet, select exactly one network at build time:
+
+```bash
+docker build --build-arg XPARQ_NETWORK=testnet --tag xparq-node:testnet .
+docker build --build-arg XPARQ_NETWORK=devnet --tag xparq-node:devnet .
+```
+
+The included Compose file is a ready-to-run, non-mining mainnet starting point.
+It publishes only the P2P port, persists the protocol-v1 database in a named
+volume, and mounts the repository's safe default configuration read-only. It
+does not require a configured initial peer: the node starts and accepts inbound
+connections on TCP port `5555`.
+
+```bash
+docker compose build
+docker compose run --rm node version
+docker compose up --detach
+docker compose logs --follow node
+```
+
+The default has no initial peers, DNS seed, gateway, public-address
+advertisement, RPC exposure, or mining. A node with no discovery source waits
+for another node to connect to its public host address on port `5555`. To use a
+custom configuration without changing the tracked default:
+
+```bash
+cp docker/config.mainnet.example.json docker/config.mainnet.json
+XPARQ_DOCKER_CONFIG=./docker/config.mainnet.json docker compose up --detach
+```
+
+`docker/config.mainnet.json` is ignored by Git so operators can add peer and
+mining settings locally. Never put `miner_secret_key` in a committed file.
+
+Stop gracefully with `docker compose stop`. `docker compose down` removes the
+containers and network but retains the named database volume. The protocol-v1
+volume is named `xparq_xparq-mainnet-v1-data`; do not add `--volumes` unless
+deleting that chain database is intentional. The mounted configuration keeps
+RPC on container loopback by default, so port 6666 is not published. Operators
+exposing RPC must configure its TLS and access controls explicitly rather than
+publishing an unauthenticated listener.
 
 ## Configuration and startup
 
@@ -96,6 +175,17 @@ Keep the other generated fields. Then run:
 ./target/release/node mine
 ```
 
+Mining starts whenever `mine` is `true` and a payout address is configured;
+it does not require an active peer. This permits the first node of a network to
+mine from genesis. When peers later connect, normal validated cumulative-work
+fork choice determines the canonical chain.
+
+Sync downloads are checkpointed at every applied batch and ranges are fetched
+from multiple eligible peers. If one range fails, already contiguous verified
+ranges are applied before the next round resumes. Transport timeouts trigger
+bounded exponential reconnect backoff but do not count as protocol violations;
+invalid peer responses still increase the ban score.
+
 The implementation still accepts `wallet` as a legacy payout-address source,
 but mining never needs the wallet's secret keys. `miner_secret_key` is also
 optional and should normally remain `null`.
@@ -110,8 +200,11 @@ command-line options.
 `public_addr_ipv4` and `public_addr_ipv6` advertise externally reachable P2P
 addresses; they are not RPC addresses. `peers_ipv4`, `peers_ipv6`,
 `peers_file`, and `dns_seeds` provide entry points, but do not determine
-canonical chain state.
-Fork choice always uses validated cumulative work.
+canonical chain state. One surviving libp2p connection is bidirectional, so a
+two-node setup may correctly report `inbound=1 outbound=0` on one node and
+`inbound=0 outbound=1` on the other. Fork choice always uses validated
+cumulative work; equal-work tips use the lower block hash as the deterministic
+tie-breaker.
 
 RPC defaults to loopback. A non-loopback HTTP RPC listener requires TLS and
 the configured security controls. Only the P2P port normally needs public
@@ -158,6 +251,10 @@ Stop the running node before offline maintenance:
 
 Backup, restore, and snapshot import refuse to overwrite an existing
 destination. Never open a database with a binary compiled for another network.
+
+The 0.2.12 monetary-policy and 20-byte-address reset has a new mainnet genesis
+identity. Preserve older data as an offline backup if needed, but do not mount
+or restore a database or wallet from a 32-byte-address build into a 0.2.12 node.
 
 Use `Ctrl+C` for graceful shutdown and wait for the shutdown-complete log.
 

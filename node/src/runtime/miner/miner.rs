@@ -1,5 +1,5 @@
 use crate::runtime::mempool::Mempool;
-use xparq::block::{Block, BlockError, CoinbaseTransaction, Nonce};
+use xparq::block::{Block, BlockError, EmissionTransaction, Nonce};
 use xparq::consensus::{Consensus, ConsensusError};
 use xparq::crypto::Address;
 use xparq::genesis::GenesisError;
@@ -19,26 +19,6 @@ pub struct MiningConfig {
 pub struct MiningResult {
     pub block: Block,
     pub attempts: u64,
-}
-
-pub fn mine_candidate_block(
-    mempool: &Mempool,
-    ledger: &Ledger,
-    consensus: &Consensus,
-    miner_address: Address,
-    _timestamp: u64,
-    config: MiningConfig,
-) -> Result<Option<MiningResult>, ConsensusError> {
-    let block = prepare_candidate_block(
-        mempool,
-        ledger,
-        miner_address,
-        _timestamp,
-        config.transaction_limit,
-        config.min_fee_rate,
-        config.difficulty,
-    )?;
-    mine_prepared_block(block, consensus, config)
 }
 
 #[allow(clippy::too_many_arguments)] // Consensus candidate inputs are explicit at this boundary.
@@ -66,7 +46,7 @@ pub fn prepare_candidate_block(
     let subsidy = ledger
         .mintable_subsidy(height)
         .map_err(|_| ConsensusError::InvalidBlock(BlockError::InvalidEmission))?;
-    let coinbase = CoinbaseTransaction::new(miner_address, subsidy);
+    let coinbase = EmissionTransaction::new(miner_address, subsidy);
     let mut block = Block::from_protocol_transactions(
         height,
         previous_hash,
@@ -113,24 +93,6 @@ fn genesis_to_consensus_error(error: GenesisError) -> ConsensusError {
         GenesisError::Ledger(error) => ledger_to_consensus_error(error),
         _ => ConsensusError::InvalidBlock(xparq::error::BlockError::InvalidTransaction),
     }
-}
-
-pub fn mine_prepared_block(
-    block: Block,
-    consensus: &Consensus,
-    config: MiningConfig,
-) -> Result<Option<MiningResult>, ConsensusError> {
-    mine_prepared_block_until(block, consensus, config, || false)
-}
-
-pub fn mine_prepared_block_until(
-    block: Block,
-    consensus: &Consensus,
-    config: MiningConfig,
-    should_stop: impl Fn() -> bool,
-) -> Result<Option<MiningResult>, ConsensusError> {
-    mine_prepared_block_until_with_attempts(block, consensus, config, should_stop)
-        .map(|(result, _attempts)| result)
 }
 
 pub fn mine_prepared_block_until_with_attempts(

@@ -1,0 +1,28 @@
+services:
+  node:
+    build:
+      context: .
+      args:
+        XPARQ_NETWORK: mainnet
+    image: xparq-node:mainnet
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 60s
+    environment:
+      XPARQ_CONFIG: /etc/xparq/config.json
+      XPARQ_LOG: ${XPARQ_LOG:-info}
+    ports:
+      - "5555:5555/tcp"
+    volumes:
+      # Keep protocol/storage v1 data isolated from incompatible earlier builds.
+      - xparq-mainnet-v1-data:/var/lib/xparq/data
+      # Starts safely with the repository default. Advanced operators can set
+      # XPARQ_DOCKER_CONFIG to an ignored, locally edited configuration file.
+      - ${XPARQ_DOCKER_CONFIG:-./docker/config.mainnet.example.json}:/etc/xparq/config.json:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  xparq-mainnet-v1-data:

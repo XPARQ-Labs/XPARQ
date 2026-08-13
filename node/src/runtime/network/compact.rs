@@ -14,7 +14,7 @@ pub const MAX_COMPACT_RECOVERY_TRANSACTIONS: usize = 1_024;
 pub struct CompactBlock {
     pub height: xparq::block::BlockHeight,
     pub header: BlockHeader,
-    pub coinbase: Option<xparq::block::CoinbaseTransaction>,
+    pub coinbase: Option<xparq::block::EmissionTransaction>,
     pub short_ids: Vec<u64>,
 }
 
@@ -184,104 +184,4 @@ pub fn compact_short_id(block_hash: BlockHash, transaction_hash: TransactionHash
     bytes.extend_from_slice(&transaction_hash.0);
     let hash = domain_hash(HashDomain::Raw, &bytes);
     u64::from_le_bytes(hash.0[..COMPACT_SHORT_ID_BYTES].try_into().unwrap())
-}
-
-// Covered by the xparq 0.2.20 canonical block/transaction tests.
-#[cfg(all(test, any()))]
-mod tests {
-    use super::*;
-    use xparq::block::{CoinbaseTransaction, Height, Nonce};
-    use xparq::consensus::supply::Amount;
-    use xparq::crypto::{
-        Address, PreviousHash, dual_address_from_public_keys, generate_keypair, sign,
-    };
-    use xparq::transaction::{SignedTransaction, Transaction};
-
-    fn signed_transaction(byte: u8, nonce: u64) -> SignedProtocolTransaction {
-        let keypair = generate_keypair();
-        let from = dual_address_from_public_keys(&keypair.public_key, &keypair.public_key);
-        let transaction = Transaction::new(
-            from,
-            Address([byte; xparq::crypto::ADDRESS_SIZE]),
-            Amount(u64::from(byte)),
-            nonce,
-        );
-        let signature = sign(&keypair.secret_key, &transaction.signing_bytes().unwrap());
-        SignedTransaction::new_authorized(
-            transaction,
-            keypair.public_key,
-            signature.clone(),
-            keypair.public_key,
-            signature,
-        )
-        .into()
-    }
-
-    fn block() -> Block {
-        let transactions = vec![signed_transaction(1, 0), signed_transaction(2, 1)];
-        Block::from_protocol_transactions(
-            Height(1),
-            PreviousHash::ZERO,
-            1,
-            Nonce(7),
-            Some(CoinbaseTransaction::new(
-                Address([9; xparq::crypto::ADDRESS_SIZE]),
-                Amount(0),
-            )),
-            transactions,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn reconstructs_after_requesting_only_missing_transactions() {
-        let block = block();
-        let compact = CompactBlock::from_block(&block).unwrap();
-        let mut mempool = Mempool::new();
-        mempool
-            .insert_for_compact_test(block.transactions[0].clone())
-            .unwrap();
-        assert_eq!(
-            compact.reconstruct(&mempool, &[]).unwrap(),
-            CompactBlockReconstruction::Missing(vec![1])
-        );
-        let supplied = vec![IndexedBlockTransaction {
-            index: 1,
-            transaction: block.transactions[1].clone(),
-        }];
-
-        assert_eq!(
-            compact.reconstruct(&mempool, &supplied).unwrap(),
-            CompactBlockReconstruction::Complete(block)
-        );
-    }
-
-    #[test]
-    fn rejects_wrong_index_transaction_and_duplicate_short_ids() {
-        let block = block();
-        let mut compact = CompactBlock::from_block(&block).unwrap();
-        let mempool = Mempool::new();
-        let wrong = IndexedBlockTransaction {
-            index: 0,
-            transaction: block.transactions[1].clone(),
-        };
-        assert_eq!(
-            compact.reconstruct(&mempool, &[wrong]),
-            Err(CompactBlockError::TransactionShortIdMismatch)
-        );
-
-        compact.short_ids[1] = compact.short_ids[0];
-        assert_eq!(
-            compact.reconstruct(&mempool, &[]),
-            Err(CompactBlockError::ShortIdCollision)
-        );
-    }
-
-    #[test]
-    fn compact_encoding_is_smaller_than_full_signed_block() {
-        let block = block();
-        let compact = CompactBlock::from_block(&block).unwrap();
-
-        assert!(borsh::to_vec(&compact).unwrap().len() < block.to_bytes().unwrap().len());
-    }
 }

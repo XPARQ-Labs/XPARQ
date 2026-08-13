@@ -1,5 +1,4 @@
 use crate::codec::{HashDomain, block_bytes, block_header_hash, canonical_bytes, domain_hash};
-use crate::consensus::GENESIS_DIFFICULTY;
 use crate::consensus::supply::Amount;
 use crate::crypto::{
     Address, BlockHash, HASH_SIZE, Hash, MerkleHash, PreviousHash, StateRoot, TransactionHash,
@@ -50,9 +49,17 @@ pub type BlockNonce = Nonce;
 
 pub const MAX_BLOCK_SIZE: usize = 5 * 1024 * 1024;
 pub const BLOCK_VERSION: u8 = 1;
+/// Header version permanently assigned to height zero.
+///
+/// Active block-version upgrades must not silently rewrite the configured
+/// genesis identity.
+pub const GENESIS_BLOCK_VERSION: u8 = 1;
+/// Difficulty permanently assigned to height zero. Production difficulty
+/// tuning begins after genesis and must not alter the genesis hash.
+pub const GENESIS_BLOCK_DIFFICULTY: u32 = 1;
 /// WBDA and block admission use the complete canonical serialized size.
 pub const MAX_BLOCK_WEIGHT: usize = MAX_BLOCK_SIZE;
-/// A dual-signature transaction cannot practically fill more than this count
+/// A maximum-sized transaction cannot practically fill more than this count
 /// within `MAX_BLOCK_WEIGHT`. Keep this explicit so hostile length prefixes
 /// cannot amplify a small wire message into multi-gigabyte allocations.
 pub const MAX_BLOCK_DECODE_ITEMS: usize = 4_096;
@@ -219,14 +226,16 @@ impl Block {
     }
 
     pub fn genesis() -> Result<Self, crate::error::CodecError> {
-        Self::from_protocol_transactions(
+        let mut block = Self::from_protocol_transactions(
             Height(0),
             PreviousHash::ZERO,
-            GENESIS_DIFFICULTY,
+            GENESIS_BLOCK_DIFFICULTY,
             Nonce(0),
             None,
             vec![],
-        )
+        )?;
+        block.header.version = GENESIS_BLOCK_VERSION;
+        Ok(block)
     }
 
     pub fn from_header(height: BlockHeight, header: Header) -> Self {
@@ -267,7 +276,12 @@ impl Block {
 
     /// Validates deterministic block-local rules only.
     pub fn validate_structure(&self) -> Result<(), BlockError> {
-        if self.header.version != BLOCK_VERSION {
+        let expected_version = if self.is_genesis() {
+            GENESIS_BLOCK_VERSION
+        } else {
+            BLOCK_VERSION
+        };
+        if self.header.version != expected_version {
             return Err(BlockError::UnsupportedVersion);
         }
 
@@ -306,7 +320,6 @@ impl Block {
         if !signed_transactions_are_valid_for_height(&self.body.transactions, self.height()) {
             return Err(BlockError::InvalidTransaction);
         }
-
         if self.header.merkle_root
             != calculate_merkle_root(self.body.emission.as_ref(), &self.body.transactions)?
         {
@@ -508,7 +521,7 @@ fn signed_transactions_are_valid_for_height(
 mod tests {
     use super::*;
     use crate::consensus::DIFFICULTY_START;
-    use crate::crypto::Signature;
+    use crate::crypto::{Signature, address_from_public_key, generate_keypair, sign};
     use std::io::Cursor;
 
     #[test]
@@ -522,6 +535,38 @@ mod tests {
             Nonce(0),
         );
         assert_eq!(borsh::to_vec(&header).unwrap().len(), 113);
+    }
+
+    #[test]
+    fn zero_fee_transaction_is_valid_block_structure() {
+        let owner = generate_keypair();
+        let sender = address_from_public_key(&owner.public_key);
+        let transaction = Transfer::new(
+            sender,
+            vec![crate::state::XpqCoinId([0x31; crate::crypto::HASH_SIZE])],
+            Address([0x32; crate::crypto::ADDRESS_SIZE]),
+            Amount(100_000),
+        );
+        let payload = transaction.signing_bytes().unwrap();
+        let signed = SignedTransfer::new(
+            transaction,
+            owner.public_key,
+            sign(&owner.secret_key, &payload),
+        );
+        let block = Block::from_protocol_transactions(
+            Height(1),
+            PreviousHash([0x33; HASH_SIZE]),
+            DIFFICULTY_START,
+            Nonce(0),
+            Some(EmissionTransaction::new(
+                Address([0x34; crate::crypto::ADDRESS_SIZE]),
+                Amount(0),
+            )),
+            vec![signed.into()],
+        )
+        .unwrap();
+
+        assert_eq!(block.validate_structure(), Ok(()));
     }
 
     fn invalid_signed_transfer(seed: u64, input_count: usize) -> SignedTransfer {
@@ -539,11 +584,7 @@ mod tests {
             Address([seed as u8; crate::crypto::ADDRESS_SIZE]),
             Amount(1),
         );
-        SignedTransfer::new_stored_authorized(
-            transaction,
-            Signature([1; crate::crypto::SIGNATURE_SIZE]),
-            Signature([2; crate::crypto::SIGNATURE_SIZE]),
-        )
+        SignedTransfer::new_stored(transaction, Signature([1; crate::crypto::SIGNATURE_SIZE]))
     }
 
     #[test]

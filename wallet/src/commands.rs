@@ -2,7 +2,7 @@ fn wallet_new(args: &[String]) -> Result<(), String> {
     let show_secret = args.iter().any(|arg| arg == "--show-secret");
     let mut output_path = DEFAULT_WALLET_PATH.to_string();
     let mut mnemonic_words = XPARQ_MNEMONIC_DEFAULT_WORDS;
-    let mut auth_password = None;
+    let mut wallet_passphrase = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -11,9 +11,9 @@ fn wallet_new(args: &[String]) -> Result<(), String> {
                 index += 1;
                 mnemonic_words = parse_mnemonic_words(args.get(index))?;
             }
-            "--auth-password" => {
+            "--password" | "--auth-password" => {
                 index += 1;
-                auth_password = Some(required_option(args, index, "--auth-password")?);
+                wallet_passphrase = Some(required_option(args, index, "--password")?);
             }
             value if value.starts_with("-") => {
                 return Err(format!("unknown wallet new option `{value}`"));
@@ -22,14 +22,14 @@ fn wallet_new(args: &[String]) -> Result<(), String> {
         }
         index += 1;
     }
-    let auth_password = match auth_password {
+    let wallet_passphrase = match wallet_passphrase {
         Some(password) => Zeroizing::new(password),
-        None => prompt_hidden("Authorization password")?,
+        None => prompt_hidden("Wallet passphrase")?,
     };
-    if auth_password.is_empty() {
-        return Err("authorization password must not be empty".to_string());
+    if wallet_passphrase.is_empty() {
+        return Err("wallet passphrase must not be empty".to_string());
     }
-    let result = create_mnemonic_wallet_file(&output_path, mnemonic_words, &auth_password);
+    let result = create_mnemonic_wallet_file(&output_path, mnemonic_words, &wallet_passphrase);
     let (wallet, mnemonic) = result?;
 
     let address_str = wallet_address_string(&wallet).to_string();
@@ -37,8 +37,8 @@ fn wallet_new(args: &[String]) -> Result<(), String> {
     println!("Wallet successfully saved to `{output_path}`");
     println!("address: {address_str}");
     println!("mnemonic: {}", mnemonic.as_str());
-    println!("authorization: bound to this dual-key address");
-    println!("keys: saved to wallet file");
+    println!("recovery: mnemonic and wallet passphrase restore this address");
+    println!("signing key: derived when needed and never stored in the wallet file");
     if show_secret {
         let secret_key_hex = Zeroizing::new(hex::encode(wallet.secret_key.0));
         println!("secret_key: {}", secret_key_hex.as_str());
@@ -57,7 +57,7 @@ fn parse_mnemonic_words(value: Option<&String>) -> Result<usize, String> {
 
 fn wallet_restore_mnemonic(args: &[String]) -> Result<(), String> {
     let mut mnemonic = None;
-    let mut auth_password = None;
+    let mut wallet_passphrase = None;
     let mut output_path = DEFAULT_IMPORTED_WALLET_PATH.to_string();
     let mut index = 0;
     while index < args.len() {
@@ -66,9 +66,9 @@ fn wallet_restore_mnemonic(args: &[String]) -> Result<(), String> {
                 index += 1;
                 mnemonic = Some(required_option(args, index, "--mnemonic")?);
             }
-            "--auth-password" => {
+            "--password" | "--auth-password" => {
                 index += 1;
-                auth_password = Some(required_option(args, index, "--auth-password")?);
+                wallet_passphrase = Some(required_option(args, index, "--password")?);
             }
             value if value.starts_with('-') => {
                 return Err(format!("unknown wallet restore-mnemonic option `{value}`"));
@@ -81,14 +81,14 @@ fn wallet_restore_mnemonic(args: &[String]) -> Result<(), String> {
         Some(value) => value,
         None => prompt_hidden("Mnemonic")?.to_string(),
     });
-    let auth_password = match auth_password {
+    let wallet_passphrase = match wallet_passphrase {
         Some(password) => Zeroizing::new(password),
-        None => prompt_hidden("Authorization password")?,
+        None => prompt_hidden("Wallet passphrase")?,
     };
-    if auth_password.is_empty() {
-        return Err("authorization password must not be empty".to_string());
+    if wallet_passphrase.is_empty() {
+        return Err("wallet passphrase must not be empty".to_string());
     }
-    let result = restore_mnemonic_wallet_file(&output_path, &mnemonic, &auth_password);
+    let result = restore_mnemonic_wallet_file(&output_path, &mnemonic, &wallet_passphrase);
     let wallet = result?;
     println!("Wallet successfully restored to `{output_path}`");
     println!("address: {}", wallet_address_string(&wallet));
@@ -455,17 +455,9 @@ fn wallet_send(args: &[String]) -> Result<(), String> {
             }
             "--output" => return Err("--output was removed; use --to and --amount".to_string()),
             "--nonce" => return Err("--nonce was removed; XPQ uses UTXO inputs".to_string()),
-            "--auth-secret-key" => {
+            "--password" | "--auth-password" => {
                 index += 1;
-                authorization = Some(AuthorizationInput::Keys(Box::new(
-                    authorization_from_secret_key(parse_secret_key(args.get(index))?),
-                )));
-            }
-            "--auth-password" => {
-                index += 1;
-                authorization = Some(AuthorizationInput::Password(Zeroizing::new(
-                    required_option(args, index, "--auth-password")?,
-                )));
+                authorization = Some(Zeroizing::new(required_option(args, index, "--password")?));
             }
             "--rpc" | "--rpc-addr" => {
                 index += 1;
@@ -505,26 +497,27 @@ fn wallet_cash(args: &[String]) -> Result<(), String> {
                 .ok_or_else(|| "usage: cash inspect <coin.QCash>".to_string())?;
             let file = load_cash_coin_file(path)?;
             println!(
-                "{{\"version\":{},\"coin_id\":\"{}\",\"denomination\":{},\"file\":\"{}\"}}",
+                "{{\"version\":{},\"coin_id\":\"{}\",\"amount\":{},\"file\":\"{}\"}}",
                 file.version,
                 hex::encode(file.coin_id),
-                file.denomination.xpq(),
+                file.amount.0,
                 path
             );
             Ok(())
         }
         Some("withdraw") => wallet_cash_withdraw(&args[1..]),
         Some("redeem") => wallet_cash_redeem(&args[1..]),
+        Some("split") => wallet_cash_split(&args[1..]),
         Some("track") | Some("status") => wallet_cash_track(&args[1..]),
         Some("utxos") | Some("explorer") => wallet_cash_utxos(&args[1..]),
         Some("list") => wallet_cash_list(&args[1..]),
         Some("backup") => wallet_cash_backup(&args[1..]),
         Some("recover") => wallet_cash_recover(&args[1..]),
         Some(command) => Err(format!(
-            "unknown cash command `{command}`; use withdraw, inspect, redeem, track, utxos, list, backup, or recover"
+            "unknown cash command `{command}`; use withdraw, inspect, redeem, split, track, utxos, list, backup, or recover"
         )),
         None => Err(
-            "usage: cash <withdraw|inspect|redeem|track|utxos|list|backup|recover> ..."
+            "usage: cash <withdraw|inspect|redeem|split|track|utxos|list|backup|recover> ..."
                 .to_string(),
         ),
     }
@@ -663,7 +656,7 @@ fn proof_request_path(
 
 fn update_checkpoint_from_headers(
     current: Option<&TrustedHeaderCheckpoint>,
-    headers: &[xparq::qcash::recovery::ChainHeader],
+    headers: &[xparq::ledger::ChainHeader],
 ) -> Result<TrustedHeaderCheckpoint, String> {
     if let Some(current) = current {
         verify_header_chain_extension(current, headers)
@@ -870,101 +863,13 @@ fn wallet_proof(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn wallet_rollback(args: &[String]) -> Result<(), String> {
-    let (action, value, options) = match args {
-        [action, value, options @ ..] => (action.as_str(), value.as_str(), options),
-        _ => {
-            return Err(
-                "usage: rollback <list address|show issue-id|verify issue-id> [--rpc host:port]"
-                    .to_string(),
-            );
-        }
-    };
-    let mut rpc_addr = default_rpc_addr();
-    let mut index = 0;
-    while index < options.len() {
-        match options[index].as_str() {
-            "--rpc" | "--rpc-addr" => {
-                index += 1;
-                rpc_addr = required_option(options, index, "--rpc")?;
-            }
-            option => return Err(format!("unknown rollback option `{option}`")),
-        }
-        index += 1;
-    }
-    match action {
-        "list" => print_rpc_get(&rpc_addr, &format!("/account/{value}/rollback-issues")),
-        "show" | "inspect" => {
-            let (body, _) = fetch_and_verify_rollback_proof(&rpc_addr, value)?;
-            print_rpc_response(&format!("/rollback-issues/{value}"), &body)
-        }
-        "verify" => {
-            let (_, verified) = fetch_and_verify_rollback_proof(&rpc_addr, value)?;
-            println!("Rollback proof verified");
-            println!(
-                "Transaction   : {}",
-                hex::encode(verified.transaction_hash.0)
-            );
-            println!(
-                "Disconnected  : {}",
-                hex::encode(verified.disconnected_block_hash.0)
-            );
-            println!(
-                "Ancestor      : {}",
-                hex::encode(verified.common_ancestor.0)
-            );
-            println!("Losing tip    : {}", hex::encode(verified.losing_tip.0));
-            println!("Canonical tip : {}", hex::encode(verified.canonical_tip.0));
-            Ok(())
-        }
-        _ => Err(format!("unknown rollback action `{action}`")),
-    }
-}
-
-fn fetch_and_verify_rollback_proof(
-    rpc_addr: &str,
-    issue_id: &str,
-) -> Result<(String, xparq::qcash::recovery::VerifiedRollbackProof), String> {
-    let path = format!("/rollback-issues/{issue_id}");
-    let body = http_get(rpc_addr, &path)?;
-    let response: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|error| format!("failed to parse rollback issue response: {error}"))?;
-    let proof_hex = response
-        .get("rollback_proof_bundle")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "node response is missing rollback_proof_bundle".to_string())?;
-    let proof_bytes =
-        hex::decode(proof_hex).map_err(|error| format!("invalid rollback proof hex: {error}"))?;
-    if proof_bytes.len() > MAX_ROLLBACK_PROOF_BYTES {
-        return Err("rollback proof exceeds the wallet verification limit".to_string());
-    }
-    let bundle: RollbackProofBundle = canonical_deserialize(&proof_bytes)
-        .map_err(|error| format!("invalid rollback proof encoding: {error}"))?;
-    let verified = bundle
-        .verify()
-        .map_err(|error| format!("rollback proof verification failed: {error}"))?;
-    if response.get("status").and_then(serde_json::Value::as_str) != Some("reconfirmed") {
-        let status = status_value(rpc_addr)?;
-        let reported_tip = status
-            .get("tip_hash")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "node status is missing tip_hash".to_string())?;
-        if !reported_tip.eq_ignore_ascii_case(&hex::encode(verified.canonical_tip.0)) {
-            return Err(
-                "rollback proof canonical tip does not match the node's current canonical tip"
-                    .to_string(),
-            );
-        }
-    }
-    Ok((body, verified))
-}
-
 fn wallet_cash_withdraw(args: &[String]) -> Result<(), String> {
     let requested_amount = parse_amount(args.first(), "cash amount")?;
     let mut wallet_path = DEFAULT_WALLET_PATH.to_string();
     let mut rpc_addr = default_rpc_addr();
     let mut output_dir = "./cash".to_string();
-    let mut selected_denominations = None;
+    let mut selected_amounts = None;
+    let mut fee = TransferFee::Automatic;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -980,15 +885,18 @@ fn wallet_cash_withdraw(args: &[String]) -> Result<(), String> {
                 index += 1;
                 output_dir = required_option(args, index, "--out")?;
             }
-            "--fee" => return Err("--fee was removed; QCash has no fee field".to_string()),
+            "--fee" => {
+                index += 1;
+                fee = parse_fee(args.get(index))?;
+            }
             "--nonce" => {
                 return Err("--nonce was removed; XPQ uses UTXO inputs".to_string());
             }
-            "--denoms" | "--denominations" => {
+            "--amounts" => {
                 index += 1;
-                selected_denominations = Some(parse_qcash_denomination_selection(
+                selected_amounts = Some(parse_qcash_amounts(
                     args.get(index)
-                        .ok_or_else(|| "missing value for --denoms".to_string())?,
+                        .ok_or_else(|| "missing value for --amounts".to_string())?,
                 )?);
             }
             value => return Err(format!("unknown cash withdraw option `{value}`")),
@@ -996,54 +904,87 @@ fn wallet_cash_withdraw(args: &[String]) -> Result<(), String> {
         index += 1;
     }
 
-    let (qcash_amount, remainder, denominations) = if let Some(selection) = selected_denominations {
-        match selection {
-            QCashDenominationSelection::Allowed(denominations) => {
-                plan_selected_qcash_denominations(requested_amount, &denominations)?
-            }
-            QCashDenominationSelection::Exact(denominations) => {
-                plan_exact_qcash_denominations(requested_amount, denominations)?
-            }
-        }
+    let (qcash_amount, remainder, amounts) = if let Some(amounts) = selected_amounts {
+        plan_exact_qcash_amounts(requested_amount, amounts)?
     } else {
         let plan = QCashWithdrawalMetadata::plan_automatic(requested_amount)
             .map_err(|error| format!("cash amount cannot be withdrawn: {error}"))?;
-        (plan.qcash_amount, plan.remainder, plan.denominations)
+        (plan.qcash_amount, plan.remainder, plan.amounts)
     };
-    let mut redeem_secrets = Zeroizing::new(Vec::with_capacity(denominations.len()));
-    let mut commitments = Vec::with_capacity(denominations.len());
-    for _ in &denominations {
+    let mut redeem_secrets = Zeroizing::new(Vec::with_capacity(amounts.len()));
+    let mut commitments = Vec::with_capacity(amounts.len());
+    for _ in &amounts {
         let mut redeem_secret = [0u8; 32];
         getrandom::fill(&mut redeem_secret)
             .map_err(|error| format!("secure random generation failed: {error}"))?;
         commitments.push(qcash_redeem_key_commitment_from_secret(&redeem_secret));
         redeem_secrets.push(redeem_secret);
     }
-    let metadata = QCashWithdrawalMetadata::with_selected_denominations(&denominations, &commitments)
+    let metadata = QCashWithdrawalMetadata::with_selected_amounts(&amounts, &commitments)
         .map_err(|error| format!("failed to build withdraw outputs: {error}"))?;
     let wallet = load_wallet(&wallet_path)?;
-    let authorization = resolve_authorization_for_wallet(&wallet, None)?;
     let account_state = resolve_wallet_account_state(&wallet.address, &rpc_addr)?;
     ensure_no_pending_outgoing(&account_state)?;
-    let (inputs, input_total) = select_xpq_inputs(&account_state.spendable_utxos, qcash_amount.0)?;
-    let mut outputs = Vec::new();
-    if input_total > qcash_amount.0 {
-        outputs.push(TransferOutput::new(
+    let automatic_rate = match fee {
+        TransferFee::Automatic => Some(fee_rate_from_status(&status_value(&rpc_addr)?)?),
+        TransferFee::Exact(_) => None,
+    };
+    let mut fee_amount = match fee {
+        TransferFee::Automatic => Amount(0),
+        TransferFee::Exact(amount) => amount,
+    };
+    let mut final_transaction = None;
+    for _ in 0..8 {
+        let required = qcash_amount
+            .0
+            .checked_add(fee_amount.0)
+            .ok_or_else(|| "QCash withdraw amount plus fee overflowed".to_string())?;
+        let (inputs, input_total) =
+            select_xpq_inputs(&account_state.spendable_utxos, required)?;
+        let mut outputs = Vec::new();
+        if input_total > required {
+            outputs.push(TransferOutput::new(
+                wallet.address,
+                Amount(input_total - required),
+            ));
+        }
+        if fee_amount.0 > 0 {
+            outputs.push(TransferOutput::new(OutputTarget::BlockMiner, fee_amount));
+        }
+        let transaction = QCashTransaction::withdraw(
             wallet.address,
-            Amount(input_total - qcash_amount.0),
-        ));
+            inputs,
+            outputs,
+            qcash_amount,
+            metadata.clone(),
+        );
+        let Some(rate) = automatic_rate else {
+            final_transaction = Some(transaction);
+            break;
+        };
+        let placeholder = Signature([1; SIGNATURE_SIZE]);
+        let template = if account_state.authorization_registered {
+            SignedQCashTransaction::new_stored(transaction.clone(), placeholder)
+        } else {
+            SignedQCashTransaction::new(transaction.clone(), wallet.public_key, placeholder)
+        };
+        let next_fee = fee_for_rate(
+            rate,
+            SignedProtocolTransaction::from(template)
+                .virtual_size()
+                .map_err(|error| format!("failed to estimate QCash withdraw size: {error}"))?,
+        )?;
+        if next_fee == fee_amount {
+            final_transaction = Some(transaction);
+            break;
+        }
+        fee_amount = next_fee;
     }
-    let transaction = QCashTransaction::withdraw(
-        wallet.address,
-        inputs,
-        outputs,
-        qcash_amount,
-        metadata.clone(),
-    );
+    let transaction = final_transaction
+        .ok_or_else(|| "QCash withdraw fee estimation did not converge".to_string())?;
     let withdraw_hash = transaction.hash().map_err(|error| error.to_string())?;
     let signed = wallet.sign_qcash_transaction(
         transaction,
-        &authorization,
         account_state.authorization_registered,
     )?;
 
@@ -1053,7 +994,7 @@ fn wallet_cash_withdraw(args: &[String]) -> Result<(), String> {
     for (output, redeem_secret) in metadata.outputs.iter().zip(redeem_secrets.iter()) {
         let cash_file = QCashCoinFile::new(withdraw_hash, output, *redeem_secret)
             .map_err(|error| format!("failed to create cash file: {error}"))?;
-        let file_name = QCashCoinId(cash_file.coin_id).file_name(output.denomination);
+        let file_name = QCashCoinId(cash_file.coin_id).file_name(output.amount);
         let final_path = std::path::Path::new(&output_dir).join(file_name);
         let encoded_cash = encode_qcash_coin_file(&cash_file).map_err(|error| {
             format!(
@@ -1081,9 +1022,10 @@ fn wallet_cash_withdraw(args: &[String]) -> Result<(), String> {
     }
     let cash_files = pending_cash_files.commit();
     println!(
-        "{{\"accepted\":true,\"qcash_state\":\"unredeemed\",\"transaction_status\":\"pending\",\"withdraw_txid\":\"{}\",\"cash_amount\":{},\"remainder\":{},\"coins\":{},\"redeem_delay_blocks\":{},\"output_dir\":\"{}\",\"next\":\"cash track {}\"}}",
+        "{{\"accepted\":true,\"qcash_state\":\"unredeemed\",\"transaction_status\":\"pending\",\"withdraw_txid\":\"{}\",\"cash_amount\":{},\"miner_output\":{},\"remainder\":{},\"coins\":{},\"redeem_delay_blocks\":{},\"output_dir\":\"{}\",\"next\":\"cash track {}\"}}",
         hex::encode(withdraw_hash.0),
         qcash_amount.0,
+        fee_amount.0,
         remainder.0,
         cash_files.len(),
         QCASH_REDEEM_DELAY,
@@ -1127,142 +1069,50 @@ impl Drop for PendingCashFiles {
     }
 }
 
-fn parse_qcash_denominations(value: &str) -> Result<Vec<QCashDenomination>, String> {
-    let mut denominations = value
+fn parse_qcash_amounts(value: &str) -> Result<Vec<Amount>, String> {
+    let mut amounts = value
         .split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| match value {
-            "1" => Ok(QCashDenomination::One),
-            "2" => Ok(QCashDenomination::Two),
-            "5" => Ok(QCashDenomination::Five),
-            "10" => Ok(QCashDenomination::Ten),
-            "20" => Ok(QCashDenomination::Twenty),
-            "50" => Ok(QCashDenomination::Fifty),
-            "100" => Ok(QCashDenomination::OneHundred),
-            "500" => Ok(QCashDenomination::FiveHundred),
-            "1000" => Ok(QCashDenomination::OneThousand),
-            "5000" => Ok(QCashDenomination::FiveThousand),
-            "10000" => Ok(QCashDenomination::TenThousand),
-            "50000" => Ok(QCashDenomination::FiftyThousand),
-            "100000" => Ok(QCashDenomination::OneHundredThousand),
-            "500000" => Ok(QCashDenomination::FiveHundredThousand),
-            "1000000" => Ok(QCashDenomination::OneMillion),
-            _ => Err(format!(
-                "unsupported QCash denomination `{value}`; use 1,2,5,10,20,50,100,500,1000,5000,10000,50000,100000,500000,1000000"
-            )),
+        .map(|value| {
+            let amount = parse_xpq_amount(value)
+                .map_err(|error| format!("invalid QCash amount `{value}`: {error}"))?;
+            if amount.0 == 0 {
+                return Err("QCash output amount must be greater than zero".to_string());
+            }
+            Ok(amount)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if denominations.is_empty() {
-        return Err("at least one QCash denomination is required".to_string());
+    if amounts.is_empty() {
+        return Err("at least one QCash output amount is required".to_string());
     }
-    if denominations.len() > xparq::qcash::MAX_QCASH_WITHDRAWAL_OUTPUTS {
-        return Err("too many QCash denominations selected".to_string());
+    if amounts.len() > xparq::qcash::MAX_QCASH_WITHDRAWAL_OUTPUTS {
+        return Err("too many QCash output amounts".to_string());
     }
-    denominations.sort_by_key(|denomination| std::cmp::Reverse(denomination.xpq()));
-    denominations.dedup();
-    Ok(denominations)
+    amounts.sort_by_key(|amount| std::cmp::Reverse(amount.0));
+    Ok(amounts)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum QCashDenominationSelection {
-    Allowed(Vec<QCashDenomination>),
-    Exact(Vec<QCashDenomination>),
-}
-
-fn parse_qcash_denomination_selection(value: &str) -> Result<QCashDenominationSelection, String> {
-    if !value.to_ascii_lowercase().contains('x') {
-        return parse_qcash_denominations(value).map(QCashDenominationSelection::Allowed);
-    }
-
-    let mut outputs = Vec::new();
-    for item in value
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-    {
-        let (denomination, count) = item
-            .split_once(['x', 'X'])
-            .ok_or_else(|| format!("invalid denomination count `{item}`; use DENOMxCOUNT"))?;
-        let denomination = parse_qcash_denominations(denomination)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| format!("missing denomination in `{item}`"))?;
-        let count = count
-            .trim()
-            .parse::<usize>()
-            .map_err(|_| format!("invalid denomination count in `{item}`"))?;
-        if count == 0 {
-            return Err(format!("denomination count must be positive in `{item}`"));
-        }
-        if outputs.len().saturating_add(count) > xparq::qcash::MAX_QCASH_WITHDRAWAL_OUTPUTS {
-            return Err(format!(
-                "denomination counts require more than {} cash files",
-                xparq::qcash::MAX_QCASH_WITHDRAWAL_OUTPUTS
-            ));
-        }
-        outputs.extend(std::iter::repeat_n(denomination, count));
-    }
-    if outputs.is_empty() {
-        return Err("at least one denomination count is required".to_string());
-    }
-    outputs.sort_by_key(|denomination| std::cmp::Reverse(denomination.xpq()));
-    Ok(QCashDenominationSelection::Exact(outputs))
-}
-
-fn plan_selected_qcash_denominations(
+fn plan_exact_qcash_amounts(
     requested_amount: Amount,
-    allowed_denominations: &[QCashDenomination],
-) -> Result<(Amount, Amount, Vec<QCashDenomination>), String> {
-    let mut remaining = requested_amount.0;
-    let mut outputs = Vec::new();
-    for denomination in allowed_denominations {
-        let unit = denomination.amount().0;
-        let count = remaining / unit;
-        let count = usize::try_from(count)
-            .map_err(|_| "selected QCash output count is too large".to_string())?;
-        if outputs.len().saturating_add(count) > xparq::qcash::MAX_QCASH_WITHDRAWAL_OUTPUTS {
-            return Err(format!(
-                "selected denominations require more than {} cash files",
-                xparq::qcash::MAX_QCASH_WITHDRAWAL_OUTPUTS
-            ));
-        }
-        outputs.extend(std::iter::repeat_n(*denomination, count));
-        remaining %= unit;
-    }
-    let qcash_amount = Amount(requested_amount.0.saturating_sub(remaining));
-    if outputs.is_empty() || qcash_amount.0 == 0 {
-        return Err("selected denominations cannot represent the requested amount".to_string());
-    }
-    Ok((qcash_amount, Amount(remaining), outputs))
-}
-
-fn plan_exact_qcash_denominations(
-    requested_amount: Amount,
-    denominations: Vec<QCashDenomination>,
-) -> Result<(Amount, Amount, Vec<QCashDenomination>), String> {
-    let qcash_amount = denominations
+    amounts: Vec<Amount>,
+) -> Result<(Amount, Amount, Vec<Amount>), String> {
+    let qcash_amount = amounts
         .iter()
-        .try_fold(Amount(0), |total, denomination| {
+        .try_fold(Amount(0), |total, amount| {
             total
                 .0
-                .checked_add(denomination.amount().0)
+                .checked_add(amount.0)
                 .map(Amount)
-                .ok_or_else(|| "explicit QCash denomination total overflowed".to_string())
+                .ok_or_else(|| "explicit QCash amount total overflowed".to_string())
         })?;
-    let requested_cash_amount = Amount(requested_amount.0 - (requested_amount.0 % XPQ));
-    if qcash_amount != requested_cash_amount {
+    if qcash_amount != requested_amount {
         return Err(format!(
-            "explicit denominations total {} XPQ, but requested cash amount is {} XPQ",
-            qcash_amount.0 / XPQ,
-            requested_cash_amount.0 / XPQ
+            "explicit QCash outputs total {} paqs, but requested amount is {} paqs",
+            qcash_amount.0, requested_amount.0
         ));
     }
-    Ok((
-        qcash_amount,
-        Amount(requested_amount.0 - qcash_amount.0),
-        denominations,
-    ))
+    Ok((qcash_amount, Amount(0), amounts))
 }
 
 fn required_option(args: &[String], index: usize, flag: &str) -> Result<String, String> {
@@ -1300,20 +1150,30 @@ fn wallet_cash_redeem(args: &[String]) -> Result<(), String> {
         .first()
         .filter(|value| !value.starts_with('-'))
         .ok_or_else(|| {
-            "usage: cash redeem <coin.QCash> --to <address> [--fee auto|0|amount-xpq]"
+            "usage: cash redeem <coin.QCash> --to <address> [--amount recipient-xpq] [--fee auto|amount-xpq] [--out directory]"
                 .to_string()
         })?
         .clone();
     let mut wallet_path = DEFAULT_WALLET_PATH.to_string();
     let mut rpc_addr = default_rpc_addr();
     let mut recipient = None;
+    let mut recipient_amount = None;
     let mut fee = TransferFee::Automatic;
+    let mut output_dir = "./cash".to_string();
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
             "--to" => {
                 index += 1;
                 recipient = Some(parse_address(args.get(index))?);
+            }
+            "--amount" => {
+                index += 1;
+                recipient_amount = Some(parse_amount(args.get(index), "redeem amount")?);
+            }
+            "--out" | "--output-dir" => {
+                index += 1;
+                output_dir = required_option(args, index, "--out")?;
             }
             "--wallet" => {
                 index += 1;
@@ -1343,95 +1203,332 @@ fn wallet_cash_redeem(args: &[String]) -> Result<(), String> {
 
     let recipient = recipient.ok_or_else(|| "missing --to address".to_string())?;
     let wallet = load_wallet(&wallet_path)?;
-    let authorization = resolve_authorization_for_wallet(&wallet, None)?;
     let account_state = resolve_wallet_account_state(&wallet.address, &rpc_addr)?;
     ensure_no_pending_outgoing(&account_state)?;
     let file = load_cash_coin_file(&coin_path)?;
-    let cash_amount = file.denomination.amount();
+    let cash_amount = file.amount;
     let fee = match fee {
         TransferFee::Exact(amount) => amount,
-        TransferFee::Automatic => {
-            if cash_amount.0 <= 1 {
-                return Err("QCash value is too small for an automatic miner output".to_string());
-            }
-            let template = QCashTransaction::redeem_from_files(
-                wallet.address,
-                vec![
-                    TransferOutput::new(recipient, Amount(cash_amount.0 - 1)),
-                    TransferOutput::new(OutputTarget::BlockMiner, Amount(1)),
-                ],
-                std::slice::from_ref(&file),
-            )
-            .map_err(|error| format!("failed to estimate cash redeem: {error}"))?;
-            let placeholder = Signature([1; SIGNATURE_SIZE]);
-            let signed_template = if account_state.authorization_registered {
-                SignedQCashTransaction::new_stored_authorized(
-                    template,
-                    placeholder,
-                    placeholder,
-                )
-            } else {
-                SignedQCashTransaction::new_authorized(
-                    template,
-                    wallet.public_key,
-                    placeholder,
-                    authorization.public_key,
-                    placeholder,
-                )
-            };
-            let virtual_size = SignedProtocolTransaction::from(signed_template)
-                .virtual_size()
-                .map_err(|error| format!("failed to estimate QCash redeem size: {error}"))?;
-            fee_for_rate(fee_rate_from_status(&status_value(&rpc_addr)?)?, virtual_size)?
-        }
+        TransferFee::Automatic => estimate_qcash_transform_fee(
+            &wallet,
+            account_state.authorization_registered,
+            &rpc_addr,
+            &file,
+            Some(recipient),
+            recipient_amount,
+            usize::from(recipient_amount.is_some()),
+        )?,
     };
-    if fee.0 >= cash_amount.0 {
-        return Err("QCash miner output must be smaller than the redeemed value".to_string());
+    let recipient_amount = recipient_amount.unwrap_or_else(|| Amount(cash_amount.0.saturating_sub(fee.0)));
+    if recipient_amount.0 == 0 {
+        return Err("QCash recipient amount must be greater than zero".to_string());
     }
-    let mut outputs = vec![TransferOutput::new(
-        recipient,
-        Amount(cash_amount.0 - fee.0),
-    )];
+    let consumed = recipient_amount
+        .0
+        .checked_add(fee.0)
+        .ok_or_else(|| "QCash redeem amount overflowed".to_string())?;
+    if consumed > cash_amount.0 {
+        return Err("recipient amount plus miner output exceeds the QCash value".to_string());
+    }
+    let change_amount = Amount(cash_amount.0 - consumed);
+    let mut outputs = vec![TransferOutput::new(recipient, recipient_amount)];
     if fee.0 > 0 {
         outputs.push(TransferOutput::new(OutputTarget::BlockMiner, fee));
     }
-    let transaction = QCashTransaction::redeem_from_files(
+    let qcash_amounts = (change_amount.0 > 0).then_some(vec![change_amount]).unwrap_or_default();
+    let submission = submit_qcash_transform(
+        &wallet,
+        account_state.authorization_registered,
+        &rpc_addr,
+        &file,
+        outputs,
+        qcash_amounts,
+        &output_dir,
+    )?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "accepted": true,
+            "transaction_status": "pending",
+            "redeem_txid": submission.hash,
+            "gross_amount": cash_amount.0,
+            "recipient_amount": recipient_amount.0,
+            "qcash_change": change_amount.0,
+            "miner_output": fee.0,
+            "original_file": coin_path,
+            "change_files": submission.files,
+        })
+    );
+    Ok(())
+}
+
+fn wallet_cash_split(args: &[String]) -> Result<(), String> {
+    let coin_path = args
+        .first()
+        .filter(|value| !value.starts_with('-'))
+        .ok_or_else(|| {
+            "usage: cash split <coin.QCash> --amounts 50,29.9 [--fee auto|amount-xpq] [--out directory]"
+                .to_string()
+        })?
+        .clone();
+    let mut wallet_path = DEFAULT_WALLET_PATH.to_string();
+    let mut rpc_addr = default_rpc_addr();
+    let mut requested_amounts = None;
+    let mut fee = TransferFee::Automatic;
+    let mut output_dir = "./cash".to_string();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--amounts" => {
+                index += 1;
+                requested_amounts = Some(parse_qcash_amounts(
+                    args.get(index)
+                        .ok_or_else(|| "missing value for --amounts".to_string())?,
+                )?);
+            }
+            "--fee" => {
+                index += 1;
+                fee = parse_fee(args.get(index))?;
+            }
+            "--out" | "--output-dir" => {
+                index += 1;
+                output_dir = required_option(args, index, "--out")?;
+            }
+            "--wallet" => {
+                index += 1;
+                wallet_path = required_option(args, index, "--wallet")?;
+            }
+            "--rpc" | "--rpc-addr" => {
+                index += 1;
+                rpc_addr = required_option(args, index, "--rpc")?;
+            }
+            value => return Err(format!("unknown cash split option `{value}`")),
+        }
+        index += 1;
+    }
+    let mut amounts = requested_amounts.ok_or_else(|| "missing --amounts".to_string())?;
+    let wallet = load_wallet(&wallet_path)?;
+    let account_state = resolve_wallet_account_state(&wallet.address, &rpc_addr)?;
+    ensure_no_pending_outgoing(&account_state)?;
+    let file = load_cash_coin_file(&coin_path)?;
+    let fee = match fee {
+        TransferFee::Exact(amount) => amount,
+        TransferFee::Automatic => estimate_qcash_transform_fee(
+            &wallet,
+            account_state.authorization_registered,
+            &rpc_addr,
+            &file,
+            None,
+            None,
+            amounts.len() + 1,
+        )?,
+    };
+    let selected_total = amounts.iter().try_fold(0_u64, |total, amount| {
+        total.checked_add(amount.0)
+    }).ok_or_else(|| "QCash split amount overflowed".to_string())?;
+    let consumed = selected_total
+        .checked_add(fee.0)
+        .ok_or_else(|| "QCash split amount overflowed".to_string())?;
+    if consumed > file.amount.0 {
+        return Err("split amounts plus miner output exceed the QCash value".to_string());
+    }
+    if consumed < file.amount.0 {
+        amounts.push(Amount(file.amount.0 - consumed));
+    }
+    if amounts.len() < 2 {
+        return Err("QCash split must create at least two bearer files".to_string());
+    }
+    amounts.sort_by_key(|amount| std::cmp::Reverse(amount.0));
+    let mut outputs = Vec::new();
+    if fee.0 > 0 {
+        outputs.push(TransferOutput::new(OutputTarget::BlockMiner, fee));
+    }
+    let submission = submit_qcash_transform(
+        &wallet,
+        account_state.authorization_registered,
+        &rpc_addr,
+        &file,
+        outputs,
+        amounts.clone(),
+        &output_dir,
+    )?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "accepted": true,
+            "transaction_status": "pending",
+            "split_txid": submission.hash,
+            "gross_amount": file.amount.0,
+            "qcash_outputs": amounts.iter().map(|amount| amount.0).collect::<Vec<_>>(),
+            "miner_output": fee.0,
+            "original_file": coin_path,
+            "new_files": submission.files,
+        })
+    );
+    Ok(())
+}
+
+struct QCashTransformSubmission {
+    hash: String,
+    files: Vec<String>,
+}
+
+fn estimate_qcash_transform_fee(
+    wallet: &Wallet,
+    authorization_registered: bool,
+    rpc_addr: &str,
+    file: &QCashCoinFile,
+    recipient: Option<Address>,
+    recipient_amount: Option<Amount>,
+    qcash_output_count: usize,
+) -> Result<Amount, String> {
+    let fee_rate = fee_rate_from_status(&status_value(rpc_addr)?)?;
+    if fee_rate == 0 {
+        return Ok(Amount(0));
+    }
+    if file.amount.0 <= 1 {
+        return Err("QCash value is too small for an automatic miner output".to_string());
+    }
+    let mut outputs = Vec::new();
+    let address_amount = match (recipient, recipient_amount) {
+        (Some(_), Some(amount)) => amount,
+        (Some(_), None) => Amount(file.amount.0 - 1),
+        (None, _) => Amount(0),
+    };
+    if let Some(recipient) = recipient {
+        outputs.push(TransferOutput::new(recipient, address_amount));
+    }
+    outputs.push(TransferOutput::new(OutputTarget::BlockMiner, Amount(1)));
+    let reserved = address_amount
+        .0
+        .checked_add(1)
+        .ok_or_else(|| "QCash fee template overflowed".to_string())?;
+    let qcash_total = file
+        .amount
+        .0
+        .checked_sub(reserved)
+        .ok_or_else(|| "QCash value is too small for the requested partial redeem".to_string())?;
+    let qcash_outputs = if qcash_output_count == 0 {
+        None
+    } else {
+        if qcash_total < qcash_output_count as u64 {
+            return Err("QCash value is too small for the requested output count".to_string());
+        }
+        let mut amounts = vec![Amount(1); qcash_output_count];
+        amounts[0] = Amount(qcash_total - (qcash_output_count as u64 - 1));
+        amounts.sort_by_key(|amount| std::cmp::Reverse(amount.0));
+        let commitments = (0..qcash_output_count)
+            .map(|index| {
+                let mut commitment = [0_u8; 32];
+                commitment[..8].copy_from_slice(&(index as u64 + 1).to_le_bytes());
+                commitment
+            })
+            .collect::<Vec<_>>();
+        Some(
+            QCashWithdrawalMetadata::with_selected_amounts(&amounts, &commitments)
+                .map_err(|error| format!("failed to estimate QCash outputs: {error}"))?,
+        )
+    };
+    let template = QCashTransaction::transform_from_files(
         wallet.address,
         outputs,
-        std::slice::from_ref(&file),
+        qcash_outputs,
+        std::slice::from_ref(file),
     )
-    .map_err(|error| format!("failed to authorize cash coin: {error}"))?;
-    let signed = wallet.sign_qcash_transaction(
-        transaction,
-        &authorization,
-        account_state.authorization_registered,
-    )?;
-    let body = format!(
-        "{{\"tx\":\"{}\"}}",
-        hex::encode(signed.to_bytes().map_err(|error| error.to_string())?)
-    );
-    let response = http_post_json(&rpc_addr, "/qcash/tx", &body)?;
+    .map_err(|error| format!("failed to estimate QCash transaction: {error}"))?;
+    let placeholder = Signature([1; SIGNATURE_SIZE]);
+    let signed_template = if authorization_registered {
+        SignedQCashTransaction::new_stored(template, placeholder)
+    } else {
+        SignedQCashTransaction::new(template, wallet.public_key, placeholder)
+    };
+    let virtual_size = SignedProtocolTransaction::from(signed_template)
+        .virtual_size()
+        .map_err(|error| format!("failed to estimate QCash transaction size: {error}"))?;
+    fee_for_rate(fee_rate, virtual_size)
+}
+
+fn submit_qcash_transform(
+    wallet: &Wallet,
+    authorization_registered: bool,
+    rpc_addr: &str,
+    input_file: &QCashCoinFile,
+    outputs: Vec<TransferOutput>,
+    qcash_amounts: Vec<Amount>,
+    output_dir: &str,
+) -> Result<QCashTransformSubmission, String> {
+    let mut secrets = Zeroizing::new(Vec::with_capacity(qcash_amounts.len()));
+    let mut commitments = Vec::with_capacity(qcash_amounts.len());
+    for _ in &qcash_amounts {
+        let mut secret = [0_u8; 32];
+        getrandom::fill(&mut secret)
+            .map_err(|error| format!("secure random generation failed: {error}"))?;
+        commitments.push(qcash_redeem_key_commitment_from_secret(&secret));
+        secrets.push(secret);
+    }
+    let qcash_outputs = if qcash_amounts.is_empty() {
+        None
+    } else {
+        Some(
+            QCashWithdrawalMetadata::with_selected_amounts(&qcash_amounts, &commitments)
+                .map_err(|error| format!("failed to build QCash outputs: {error}"))?,
+        )
+    };
+    let transaction = QCashTransaction::transform_from_files(
+        wallet.address,
+        outputs,
+        qcash_outputs.clone(),
+        std::slice::from_ref(input_file),
+    )
+    .map_err(|error| format!("failed to authorize QCash transform: {error}"))?;
+    let transaction_hash = transaction.hash().map_err(|error| error.to_string())?;
+    let signed = wallet.sign_qcash_transaction(transaction, authorization_registered)?;
+
+    let mut pending_files = PendingCashFiles::new(qcash_amounts.len());
+    if let Some(metadata) = &qcash_outputs {
+        fs::create_dir_all(output_dir).map_err(|error| {
+            format!("failed to create cash output directory {output_dir}: {error}")
+        })?;
+        for (output, secret) in metadata.outputs.iter().zip(secrets.iter()) {
+            let file = QCashCoinFile::new(transaction_hash, output, *secret)
+                .map_err(|error| format!("failed to create QCash output file: {error}"))?;
+            let path = std::path::Path::new(output_dir)
+                .join(QCashCoinId(file.coin_id).file_name(output.amount));
+            let encoded = encode_qcash_coin_file(&file)
+                .map_err(|error| format!("failed to encode {}: {error}", path.display()))?;
+            write_new_synced_file(&path, &encoded)?;
+            pending_files.track(path);
+        }
+    }
+    let body = serde_json::json!({
+        "tx": hex::encode(signed.to_bytes().map_err(|error| error.to_string())?)
+    })
+    .to_string();
+    let response = http_post_json(rpc_addr, "/qcash/tx", &body)?;
     let value: serde_json::Value = serde_json::from_str(&response)
         .map_err(|error| format!("invalid node response: {error}: {response}"))?;
     if value.get("accepted").and_then(serde_json::Value::as_bool) != Some(true) {
         return Err(format!(
-            "node rejected cash redeem; original file retained: {response}"
+            "node rejected QCash transaction; original file retained and new files removed: {response}"
         ));
     }
-    let redeem_hash = value
+    let expected_hash = hex::encode(transaction_hash.0);
+    let response_hash = value
         .get("hash")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| format!("accepted redeem response has no hash: {response}"))?;
-    println!(
-        "{{\"accepted\":true,\"qcash_state\":\"unredeemed\",\"transaction_status\":\"pending\",\"redeem_txid\":\"{}\",\"gross_amount\":{},\"recipient_amount\":{},\"miner_output\":{},\"file\":\"{}\",\"next\":\"cash track {}\"}}",
-        redeem_hash,
-        cash_amount.0,
-        cash_amount.0 - fee.0,
-        fee.0,
-        coin_path,
-        coin_path
-    );
-    Ok(())
+        .ok_or_else(|| format!("accepted QCash response has no hash: {response}"))?;
+    if response_hash != expected_hash {
+        return Err("node returned a different QCash transaction hash".to_string());
+    }
+    let files = pending_files
+        .commit()
+        .into_iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    Ok(QCashTransformSubmission {
+        hash: expected_hash,
+        files,
+    })
 }
 
 fn wallet_cash_track(args: &[String]) -> Result<(), String> {
@@ -1486,8 +1583,8 @@ fn wallet_cash_utxos(args: &[String]) -> Result<(), String> {
         if let Some(coin_id) = json_str(utxo, "coin_id") {
             println!("Coin id       : {coin_id}");
         }
-        if let Some(denomination) = utxo.get("denomination").and_then(serde_json::Value::as_u64) {
-            println!("Denomination  : {denomination} XPQ");
+        if let Some(amount) = utxo.get("amount").and_then(serde_json::Value::as_u64) {
+            println!("Amount        : {} XPQ", format_xpq(amount));
         }
         if let Some(status) = json_str(utxo, "status") {
             println!("Status        : {}", qcash_status_label(status));
@@ -1523,11 +1620,11 @@ fn print_qcash_file_lookup(response: &str) -> Result<(), String> {
     if let Some(file_name) = json_str(&value, "file_name").or_else(|| json_str(&value, "lookup")) {
         println!("File          : {file_name}");
     }
-    if let Some(denomination) = value
-        .get("denomination")
+    if let Some(amount) = value
+        .get("amount")
         .and_then(serde_json::Value::as_u64)
     {
-        println!("Denomination  : {denomination} XPQ");
+        println!("Amount        : {} XPQ", format_xpq(amount));
     }
     if let Some(coin_id) = json_str(&value, "coin_id") {
         println!("Coin id       : {coin_id}");
@@ -1660,7 +1757,7 @@ fn qcash_local_totals(
                 .ok_or_else(|| "cash path is not valid UTF-8".to_string())?,
         )?;
         totals.files += 1;
-        let amount = file.denomination.amount().0;
+        let amount = file.amount.0;
         let coin_id = hex::encode(file.coin_id);
         let response = http_get(rpc_addr, &format!("/qcash/coin/{coin_id}"))?;
         let value: serde_json::Value = serde_json::from_str(&response)
@@ -1709,13 +1806,13 @@ fn wallet_cash_list(args: &[String]) -> Result<(), String> {
         })?;
         let total = totals.entry(file_state).or_default();
         total.0 += 1;
-        total.1 = total.1.saturating_add(file.denomination.amount().0);
+        total.1 = total.1.saturating_add(file.amount.0);
         println!(
-            "{{\"file\":\"{}\",\"file_state\":\"{}\",\"coin_id\":\"{}\",\"denomination\":{}}}",
+            "{{\"file\":\"{}\",\"file_state\":\"{}\",\"coin_id\":\"{}\",\"amount\":{}}}",
             path.display(),
             file_state,
             hex::encode(file.coin_id),
-            file.denomination.xpq()
+            file.amount.0
         );
     }
     let coins: usize = totals.values().map(|(count, _)| *count).sum();
@@ -1884,17 +1981,9 @@ fn wallet_send_short(args: &[String]) -> Result<(), String> {
             }
             "--output" => return Err("--output was removed; transfer has one recipient".to_string()),
             "--nonce" => return Err("--nonce was removed; XPQ uses UTXO inputs".to_string()),
-            "--auth-secret-key" => {
+            "--password" | "--auth-password" => {
                 index += 1;
-                authorization = Some(AuthorizationInput::Keys(Box::new(
-                    authorization_from_secret_key(parse_secret_key(args.get(index))?),
-                )));
-            }
-            "--auth-password" => {
-                index += 1;
-                authorization = Some(AuthorizationInput::Password(Zeroizing::new(
-                    required_option(args, index, "--auth-password")?,
-                )));
+                authorization = Some(Zeroizing::new(required_option(args, index, "--password")?));
             }
             value => return Err(format!("unknown wallet send option `{value}`")),
         }
@@ -1919,10 +2008,12 @@ fn submit_wallet_transfer(
     requested_fee: TransferFee,
     rpc_addr: &str,
     submit: bool,
-    authorization: Option<AuthorizationInput>,
+    wallet_passphrase: Option<Zeroizing<String>>,
 ) -> Result<(), String> {
-    let wallet = load_wallet(wallet_path)?;
-    let authorization = resolve_authorization_for_wallet(&wallet, authorization)?;
+    let wallet = match wallet_passphrase.as_ref() {
+        Some(password) => load_wallet_with_password(wallet_path, password)?,
+        _ => load_wallet(wallet_path)?,
+    };
     let account_state = resolve_wallet_account_state(&wallet.address, rpc_addr)?;
     ensure_no_pending_outgoing(&account_state)?;
     let target = output_target_to_string(to);
@@ -1961,7 +2052,6 @@ fn submit_wallet_transfer(
     )?;
     let signed_payment = wallet.sign_transaction(
         payment,
-        Some(authorization),
         account_state.authorization_registered,
     )?;
 
@@ -2170,70 +2260,25 @@ fn select_xpq_inputs(
     Err("insufficient spendable XPQ UTXOs".to_string())
 }
 
-#[derive(Debug, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
-struct WalletFile {
-    version: u8,
-    address: String,
-    #[serde(default)]
-    mnemonic: Option<String>,
-    public_key: String,
-    secret_key: String,
-    #[serde(default)]
-    auth_public_key: Option<String>,
-    #[serde(default)]
-    auth_secret_key: Option<String>,
+fn load_wallet(path: &str) -> Result<Wallet, String> {
+    let password = prompt_hidden("Wallet passphrase")?;
+    load_wallet_with_password(path, &password)
 }
 
-fn load_wallet(path: &str) -> Result<Wallet, String> {
+fn load_wallet_with_password(path: &str, password: &str) -> Result<Wallet, String> {
     let contents = Zeroizing::new(
         fs::read(path).map_err(|error| format!("failed to read wallet file {path}: {error}"))?,
     );
-    load_wallet_bytes(path, &contents)
+    wallet_from_file_bytes(&contents, password)
+        .map_err(|error| format!("failed to unlock wallet file {path}: {error}"))
 }
 
 fn load_wallet_address(path: &str) -> Result<Address, String> {
-    load_wallet(path).map(|wallet| wallet.address)
-}
-
-fn load_wallet_bytes(path: &str, contents: &[u8]) -> Result<Wallet, String> {
-    let mut wallet_file: WalletFile = serde_json::from_slice(contents)
-        .map_err(|error| format!("failed to parse wallet file {path}: {error}"))?;
-    if wallet_file.version != WALLET_VERSION {
-        return Err("unsupported wallet format".to_string());
-    }
-    let address = parse_address_string(&wallet_file.address)
-        .map_err(|error| format!("invalid wallet address `{}`: {error}", wallet_file.address))?;
-    let secret_key = parse_secret_key(Some(&wallet_file.secret_key))?;
-    let auth_public_key = wallet_file
-        .auth_public_key
-        .as_deref()
-        .map(parse_public_key_hex)
-        .transpose()?
-        .ok_or_else(|| {
-            "wallet is missing auth_public_key and is incompatible with dual-key addresses"
-                .to_string()
-        })?;
-    let auth_secret_key = wallet_file
-        .auth_secret_key
-        .as_ref()
-        .map(|value| parse_secret_key(Some(value)))
-        .transpose()?;
-    let mut wallet = Wallet::from_keys_with_authorization(
-        derive_public_key(&secret_key),
-        secret_key,
-        auth_public_key,
-        auth_secret_key,
+    let contents = Zeroizing::new(
+        fs::read(path).map_err(|error| format!("failed to read wallet file {path}: {error}"))?,
     );
-    wallet.mnemonic = wallet_file.mnemonic.take();
-    if wallet.address != address {
-        return Err(
-            "wallet address does not match its owner and authorization keys".to_string(),
-        );
-    }
-    if hex::encode(wallet.public_key.0) != wallet_file.public_key {
-        return Err("wallet public key does not match secret key".to_string());
-    }
-    Ok(wallet)
+    wallet_address_from_file_bytes(&contents)
+        .map_err(|error| format!("failed to read wallet address from {path}: {error}"))
 }
 
 fn signed_transaction_to_hex(transaction: &SignedTransaction) -> Result<String, String> {
@@ -2242,107 +2287,12 @@ fn signed_transaction_to_hex(transaction: &SignedTransaction) -> Result<String, 
     ))
 }
 
-#[allow(dead_code)]
-fn submit_or_print_protocol_transaction(
-    transaction: SignedProtocolTransaction,
-    submit: bool,
-    rpc_addr: &str,
-) -> Result<(), String> {
-    let tx_hex = hex::encode(
-        signed_protocol_transaction_bytes(&transaction).map_err(|error| error.to_string())?,
-    );
-    if submit {
-        let body = format!("{{\"tx\":\"{tx_hex}\"}}");
-        let response = http_post_json(rpc_addr, "/protocol/transaction", &body)?;
-        println!("{response}");
-    } else {
-        println!(
-            "{}",
-            serde_json::json!({
-                "tx": tx_hex,
-                "family": protocol_family_name(&transaction),
-                "hash": hex::encode(transaction.hash().map_err(|error| error.to_string())?.0),
-                "signer": address_to_string(&transaction.signer()),
-            })
-        );
-    }
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn protocol_family_name(transaction: &SignedProtocolTransaction) -> &'static str {
-    match transaction {
-        SignedProtocolTransaction::Transfer(_) => "transfer",
-        SignedProtocolTransaction::QCash(_) => "qcash",
-    }
-}
-
 fn parse_address(value: Option<&String>) -> Result<Address, String> {
     parse_address_string(value.ok_or_else(|| "missing address".to_string())?)
 }
 
 fn parse_address_string(value: &str) -> Result<Address, String> {
     address_from_string(value).map_err(|error| format!("invalid address `{value}`: {error}"))
-}
-
-fn parse_secret_key(value: Option<&String>) -> Result<SecretKey, String> {
-    let value = value.ok_or_else(|| "missing secret key".to_string())?;
-    let bytes = hex::decode(value).map_err(|error| format!("invalid secret key hex: {error}"))?;
-    if bytes.len() != xparq::crypto::SECRET_KEY_SIZE {
-        return Err(format!(
-            "secret key must be {} bytes",
-            xparq::crypto::SECRET_KEY_SIZE
-        ));
-    }
-    let mut key = [0_u8; xparq::crypto::SECRET_KEY_SIZE];
-    key.copy_from_slice(&bytes);
-    Ok(SecretKey(key))
-}
-
-fn parse_public_key_hex(value: &str) -> Result<PublicKey, String> {
-    let bytes = hex::decode(value).map_err(|error| format!("invalid public key hex: {error}"))?;
-    if bytes.len() != xparq::crypto::PUBLIC_KEY_SIZE {
-        return Err(format!(
-            "public key must be {} bytes",
-            xparq::crypto::PUBLIC_KEY_SIZE
-        ));
-    }
-    let mut key = [0_u8; xparq::crypto::PUBLIC_KEY_SIZE];
-    key.copy_from_slice(&bytes);
-    Ok(PublicKey(key))
-}
-
-fn authorization_from_secret_key(secret_key: SecretKey) -> AuthorizationKeys {
-    AuthorizationKeys {
-        public_key: derive_public_key(&secret_key),
-        secret_key,
-    }
-}
-
-fn resolve_authorization_for_wallet(
-    wallet: &Wallet,
-    input: Option<AuthorizationInput>,
-) -> Result<AuthorizationKeys, String> {
-    let keys = match input {
-        Some(AuthorizationInput::Keys(keys)) => *keys,
-        Some(AuthorizationInput::Password(password)) => {
-            authorization_keys_from_password(wallet, &password)?
-        }
-        None => match wallet.stored_authorization_keys() {
-            Some(keys) => keys,
-            None => {
-                let password = prompt_hidden("Authorization password")?;
-                authorization_keys_from_password(wallet, &password)?
-            }
-        },
-    };
-    if wallet.auth_public_key != Some(keys.public_key) {
-        return Err("authorization key does not match this wallet".to_string());
-    }
-    if derive_public_key(&keys.secret_key) != keys.public_key {
-        return Err("authorization secret key does not match its public key".to_string());
-    }
-    Ok(keys)
 }
 
 fn parse_amount(value: Option<&String>, flag: &str) -> Result<Amount, String> {
@@ -2401,9 +2351,9 @@ fn fee_rate_from_status(status: &serde_json::Value) -> Result<u64, String> {
         .or_else(|| status.get("min_relay_fee_rate"))
         .and_then(serde_json::Value::as_u64);
     match (dynamic_rate, min_relay_rate) {
-        (Some(dynamic), Some(minimum)) => Ok(dynamic.max(minimum).max(1)),
-        (Some(dynamic), None) => Ok(dynamic.max(1)),
-        (None, Some(minimum)) => Ok(minimum.max(1)),
+        (Some(dynamic), Some(minimum)) => Ok(dynamic.max(minimum)),
+        (Some(dynamic), None) => Ok(dynamic),
+        (None, Some(minimum)) => Ok(minimum),
         (None, None) => Err("node status is missing dynamic_market_fee_rate_per_byte".to_string()),
     }
 }
@@ -2737,26 +2687,24 @@ wallet
 Usage:
   wallet
   wallet menu
-  wallet new [wallet-path] [--words 12|24] [--auth-password password] [--show-secret]
-  wallet import [wallet-path] [--mnemonic words] [--auth-password password]
-  wallet restore-mnemonic [wallet-path] [--mnemonic words] [--auth-password password]
+  wallet new [wallet-path] [--words 12|24] [--password password] [--show-secret]
+  wallet import [wallet-path] [--mnemonic words] [--password password]
+  wallet restore-mnemonic [wallet-path] [--mnemonic words] [--password password]
   wallet balance [address] [--wallet path] [--rpc host:port]
   wallet stats [--rpc host:port]
   wallet address-stats [address] [--wallet path] [--rpc host:port]
   wallet hashrate [--rpc host:port]
-  wallet send <address> <amount-xpq> [--wallet path] [--fee auto|xpq] [--auth-secret-key hex | --auth-password text] [--rpc host:port]
-  wallet send --to <address> --amount <xpq> [--wallet path] [--fee auto|xpq] [--auth-secret-key hex | --auth-password text] [--submit] [--rpc host:port]
-  wallet cash withdraw <amount-xpq> [--denoms 1000,500,100 | 1000x1,500x2] [--out directory] [--wallet path] [--rpc host:port]
+  wallet send <address> <amount-xpq> [--wallet path] [--fee auto|xpq] [--password text] [--rpc host:port]
+  wallet send --to <address> --amount <xpq> [--wallet path] [--fee auto|xpq] [--password text] [--submit] [--rpc host:port]
+  wallet cash withdraw <amount-xpq> [--amounts 50,20,29.9] [--fee auto|amount-xpq] [--out directory] [--wallet path] [--rpc host:port]
   wallet cash inspect <coin.QCash>
-  wallet cash redeem <coin.QCash> --to <address> [--fee auto|0|amount-xpq] [--wallet path] [--rpc host:port]
+  wallet cash redeem <coin.QCash> --to <address> [--amount recipient-xpq] [--fee auto|amount-xpq] [--out directory] [--wallet path] [--rpc host:port]
+  wallet cash split <coin.QCash> --amounts 50,29.9 [--fee auto|amount-xpq] [--out directory] [--wallet path] [--rpc host:port]
   wallet cash track <file-name-or-full-coin-id> [--rpc host:port]
   wallet cash list [cash-directory]
   wallet cash backup <cash-directory> <new-backup-directory>
   wallet cash recover <backup-directory> <cash-directory>
   wallet events <block|tx|address|id> <value> [--kind event-kind] [--offset n] [--limit n] [--from-height n] [--to-height n] [--rpc host:port]
-  wallet rollback list <address> [--rpc host:port]
-  wallet rollback show <issue-id> [--rpc host:port]
-  wallet rollback verify <issue-id> [--rpc host:port]
   wallet proof account [address] [--wallet path] [--rpc host:port]
   wallet proof qcash <coin-id> [--wallet path] [--rpc host:port]
   wallet proof status [--wallet path]
@@ -2765,7 +2713,7 @@ Defaults:
   Wallet path: wallet.json
   Shared config: ${CONFIG_FILE_ENV} or {DEFAULT_SHARED_CONFIG_PATH}
   RPC address: --rpc, ${RPC_ADDR_ENV}, shared config, then {DEFAULT_WALLET_RPC_ADDR}
-  New wallets are mnemonic-backed and start with authorization inactive; authorized actions ask for the password when needed.
+  Wallet files contain version, public address, and plaintext mnemonic. The same mnemonic and wallet passphrase restore the same address; derived keys are never stored.
 "
     );
 }

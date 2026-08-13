@@ -20,9 +20,7 @@ devnet = ["xparq/devnet"]
 sqisign-blockchain-test = ["xparq/sqisign-blockchain-test"]
 
 [dependencies]
-argon2.workspace = true
 bip39.workspace = true
-chacha20poly1305.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 xparq.workspace = true

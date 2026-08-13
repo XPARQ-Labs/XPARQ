@@ -7,23 +7,18 @@ use std::process::{Command, ExitCode};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use time::{OffsetDateTime, macros::format_description};
 use xparq::{
-    codec::{canonical_bytes, canonical_deserialize, signed_protocol_transaction_bytes},
+    codec::{canonical_bytes, canonical_deserialize},
     consensus::supply::{Amount, DECIMALS, XPQ},
-    crypto::{
-        Address, PublicKey, SIGNATURE_SIZE, SecretKey, Signature, address_from_string,
-        address_to_string, derive_public_key,
-    },
+    crypto::{Address, SIGNATURE_SIZE, Signature, address_from_string, address_to_string},
     ledger::{
-        BLOCK_REWARD_MATURITY, QCASH_REDEEM_DELAY, decode_account_non_membership_proof_bundle,
-        decode_account_state_proof_bundle, decode_qcash_state_proof_bundle,
-    },
-    qcash::recovery::{
-        RollbackProofBundle, TrustedHeaderCheckpoint, advance_trusted_header_checkpoint,
-        decode_header_chain_chunk, trusted_header_checkpoint, verify_header_chain_extension,
+        BLOCK_REWARD_MATURITY, QCASH_REDEEM_DELAY, TrustedHeaderCheckpoint,
+        advance_trusted_header_checkpoint, decode_account_non_membership_proof_bundle,
+        decode_account_state_proof_bundle, decode_header_chain_chunk,
+        decode_qcash_state_proof_bundle, trusted_header_checkpoint, verify_header_chain_extension,
     },
     qcash::{
-        QCashCoinFile, QCashDenomination, QCashWithdrawalMetadata, decode_qcash_coin_file,
-        encode_qcash_coin_file, qcash_redeem_key_commitment_from_secret,
+        QCashCoinFile, QCashWithdrawalMetadata, decode_qcash_coin_file, encode_qcash_coin_file,
+        qcash_redeem_key_commitment_from_secret,
     },
     state::{QCashCoinId, XpqCoinId},
     transaction::{
@@ -31,7 +26,7 @@ use xparq::{
         SignedTransfer as SignedTransaction, Transfer as Transaction, TransferOutput,
     },
 };
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, Zeroizing};
 
 const RPC_ADDR_ENV: &str = "XPARQ_RPC_ADDR";
 const CONFIG_FILE_ENV: &str = "XPARQ_CONFIG";
@@ -71,10 +66,8 @@ const DEFAULT_WALLET_PATH: &str = "wallet-sqisign-level5-test.json";
 const DEFAULT_IMPORTED_WALLET_PATH: &str = "imported.json";
 #[cfg(feature = "sqisign-blockchain-test")]
 const DEFAULT_IMPORTED_WALLET_PATH: &str = "imported-sqisign-level5-test.json";
-const WALLET_VERSION: u8 = 1;
 const DEFAULT_TRANSACTION_FEE_XPQ: &str = "auto";
 const RPC_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
-const MAX_ROLLBACK_PROOF_BYTES: usize = 64 * 1024 * 1024;
 const MAX_HEADER_CHUNK_HTTP_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
 
 include!("wallet_file.rs");
@@ -121,7 +114,6 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         Some("send") => wallet_send(&args[1..]),
         Some("cash") | Some("qcash") => wallet_cash(&args[1..]),
         Some("events") | Some("event") => wallet_events(&args[1..]),
-        Some("rollback") | Some("recovery") => wallet_rollback(&args[1..]),
         Some("proof") | Some("checkpoint") => wallet_proof(&args[1..]),
         Some(command) => Err(format!("unknown wallet command `{command}`. Try --help.")),
     };
@@ -143,19 +135,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wrong_authorization_password_does_not_modify_wallet_file() {
-        let owner = xparq::crypto::keypair_from_seed(&[0x51; 32]);
-        let authorization = xparq::crypto::authorization_keypair_from_password(
-            b"correct password",
-            &owner.public_key,
-        )
-        .unwrap();
-        let wallet = Wallet::from_keys_with_authorization(
-            owner.public_key,
-            owner.secret_key,
-            authorization.public_key,
-            None,
-        );
+    fn different_wallet_passphrase_does_not_modify_wallet_file() {
+        let mnemonic = xparq_wallet::generate_xparq_mnemonic(12).unwrap();
+        let mut wallet =
+            xparq_wallet::wallet_from_xparq_mnemonic(&mnemonic, "correct password").unwrap();
+        wallet.mnemonic = Some(mnemonic.to_string());
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -168,16 +152,8 @@ mod tests {
 
         save_wallet(&wallet_path_string, &wallet).unwrap();
         let bytes_before = fs::read(&wallet_path).unwrap();
-        let loaded = load_wallet(&wallet_path_string).unwrap();
-        let error = resolve_authorization_for_wallet(
-            &loaded,
-            Some(AuthorizationInput::Password(Zeroizing::new(
-                "wrong password".to_string(),
-            ))),
-        )
-        .unwrap_err();
-
-        assert_eq!(error, "authorization password does not match this wallet");
+        let error = load_wallet_with_password(&wallet_path_string, "wrong password").unwrap_err();
+        assert!(error.ends_with("wallet passphrase does not match this wallet"));
         assert_eq!(fs::read(&wallet_path).unwrap(), bytes_before);
         fs::remove_file(wallet_path).unwrap();
     }
@@ -191,7 +167,7 @@ mod tests {
     #[test]
     fn trusted_checkpoint_file_roundtrips_current_format() {
         let genesis = xparq::genesis::genesis_block().unwrap();
-        let checkpoint = trusted_header_checkpoint(&[xparq::qcash::recovery::ChainHeader::new(
+        let checkpoint = trusted_header_checkpoint(&[xparq::ledger::ChainHeader::new(
             genesis.height(),
             genesis.header,
         )])
@@ -226,6 +202,11 @@ mod tests {
             "min_relay_fee_rate_per_byte": 3
         });
         assert_eq!(fee_rate_from_status(&current), Ok(7));
+        let zero_policy = serde_json::json!({
+            "dynamic_market_fee_rate_per_byte": 0,
+            "min_relay_fee_rate_per_byte": 0
+        });
+        assert_eq!(fee_rate_from_status(&zero_policy), Ok(0));
 
         let incomplete = serde_json::json!({ "height": 10 });
         assert!(fee_rate_from_status(&incomplete).is_err());
@@ -271,43 +252,18 @@ mod tests {
     }
 
     #[test]
-    fn selected_qcash_denominations_are_allowed_types_not_single_outputs() {
-        let allowed = parse_qcash_denominations("1, 2, 5").unwrap();
-        let (cash, remainder, outputs) =
-            plan_selected_qcash_denominations(Amount(100 * XPQ), &allowed).unwrap();
-
-        assert_eq!(cash, Amount(100 * XPQ));
+    fn explicit_qcash_amounts_accept_fractional_xpq_and_must_match() {
+        let amounts = parse_qcash_amounts("50, 20, 29.9").unwrap();
+        let requested = parse_xpq_amount("99.9").unwrap();
+        let (cash, remainder, outputs) = plan_exact_qcash_amounts(requested, amounts).unwrap();
+        assert_eq!(cash, requested);
         assert_eq!(remainder, Amount(0));
-        assert_eq!(outputs, vec![QCashDenomination::Five; 20]);
-    }
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[2], parse_xpq_amount("20").unwrap());
 
-    #[test]
-    fn explicit_qcash_denomination_counts_must_match_requested_amount() {
-        let selection = parse_qcash_denomination_selection("5x16,2x5,1x10").unwrap();
-        let QCashDenominationSelection::Exact(outputs) = selection else {
-            panic!("count syntax must produce exact outputs");
-        };
-        let (cash, remainder, outputs) =
-            plan_exact_qcash_denominations(Amount(100 * XPQ), outputs).unwrap();
-        assert_eq!(cash, Amount(100 * XPQ));
-        assert_eq!(remainder, Amount(0));
-        assert_eq!(outputs.len(), 31);
-
-        let selection = parse_qcash_denomination_selection("5x1").unwrap();
-        let QCashDenominationSelection::Exact(outputs) = selection else {
-            panic!("count syntax must produce exact outputs");
-        };
-        assert!(plan_exact_qcash_denominations(Amount(100 * XPQ), outputs).is_err());
-
-        let selection = parse_qcash_denomination_selection("1000000x1").unwrap();
-        let QCashDenominationSelection::Exact(outputs) = selection else {
-            panic!("large denomination must produce exact outputs");
-        };
-        let (cash, remainder, outputs) =
-            plan_exact_qcash_denominations(Amount(1_000_000 * XPQ), outputs).unwrap();
-        assert_eq!(cash, Amount(1_000_000 * XPQ));
-        assert_eq!(remainder, Amount(0));
-        assert_eq!(outputs, vec![QCashDenomination::OneMillion]);
+        let amounts = parse_qcash_amounts("5").unwrap();
+        assert!(plan_exact_qcash_amounts(Amount(100 * XPQ), amounts).is_err());
+        assert!(parse_qcash_amounts("0").is_err());
     }
 
     #[test]
@@ -316,7 +272,7 @@ mod tests {
             "Transfer",
             "QCashWithdrawn",
             "QCashRedeemed",
-            "QCashRecoverRedeemed",
+            "QCashSplit",
             "EmissionDistributed",
         ];
         assert_eq!(names.len(), 5);
@@ -335,10 +291,14 @@ mod tests {
             Ok(Some("transfer".to_string()))
         );
         assert_eq!(
-            event_kind_from_menu_selection("4"),
+            event_kind_from_menu_selection("5"),
             Ok(Some("emission_distributed".to_string()))
         );
-        assert!(event_kind_from_menu_selection("5").is_err());
+        assert_eq!(
+            event_kind_from_menu_selection("4"),
+            Ok(Some("qcash_split".to_string()))
+        );
+        assert!(event_kind_from_menu_selection("6").is_err());
     }
 
     #[test]
@@ -349,20 +309,10 @@ mod tests {
     }
 
     #[test]
-    fn qcash_denomination_menu_maps_numbers_from_smallest_to_largest() {
-        assert_eq!(qcash_denomination_from_menu("1").unwrap().xpq(), 1);
-        assert_eq!(qcash_denomination_from_menu("3").unwrap().xpq(), 5);
-        assert_eq!(qcash_denomination_from_menu("15").unwrap().xpq(), 1_000_000);
+    fn qcash_amount_parser_orders_outputs_canonically() {
         assert_eq!(
-            qcash_allowed_denominations_from_menu("1, 3, 15"),
-            Ok("1,5,1000000".to_string())
+            parse_qcash_amounts("0.1,29.9,1").unwrap(),
+            vec![Amount(29_900_000), Amount(XPQ), Amount(100_000)]
         );
-        assert_eq!(
-            qcash_exact_denominations_from_menu("3x2,1x5"),
-            Ok("5x2,1x5".to_string())
-        );
-        assert!(qcash_denomination_from_menu("0").is_err());
-        assert!(qcash_denomination_from_menu("16").is_err());
-        assert!(qcash_exact_denominations_from_menu("1x0").is_err());
     }
 }

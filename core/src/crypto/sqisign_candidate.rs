@@ -1,4 +1,4 @@
-//! Experimental SQIsign Level 5 dual authorization.
+//! Experimental SQIsign Level 5 single-authority implementation.
 //!
 //! This module is compiled only with `sqisign-candidate`. Its types are not
 //! accepted by XPARQ transactions or consensus.
@@ -16,9 +16,7 @@ pub const PUBLIC_KEY_SIZE: usize = 129;
 pub const SECRET_KEY_SIZE: usize = 705;
 pub const SIGNATURE_SIZE: usize = 292;
 
-const DUAL_AUTH_DOMAIN: &[u8] = b"XPARQ_SQISIGN_LEVEL5_DUAL_AUTH_V1";
-const OWNER_ROLE: u8 = 0;
-const AUTHORIZATION_ROLE: u8 = 1;
+const SIGNATURE_DOMAIN: &[u8] = b"XPARQ_SQISIGN_LEVEL5_SIGNATURE_V1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PublicKey([u8; PUBLIC_KEY_SIZE]);
@@ -51,11 +49,6 @@ impl PublicKey {
     pub fn as_bytes(&self) -> &[u8; PUBLIC_KEY_SIZE] {
         &self.0
     }
-
-    #[cfg(test)]
-    pub(crate) fn from_bytes_unchecked(bytes: [u8; PUBLIC_KEY_SIZE]) -> Self {
-        Self(bytes)
-    }
 }
 
 impl SecretKey {
@@ -86,12 +79,6 @@ impl Signature {
 pub struct KeyPair {
     pub public_key: PublicKey,
     pub secret_key: SecretKey,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DualAuthorization {
-    pub owner_signature: Signature,
-    pub authorization_signature: Signature,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,66 +114,12 @@ pub fn generate_keypair() -> Result<KeyPair, CandidateError> {
     })
 }
 
-pub fn sign_owner(
+pub fn sign(
     context: SignatureContext,
     secret_key: &SecretKey,
     message: &[u8],
 ) -> Result<Signature, CandidateError> {
-    sign_for_role(context, secret_key, OWNER_ROLE, message)
-}
-
-pub fn sign_authorization(
-    context: SignatureContext,
-    secret_key: &SecretKey,
-    message: &[u8],
-) -> Result<Signature, CandidateError> {
-    sign_for_role(context, secret_key, AUTHORIZATION_ROLE, message)
-}
-
-pub fn sign_dual(
-    context: SignatureContext,
-    owner_secret_key: &SecretKey,
-    authorization_secret_key: &SecretKey,
-    message: &[u8],
-) -> Result<DualAuthorization, CandidateError> {
-    Ok(DualAuthorization {
-        owner_signature: sign_owner(context, owner_secret_key, message)?,
-        authorization_signature: sign_authorization(context, authorization_secret_key, message)?,
-    })
-}
-
-pub fn verify_dual(
-    context: SignatureContext,
-    owner_public_key: &PublicKey,
-    authorization_public_key: &PublicKey,
-    message: &[u8],
-    signatures: &DualAuthorization,
-) -> bool {
-    std::panic::catch_unwind(|| {
-        verify_for_role(
-            context,
-            owner_public_key,
-            OWNER_ROLE,
-            message,
-            &signatures.owner_signature,
-        ) && verify_for_role(
-            context,
-            authorization_public_key,
-            AUTHORIZATION_ROLE,
-            message,
-            &signatures.authorization_signature,
-        )
-    })
-    .unwrap_or(false)
-}
-
-fn sign_for_role(
-    context: SignatureContext,
-    secret_key: &SecretKey,
-    role: u8,
-    message: &[u8],
-) -> Result<Signature, CandidateError> {
-    let separated = role_message(context, role, message);
+    let separated = context_message(context, message);
     let signature = std::panic::catch_unwind(|| {
         let signing_key = SqisignSigningKey::<Level5>::from_bytes(&secret_key.0)
             .map_err(|_| CandidateError::InvalidSecretKey)?;
@@ -204,10 +137,9 @@ fn sign_for_role(
     ))
 }
 
-fn verify_for_role(
+pub fn verify(
     context: SignatureContext,
     public_key: &PublicKey,
-    role: u8,
     message: &[u8],
     signature: &Signature,
 ) -> bool {
@@ -218,17 +150,16 @@ fn verify_for_role(
         return false;
     };
     public_key
-        .verify(&role_message(context, role, message), &signature)
+        .verify(&context_message(context, message), &signature)
         .is_ok()
 }
 
-fn role_message(context: SignatureContext, role: u8, message: &[u8]) -> Vec<u8> {
+fn context_message(context: SignatureContext, message: &[u8]) -> Vec<u8> {
     let mut separated =
-        Vec::with_capacity(DUAL_AUTH_DOMAIN.len() + 3 + size_of::<u64>() + message.len());
-    separated.extend_from_slice(DUAL_AUTH_DOMAIN);
+        Vec::with_capacity(SIGNATURE_DOMAIN.len() + 2 + size_of::<u64>() + message.len());
+    separated.extend_from_slice(SIGNATURE_DOMAIN);
     separated.push(SignatureScheme::SqisignLevel5 as u8);
     separated.push(context as u8);
-    separated.push(role);
     separated.extend_from_slice(&(message.len() as u64).to_le_bytes());
     separated.extend_from_slice(message);
     separated
@@ -246,31 +177,15 @@ mod tests {
     }
 
     #[test]
-    fn role_domains_are_distinct() {
-        assert_ne!(
-            role_message(
-                SignatureContext::ProtocolTransaction,
-                OWNER_ROLE,
-                b"transaction"
-            ),
-            role_message(
-                SignatureContext::ProtocolTransaction,
-                AUTHORIZATION_ROLE,
-                b"transaction"
-            )
-        );
-    }
-
-    #[test]
     fn protocol_contexts_are_domain_separated() {
         let message = b"same canonical bytes";
         assert_ne!(
-            role_message(SignatureContext::ProtocolTransaction, OWNER_ROLE, message),
-            role_message(SignatureContext::QCashTransaction, OWNER_ROLE, message)
+            context_message(SignatureContext::ProtocolTransaction, message),
+            context_message(SignatureContext::QCashTransaction, message)
         );
         assert_ne!(
-            role_message(SignatureContext::ProtocolTransaction, OWNER_ROLE, message),
-            role_message(SignatureContext::RecoveryProof, OWNER_ROLE, message)
+            context_message(SignatureContext::ProtocolTransaction, message),
+            context_message(SignatureContext::RecoveryProof, message)
         );
     }
 }

@@ -11,7 +11,7 @@ fn protocol_event_kind_name(kind: &ProtocolEventKind) -> &'static str {
         ProtocolEventKind::Transfer { .. } => "transfer",
         ProtocolEventKind::QCashWithdrawn { .. } => "qcash_withdrawn",
         ProtocolEventKind::QCashRedeemed { .. } => "qcash_redeemed",
-        ProtocolEventKind::QCashRecoverRedeemed { .. } => "qcash_recover_redeemed",
+        ProtocolEventKind::QCashSplit { .. } => "qcash_split",
         ProtocolEventKind::EmissionDistributed { .. } => "emission_distributed",
     }
 }
@@ -22,7 +22,7 @@ pub(crate) fn is_protocol_event_kind(kind: &str) -> bool {
         "transfer"
             | "qcash_withdrawn"
             | "qcash_redeemed"
-            | "qcash_recover_redeemed"
+            | "qcash_split"
             | "emission_distributed"
     )
 }
@@ -91,9 +91,7 @@ pub(crate) fn protocol_event_involves_address(kind: &ProtocolEventKind, address:
         ProtocolEventKind::QCashRedeemed {
             signer, recipient, ..
         } => signer == address || recipient == address,
-        ProtocolEventKind::QCashRecoverRedeemed {
-            signer, claimant, ..
-        } => signer == address || claimant == address,
+        ProtocolEventKind::QCashSplit { signer, .. } => signer == address,
         ProtocolEventKind::EmissionDistributed { miner, .. } => miner == address,
     }
 }

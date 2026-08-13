@@ -2,8 +2,8 @@ use crate::runtime::network::compact::{CompactBlock, IndexedBlockTransaction};
 use crate::runtime::params::{CURRENT_CHAIN_PARAMS, P2P_WIRE_FORMAT_VERSION};
 use borsh::{BorshDeserialize, BorshSerialize};
 use xparq::block::{Block, BlockHeight};
-use xparq::crypto::{BlockHash, Hash, TransactionHash};
-use xparq::qcash::recovery::ChainHeader;
+use xparq::crypto::{ADDRESS_SIZE, BlockHash, Hash, TransactionHash};
+use xparq::ledger::ChainHeader;
 use xparq::transaction::SignedProtocolTransaction;
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
@@ -22,6 +22,7 @@ pub struct TipInfo {
 pub struct VersionInfo {
     pub protocol_version: u8,
     pub p2p_wire_format_version: u8,
+    pub address_size: u16,
     pub chain_id: u32,
     pub chain_name: String,
     pub protocol_stage: String,
@@ -36,6 +37,7 @@ impl VersionInfo {
         Self {
             protocol_version: CURRENT_CHAIN_PARAMS.protocol_version,
             p2p_wire_format_version: P2P_WIRE_FORMAT_VERSION,
+            address_size: ADDRESS_SIZE as u16,
             chain_id: CURRENT_CHAIN_PARAMS.chain_id,
             chain_name: CURRENT_CHAIN_PARAMS.chain_name.to_string(),
             protocol_stage: CURRENT_CHAIN_PARAMS.protocol_stage.to_string(),
@@ -61,6 +63,9 @@ impl VersionInfo {
         }
         if self.p2p_wire_format_version != P2P_WIRE_FORMAT_VERSION {
             return Err(RejectReason::ProtocolVersionMismatch);
+        }
+        if self.address_size != ADDRESS_SIZE as u16 {
+            return Err(RejectReason::ConsensusMismatch);
         }
         if self.pow_algorithm != CURRENT_CHAIN_PARAMS.pow_algorithm
             || self.difficulty_algorithm != CURRENT_CHAIN_PARAMS.difficulty_algorithm

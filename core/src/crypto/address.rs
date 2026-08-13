@@ -1,6 +1,5 @@
 use crate::crypto::PublicKey;
 use crate::error::CryptoError;
-use crate::genesis::CURRENT_CHAIN_PARAMS;
 use bech32::primitives::decode::CheckedHrpstring;
 use bech32::{Bech32, Hrp};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -32,16 +31,10 @@ impl Address {
     pub const ZERO: Self = Self([0; ADDRESS_SIZE]);
 }
 
-pub const ADDRESS_HRP: &str = "x";
-#[cfg(not(feature = "sqisign-blockchain-test"))]
-const DUAL_AUTHORIZATION_DOMAIN: &[u8] = b"XPARQ_DUAL_AUTHORIZATION_V1";
-#[cfg(feature = "sqisign-blockchain-test")]
-const DUAL_AUTHORIZATION_DOMAIN: &[u8] = b"XPARQ_SQISIGN_LEVEL5_DUAL_AUTHORIZATION_V1";
-#[cfg(feature = "sqisign-candidate")]
-const SQISIGN_DUAL_AUTHORIZATION_DOMAIN: &[u8] = b"XPARQ_SQISIGN_LEVEL5_DUAL_AUTHORIZATION_V1";
+pub const ADDRESS_HRP: &str = "z";
 const BECH32_CHECKSUM_LEN: usize = 6;
 const BECH32_ADDRESS_LEN: usize =
-    ADDRESS_HRP.len() + 1 + (ADDRESS_SIZE * 8 / 5) + BECH32_CHECKSUM_LEN;
+    ADDRESS_HRP.len() + 1 + (ADDRESS_SIZE * 8).div_ceil(5) + BECH32_CHECKSUM_LEN;
 const_assert_eq!(BECH32_CHECKSUM_LEN, 6);
 const_assert_eq!(BECH32_ADDRESS_LEN, 40);
 
@@ -61,49 +54,10 @@ pub fn try_address_from_public_key(public_key: &PublicKey) -> Result<Address, Cr
     Ok(address_from_key_material(&public_key.0))
 }
 
-pub fn dual_address_from_public_keys(
-    primary_public_key: &PublicKey,
-    auth_public_key: &PublicKey,
-) -> Address {
-    dual_address_from_key_material(primary_public_key, auth_public_key)
-}
-
-pub fn try_dual_address_from_public_keys(
-    primary_public_key: &PublicKey,
-    auth_public_key: &PublicKey,
-) -> Result<Address, CryptoError> {
-    if primary_public_key.0.iter().all(|byte| *byte == 0)
-        || auth_public_key.0.iter().all(|byte| *byte == 0)
-    {
-        return Err(CryptoError::InvalidPublicKey);
-    }
-    Ok(dual_address_from_key_material(
-        primary_public_key,
-        auth_public_key,
-    ))
-}
-
 fn address_from_key_material(public_key: &[u8]) -> Address {
     let digest = Sha3_256::digest(public_key);
     let mut address = [0_u8; ADDRESS_SIZE];
-    address.copy_from_slice(&digest[12..32]);
-    Address(address)
-}
-
-fn dual_address_from_key_material(
-    primary_public_key: &PublicKey,
-    auth_public_key: &PublicKey,
-) -> Address {
-    let mut material = Vec::with_capacity(
-        DUAL_AUTHORIZATION_DOMAIN.len() + size_of::<u32>() + (2 * crate::crypto::PUBLIC_KEY_SIZE),
-    );
-    material.extend_from_slice(DUAL_AUTHORIZATION_DOMAIN);
-    material.extend_from_slice(&CURRENT_CHAIN_PARAMS.chain_id.to_le_bytes());
-    material.extend_from_slice(&primary_public_key.0);
-    material.extend_from_slice(&auth_public_key.0);
-    let digest = Sha3_256::digest(material);
-    let mut address = [0_u8; ADDRESS_SIZE];
-    address.copy_from_slice(&digest[12..32]);
+    address.copy_from_slice(&digest[12..]);
     Address(address)
 }
 
@@ -113,34 +67,6 @@ pub fn address_to_string(address: &Address) -> String {
 
 pub fn address_from_string(address: &str) -> Result<Address, CryptoError> {
     address_from_string_with_hrp(address, ADDRESS_HRP, BECH32_ADDRESS_LEN)
-}
-
-#[cfg(feature = "sqisign-candidate")]
-pub fn sqisign_dual_address_from_public_keys(
-    owner_public_key: &crate::crypto::sqisign_candidate::PublicKey,
-    authorization_public_key: &crate::crypto::sqisign_candidate::PublicKey,
-) -> Result<Address, CryptoError> {
-    if owner_public_key.as_bytes().iter().all(|byte| *byte == 0)
-        || authorization_public_key
-            .as_bytes()
-            .iter()
-            .all(|byte| *byte == 0)
-    {
-        return Err(CryptoError::InvalidPublicKey);
-    }
-    let mut material = Vec::with_capacity(
-        SQISIGN_DUAL_AUTHORIZATION_DOMAIN.len()
-            + size_of::<u32>()
-            + 1
-            + owner_public_key.as_bytes().len()
-            + authorization_public_key.as_bytes().len(),
-    );
-    material.extend_from_slice(SQISIGN_DUAL_AUTHORIZATION_DOMAIN);
-    material.extend_from_slice(&CURRENT_CHAIN_PARAMS.chain_id.to_le_bytes());
-    material.push(crate::crypto::SignatureScheme::SqisignLevel5 as u8);
-    material.extend_from_slice(owner_public_key.as_bytes());
-    material.extend_from_slice(authorization_public_key.as_bytes());
-    Ok(address_from_key_material(&material))
 }
 
 fn address_to_string_with_hrp(address: &Address, hrp: &str) -> String {
@@ -177,29 +103,19 @@ mod tests {
     use crate::crypto::keygen::keypair_from_seed;
 
     #[test]
-    fn dual_address_binds_both_public_keys_and_is_deterministic() {
-        let primary = keypair_from_seed(&[1; 32]);
-        let auth_a = keypair_from_seed(&[2; 32]);
-        let auth_b = keypair_from_seed(&[3; 32]);
+    fn single_key_address_uses_the_last_20_sha3_256_bytes() {
+        let public_key = keypair_from_seed(&[4; 32]).public_key;
+        let digest = Sha3_256::digest(public_key.0);
+        let expected: [u8; ADDRESS_SIZE] = digest[12..].try_into().unwrap();
 
-        let address_a = dual_address_from_public_keys(&primary.public_key, &auth_a.public_key);
-        let address_a_again =
-            dual_address_from_public_keys(&primary.public_key, &auth_a.public_key);
-        let address_b = dual_address_from_public_keys(&primary.public_key, &auth_b.public_key);
-
-        assert_eq!(address_a, address_a_again);
-        assert_ne!(address_a, address_b);
-        assert_ne!(
-            address_a,
-            dual_address_from_public_keys(&auth_a.public_key, &primary.public_key)
-        );
+        assert_eq!(address_from_public_key(&public_key), Address(expected));
     }
 
     #[test]
-    fn every_network_address_uses_lowercase_x_hrp() {
+    fn every_network_address_uses_lowercase_z_hrp() {
         let address = Address([7; ADDRESS_SIZE]);
         let encoded = address_to_string(&address);
-        assert!(encoded.starts_with("x1"));
+        assert!(encoded.starts_with("z1"));
         assert_eq!(encoded.len(), BECH32_ADDRESS_LEN);
         assert_eq!(address_from_string(&encoded), Ok(address));
 
@@ -213,25 +129,5 @@ mod tests {
             address_from_string(&old_hrp),
             Err(CryptoError::InvalidAddressEncoding)
         );
-    }
-
-    #[cfg(feature = "sqisign-candidate")]
-    #[test]
-    fn sqisign_address_uses_common_lowercase_x_hrp() {
-        use crate::crypto::sqisign_candidate::PublicKey as SqisignPublicKey;
-
-        let owner = SqisignPublicKey::from_bytes_unchecked(
-            [1; crate::crypto::sqisign_candidate::PUBLIC_KEY_SIZE],
-        );
-        let authorization = SqisignPublicKey::from_bytes_unchecked(
-            [2; crate::crypto::sqisign_candidate::PUBLIC_KEY_SIZE],
-        );
-        let address =
-            sqisign_dual_address_from_public_keys(&owner, &authorization).expect("valid keys");
-        let encoded = address_to_string(&address);
-
-        assert!(encoded.starts_with("x1"));
-        assert_eq!(encoded.len(), BECH32_ADDRESS_LEN);
-        assert_eq!(address_from_string(&encoded), Ok(address));
     }
 }

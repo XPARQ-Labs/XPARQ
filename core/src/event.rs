@@ -109,18 +109,18 @@ pub enum ProtocolEventKind {
     QCashRedeemed {
         signer: Address,
         recipient: Address,
+        /// XPQ credited on-chain to the recipient.
         amount: Amount,
-    },
-    /// Legacy persisted event tag. New blocks cannot produce this event because
-    /// recovery requeues the original redeem transaction instead.
-    QCashRecoverRedeemed {
-        signer: Address,
-        claimant: Address,
-        amount: Amount,
+        /// Value recreated as new QCash bearer outputs by the same transaction.
+        qcash_change_amount: Amount,
     },
     EmissionDistributed {
         miner: Address,
         subsidy: Amount,
+    },
+    QCashSplit {
+        signer: Address,
+        amount: Amount,
     },
 }
 
@@ -191,5 +191,34 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history.last(), Some(&event));
         assert_eq!(history.events(), &[event]);
+    }
+
+    #[test]
+    fn partial_redeem_event_serializes_recipient_and_qcash_change_amounts() {
+        let event = ProtocolEvent::new(
+            Height(7),
+            BlockHash([3; 32]),
+            Some(TransactionHash([4; 32])),
+            0,
+            ProtocolEventKind::QCashRedeemed {
+                signer: Address([5; crate::crypto::ADDRESS_SIZE]),
+                recipient: Address([6; crate::crypto::ADDRESS_SIZE]),
+                amount: Amount(39_000_000),
+                qcash_change_amount: Amount(60_000_000),
+            },
+        );
+        let decoded: ProtocolEvent =
+            crate::codec::canonical_deserialize(&event.to_bytes().unwrap()).unwrap();
+        let ProtocolEventKind::QCashRedeemed {
+            amount,
+            qcash_change_amount,
+            ..
+        } = decoded.kind
+        else {
+            panic!("expected QCashRedeemed event");
+        };
+
+        assert_eq!(amount, Amount(39_000_000));
+        assert_eq!(qcash_change_amount, Amount(60_000_000));
     }
 }

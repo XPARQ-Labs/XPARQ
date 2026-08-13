@@ -12,7 +12,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 pub const CANONICAL_ENCODING_VERSION: u8 = 1;
 pub const CANONICAL_ENCODING_PROFILE: &str = "xparq-borsh-le";
 
-/// Consensus-critical serialization. Do not replace or wrap this format under encoding version 1.
+/// Consensus-critical serialization. Changing it requires an explicit chain reset.
 pub fn canonical_bytes<T: BorshSerialize>(value: &T) -> Result<Vec<u8>, CodecError> {
     borsh::to_vec(value).map_err(|_| CodecError::EncodeFailed)
 }
@@ -200,15 +200,14 @@ pub fn decode_block(bytes: &[u8]) -> Result<Block, CodecError> {
 mod tests {
     use super::*;
     use crate::consensus::supply::Amount;
-    use crate::crypto::{Address, dual_address_from_public_keys, generate_keypair, sign};
+    use crate::crypto::{Address, address_from_public_key, generate_keypair, sign};
     use crate::state::{AccountAuthorization, XpqCoinId};
     use crate::transaction::{SignedTransfer, Transfer};
 
     #[test]
     fn protocol_decoder_uses_stored_account_authorization() {
         let owner = generate_keypair();
-        let authorization = generate_keypair();
-        let sender = dual_address_from_public_keys(&owner.public_key, &authorization.public_key);
+        let sender = address_from_public_key(&owner.public_key);
         let transaction = Transfer::new(
             sender,
             vec![XpqCoinId([7; crate::crypto::HASH_SIZE])],
@@ -216,18 +215,13 @@ mod tests {
             Amount(1),
         );
         let payload = transaction.signing_bytes().unwrap();
-        let signed = SignedTransfer::new_stored_authorized(
-            transaction,
-            sign(&owner.secret_key, &payload),
-            sign(&authorization.secret_key, &payload),
-        );
+        let signed = SignedTransfer::new_stored(transaction, sign(&owner.secret_key, &payload));
         let bytes = signed_protocol_transaction_bytes(&signed.into()).unwrap();
 
         let decoded =
             decode_signed_protocol_transaction_at(&bytes, crate::block::Height(1), |_| {
                 Some(AccountAuthorization {
-                    owner_public_key: owner.public_key,
-                    auth_public_key: authorization.public_key,
+                    public_key: owner.public_key,
                 })
             });
         assert!(decoded.is_ok());

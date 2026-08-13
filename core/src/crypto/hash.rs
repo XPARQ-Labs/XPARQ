@@ -7,9 +7,9 @@ use static_assertions::const_assert_eq;
 use std::fmt;
 
 pub const HASH_SIZE: usize = 32;
-pub const POW_HASH_SIZE: usize = 64;
+pub const POW_HASH_SIZE: usize = 32;
 const_assert_eq!(HASH_SIZE, 32);
-const_assert_eq!(POW_HASH_SIZE, 64);
+const_assert_eq!(POW_HASH_SIZE, 32);
 
 pub type HashBytes = [u8; HASH_SIZE];
 pub type PoWHashBytes = [u8; POW_HASH_SIZE];
@@ -230,6 +230,8 @@ pub enum HashDomain {
     XPARQArtifact,
     ProtocolEvent,
     ProtocolState,
+    PoWSeed,
+    PoWSalt,
     Raw,
 }
 
@@ -258,6 +260,8 @@ impl HashDomain {
             HashDomain::XPARQArtifact => b"XPARQ_HASH_ARTIFACT_V1",
             HashDomain::ProtocolEvent => b"XPARQ_HASH_PROTOCOL_EVENT_V1",
             HashDomain::ProtocolState => b"XPARQ_HASH_PROTOCOL_STATE_V1",
+            HashDomain::PoWSeed => b"XPARQ_POW_SEED_V1",
+            HashDomain::PoWSalt => b"XPARQ_POW_SALT_V1",
             HashDomain::Raw => b"XPARQ_HASH_RAW",
         }
     }
@@ -285,7 +289,12 @@ pub const POW_ARGON2_ITERATIONS: u32 = 1;
 /// Argon2id proof-of-work parallelism. This is a consensus parameter.
 pub const POW_ARGON2_LANES: u32 = 2;
 
-pub fn argon2id_pow_hash(header_bytes: &[u8]) -> Result<PoWHash, CryptoError> {
+/// Evaluates the fixed XPARQ Argon2id work function over an already
+/// domain-separated seed and salt.
+pub(crate) fn argon2id_pow_hash(
+    seed: &[u8; HASH_SIZE],
+    salt: &[u8; HASH_SIZE],
+) -> Result<PoWHash, CryptoError> {
     let params = argon2::Params::new(
         POW_ARGON2_MEMORY_KIB,
         POW_ARGON2_ITERATIONS,
@@ -296,7 +305,7 @@ pub fn argon2id_pow_hash(header_bytes: &[u8]) -> Result<PoWHash, CryptoError> {
     let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut output = [0_u8; POW_HASH_SIZE];
     argon2
-        .hash_password_into(header_bytes, b"XPARQ_POW_ARGON2ID_V1", &mut output)
+        .hash_password_into(seed, salt, &mut output)
         .map_err(|_| CryptoError::PoWHashFailed)?;
     Ok(PoWHash(output))
 }

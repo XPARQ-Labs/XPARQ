@@ -9,16 +9,18 @@ pub const DECIMALS: u8 = 6;
 const_assert!(XPQ == 1_000_000);
 
 /// Reward used for the first WBDA epoch.
-pub const BASE_BLOCK_REWARD: u64 = 10_000_000;
+pub const BASE_BLOCK_REWARD: u64 = 5_000_000;
 /// Consensus lower bound for the epoch reward.
-pub const MIN_BLOCK_REWARD: u64 = 1_000_000;
+pub const MIN_BLOCK_REWARD: u64 = 500_000;
 /// Consensus upper bound for the epoch reward.
-pub const MAX_BLOCK_REWARD: u64 = 20_000_000;
-/// One utilization adjustment changes the reward by exactly 1 XPQ.
-pub const BLOCK_REWARD_STEP: u64 = 1_000_000;
+pub const MAX_BLOCK_REWARD: u64 = 10_000_000;
+/// One utilization adjustment changes the reward by exactly 0.1 XPQ.
+pub const BLOCK_REWARD_STEP: u64 = 100_000;
 
-// Compatibility alias for consumers that used the former fixed reward name.
-pub const BLOCK_REWARD: u64 = BASE_BLOCK_REWARD;
+const_assert!(MIN_BLOCK_REWARD == XPQ / 2);
+const_assert!(BASE_BLOCK_REWARD == 5 * XPQ);
+const_assert!(MAX_BLOCK_REWARD == 10 * XPQ);
+const_assert!(BLOCK_REWARD_STEP == XPQ / 10);
 
 #[derive(
     Debug,

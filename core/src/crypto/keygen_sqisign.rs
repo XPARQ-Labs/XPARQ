@@ -4,7 +4,6 @@
 //! is deliberately incompatible with the default ML-DSA-44 chain.
 
 use crate::error::CryptoError;
-use crate::genesis::CURRENT_CHAIN_PARAMS;
 use borsh::{BorshDeserialize, BorshSerialize};
 use chacha20::ChaCha12Rng;
 use rand_10::SeedableRng;
@@ -22,7 +21,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::Instant;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 type XparqSigningKey = SqisignSigningKey<Level5>;
 type XparqVerifyingKey = SqisignPublicKey<Level5>;
@@ -85,7 +84,6 @@ impl SqisignVerificationWork {
 pub type PublicKeyBytes = [u8; PUBLIC_KEY_SIZE];
 pub type SecretKeyBytes = [u8; SECRET_KEY_SIZE];
 pub type SignatureBytes = [u8; SIGNATURE_SIZE];
-pub type AuthorizationSeed = Zeroizing<[u8; 32]>;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
@@ -245,34 +243,6 @@ fn keypair_from_parts(public_key: XparqVerifyingKey, signing_key: XparqSigningKe
     }
 }
 
-pub fn authorization_keypair_from_password(
-    password: &[u8],
-    primary_public_key: &PublicKey,
-) -> Result<KeyPair, CryptoError> {
-    let seed = authorization_seed_from_password(password, primary_public_key)?;
-    Ok(keypair_from_seed(&seed))
-}
-
-pub fn authorization_seed_from_password(
-    password: &[u8],
-    primary_public_key: &PublicKey,
-) -> Result<AuthorizationSeed, CryptoError> {
-    let params = argon2::Params::new(64 * 1024, 3, 1, Some(32))
-        .map_err(|_| CryptoError::InvalidKeyDerivationParameters)?;
-    let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    let mut salt_material =
-        Vec::with_capacity(b"XPARQ_SQISIGN_LEVEL5_AUTHORIZATION_V1".len() + 4 + PUBLIC_KEY_SIZE);
-    salt_material.extend_from_slice(b"XPARQ_SQISIGN_LEVEL5_AUTHORIZATION_V1");
-    salt_material.extend_from_slice(&CURRENT_CHAIN_PARAMS.chain_id.to_le_bytes());
-    salt_material.extend_from_slice(&primary_public_key.0);
-    let salt = crate::crypto::hash::hash_bytes(&salt_material);
-    let mut seed = [0_u8; 32];
-    argon2
-        .hash_password_into(password, &salt.0, &mut seed)
-        .map_err(|_| CryptoError::InvalidKeyDerivationParameters)?;
-    Ok(AuthorizationSeed::new(seed))
-}
-
 pub fn public_key_from_seed(seed: &[u8; 32]) -> PublicKey {
     keypair_from_seed(seed).public_key
 }
@@ -312,50 +282,6 @@ pub fn sign(secret_key: &SecretKey, message: &[u8]) -> Signature {
 
 pub fn verify(public_key: &PublicKey, message: &[u8], signature: &Signature) -> bool {
     verify_result(public_key, message, signature).is_ok()
-}
-
-pub fn verify_dual_parallel(
-    owner_public_key: &PublicKey,
-    auth_public_key: &PublicKey,
-    message: &[u8],
-    owner_signature: &Signature,
-    auth_signature: &Signature,
-) -> (bool, bool) {
-    let owner_key = cached_verifying_key(owner_public_key);
-    let auth_key = cached_verifying_key(auth_public_key);
-    let Some(workers) = verification_workers() else {
-        return (
-            owner_key.verify(message, owner_signature).is_ok(),
-            auth_key.verify(message, auth_signature).is_ok(),
-        );
-    };
-    let (result_sender, result_receiver) = mpsc::sync_channel(1);
-    let job = VerificationJob {
-        verifying_key: auth_key.clone(),
-        message: message.to_vec(),
-        signature: *auth_signature,
-        result: result_sender,
-        queued_at: Instant::now(),
-    };
-    VERIFICATION_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
-    match workers.try_send(job) {
-        Ok(()) => {
-            VERIFICATION_QUEUE_QUEUED.fetch_add(1, Ordering::Relaxed);
-        }
-        Err(_) => {
-            VERIFICATION_QUEUE_DEPTH.fetch_sub(1, Ordering::Relaxed);
-            VERIFICATION_QUEUE_FALLBACK.fetch_add(1, Ordering::Relaxed);
-            return (
-                owner_key.verify(message, owner_signature).is_ok(),
-                auth_key.verify(message, auth_signature).is_ok(),
-            );
-        }
-    }
-    let owner_valid = owner_key.verify(message, owner_signature).is_ok();
-    let auth_valid = result_receiver
-        .recv()
-        .unwrap_or_else(|_| auth_key.verify(message, auth_signature).is_ok());
-    (owner_valid, auth_valid)
 }
 
 /// Verifies independent SQIsign jobs concurrently using the persistent pool.
@@ -606,26 +532,20 @@ mod tests {
     }
 
     #[test]
-    fn dual_sqisign_level5_verification_works() {
+    fn sqisign_level5_batch_verification_works() {
         let owner = keypair_from_seed(&[3; 32]);
-        let auth = keypair_from_seed(&[4; 32]);
-        let message = b"dual SQIsign Level 5 authorization";
+        let authorization = keypair_from_seed(&[4; 32]);
+        let message = b"SQIsign Level 5 authorization";
         let owner_signature = sign(&owner.secret_key, message);
-        let auth_signature = sign(&auth.secret_key, message);
-        assert_eq!(
-            verify_dual_parallel(
-                &owner.public_key,
-                &auth.public_key,
-                message,
-                &owner_signature,
-                &auth_signature
-            ),
-            (true, true)
-        );
+        let authorization_signature = sign(&authorization.secret_key, message);
 
         let jobs = vec![
             (owner.public_key, message.to_vec(), owner_signature),
-            (auth.public_key, message.to_vec(), auth_signature),
+            (
+                authorization.public_key,
+                message.to_vec(),
+                authorization_signature,
+            ),
             (owner.public_key, b"modified".to_vec(), owner_signature),
         ];
         assert_eq!(verify_batch_parallel(&jobs), vec![true, true, false]);

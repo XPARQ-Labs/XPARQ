@@ -8,11 +8,10 @@ members = [
 exclude = [
     "depend",
     "core/fuzz",
-    "sidechain",
 ]
 
 [workspace.package]
-version = "0.2.11"
+version = "0.2.12"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"

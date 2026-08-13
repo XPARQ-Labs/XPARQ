@@ -1,5 +1,4 @@
 use crate::error::CryptoError;
-use crate::genesis::CURRENT_CHAIN_PARAMS;
 use borsh::{BorshDeserialize, BorshSerialize};
 use ml_dsa::{
     ExpandedSigningKey, Generate, Keypair, MlDsa44, Signature as MlDsaSignature, SignatureEncoding,
@@ -7,10 +6,7 @@ use ml_dsa::{
 };
 use static_assertions::const_assert_eq;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
-use std::time::Instant;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -31,7 +27,6 @@ const_assert_eq!(SIGNATURE_SIZE, 2_420);
 pub type PublicKeyBytes = [u8; PUBLIC_KEY_SIZE];
 pub type SecretKeyBytes = [u8; SECRET_KEY_SIZE];
 pub type SignatureBytes = [u8; SIGNATURE_SIZE];
-pub type AuthorizationSeed = Zeroizing<[u8; 32]>;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
@@ -177,45 +172,6 @@ fn keypair_from_signing_key(signing_key: XPARQSigningKey) -> KeyPair {
     }
 }
 
-pub fn authorization_keypair_from_password(
-    password: &[u8],
-    primary_public_key: &PublicKey,
-) -> Result<KeyPair, CryptoError> {
-    let seed = authorization_seed_from_password(password, primary_public_key)?;
-    let mut encoded_seed = (*seed).into();
-    let signing_key = XPARQSigningKey::from_seed(&encoded_seed);
-    encoded_seed.zeroize();
-    let public_key = PublicKey(signing_key.verifying_key().encode().into());
-
-    #[allow(deprecated)]
-    let secret_key = SecretKey(signing_key.expanded_key().to_expanded().into());
-
-    Ok(KeyPair {
-        public_key,
-        secret_key,
-    })
-}
-
-pub fn authorization_seed_from_password(
-    password: &[u8],
-    primary_public_key: &PublicKey,
-) -> Result<AuthorizationSeed, CryptoError> {
-    let params = argon2::Params::new(64 * 1024, 3, 1, Some(32))
-        .map_err(|_| CryptoError::InvalidKeyDerivationParameters)?;
-    let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    let mut wallet_salt_material =
-        Vec::with_capacity(b"XPARQ_AUTHORIZATION_V1".len() + size_of::<u32>() + PUBLIC_KEY_SIZE);
-    wallet_salt_material.extend_from_slice(b"XPARQ_AUTHORIZATION_V1");
-    wallet_salt_material.extend_from_slice(&CURRENT_CHAIN_PARAMS.chain_id.to_le_bytes());
-    wallet_salt_material.extend_from_slice(&primary_public_key.0);
-    let wallet_salt = crate::crypto::hash::hash_bytes(&wallet_salt_material);
-    let mut seed = [0_u8; 32];
-    argon2
-        .hash_password_into(password, &wallet_salt.0, &mut seed)
-        .map_err(|_| CryptoError::InvalidKeyDerivationParameters)?;
-    Ok(AuthorizationSeed::new(seed))
-}
-
 /// Deterministically derives an ML-DSA-44 public key from a compact 32-byte seed.
 /// This is used by bearer QCash files so the large expanded secret key never
 /// needs to be stored in the file.
@@ -246,19 +202,6 @@ pub fn verify(public_key: &PublicKey, message: &[u8], signature: &Signature) -> 
     verify_result(public_key, message, signature).is_ok()
 }
 
-struct VerificationJob {
-    public_key: PublicKey,
-    message: Vec<u8>,
-    signature: Signature,
-    result: mpsc::SyncSender<bool>,
-    queued_at: Instant,
-}
-
-static VERIFICATION_QUEUE_DEPTH: AtomicU64 = AtomicU64::new(0);
-static VERIFICATION_QUEUE_QUEUED: AtomicU64 = AtomicU64::new(0);
-static VERIFICATION_QUEUE_FALLBACK: AtomicU64 = AtomicU64::new(0);
-static VERIFICATION_QUEUE_WAIT_MICROS: AtomicU64 = AtomicU64::new(0);
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VerificationQueueSnapshot {
     pub depth: u64,
@@ -270,109 +213,9 @@ pub struct VerificationQueueSnapshot {
 
 pub fn verification_queue_snapshot() -> VerificationQueueSnapshot {
     VerificationQueueSnapshot {
-        depth: VERIFICATION_QUEUE_DEPTH.load(Ordering::Relaxed),
         capacity: VERIFICATION_QUEUE_CAPACITY,
-        queued_total: VERIFICATION_QUEUE_QUEUED.load(Ordering::Relaxed),
-        fallback_total: VERIFICATION_QUEUE_FALLBACK.load(Ordering::Relaxed),
-        wait_micros_total: VERIFICATION_QUEUE_WAIT_MICROS.load(Ordering::Relaxed),
+        ..VerificationQueueSnapshot::default()
     }
-}
-
-fn verification_workers() -> Option<&'static mpsc::SyncSender<VerificationJob>> {
-    static WORKERS: OnceLock<Option<mpsc::SyncSender<VerificationJob>>> = OnceLock::new();
-    WORKERS
-        .get_or_init(|| {
-            let worker_count = std::thread::available_parallelism()
-                .map(usize::from)
-                .unwrap_or(1)
-                .saturating_sub(1);
-            if worker_count == 0 {
-                return None;
-            }
-            let (sender, receiver) =
-                mpsc::sync_channel::<VerificationJob>(VERIFICATION_QUEUE_CAPACITY);
-            let receiver = Arc::new(Mutex::new(receiver));
-            for index in 0..worker_count {
-                let receiver = Arc::clone(&receiver);
-                if std::thread::Builder::new()
-                    .name(format!("xparq-ml-dsa-{index}"))
-                    .spawn(move || {
-                        loop {
-                            let job = {
-                                let Ok(receiver) = receiver.lock() else {
-                                    return;
-                                };
-                                let Ok(job) = receiver.recv() else {
-                                    return;
-                                };
-                                job
-                            };
-                            VERIFICATION_QUEUE_DEPTH.fetch_sub(1, Ordering::Relaxed);
-                            VERIFICATION_QUEUE_WAIT_MICROS.fetch_add(
-                                job.queued_at
-                                    .elapsed()
-                                    .as_micros()
-                                    .min(u128::from(u64::MAX))
-                                    as u64,
-                                Ordering::Relaxed,
-                            );
-                            let valid = verify(&job.public_key, &job.message, &job.signature);
-                            let _ = job.result.send(valid);
-                        }
-                    })
-                    .is_err()
-                {
-                    return None;
-                }
-            }
-            Some(sender)
-        })
-        .as_ref()
-}
-
-/// Verifies the owner and authorization signatures concurrently when at least
-/// two logical CPUs are available. The persistent worker pool avoids creating
-/// operating-system threads for individual transactions.
-pub fn verify_dual_parallel(
-    owner_public_key: &PublicKey,
-    auth_public_key: &PublicKey,
-    message: &[u8],
-    owner_signature: &Signature,
-    auth_signature: &Signature,
-) -> (bool, bool) {
-    let Some(workers) = verification_workers() else {
-        return (
-            verify(owner_public_key, message, owner_signature),
-            verify(auth_public_key, message, auth_signature),
-        );
-    };
-    let (result_sender, result_receiver) = mpsc::sync_channel(1);
-    let job = VerificationJob {
-        public_key: *auth_public_key,
-        message: message.to_vec(),
-        signature: *auth_signature,
-        result: result_sender,
-        queued_at: Instant::now(),
-    };
-    VERIFICATION_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
-    match workers.try_send(job) {
-        Ok(()) => {
-            VERIFICATION_QUEUE_QUEUED.fetch_add(1, Ordering::Relaxed);
-        }
-        Err(_) => {
-            VERIFICATION_QUEUE_DEPTH.fetch_sub(1, Ordering::Relaxed);
-            VERIFICATION_QUEUE_FALLBACK.fetch_add(1, Ordering::Relaxed);
-            return (
-                verify(owner_public_key, message, owner_signature),
-                verify(auth_public_key, message, auth_signature),
-            );
-        }
-    }
-    let owner_valid = verify(owner_public_key, message, owner_signature);
-    let auth_valid = result_receiver
-        .recv()
-        .unwrap_or_else(|_| verify(auth_public_key, message, auth_signature));
-    (owner_valid, auth_valid)
 }
 
 pub fn cached_verifying_key(public_key: &PublicKey) -> CachedVerifyingKey {
@@ -408,53 +251,4 @@ fn expanded_signing_key(secret_key: &SecretKey) -> XPARQExpandedSigningKey {
 
 fn verifying_key(public_key: &PublicKey) -> XPARQVerifyingKey {
     XPARQVerifyingKey::decode(&public_key.0.into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn authorization_key_is_deterministic_and_bound_to_primary_public_key() {
-        let password = b"same authorization password";
-        let primary_a = keypair_from_seed(&[1; 32]).public_key;
-        let primary_b = keypair_from_seed(&[2; 32]).public_key;
-
-        let key_a = authorization_keypair_from_password(password, &primary_a).unwrap();
-        let key_a_again = authorization_keypair_from_password(password, &primary_a).unwrap();
-        let key_b = authorization_keypair_from_password(password, &primary_b).unwrap();
-
-        assert_eq!(key_a.public_key, key_a_again.public_key);
-        assert_ne!(key_a.public_key, key_b.public_key);
-    }
-
-    #[test]
-    fn parallel_dual_verification_matches_individual_verification() {
-        let owner = keypair_from_seed(&[3; 32]);
-        let auth = keypair_from_seed(&[4; 32]);
-        let message = b"parallel dual ML-DSA verification";
-        let owner_signature = sign(&owner.secret_key, message);
-        let auth_signature = sign(&auth.secret_key, message);
-
-        assert_eq!(
-            verify_dual_parallel(
-                &owner.public_key,
-                &auth.public_key,
-                message,
-                &owner_signature,
-                &auth_signature,
-            ),
-            (true, true)
-        );
-        assert_eq!(
-            verify_dual_parallel(
-                &owner.public_key,
-                &auth.public_key,
-                b"modified",
-                &owner_signature,
-                &auth_signature,
-            ),
-            (false, false)
-        );
-    }
 }

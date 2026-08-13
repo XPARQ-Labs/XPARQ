@@ -4,21 +4,20 @@ use crate::consensus::supply::{
     BASE_BLOCK_REWARD, BLOCK_REWARD_STEP, DECIMALS, MAX_BLOCK_REWARD, MIN_BLOCK_REWARD, UNIT, XPQ,
 };
 use crate::consensus::{
-    DIFFICULTY_START, MIN_DIFFICULTY, WBDA_HIGH_UTILIZATION_PPM, WBDA_LOW_UTILIZATION_PPM,
-    WBDA_WINDOW,
+    DIFFICULTY_START, MAX_DIFFICULTY, MIN_DIFFICULTY, WBDA_HIGH_UTILIZATION_PPM,
+    WBDA_LOW_UTILIZATION_PPM, WBDA_WINDOW,
 };
-use crate::crypto::{BlockHash, Hash, HashDomain, domain_hash};
+use crate::crypto::{ADDRESS_SIZE, BlockHash, Hash, HashDomain, domain_hash};
 use crate::error::{CodecError, GenesisError};
 use crate::genesis::{
     CURRENT_CHAIN_PARAMS, ChainParams, genesis_block_for_chain, genesis_hash_for_chain,
     genesis_ledger_for_chain,
 };
 use crate::ledger::{
-    BLOCK_REWARD_MATURITY, CONFIRMATION_DEPTH, FINALITY_DEPTH, Ledger,
-    QCASH_REDEEM_CREDIT_MATURITY, QCASH_REDEEM_DELAY, SparseStateTree, Work,
-    calculate_protocol_state_root_from_roots,
+    BLOCK_REWARD_MATURITY, CONFIRMATION_DEPTH, ChainHeader, FINALITY_DEPTH, HeaderChainError,
+    Ledger, QCASH_REDEEM_CREDIT_MATURITY, QCASH_REDEEM_DELAY, SparseStateTree, Work,
+    calculate_protocol_state_root_from_roots, verify_header_chain,
 };
-use crate::qcash::recovery::ChainHeader;
 use crate::state::{Account, BlockStateCommitment, QCashUtxoSet, XpqUtxoSet};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::BTreeMap;
@@ -56,6 +55,7 @@ pub struct ChainParamsArtifact {
     pub pow_memory_kib: u32,
     pub pow_iterations: u32,
     pub pow_lanes: u32,
+    pub pow_output_bytes: u16,
     pub difficulty_algorithm: String,
     pub network_magic: [u8; 4],
 }
@@ -66,15 +66,21 @@ pub struct ChainSpecArtifact {
     pub genesis_nonce: u64,
     pub genesis_hash: [u8; crate::crypto::HASH_SIZE],
     pub block_version: u8,
+    pub address_size: u16,
     pub max_block_size: u64,
     pub max_block_weight: u64,
     pub max_block_decode_items: u64,
     pub min_difficulty: u32,
+    pub max_difficulty: u32,
     pub difficulty_start: u32,
     pub wbda_window: u64,
     pub wbda_target_block_weight: u64,
     pub wbda_low_utilization_ppm: u64,
     pub wbda_high_utilization_ppm: u64,
+    /// Automatic local-history checkpoints are disabled. Non-zero values are
+    /// reserved for a future globally authenticated finality mechanism.
+    pub automatic_checkpoint_interval: u64,
+    pub automatic_checkpoint_burial_epochs: u64,
     pub confirmation_depth: u32,
     pub finality_depth: u32,
     pub block_reward_maturity: u32,
@@ -143,16 +149,14 @@ impl ArtifactTrustAnchor {
     /// and protocol state root are all taken from the validated tip header.
     pub fn from_verified_header_chain(
         headers: &[ChainHeader],
-    ) -> Result<(Self, Work), crate::qcash::recovery::RollbackProofError> {
-        let (block_hash, cumulative_work) = crate::qcash::recovery::verify_header_chain(headers)?;
-        let tip = headers
-            .last()
-            .ok_or(crate::qcash::recovery::RollbackProofError::EmptyHeaderChain)?;
+    ) -> Result<(Self, Work), HeaderChainError> {
+        let (block_hash, cumulative_work) = verify_header_chain(headers)?;
+        let tip = headers.last().ok_or(HeaderChainError::EmptyHeaderChain)?;
         let protocol_state_root = if tip.height == Height(0) {
             genesis_ledger_for_chain(CURRENT_CHAIN_PARAMS)
-                .map_err(|_| crate::qcash::recovery::RollbackProofError::WrongGenesis)?
+                .map_err(|_| HeaderChainError::WrongGenesis)?
                 .protocol_state_root()
-                .map_err(|_| crate::qcash::recovery::RollbackProofError::WrongGenesis)?
+                .map_err(|_| HeaderChainError::WrongGenesis)?
         } else {
             tip.header.state_root
         };
@@ -170,7 +174,7 @@ impl ArtifactTrustAnchor {
     /// work, using the consensus hash tie-breaker when work is equal.
     pub fn select_best_verified_header_chain(
         candidates: &[Vec<ChainHeader>],
-    ) -> Result<(usize, Self, Work), crate::qcash::recovery::RollbackProofError> {
+    ) -> Result<(usize, Self, Work), HeaderChainError> {
         let mut best: Option<(usize, Self, Work)> = None;
         for (index, headers) in candidates.iter().enumerate() {
             let (anchor, work) = Self::from_verified_header_chain(headers)?;
@@ -182,7 +186,7 @@ impl ArtifactTrustAnchor {
                 best = Some((index, anchor, work));
             }
         }
-        best.ok_or(crate::qcash::recovery::RollbackProofError::EmptyHeaderChain)
+        best.ok_or(HeaderChainError::EmptyHeaderChain)
     }
 
     pub fn from_validated_ledger_tip(ledger: &Ledger) -> Result<Self, GenesisError> {
@@ -253,6 +257,7 @@ impl ChainParamsArtifact {
             pow_memory_kib: params.pow_memory_kib,
             pow_iterations: params.pow_iterations,
             pow_lanes: params.pow_lanes,
+            pow_output_bytes: params.pow_output_bytes,
             difficulty_algorithm: params.difficulty_algorithm.to_owned(),
             network_magic: params.network_magic,
         })
@@ -270,15 +275,19 @@ impl ChainSpecArtifact {
             genesis_nonce: params.genesis.nonce,
             genesis_hash: genesis_hash_for_chain(params)?.0,
             block_version: crate::block::BLOCK_VERSION,
+            address_size: ADDRESS_SIZE as u16,
             max_block_size: crate::block::MAX_BLOCK_SIZE as u64,
             max_block_weight: crate::block::MAX_BLOCK_WEIGHT as u64,
             max_block_decode_items: crate::block::MAX_BLOCK_DECODE_ITEMS as u64,
             min_difficulty: MIN_DIFFICULTY,
+            max_difficulty: MAX_DIFFICULTY,
             difficulty_start: DIFFICULTY_START,
             wbda_window: WBDA_WINDOW as u64,
             wbda_target_block_weight: crate::consensus::WBDA_TARGET_BLOCK_WEIGHT as u64,
             wbda_low_utilization_ppm: WBDA_LOW_UTILIZATION_PPM,
             wbda_high_utilization_ppm: WBDA_HIGH_UTILIZATION_PPM,
+            automatic_checkpoint_interval: 0,
+            automatic_checkpoint_burial_epochs: 0,
             confirmation_depth: CONFIRMATION_DEPTH,
             finality_depth: FINALITY_DEPTH,
             block_reward_maturity: BLOCK_REWARD_MATURITY,
@@ -715,6 +724,9 @@ mod tests {
             genesis_hash_for_chain(CURRENT_CHAIN_PARAMS).unwrap().0
         );
         assert_eq!(decoded.chain_spec.params, decoded.params);
+        assert_eq!(decoded.chain_spec.address_size, ADDRESS_SIZE as u16);
+        assert_eq!(decoded.params.pow_output_bytes, 32);
+        assert_eq!(decoded.chain_spec.max_difficulty, 256);
         assert_eq!(
             decoded.chain_spec_hash,
             chain_spec_hash(&decoded.chain_spec).unwrap()

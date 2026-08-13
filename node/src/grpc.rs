@@ -36,7 +36,7 @@ impl NodeRpc for GrpcNodeService {
             .lock()
             .map_err(|_| Status::internal("node state lock poisoned"))?;
         let connection_stats = self.p2p_swarm.connection_stats();
-        let peer_count = connection_stats.outbound + connection_stats.inbound;
+        let peer_count = connection_stats.total;
         let height = node.tip_height().unwrap_or(Height(0)).0;
         let tip_hash = node
             .tip_hash()

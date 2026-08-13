@@ -1,26 +1,22 @@
 use crate::runtime::cache::CoreCache;
 use crate::runtime::mempool::Mempool;
 use crate::runtime::mempool::MempoolError;
-use crate::runtime::miner::{MiningConfig, MiningResult, mine_candidate_block};
 use crate::runtime::node::error::NodeError;
 use crate::runtime::params::HASH_SIZE;
-use crate::runtime::recovery::{
-    RollbackIssue, RollbackIssueId, RollbackProofContext, RollbackRecoveryStatus,
-};
+use crate::runtime::reorg_journal::{ReorgTransaction, ReorgTransactionStatus};
 use crate::runtime::storage::Storage;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use xparq::block::{Block, BlockHeight, Height};
-use xparq::consensus::supply::{Amount, Balance};
+use xparq::consensus::supply::Amount;
 use xparq::consensus::{
     Consensus, MIN_DIFFICULTY, WBDA_WINDOW, is_wbda_epoch_boundary, next_difficulty_from_window,
 };
 use xparq::crypto::{Address, BlockHash, Hash, TransactionHash};
 use xparq::genesis::{GenesisError, genesis_hash, genesis_ledger};
 use xparq::ledger::fork_choice::ForkChoice;
-use xparq::ledger::{Chain, FINALITY_DEPTH, Ledger};
-use xparq::qcash::recovery::{ROLLBACK_PROOF_VERSION, RollbackProofBundle};
+use xparq::ledger::{Chain, Checkpoint, CheckpointSet, FINALITY_DEPTH, Ledger};
 use xparq::transaction::{SignedProtocolTransaction, SignedQCashTransaction, SignedTransfer};
 
 const MAX_ORPHAN_BLOCKS: usize = 1024;
@@ -49,19 +45,6 @@ impl Default for PendingBalance {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BalanceSummary {
-    pub confirmed: Amount,
-    pub available: Amount,
-    pub pending: PendingBalance,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AccountView {
-    pub balance: Amount,
-    pub unspendable: Amount,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftBasis {
     pub signer: Address,
@@ -75,16 +58,6 @@ pub struct DraftBasis {
     pub pending_outgoing_hashes: Vec<TransactionHash>,
 }
 
-impl Default for BalanceSummary {
-    fn default() -> Self {
-        Self {
-            confirmed: Amount(0),
-            available: Amount(0),
-            pending: PendingBalance::default(),
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct Node {
     pub ledger: Ledger,
@@ -93,6 +66,7 @@ pub struct Node {
     pub consensus: Consensus,
     pub cache: CoreCache,
     pub fork_choice: ForkChoice,
+    checkpoints: CheckpointSet,
     genesis_accounts: BTreeMap<Address, xparq::state::Account>,
     orphan_blocks: BTreeMap<BlockHash, OrphanBlock>,
     orphan_children_by_parent: BTreeMap<BlockHash, Vec<BlockHash>>,
@@ -152,19 +126,18 @@ impl Node {
             if let Some(block) = ledger.chain.blocks.get(height) {
                 fork_choice.insert_block(block.clone())?;
             } else {
-                fork_choice.insert_header(xparq::qcash::recovery::ChainHeader::new(
-                    *height,
-                    header.clone(),
-                ))?;
+                fork_choice
+                    .insert_header(xparq::ledger::ChainHeader::new(*height, header.clone()))?;
             }
         }
-        Ok(Self {
+        let mut node = Self {
             ledger,
             mempool: Mempool::new(),
             storage,
             consensus,
             cache,
             fork_choice,
+            checkpoints: CheckpointSet::empty(),
             genesis_accounts,
             orphan_blocks: BTreeMap::new(),
             orphan_children_by_parent: BTreeMap::new(),
@@ -175,7 +148,9 @@ impl Node {
             snapshot_cache: None,
             block_validation_failures_total: 0,
             reorgs_total: 0,
-        })
+        };
+        node.restore_trusted_checkpoint()?;
+        Ok(node)
     }
 
     pub fn block_validation_failures_total(&self) -> u64 {
@@ -274,6 +249,8 @@ impl Node {
             genesis_hash()?.into(),
         )?;
         node.index_stored_blocks()?;
+        node.reconcile_indexed_fork_choice()?;
+        node.retry_reorg_transactions()?;
         Ok(node)
     }
 
@@ -297,6 +274,9 @@ impl Node {
 
     pub fn apply_block(&mut self, block: Block) -> Result<(), NodeError> {
         self.prune_expired_orphans(current_unix_timestamp());
+        if self.fork_choice.contains(&block.hash()?) {
+            return Ok(());
+        }
         match self.apply_known_parent_block(block.clone()) {
             Ok(()) => {
                 self.process_orphans_for_parent(block.hash()?)?;
@@ -349,25 +329,8 @@ impl Node {
             self.storage.save_genesis_accounts(&self.genesis_accounts)?;
         }
         self.mempool.remove_confirmed(&block)?;
-        self.mark_rollback_issues_reconfirmed(&block)?;
+        self.mark_reorg_transactions_reconfirmed(&block)?;
         self.cache.insert_block(block.clone())?;
-        for transaction in block.transactions() {
-            if let SignedProtocolTransaction::Transfer(transaction) = transaction {
-                if let Some(sender) = self.ledger.account(&transaction.transaction.from) {
-                    self.cache.insert_account(sender.clone());
-                }
-                for output in &transaction.transaction.outputs {
-                    if let Some(address) = output.to.address()
-                        && let Some(receiver) = self.ledger.account(&address)
-                    {
-                        self.cache.insert_account(receiver.clone());
-                    }
-                }
-            }
-        }
-        if let Some(miner) = self.ledger.account(&block.miner_address()) {
-            self.cache.insert_account(miner.clone());
-        }
         self.prune_finalized_state()?;
         self.storage
             .save_active_extension(&previous_ledger, &self.ledger, &block)?;
@@ -561,17 +524,44 @@ impl Node {
     }
 
     fn reorg_to_best_tip(&mut self) -> Result<(), NodeError> {
-        let old_blocks: Vec<_> = self.ledger.chain.blocks.values().cloned().collect();
         let old_tip_hash = self.ledger.tip_hash();
-        let best_tip = self
+        let old_tip_height = self
+            .ledger
+            .tip_height()
+            .ok_or(NodeError::MissingActiveTip)?;
+        let best_tip_node = self
             .fork_choice
             .best_tip()
-            .ok_or(NodeError::MissingBestTip)?
-            .hash;
+            .ok_or(NodeError::MissingBestTip)?;
+        let best_tip = best_tip_node.hash;
+        let best_tip_height = best_tip_node.height;
         let ancestor = self
             .common_ancestor(old_tip_hash, best_tip)
             .ok_or(NodeError::MissingCommonAncestor)?;
-        if xparq::ledger::reorg_crosses_finality_boundary(&self.ledger, &self.fork_choice, ancestor)
+        let ancestor_height = self
+            .fork_choice
+            .get(&ancestor)
+            .ok_or(NodeError::MissingForkNode)?
+            .height;
+        let disconnected_depth = old_tip_height.0.saturating_sub(ancestor_height.0);
+        let connected_depth = best_tip_height.0.saturating_sub(ancestor_height.0);
+        if disconnected_depth > u64::from(FINALITY_DEPTH) {
+            crate::node_warn!(
+                "REORG",
+                "deep_reorg_detected ancestor_height={} old_height={} new_height={} disconnected_blocks={} connected_blocks={}",
+                ancestor_height.0,
+                old_tip_height.0,
+                best_tip_height.0,
+                disconnected_depth,
+                connected_depth
+            );
+        }
+        if !self.checkpoints.is_compatible(&self.fork_choice, best_tip)
+            || xparq::ledger::reorg_crosses_checkpoint(
+                &self.fork_choice,
+                &self.checkpoints,
+                ancestor,
+            )?
         {
             return Err(xparq::ledger::LedgerError::FinalityViolation.into());
         }
@@ -579,193 +569,149 @@ impl Node {
             .fork_choice
             .branch_from_ancestor(ancestor, best_tip)
             .ok_or(NodeError::MissingForkBranch)?;
-        let losing_headers =
-            self.headers_to_tip(old_tip_hash.ok_or(NodeError::MissingActiveTip)?)?;
-        let canonical_headers = self.headers_to_tip(best_tip)?;
-        let proof_context = RollbackProofContext::new(losing_headers, canonical_headers, ancestor)?;
-        self.storage.save_rollback_proof_context(&proof_context)?;
-
-        self.ledger = self.ledger_for_branch_tip(best_tip)?;
-        self.snapshot_cache = None;
-        self.cache = CoreCache::from_ledger(&self.ledger)?;
-        self.prune_finalized_state()?;
-        self.storage.save_ledger(&self.ledger)?;
-
-        let winning_hashes: std::collections::BTreeSet<_> = self
-            .fork_choice
-            .ancestor_hashes(best_tip)
-            .into_iter()
-            .collect();
-        for old_block in old_blocks {
+        let mut disconnected = Vec::new();
+        let mut current = old_tip_hash.ok_or(NodeError::MissingActiveTip)?;
+        while current != ancestor {
+            let fork_node = self
+                .fork_choice
+                .get(&current)
+                .ok_or(NodeError::MissingForkNode)?;
+            disconnected.push((
+                fork_node.block.clone(),
+                self.ledger.events_for_block(&current).to_vec(),
+            ));
+            current = fork_node.parent;
+        }
+        let mut disconnected_transaction_ids = Vec::new();
+        let mut disconnected_transaction_hashes = Vec::new();
+        for (old_block, _) in &disconnected {
             let old_block_hash = old_block.hash()?;
-            if winning_hashes.contains(&old_block_hash) {
-                continue;
-            }
-            let old_block_height = old_block.height();
             for (transaction_index, transaction) in
                 old_block.transactions().iter().cloned().enumerate()
             {
                 let transaction_index = u32::try_from(transaction_index)
                     .map_err(|_| NodeError::TransactionIndexOverflow)?;
-                let transaction_proof =
-                    old_block.transaction_inclusion_proofs(transaction_index as usize)?;
-                let mut issue = RollbackIssue::new(
-                    old_block_height,
+                let record = ReorgTransaction::new(
+                    old_block.height(),
                     old_block_hash,
                     transaction_index,
                     transaction,
-                    proof_context.id,
-                    transaction_proof,
                     current_unix_timestamp(),
                 )?;
-                if let Some(existing) = self.storage.load_rollback_issue(&issue.id)? {
-                    issue = existing;
-                } else {
-                    self.storage.save_rollback_issue(&issue)?;
-                }
-                self.retry_rollback_issue_record(&mut issue, false)?;
+                disconnected_transaction_ids.push(record.id);
+                disconnected_transaction_hashes.push(record.transaction_hash);
+                self.storage.save_reorg_transaction(&record)?;
             }
         }
 
-        // Keep the variable intentionally used for the common ancestor search, even when the
-        // winning branch starts at genesis.
-        let _ = winning_branch;
+        self.ledger = self.ledger_for_branch_tip(best_tip)?;
+        self.snapshot_cache = None;
+        self.cache = CoreCache::from_ledger(&self.ledger)?;
+        for block in &winning_branch {
+            self.mempool.remove_confirmed(block)?;
+        }
+        self.mempool.revalidate_after_reorg(&self.ledger)?;
+        self.prune_finalized_state()?;
+        self.storage
+            .save_reorg(&self.ledger, &disconnected, &winning_branch)?;
+        self.retry_reorg_transactions()?;
+
+        let mut requeued_transactions = 0usize;
+        let mut conflicting_transactions = 0usize;
+        let mut reconfirmed_transactions = 0usize;
+        for id in disconnected_transaction_ids {
+            let Some(record) = self.storage.load_reorg_transaction(&id)? else {
+                continue;
+            };
+            match record.status {
+                ReorgTransactionStatus::Requeued => {
+                    requeued_transactions = requeued_transactions.saturating_add(1)
+                }
+                ReorgTransactionStatus::Conflict => {
+                    conflicting_transactions = conflicting_transactions.saturating_add(1)
+                }
+                ReorgTransactionStatus::Reconfirmed { .. } => {
+                    reconfirmed_transactions = reconfirmed_transactions.saturating_add(1)
+                }
+                ReorgTransactionStatus::Pending => {}
+            }
+        }
+        let transaction_sample = disconnected_transaction_hashes
+            .iter()
+            .take(16)
+            .map(|hash| hex::encode(hash.0))
+            .collect::<Vec<_>>()
+            .join(",");
+        crate::node_info!(
+            "REORG",
+            "reconciled ancestor_height={} old_height={} new_height={} disconnected_blocks={} connected_blocks={} disconnected_transactions={} requeued={} conflicts={} reconfirmed={} transaction_hash_sample=[{}] omitted_transaction_hashes={}",
+            ancestor_height.0,
+            old_tip_height.0,
+            best_tip_height.0,
+            disconnected_depth,
+            connected_depth,
+            disconnected_transaction_hashes.len(),
+            requeued_transactions,
+            conflicting_transactions,
+            reconfirmed_transactions,
+            transaction_sample,
+            disconnected_transaction_hashes.len().saturating_sub(16)
+        );
+
         self.reorgs_total = self.reorgs_total.saturating_add(1);
         Ok(())
     }
 
-    pub fn rollback_issue(&self, id: &RollbackIssueId) -> Result<Option<RollbackIssue>, NodeError> {
-        Ok(self.storage.load_rollback_issue(id)?)
-    }
-
-    pub fn rollback_proof_bundle(
-        &self,
-        issue: &RollbackIssue,
-    ) -> Result<RollbackProofBundle, NodeError> {
-        let context = self
-            .storage
-            .load_rollback_proof_context(&issue.proof_context_id)?
-            .ok_or(NodeError::MissingRollbackProofContext)?;
-        let current_canonical_headers =
-            self.headers_to_tip(self.ledger.tip_hash().ok_or(NodeError::MissingActiveTip)?)?;
-        let shared_count = context
-            .losing_headers
-            .iter()
-            .zip(&current_canonical_headers)
-            .take_while(|(left, right)| left == right)
-            .count();
-        if shared_count == 0
-            || shared_count == context.losing_headers.len()
-            || shared_count == current_canonical_headers.len()
-        {
-            return Err(NodeError::RollbackProofContextMismatch);
+    fn restore_trusted_checkpoint(&mut self) -> Result<(), NodeError> {
+        if let Some(height) = self.ledger.chain.checkpoint_height {
+            let hash = self
+                .ledger
+                .chain
+                .header(&height)
+                .ok_or(NodeError::MissingDifficultyAnchor)?
+                .hash()?;
+            self.checkpoints.insert(Checkpoint { height, hash })?;
         }
-        let canonical_headers = current_canonical_headers;
-        let common_ancestor = canonical_headers[shared_count - 1].hash()?;
-        let disconnected_block_header = context
-            .losing_headers
-            .iter()
-            .find(|header| header.hash() == Ok(issue.disconnected_block_hash))
-            .cloned()
-            .ok_or(NodeError::MissingDisconnectedBlock)?;
-        Ok(RollbackProofBundle {
-            version: ROLLBACK_PROOF_VERSION,
-            transaction: issue.transaction.clone(),
-            disconnected_block_header,
-            transaction_proof: issue.transaction_proof.clone(),
-            losing_headers: context.losing_headers,
-            canonical_headers,
-            common_ancestor,
-        })
-    }
-
-    pub fn rollback_issues_for_account(
-        &self,
-        address: &Address,
-    ) -> Result<Vec<RollbackIssue>, NodeError> {
-        Ok(self
-            .storage
-            .load_rollback_issues()?
-            .into_iter()
-            .filter(|issue| issue.affected_accounts.contains(address))
-            .collect())
-    }
-
-    pub fn retry_rollback_issue(
-        &mut self,
-        id: &RollbackIssueId,
-    ) -> Result<Option<RollbackIssue>, NodeError> {
-        let Some(mut issue) = self.storage.load_rollback_issue(id)? else {
-            return Ok(None);
-        };
-        if !issue.is_reconfirmed() {
-            self.retry_rollback_issue_record(&mut issue, true)?;
-        }
-        Ok(Some(issue))
-    }
-
-    fn retry_rollback_issue_record(
-        &mut self,
-        issue: &mut RollbackIssue,
-        verify_proof: bool,
-    ) -> Result<(), NodeError> {
-        if let Some((block_height, block_hash)) =
-            self.canonical_transaction_location(issue.transaction_hash)?
-        {
-            issue.status = RollbackRecoveryStatus::Reconfirmed {
-                block_height,
-                block_hash,
-            };
-            issue.last_error = None;
-            self.storage.save_rollback_issue(issue)?;
-            return Ok(());
-        }
-        if verify_proof {
-            let bundle = self.rollback_proof_bundle(issue)?;
-            let verified = bundle.verify()?;
-            if verified.transaction_hash != issue.transaction_hash
-                || bundle.transaction != issue.transaction
-                || verified.disconnected_block_hash != issue.disconnected_block_hash
-                || Some(verified.canonical_tip) != self.ledger.tip_hash()
-            {
-                return Err(NodeError::RollbackIssueMismatch);
-            }
-        }
-        issue.retry_attempts = issue.retry_attempts.saturating_add(1);
-        match self.submit_protocol_transaction(issue.transaction.clone()) {
-            Ok(_) | Err(NodeError::Mempool(MempoolError::DuplicateTransaction)) => {
-                issue.status = RollbackRecoveryStatus::Requeued;
-                issue.last_error = None;
-            }
-            Err(error) => {
-                issue.status = RollbackRecoveryStatus::Conflict;
-                issue.last_error = Some(error.to_string());
-            }
-        }
-        self.storage.save_rollback_issue(issue)?;
         Ok(())
     }
 
-    fn headers_to_tip(
-        &self,
-        tip: BlockHash,
-    ) -> Result<Vec<xparq::qcash::recovery::ChainHeader>, NodeError> {
-        let mut hashes = self.fork_choice.ancestor_hashes(tip);
-        hashes.reverse();
-        hashes
-            .into_iter()
-            .map(|hash| {
-                self.fork_choice
-                    .get(&hash)
-                    .map(|node| {
-                        xparq::qcash::recovery::ChainHeader::new(
-                            node.block.height(),
-                            node.block.header.clone(),
-                        )
-                    })
-                    .ok_or(NodeError::MissingForkNode)
-            })
-            .collect()
+    fn retry_reorg_transactions(&mut self) -> Result<(), NodeError> {
+        for mut record in self.storage.load_reorg_transactions()? {
+            if !record.is_reconfirmed() {
+                self.retry_reorg_transaction_record(&mut record)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn retry_reorg_transaction_record(
+        &mut self,
+        record: &mut ReorgTransaction,
+    ) -> Result<(), NodeError> {
+        if let Some((block_height, block_hash)) =
+            self.canonical_transaction_location(record.transaction_hash)?
+        {
+            record.status = ReorgTransactionStatus::Reconfirmed {
+                block_height,
+                block_hash,
+            };
+            record.last_error = None;
+            self.storage.save_reorg_transaction(record)?;
+            return Ok(());
+        }
+        record.retry_attempts = record.retry_attempts.saturating_add(1);
+        match self.submit_protocol_transaction(record.transaction.clone()) {
+            Ok(_) | Err(NodeError::Mempool(MempoolError::DuplicateTransaction)) => {
+                record.status = ReorgTransactionStatus::Requeued;
+                record.last_error = None;
+            }
+            Err(error) => {
+                record.status = ReorgTransactionStatus::Conflict;
+                record.last_error = Some(error.to_string());
+            }
+        }
+        self.storage.save_reorg_transaction(record)?;
+        Ok(())
     }
 
     fn canonical_transaction_location(
@@ -782,30 +728,77 @@ impl Node {
         Ok(None)
     }
 
-    fn mark_rollback_issues_reconfirmed(&self, block: &Block) -> Result<(), NodeError> {
+    fn mark_reorg_transactions_reconfirmed(&self, block: &Block) -> Result<(), NodeError> {
         let block_hash = block.hash()?;
         for transaction in block.transactions() {
             let transaction_hash = transaction.hash()?;
-            for mut issue in self
+            for mut record in self
                 .storage
-                .load_rollback_issues()?
+                .load_reorg_transactions()?
                 .into_iter()
-                .filter(|issue| {
-                    issue.transaction_hash == transaction_hash && !issue.is_reconfirmed()
+                .filter(|record| {
+                    record.transaction_hash == transaction_hash && !record.is_reconfirmed()
                 })
             {
-                issue.status = RollbackRecoveryStatus::Reconfirmed {
+                record.status = ReorgTransactionStatus::Reconfirmed {
                     block_height: block.height(),
                     block_hash,
                 };
-                issue.last_error = None;
-                self.storage.save_rollback_issue(&issue)?;
+                record.last_error = None;
+                self.storage.save_reorg_transaction(&record)?;
             }
         }
         Ok(())
     }
 
     fn ledger_for_branch_tip(&self, tip: BlockHash) -> Result<Ledger, NodeError> {
+        if self.ledger.tip_hash() == Some(tip) {
+            return Ok(self.ledger.clone());
+        }
+        let ancestor = self
+            .common_ancestor(self.ledger.tip_hash(), tip)
+            .ok_or(NodeError::MissingCommonAncestor)?;
+        if !self.checkpoints.is_compatible(&self.fork_choice, tip)
+            || xparq::ledger::reorg_crosses_checkpoint(
+                &self.fork_choice,
+                &self.checkpoints,
+                ancestor,
+            )?
+        {
+            return Err(xparq::ledger::LedgerError::FinalityViolation.into());
+        }
+
+        let mut disconnect = Vec::new();
+        let mut current = self.ledger.tip_hash().ok_or(NodeError::MissingActiveTip)?;
+        while current != ancestor {
+            disconnect.push(current);
+            current = self
+                .fork_choice
+                .get(&current)
+                .ok_or(NodeError::MissingForkNode)?
+                .parent;
+        }
+
+        let mut ledger = self.ledger.clone();
+        match ledger.rollback_blocks(&disconnect) {
+            Ok(_) => {}
+            Err(xparq::ledger::LedgerError::MissingQCashAccountJournal) => {
+                return self.ledger_for_branch_tip_from_genesis(tip);
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let branch = self
+            .fork_choice
+            .branch_from_ancestor(ancestor, tip)
+            .ok_or(NodeError::MissingForkBranch)?;
+        for block in branch {
+            ledger.apply_block(block)?;
+        }
+
+        Ok(ledger)
+    }
+
+    fn ledger_for_branch_tip_from_genesis(&self, tip: BlockHash) -> Result<Ledger, NodeError> {
         let genesis_hash = self
             .fork_choice
             .ancestor_hashes(tip)
@@ -821,7 +814,6 @@ impl Node {
         let mut ledger =
             Ledger::from_accounts_and_chain(self.genesis_accounts.clone(), Chain::new())?;
         ledger.chain.insert_block(genesis)?;
-
         let branch = self
             .fork_choice
             .branch_from_ancestor(genesis_hash, tip)
@@ -829,7 +821,6 @@ impl Node {
         for block in branch {
             ledger.apply_block(block)?;
         }
-
         Ok(ledger)
     }
 
@@ -858,22 +849,43 @@ impl Node {
             blocks = remaining;
         }
 
-        self.prune_finalized_state()?;
+        Ok(())
+    }
 
+    /// Resolves every locally stored branch by cumulative work. A height
+    /// boundary must never win merely because the active ledger reached it
+    /// first, and local history must never create a hard checkpoint.
+    fn reconcile_indexed_fork_choice(&mut self) -> Result<(), NodeError> {
+        self.prune_finalized_state()?;
+        let best_tip = self
+            .fork_choice
+            .best_tip()
+            .ok_or(NodeError::MissingBestTip)?
+            .hash;
+        if self.ledger.tip_hash() != Some(best_tip) {
+            self.reorg_to_best_tip()?;
+        } else {
+            self.prune_finalized_state()?;
+            self.storage.save_ledger(&self.ledger)?;
+        }
         Ok(())
     }
 
     fn prune_finalized_state(&mut self) -> Result<usize, NodeError> {
-        let Some(tip_height) = self.ledger.tip_height() else {
+        let Some(checkpoint) = self.checkpoints.highest() else {
             return Ok(0);
         };
-        let finalized_height = Height(tip_height.0.saturating_sub(FINALITY_DEPTH as u64));
-        let Some(finalized_block) = self.ledger.block(&finalized_height) else {
+        if self
+            .ledger
+            .block(&checkpoint.height)
+            .and_then(|block| block.hash().ok())
+            != Some(checkpoint.hash)
+        {
             return Ok(0);
-        };
-        let finalized_hash = finalized_block.hash()?;
-        self.ledger.prune_finalized_rollback_state(finalized_height);
-        Ok(self.fork_choice.prune_finalized(finalized_hash)?)
+        }
+        self.ledger
+            .prune_finalized_rollback_state(checkpoint.height);
+        Ok(self.fork_choice.prune_finalized(checkpoint.hash)?)
     }
 
     fn common_ancestor(&self, old_tip: Option<BlockHash>, new_tip: BlockHash) -> Option<BlockHash> {
@@ -921,6 +933,15 @@ impl Node {
             .fork_choice
             .get(&BlockHash::from(block.previous_hash().as_hash()))
             .ok_or(xparq::ledger::fork_choice::ForkChoiceError::MissingParent)?;
+        if let Some(checkpoint) = self.checkpoints.highest()
+            && (block.height() <= checkpoint.height
+                || self
+                    .fork_choice
+                    .ancestor_hash_at_height(parent.hash, checkpoint.height)
+                    != Some(checkpoint.hash))
+        {
+            return Err(xparq::ledger::LedgerError::FinalityViolation.into());
+        }
         let expected_difficulty = self.next_difficulty_after_branch_tip(parent.hash)?;
         let validation_consensus = self.consensus;
         validation_consensus.validate_next_block_with_tip(
@@ -929,35 +950,6 @@ impl Node {
             expected_difficulty,
         )?;
         Ok(())
-    }
-
-    pub fn mine_block(
-        &mut self,
-        miner_address: Address,
-        timestamp: u64,
-        max_attempts: u64,
-        transaction_limit: usize,
-    ) -> Result<MiningResult, NodeError> {
-        self.mempool.evict_by_policy(timestamp)?;
-        let difficulty = self.next_difficulty_at(timestamp)?;
-        let result = mine_candidate_block(
-            &self.mempool,
-            &self.ledger,
-            &self.consensus,
-            miner_address,
-            timestamp,
-            MiningConfig {
-                difficulty,
-                start_nonce: 0,
-                max_attempts,
-                transaction_limit,
-                min_fee_rate: self.mempool.dynamic_market_fee_rate(),
-            },
-        )?
-        .ok_or(NodeError::MiningExhausted)?;
-
-        self.apply_block(result.block.clone())?;
-        Ok(result)
     }
 
     pub fn next_difficulty(&self) -> Result<u32, NodeError> {
@@ -983,16 +975,6 @@ impl Node {
             .ledger
             .expected_difficulty_after_tip()?
             .max(MIN_DIFFICULTY))
-    }
-
-    fn expected_difficulty_after_tip_for_block(
-        &self,
-        tip_height: BlockHeight,
-        block_timestamp: u64,
-        block_height: BlockHeight,
-    ) -> Result<u32, NodeError> {
-        let _ = (block_timestamp, block_height);
-        self.next_difficulty_after_tip(tip_height)
     }
 
     fn next_difficulty_after_branch_tip(&self, tip_hash: BlockHash) -> Result<u32, NodeError> {
@@ -1032,16 +1014,6 @@ impl Node {
             .ok_or(NodeError::MissingDifficultyAnchor)
     }
 
-    fn expected_difficulty_after_branch_tip_for_block(
-        &self,
-        tip_hash: BlockHash,
-        block_timestamp: u64,
-        block_height: BlockHeight,
-    ) -> Result<u32, NodeError> {
-        let _ = (block_timestamp, block_height);
-        self.next_difficulty_after_branch_tip(tip_hash)
-    }
-
     pub fn flush_to_storage(&self) -> Result<(), NodeError> {
         self.storage.save_ledger(&self.ledger)?;
         Ok(())
@@ -1060,33 +1032,6 @@ impl Node {
             .tip_hash()
             .and_then(|hash| self.fork_choice.get(&hash))
             .map(|node| node.cumulative_work.to_be_limbs())
-    }
-
-    pub fn balance(&self, address: &Address) -> Option<Balance> {
-        self.ledger.balance(address)
-    }
-
-    pub fn confirmed_balance(&self, address: &Address) -> Option<Balance> {
-        self.ledger.confirmed_balance(address)
-    }
-
-    pub fn available_balance(&self, address: &Address) -> Option<Balance> {
-        self.available_balance_with_depth(
-            address,
-            crate::runtime::params::CONFIRMATION_DEPTH as u64,
-        )
-    }
-
-    pub fn available_balance_with_depth(
-        &self,
-        address: &Address,
-        _finality_depth: u64,
-    ) -> Option<Balance> {
-        let tip_height = self.ledger.tip_height()?;
-        self.ledger
-            .xpq_utxos
-            .available_balance(*address, tip_height)
-            .ok()
     }
 
     pub fn pending_balance(&self, address: &Address) -> PendingBalance {
@@ -1163,29 +1108,6 @@ impl Node {
             pending_outgoing_hashes,
         })
     }
-
-    pub fn balance_summary(&self, address: &Address) -> Option<BalanceSummary> {
-        Some(BalanceSummary {
-            confirmed: self.confirmed_balance(address)?,
-            available: self.available_balance(address)?,
-            pending: self.pending_balance(address),
-        })
-    }
-
-    pub fn account_view(&self, address: &Address) -> Option<AccountView> {
-        self.ledger.account(address)?;
-        let tip_height = self.ledger.tip_height()?;
-        let balance = self
-            .ledger
-            .xpq_utxos
-            .available_balance(*address, tip_height)
-            .ok()?;
-        let total = self.ledger.xpq_utxos.balance(*address).ok()?;
-        Some(AccountView {
-            balance,
-            unspendable: Amount(total.0.saturating_sub(balance.0)),
-        })
-    }
 }
 
 fn ensure_expected_genesis(ledger: &Ledger) -> Result<(), NodeError> {
@@ -1211,495 +1133,351 @@ fn current_unix_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
-// Legacy wrapper fixtures predate the xparq 0.2.20 block model.
-#[cfg(all(test, any()))]
-mod tests {
+#[cfg(test)]
+mod incremental_reorg_tests {
     use super::*;
-    use crate::runtime::storage::Storage;
-    use crate::test_support::BlockTestExt;
-    use xparq::block::{Block, Height, Nonce};
-    use xparq::consensus::supply::Amount;
-    use xparq::consensus::{Consensus, ConsensusConfig};
-    use xparq::crypto::{Hash, dual_address_from_public_keys, generate_keypair, sign};
-    use xparq::ledger::Ledger;
-    use xparq::state::Account;
-    use xparq::transaction::{SignedTransaction, Transaction};
+    use crate::runtime::miner::{
+        MiningConfig, mine_prepared_block_until_with_attempts, prepare_candidate_block,
+    };
+    use xparq::consensus::ConsensusConfig;
 
-    fn address(byte: u8) -> Address {
-        Address([byte; 20])
-    }
-
-    fn mine_for_test(mut block: Block) -> Block {
-        while Consensus::validate_proof_of_work_at_difficulty(&block, block.difficulty()).is_err() {
-            block.header.nonce = Nonce(block.header.nonce.0.saturating_add(1));
-        }
-        block
-    }
-
-    #[test]
-    fn invalid_state_block_does_not_enter_fork_choice() {
-        let genesis = Block::new(
-            Height(0),
-            Hash([0; HASH_SIZE]),
-            address(9),
-            1_700_000_000,
-            Nonce(0),
-            vec![],
-        );
-        let keypair = generate_keypair();
-        let sender = dual_address_from_public_keys(&keypair.public_key, &keypair.public_key);
-        let receiver = address(2);
-        let mut genesis_accounts = BTreeMap::new();
-        genesis_accounts.insert(sender, Account::new(sender, Amount(100)));
-        genesis_accounts.insert(receiver, Account::new(receiver, Amount(0)));
-        genesis_accounts.insert(address(9), Account::new(address(9), Amount(0)));
-        let mut ledger =
-            Ledger::from_accounts_and_chain(genesis_accounts.clone(), Chain::new()).unwrap();
-        ledger.chain.insert_block(genesis.clone()).unwrap();
-        let transaction = Transaction::new(sender, receiver, Amount(200), 0);
-        let signature = sign(&keypair.secret_key, &transaction.signing_bytes().unwrap());
-        let signed = SignedTransaction::new_authorized(
-            transaction,
-            keypair.public_key,
-            signature,
-            keypair.public_key,
-            signature,
-        );
-        let block = mine_for_test(Block::new(
-            Height(1),
-            genesis.hash(),
-            address(9),
-            1_700_000_001,
-            Nonce(0),
-            vec![signed],
-        ));
-        let block_hash = block.hash().unwrap();
-        let mut node = Node::with_genesis_accounts(
-            ledger,
-            Storage::temporary().unwrap(),
-            Consensus::new(ConsensusConfig::new(xparq::consensus::MIN_DIFFICULTY)).unwrap(),
-            genesis_accounts,
-        );
-
-        let error = node.apply_block(block).unwrap_err();
-
-        assert!(matches!(error, NodeError::Ledger(_)));
-        assert!(!node.fork_choice.contains(&block_hash));
-        assert_eq!(node.tip_hash(), Some(genesis.hash().unwrap()));
-    }
-
-    #[test]
-    fn reorgs_from_empty_genesis_accounts() {
-        let genesis = Block::new(
-            Height(0),
-            Hash([0; HASH_SIZE]),
-            address(9),
-            1_700_000_000,
-            Nonce(0),
-            vec![],
-        );
-        let mut active = Block::with_difficulty(
-            Height(1),
-            genesis.hash(),
-            address(9),
-            xparq::consensus::DIFFICULTY_START,
-            1_700_000_001,
-            Nonce(1),
-            vec![],
-        );
-        let mut side = Block::with_difficulty(
-            Height(1),
-            genesis.hash(),
-            address(8),
-            xparq::consensus::DIFFICULTY_START,
-            1_700_000_001,
-            Nonce(2),
-            vec![],
-        );
-        let genesis_accounts = BTreeMap::new();
-        let mut ledger =
-            Ledger::from_accounts_and_chain(genesis_accounts.clone(), Chain::new()).unwrap();
-        ledger.chain.insert_block(genesis).unwrap();
-        active = mine_for_test(active);
-        side = mine_for_test(side);
-        active.set_state_root(ledger.state_root_after_block(&active).unwrap());
-        side.set_state_root(ledger.state_root_after_block(&side).unwrap());
-        active = mine_for_test(active);
-        side = mine_for_test(side);
-        let mut side_ledger = ledger.clone();
-        side_ledger
-            .apply_block_at(side.clone(), side.timestamp())
-            .unwrap();
-        let mut side_child = Block::with_difficulty(
-            Height(2),
-            side.hash(),
-            address(8),
-            xparq::consensus::DIFFICULTY_START,
-            1_700_000_002,
-            Nonce(3),
-            vec![],
-        );
-        side_child = mine_for_test(side_child);
-        side_child.set_state_root(side_ledger.state_root_after_block(&side_child).unwrap());
-        side_child = mine_for_test(side_child);
-        let side_hash = side_child.hash().unwrap();
-        let now = active.timestamp();
-        ledger.apply_block_at(active, now).unwrap();
-        let mut node = Node::with_genesis_accounts(
-            ledger,
-            Storage::temporary().unwrap(),
-            Consensus::new(ConsensusConfig::new(xparq::consensus::MIN_DIFFICULTY)).unwrap(),
-            genesis_accounts,
-        );
-
-        node.apply_block(side).unwrap();
-        node.apply_block(side_child).unwrap();
-
-        assert_eq!(node.tip_hash(), Some(side_hash));
-        assert_eq!(
-            node.balance(&address(8)),
-            node.ledger.account(&address(8)).map(|a| a.balance)
-        );
-    }
-
-    #[test]
-    fn rejects_non_genesis_block_with_zero_state_root() {
-        let genesis = Block::new(
-            Height(0),
-            Hash([0; HASH_SIZE]),
-            address(9),
-            1_700_000_000,
-            Nonce(0),
-            vec![],
-        );
-        let mut ledger = Ledger::new();
-        ledger.chain.insert_block(genesis.clone()).unwrap();
-        let block = mine_for_test(Block::with_difficulty(
-            Height(1),
-            genesis.hash(),
-            address(9),
-            xparq::consensus::DIFFICULTY_START,
-            1_700_000_001,
-            Nonce(1),
-            vec![],
-        ));
-        let block_hash = block.hash().unwrap();
-        let mut node = Node::with_genesis_accounts(
-            ledger,
-            Storage::temporary().unwrap(),
-            Consensus::new(ConsensusConfig::new(xparq::consensus::MIN_DIFFICULTY)).unwrap(),
-            BTreeMap::new(),
-        );
-
-        let error = node.apply_block(block).unwrap_err();
-
-        assert!(matches!(error, NodeError::Ledger(_)));
-        assert!(!node.fork_choice.contains(&block_hash));
-        assert_eq!(node.tip_hash(), Some(genesis.hash().unwrap()));
-    }
-
-    #[test]
-    fn branch_difficulty_uses_wbda_weight_window_on_parent_branch() {
-        let mut node = Node::temporary(
-            Ledger::new(),
-            Consensus::new(ConsensusConfig::new(xparq::consensus::MIN_DIFFICULTY)).unwrap(),
+    fn mine_empty_block(
+        ledger: &Ledger,
+        consensus: &Consensus,
+        miner: Address,
+        start_nonce: u64,
+    ) -> (Block, u64) {
+        let candidate =
+            prepare_candidate_block(&Mempool::new(), ledger, miner, 0, 0, 0, MIN_DIFFICULTY)
+                .unwrap();
+        let (result, attempted) = mine_prepared_block_until_with_attempts(
+            candidate,
+            consensus,
+            MiningConfig {
+                difficulty: MIN_DIFFICULTY,
+                start_nonce,
+                max_attempts: 256,
+                transaction_limit: 0,
+                min_fee_rate: 0,
+            },
+            || false,
         )
         .unwrap();
-        let genesis = xparq::genesis::genesis_block().unwrap();
-        let mut previous_hash = node.fork_choice.insert_block(genesis).unwrap();
-
-        let blocks = WBDA_WINDOW as u64;
-        for height in 1..=blocks {
-            let difficulty = node
-                .next_difficulty_after_branch_tip(previous_hash)
-                .unwrap();
-            let block = mine_for_test(Block::with_difficulty(
-                Height(height),
-                previous_hash,
-                address(9),
-                difficulty,
-                1_700_000_000,
-                Nonce(height),
-                vec![],
-            ));
-            previous_hash = node.fork_choice.insert_block(block).unwrap();
-        }
-
-        let expected = node
-            .next_difficulty_after_branch_tip(previous_hash)
-            .unwrap();
-        assert_eq!(expected, 2);
-
-        let mut candidate = Block::with_difficulty(
-            Height(blocks + 1),
-            previous_hash,
-            address(9),
-            expected,
-            1_700_000_000,
-            Nonce(0),
-            vec![],
-        );
-        candidate = mine_for_test(candidate);
-        node.validate_block_for_known_parent(&candidate).unwrap();
+        (
+            result
+                .expect("difficulty-one test block must be mined")
+                .block,
+            attempted,
+        )
     }
 
     #[test]
-    fn indexes_stored_side_blocks_into_fork_choice() {
-        let genesis = mine_for_test(Block::new(
-            Height(0),
-            Hash([0; HASH_SIZE]),
-            address(9),
-            1_700_000_000,
-            Nonce(0),
-            vec![],
-        ));
-        let active = mine_for_test(Block::with_difficulty(
-            Height(1),
-            genesis.hash(),
-            address(9),
-            1,
-            1_700_000_001,
-            Nonce(1),
-            vec![],
-        ));
-        let side = mine_for_test(Block::with_difficulty(
-            Height(1),
-            genesis.hash(),
-            address(8),
-            1,
-            1_700_000_002,
-            Nonce(2),
-            vec![],
-        ));
-        let side_hash = side.hash().unwrap();
-        let mut ledger = Ledger::new();
-        ledger.chain.insert_block(genesis).unwrap();
-        ledger.chain.insert_block(active).unwrap();
+    fn shallow_reorg_rolls_back_only_to_common_ancestor() {
+        let consensus = Consensus::new(ConsensusConfig::new(MIN_DIFFICULTY)).unwrap();
+        let ledger = genesis_ledger().unwrap();
         let storage = Storage::temporary().unwrap();
         storage.save_ledger(&ledger).unwrap();
-        storage.save_side_block(&side).unwrap();
-        let mut node = Node::new(
-            ledger,
-            storage,
-            Consensus::new(ConsensusConfig::new(xparq::consensus::MIN_DIFFICULTY)).unwrap(),
-        );
+        let mut node = Node::new(ledger, storage, consensus);
+        let miner = Address([0x71; xparq::crypto::ADDRESS_SIZE]);
+        let mut next_nonce = 0;
 
-        node.index_stored_blocks().unwrap();
+        for _ in 0..2 {
+            let (block, attempted) =
+                mine_empty_block(&node.ledger, &node.consensus, miner, next_nonce);
+            next_nonce = next_nonce.saturating_add(attempted);
+            node.apply_block(block).unwrap();
+        }
 
-        assert!(node.fork_choice.contains(&side_hash));
-    }
+        let reloaded = node.storage.load_ledger().unwrap();
+        node = Node::new(reloaded, node.storage.clone(), node.consensus);
 
-    #[test]
-    fn caches_orphan_block_until_parent_arrives() {
-        let genesis = Block::new(
-            Height(0),
-            Hash([0; HASH_SIZE]),
-            address(9),
-            1_700_000_000,
-            Nonce(0),
-            vec![],
-        );
-        let mut parent = Block::with_difficulty(
-            Height(1),
-            genesis.hash(),
-            address(9),
-            1,
-            1_700_000_001,
-            Nonce(1),
-            vec![],
-        );
-        let mut ledger = Ledger::new();
-        ledger.chain.insert_block(genesis.clone()).unwrap();
-        parent = mine_for_test(parent);
-        parent.set_state_root(ledger.state_root_after_block(&parent).unwrap());
-        parent = mine_for_test(parent);
-        let mut child_ledger = ledger.clone();
-        child_ledger.chain.insert_block(parent.clone()).unwrap();
+        let ancestor_hash = node.tip_hash().unwrap();
+        let ancestor_height = node.tip_height().unwrap();
+        let ancestor_ledger = node.ledger.clone();
+        let (first, attempted) =
+            mine_empty_block(&ancestor_ledger, &node.consensus, miner, next_nonce);
+        next_nonce = next_nonce.saturating_add(attempted);
+        let (second, _) = mine_empty_block(&ancestor_ledger, &node.consensus, miner, next_nonce);
+        let first_hash = first.hash().unwrap();
+        let second_hash = second.hash().unwrap();
+        assert_ne!(first_hash, second_hash);
+        let (loser, winner) = if first_hash < second_hash {
+            (second, first)
+        } else {
+            (first, second)
+        };
+        let loser_hash = loser.hash().unwrap();
+        let winner_hash = winner.hash().unwrap();
 
-        let mut child = Block::with_difficulty(
-            Height(2),
-            parent.hash(),
-            address(9),
-            1,
-            1_700_000_002,
-            Nonce(2),
-            vec![],
-        );
-        child.set_state_root(child_ledger.protocol_state_root().unwrap());
-        child = mine_for_test(child);
-        let child_hash = child.hash().unwrap();
-        let mut node = Node::with_genesis_accounts(
-            ledger,
-            Storage::temporary().unwrap(),
-            Consensus::new(ConsensusConfig::new(xparq::consensus::MIN_DIFFICULTY)).unwrap(),
-            BTreeMap::new(),
-        );
+        node.apply_block(loser).unwrap();
+        assert_eq!(node.tip_hash(), Some(loser_hash));
+        assert!(node.ledger.rollback_history().is_empty());
 
-        node.apply_block(child).unwrap();
+        node.apply_block(winner).unwrap();
 
-        assert_eq!(node.orphan_blocks.len(), 1);
-        assert!(!node.fork_choice.contains(&child_hash));
-        assert_eq!(node.tip_hash(), Some(genesis.hash().unwrap()));
-
-        let parent_hash = parent.hash().unwrap();
-        node.apply_block(parent).unwrap();
-
-        assert!(node.orphan_blocks.is_empty());
-        assert!(node.fork_choice.contains(&parent_hash));
-        assert_eq!(node.tip_height(), Some(Height(1)));
-    }
-
-    #[test]
-    fn prunes_expired_orphan_blocks() {
-        let genesis = Block::new(
-            Height(0),
-            Hash([0; HASH_SIZE]),
-            address(9),
-            1_700_000_000,
-            Nonce(0),
-            vec![],
-        );
-        let missing_parent_hash = BlockHash([7; HASH_SIZE]);
-        let child = Block::with_difficulty(
-            Height(1),
-            missing_parent_hash,
-            address(9),
-            1,
-            1_700_000_001,
-            Nonce(1),
-            vec![],
-        );
-        let child_hash = child.hash().unwrap();
-        let mut ledger = Ledger::new();
-        ledger.chain.insert_block(genesis).unwrap();
-        let mut node = Node::with_genesis_accounts(
-            ledger,
-            Storage::temporary().unwrap(),
-            Consensus::new(ConsensusConfig::new(xparq::consensus::MIN_DIFFICULTY)).unwrap(),
-            BTreeMap::new(),
-        );
-
-        node.apply_block(child).unwrap();
-        node.orphan_blocks.get_mut(&child_hash).unwrap().received_at = 1;
-        node.prune_expired_orphans(ORPHAN_BLOCK_TTL_SECS + 2);
-
-        assert!(node.orphan_blocks.is_empty());
-        assert!(node.orphan_children_by_parent.is_empty());
-    }
-
-    #[test]
-    fn queues_missing_parent_request_once_for_orphans() {
-        let genesis = Block::new(
-            Height(0),
-            Hash([0; HASH_SIZE]),
-            address(9),
-            1_700_000_000,
-            Nonce(0),
-            vec![],
-        );
-        let missing_parent_hash = BlockHash([7; HASH_SIZE]);
-        let first = Block::with_difficulty(
-            Height(1),
-            missing_parent_hash,
-            address(9),
-            1,
-            1_700_000_001,
-            Nonce(1),
-            vec![],
-        );
-        let second = Block::with_difficulty(
-            Height(1),
-            missing_parent_hash,
-            address(8),
-            1,
-            1_700_000_002,
-            Nonce(2),
-            vec![],
-        );
-        let mut ledger = Ledger::new();
-        ledger.chain.insert_block(genesis).unwrap();
-        let mut node = Node::with_genesis_accounts(
-            ledger,
-            Storage::temporary().unwrap(),
-            Consensus::new(ConsensusConfig::new(xparq::consensus::MIN_DIFFICULTY)).unwrap(),
-            BTreeMap::new(),
-        );
-
-        node.apply_block(first).unwrap();
-        node.apply_block(second).unwrap();
-
-        assert_eq!(
-            node.drain_missing_parent_requests(),
-            vec![missing_parent_hash]
-        );
-        assert!(node.drain_missing_parent_requests().is_empty());
-    }
-
-    #[test]
-    fn retries_missing_parent_request_after_cooldown() {
-        let genesis = Block::new(
-            Height(0),
-            Hash([0; HASH_SIZE]),
-            address(9),
-            1_700_000_000,
-            Nonce(0),
-            vec![],
-        );
-        let missing_parent_hash = BlockHash([7; HASH_SIZE]);
-        let mut ledger = Ledger::new();
-        ledger.chain.insert_block(genesis).unwrap();
-        let mut node = Node::with_genesis_accounts(
-            ledger,
-            Storage::temporary().unwrap(),
-            Consensus::new(ConsensusConfig::new(xparq::consensus::MIN_DIFFICULTY)).unwrap(),
-            BTreeMap::new(),
-        );
-
-        node.queue_missing_parent_request_at(missing_parent_hash, 10);
-        assert!(node.drain_missing_parent_requests_at(9).is_empty());
-        assert_eq!(
-            node.drain_missing_parent_requests_at(10),
-            vec![missing_parent_hash]
-        );
-
-        node.retry_missing_parent_request(missing_parent_hash);
+        assert_eq!(node.tip_hash(), Some(winner_hash));
+        assert_eq!(node.tip_height(), Some(Height(ancestor_height.0 + 1)));
+        assert_eq!(node.reorgs_total(), 1);
+        assert_eq!(node.ledger.rollback_history().len(), 1);
+        let rollback = node.ledger.rollback_history().last().unwrap();
+        assert_eq!(rollback.old_tip, loser_hash);
+        assert_eq!(rollback.new_tip, ancestor_hash);
+        assert_eq!(rollback.disconnected_blocks.len(), 1);
         assert!(
-            node.drain_missing_parent_requests_at(current_unix_timestamp())
+            node.storage
+                .load_block_events(&loser_hash)
+                .unwrap()
                 .is_empty()
         );
+        assert!(
+            !node
+                .storage
+                .load_block_events(&winner_hash)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            node.storage
+                .load_block_by_hash(&loser_hash)
+                .unwrap()
+                .unwrap()
+                .hash()
+                .unwrap(),
+            loser_hash
+        );
+        let reloaded = node.storage.load_ledger().unwrap();
+        assert_eq!(reloaded.tip_hash(), Some(winner_hash));
+        assert_eq!(reloaded.state_root(), node.ledger.state_root());
+        assert!(reloaded.rollback_state_before(&winner_hash).is_some());
+    }
+}
+
+#[cfg(test)]
+mod requeue_tests {
+    use super::*;
+    use xparq::block::Nonce;
+    use xparq::consensus::ConsensusConfig;
+    use xparq::consensus::supply::{Amount, XPQ};
+    use xparq::crypto::{address_from_public_key, generate_keypair, sign};
+    use xparq::qcash::{
+        QCashCoinFile, QCashWithdrawalMetadata, qcash_redeem_key_commitment_from_secret,
+    };
+    use xparq::transaction::{
+        QCashTransaction, SignedQCashTransaction, SignedTransfer, Transfer, TransferOutput,
+    };
+
+    fn test_genesis() -> Block {
+        xparq::genesis::genesis_block().unwrap()
+    }
+
+    fn reorg_transaction(transaction: SignedProtocolTransaction) -> ReorgTransaction {
+        let block = Block::from_protocol_transactions(
+            Height(1),
+            BlockHash([0x11; HASH_SIZE]),
+            MIN_DIFFICULTY,
+            Nonce(0),
+            None,
+            vec![transaction.clone()],
+        )
+        .unwrap();
+        ReorgTransaction::new(block.height(), block.hash().unwrap(), 0, transaction, 1).unwrap()
+    }
+
+    fn test_node(ledger: Ledger) -> Node {
+        let genesis_accounts = ledger.accounts().clone();
+        Node::with_genesis_accounts(
+            ledger,
+            Storage::temporary().unwrap(),
+            Consensus::new(ConsensusConfig::new(MIN_DIFFICULTY)).unwrap(),
+            genesis_accounts,
+        )
     }
 
     #[test]
-    fn ignores_orphan_blocks_too_far_ahead_of_tip() {
-        let genesis = Block::new(
-            Height(0),
-            Hash([0; HASH_SIZE]),
-            address(9),
-            1_700_000_000,
-            Nonce(0),
-            vec![],
-        );
-        let far_orphan = Block::with_difficulty(
-            Height(MAX_ORPHAN_HEIGHT_DISTANCE + 1),
-            BlockHash([7; HASH_SIZE]),
-            address(9),
-            1,
-            1_700_000_001,
-            Nonce(1),
-            vec![],
-        );
+    fn disconnected_utxo_transfer_is_requeued_without_resigning() {
+        let owner = generate_keypair();
+        let sender = address_from_public_key(&owner.public_key);
         let mut ledger = Ledger::new();
-        ledger.chain.insert_block(genesis).unwrap();
-        let mut node = Node::with_genesis_accounts(
+        ledger
+            .create_account_with_authorization(sender, owner.public_key, Amount(XPQ))
+            .unwrap();
+        let input = ledger.xpq_utxos.coins_for_owner(sender).next().unwrap().id;
+        ledger.chain.insert_block(test_genesis()).unwrap();
+        let transaction = Transfer::new(
+            sender,
+            vec![input],
+            Address([0x42; xparq::crypto::ADDRESS_SIZE]),
+            Amount(XPQ - 10_000),
+        )
+        .with_output(TransferOutput::new(
+            xparq::transaction::OutputTarget::BlockMiner,
+            Amount(10_000),
+        ));
+        let payload = transaction.signing_bytes().unwrap();
+        let signed = SignedTransfer::new(
+            transaction,
+            owner.public_key,
+            sign(&owner.secret_key, &payload),
+        );
+        let mut record = reorg_transaction(signed.into());
+        let hash = record.transaction_hash;
+        let mut node = test_node(ledger);
+
+        node.retry_reorg_transaction_record(&mut record).unwrap();
+
+        assert_eq!(record.status, ReorgTransactionStatus::Requeued);
+        assert!(node.mempool.contains(&hash));
+    }
+
+    #[test]
+    fn persisted_reorg_transaction_is_retried_after_mempool_restart() {
+        let owner = generate_keypair();
+        let sender = address_from_public_key(&owner.public_key);
+        let mut ledger = Ledger::new();
+        ledger
+            .create_account_with_authorization(sender, owner.public_key, Amount(XPQ))
+            .unwrap();
+        let input = ledger.xpq_utxos.coins_for_owner(sender).next().unwrap().id;
+        ledger.chain.insert_block(test_genesis()).unwrap();
+        let transaction = Transfer::new(
+            sender,
+            vec![input],
+            Address([0x44; xparq::crypto::ADDRESS_SIZE]),
+            Amount(XPQ - 10_000),
+        )
+        .with_output(TransferOutput::new(
+            xparq::transaction::OutputTarget::BlockMiner,
+            Amount(10_000),
+        ));
+        let payload = transaction.signing_bytes().unwrap();
+        let signed = SignedTransfer::new(
+            transaction,
+            owner.public_key,
+            sign(&owner.secret_key, &payload),
+        );
+        let record = reorg_transaction(signed.into());
+        let hash = record.transaction_hash;
+        let mut node = test_node(ledger);
+        node.storage.save_reorg_transaction(&record).unwrap();
+
+        node.retry_reorg_transactions().unwrap();
+        assert!(node.mempool.contains(&hash));
+
+        node.mempool = Mempool::new();
+        node.retry_reorg_transactions().unwrap();
+
+        assert!(node.mempool.contains(&hash));
+        assert_eq!(
+            node.storage
+                .load_reorg_transaction(&record.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ReorgTransactionStatus::Requeued
+        );
+    }
+
+    #[test]
+    fn disconnected_qcash_redeem_is_requeued_without_the_bearer_file() {
+        let owner = generate_keypair();
+        let sender = address_from_public_key(&owner.public_key);
+        let mut ledger = Ledger::new();
+        ledger
+            .create_account_with_authorization(sender, owner.public_key, Amount(XPQ))
+            .unwrap();
+        let redeem_secret = [0x31; 32];
+        let metadata = QCashWithdrawalMetadata::with_selected_amounts(
+            &[Amount(XPQ)],
+            &[qcash_redeem_key_commitment_from_secret(&redeem_secret)],
+        )
+        .unwrap();
+        let input = ledger.xpq_utxos.coins_for_owner(sender).next().unwrap().id;
+        let withdraw = QCashTransaction::withdraw(
+            sender,
+            vec![input],
+            Vec::new(),
+            Amount(XPQ),
+            metadata.clone(),
+        );
+        let withdraw_hash = withdraw.hash().unwrap();
+        let payload = withdraw.signing_bytes().unwrap();
+        let signed_withdraw = SignedQCashTransaction::new(
+            withdraw,
+            owner.public_key,
+            sign(&owner.secret_key, &payload),
+        );
+        ledger
+            .apply_signed_qcash_transaction(&signed_withdraw, Height(0))
+            .unwrap();
+        ledger.chain.insert_block(test_genesis()).unwrap();
+
+        let cash_file =
+            QCashCoinFile::new(withdraw_hash, &metadata.outputs[0], redeem_secret).unwrap();
+        let redeem = QCashTransaction::redeem_from_files(
+            sender,
+            vec![
+                TransferOutput::new(
+                    Address([0x43; xparq::crypto::ADDRESS_SIZE]),
+                    Amount(XPQ - 10_000),
+                ),
+                TransferOutput::new(xparq::transaction::OutputTarget::BlockMiner, Amount(10_000)),
+            ],
+            &[cash_file],
+        )
+        .unwrap();
+        let payload = redeem.signing_bytes().unwrap();
+        let signed_redeem =
+            SignedQCashTransaction::new_stored(redeem, sign(&owner.secret_key, &payload));
+        let mut record = reorg_transaction(signed_redeem.into());
+        let hash = record.transaction_hash;
+        let mut node = test_node(ledger);
+
+        node.retry_reorg_transaction_record(&mut record).unwrap();
+
+        assert_eq!(record.status, ReorgTransactionStatus::Requeued);
+        assert!(node.mempool.contains(&hash));
+    }
+}
+
+#[cfg(test)]
+mod header_first_sync_tests {
+    use super::*;
+    use xparq::block::{EmissionTransaction, Nonce};
+    use xparq::consensus::ConsensusConfig;
+
+    #[test]
+    fn rejects_invalid_pow_header_before_it_enters_fork_choice() {
+        let ledger = genesis_ledger().unwrap();
+        let parent = ledger.tip_hash().unwrap();
+        let node = Node::new(
             ledger,
             Storage::temporary().unwrap(),
-            Consensus::new(ConsensusConfig::new(xparq::consensus::MIN_DIFFICULTY)).unwrap(),
-            BTreeMap::new(),
+            Consensus::new(ConsensusConfig::new(MIN_DIFFICULTY)).unwrap(),
         );
+        let mut block = Block::from_protocol_transactions(
+            Height(1),
+            parent,
+            MIN_DIFFICULTY,
+            Nonce(0),
+            Some(EmissionTransaction::new(
+                Address([7; xparq::crypto::ADDRESS_SIZE]),
+                Amount(0),
+            )),
+            Vec::new(),
+        )
+        .unwrap();
+        while Consensus::validate_pow_at_difficulty(&block, MIN_DIFFICULTY).is_ok() {
+            block.header.nonce.0 = block.header.nonce.0.saturating_add(1);
+        }
+        let hash = block.hash().unwrap();
+        let headers = [xparq::ledger::ChainHeader::new(
+            block.height(),
+            block.header,
+        )];
 
-        node.apply_block(far_orphan).unwrap();
-
-        assert!(node.orphan_blocks.is_empty());
-        assert!(node.orphan_children_by_parent.is_empty());
+        let mut preview = node.fork_choice.clone();
+        assert!(preview.insert_header(headers[0].clone()).is_err());
+        assert!(!node.fork_choice.contains(&hash));
+        assert_eq!(node.ledger.chain.checkpoint_height, None);
     }
 }

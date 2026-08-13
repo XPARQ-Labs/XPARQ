@@ -14,7 +14,6 @@ fn interactive_menu() -> Result<(), String> {
         println!("9. Mempool");
         println!("10. Hashrate");
         println!("11. Protocol events");
-        println!("12. Rollback recovery");
         println!("13. Trusted proof/checkpoint");
         println!("14. Exit");
         println!("Type b/back to return from prompts.");
@@ -77,7 +76,6 @@ fn handle_menu_choice(choice: &str) -> Result<bool, String> {
         "9" => menu_rpc_get("/mempool")?,
         "10" => menu_hashrate()?,
         "11" => return menu_protocol_events(),
-        "12" => return menu_rollback_recovery(),
         "13" => return menu_trusted_proof(),
         value => return Err(format!("unknown menu `{value}`; choose 1-14")),
     }
@@ -237,30 +235,6 @@ fn menu_trusted_proof() -> Result<bool, String> {
     Ok(true)
 }
 
-fn menu_rollback_recovery() -> Result<bool, String> {
-    println!("Rollback Recovery");
-    println!("1. List issues by account");
-    println!("2. Inspect issue");
-    println!("3. Verify issue proof");
-    let Some(choice) = prompt_back("Select")? else {
-        return Ok(false);
-    };
-    let (action, label, default) = match choice.as_str() {
-        "1" => ("list", "Account address", default_wallet_address_or_empty()),
-        "2" => ("show", "Rollback issue ID", String::new()),
-        "3" => ("verify", "Rollback issue ID", String::new()),
-        _ => return Err(format!("unknown rollback recovery selection `{choice}`; choose 1-3")),
-    };
-    let Some(value) = prompt_default_back(label, &default)? else {
-        return Ok(false);
-    };
-    if value.is_empty() {
-        return Err(format!("{label} is required"));
-    }
-    wallet_rollback(&[action.to_string(), value])?;
-    Ok(true)
-}
-
 fn menu_protocol_events() -> Result<bool, String> {
     println!("Protocol Event Explorer");
     println!("1. Events by block height");
@@ -290,7 +264,8 @@ fn menu_protocol_events() -> Result<bool, String> {
         println!("1. Transfer");
         println!("2. QCash withdrawn");
         println!("3. QCash redeemed");
-        println!("4. Emission distributed");
+        println!("4. QCash split");
+        println!("5. Emission distributed");
         let Some(selection) = prompt_default_back("Select kind", "0")? else {
             return Ok(false);
         };
@@ -330,8 +305,9 @@ fn event_kind_from_menu_selection(selection: &str) -> Result<Option<String>, Str
         "1" => Ok(Some("transfer".to_string())),
         "2" => Ok(Some("qcash_withdrawn".to_string())),
         "3" => Ok(Some("qcash_redeemed".to_string())),
-        "4" => Ok(Some("emission_distributed".to_string())),
-        value => Err(format!("unknown event kind selection `{value}`; choose 0-4")),
+        "4" => Ok(Some("qcash_split".to_string())),
+        "5" => Ok(Some("emission_distributed".to_string())),
+        value => Err(format!("unknown event kind selection `{value}`; choose 0-5")),
     }
 }
 
@@ -405,6 +381,7 @@ fn menu_qcash() -> Result<bool, String> {
     println!("6. Recover QCash");
     println!("7. Track QCash");
     println!("8. QCash UTXO Explorer");
+    println!("9. Split QCash");
     let Some(choice) = prompt_back("Select")? else {
         return Ok(false);
     };
@@ -413,35 +390,41 @@ fn menu_qcash() -> Result<bool, String> {
             let Some(amount) = prompt_back("Amount XPQ")? else {
                 return Ok(false);
             };
-            println!("QCash denomination mode");
-            println!("1. Automatic");
-            println!("2. Choose allowed denomination types");
-            println!("3. Enter exact denomination counts");
-            let Some(denomination_mode) = prompt_default_back("Select", "1")? else {
+            println!("QCash file mode");
+            println!("1. One file for the full amount");
+            println!("2. Enter exact file amounts");
+            let Some(amount_mode) = prompt_default_back("Select", "1")? else {
                 return Ok(false);
             };
-            let denominations = match denomination_mode.trim() {
+            let amounts = match amount_mode.trim() {
                 "" | "1" => None,
                 "2" => {
-                    print_qcash_denomination_menu();
-                    let Some(value) = prompt_back("Allowed menu numbers, separated by commas")?
-                    else {
+                    println!("Example: 50,20,29.9 (must total the requested amount)");
+                    let Some(value) = prompt_back("File amounts XPQ, separated by commas")? else {
                         return Ok(false);
                     };
-                    Some(qcash_allowed_denominations_from_menu(&value)?)
+                    Some(value)
                 }
-                "3" => {
-                    print_qcash_denomination_menu();
-                    println!("Format: MENU_NUMBERxCOUNT (example: 3x2,1x5)");
-                    let Some(value) = prompt_back("Exact menu-number counts")? else {
-                        return Ok(false);
-                    };
-                    Some(qcash_exact_denominations_from_menu(&value)?)
-                }
-                value => return Err(format!("unknown denomination mode `{value}`; choose 1-3")),
+                value => return Err(format!("unknown QCash file mode `{value}`; choose 1-2")),
             };
             let Some(output) = prompt_default_back("Cash directory", "./cash")? else {
                 return Ok(false);
+            };
+            println!("Miner fee output");
+            println!("1. Automatic (recommended)");
+            println!("2. Custom XPQ amount");
+            let Some(fee_choice) = prompt_default_back("Select", "1")? else {
+                return Ok(false);
+            };
+            let fee = match fee_choice.trim() {
+                "" | "1" => "auto".to_string(),
+                "2" => {
+                    let Some(value) = prompt_back("Custom fee XPQ")? else {
+                        return Ok(false);
+                    };
+                    value
+                }
+                value => return Err(format!("unknown fee selection `{value}`; choose 1-2")),
             };
             let Some(wallet) = prompt_default_back("Wallet file", DEFAULT_WALLET_PATH)? else {
                 return Ok(false);
@@ -450,14 +433,16 @@ fn menu_qcash() -> Result<bool, String> {
                 amount,
                 "--out".into(),
                 output,
+                "--fee".into(),
+                fee,
                 "--wallet".into(),
                 wallet,
                 "--rpc".into(),
                 default_rpc_addr(),
             ];
-            if let Some(denominations) = denominations {
-                withdraw_args.push("--denoms".into());
-                withdraw_args.push(denominations);
+            if let Some(amounts) = amounts {
+                withdraw_args.push("--amounts".into());
+                withdraw_args.push(amounts);
             }
             wallet_cash_withdraw(&withdraw_args)?;
         }
@@ -473,28 +458,31 @@ fn menu_qcash() -> Result<bool, String> {
             if recipient.is_empty() {
                 return Err("recipient address is required".to_string());
             }
+            let Some(redeem_amount) =
+                prompt_default_back("Recipient amount XPQ (blank = full value)", "")?
+            else {
+                return Ok(false);
+            };
             println!("Miner fee output");
             println!("1. Automatic (recommended)");
-            println!("2. Zero fee");
-            println!("3. Custom XPQ amount");
+            println!("2. Custom XPQ amount");
             let Some(fee_choice) = prompt_default_back("Select", "1")? else {
                 return Ok(false);
             };
             let fee = match fee_choice.trim() {
                 "" | "1" => "auto".to_string(),
-                "2" => "0".to_string(),
-                "3" => {
+                "2" => {
                     let Some(value) = prompt_back("Custom fee XPQ")? else {
                         return Ok(false);
                     };
                     value
                 }
-                value => return Err(format!("unknown fee selection `{value}`; choose 1-3")),
+                value => return Err(format!("unknown fee selection `{value}`; choose 1-2")),
             };
             let Some(wallet) = prompt_default_back("Signing wallet", DEFAULT_WALLET_PATH)? else {
                 return Ok(false);
             };
-            wallet_cash_redeem(&[
+            let mut redeem_args = vec![
                 file,
                 "--to".into(),
                 recipient,
@@ -504,7 +492,14 @@ fn menu_qcash() -> Result<bool, String> {
                 wallet,
                 "--rpc".into(),
                 default_rpc_addr(),
-            ])?;
+            ];
+            if !redeem_amount.trim().is_empty() {
+                redeem_args.push("--amount".into());
+                redeem_args.push(redeem_amount);
+                redeem_args.push("--out".into());
+                redeem_args.push("./cash".into());
+            }
+            wallet_cash_redeem(&redeem_args)?;
         }
         "3" => {
             let Some(path) = prompt_back("Cash file")? else {
@@ -545,81 +540,53 @@ fn menu_qcash() -> Result<bool, String> {
         "8" => {
             wallet_cash_utxos(&["--rpc".into(), default_rpc_addr()])?;
         }
-        value => return Err(format!("unknown QCash selection `{value}`; choose 1-8")),
+        "9" => {
+            let Some(file) = prompt_back("QCash file (.QCash)")? else {
+                return Ok(false);
+            };
+            println!("The remaining value after these amounts and the fee becomes another file.");
+            let Some(amounts) = prompt_back("New file amounts XPQ, separated by commas")? else {
+                return Ok(false);
+            };
+            println!("Miner fee output");
+            println!("1. Automatic (recommended)");
+            println!("2. Custom XPQ amount");
+            let Some(fee_choice) = prompt_default_back("Select", "1")? else {
+                return Ok(false);
+            };
+            let fee = match fee_choice.trim() {
+                "" | "1" => "auto".to_string(),
+                "2" => {
+                    let Some(value) = prompt_back("Custom fee XPQ")? else {
+                        return Ok(false);
+                    };
+                    value
+                }
+                value => return Err(format!("unknown fee selection `{value}`; choose 1-2")),
+            };
+            let Some(output) = prompt_default_back("Cash directory", "./cash")? else {
+                return Ok(false);
+            };
+            let Some(wallet) = prompt_default_back("Signing wallet", DEFAULT_WALLET_PATH)? else {
+                return Ok(false);
+            };
+            wallet_cash_split(&[
+                file,
+                "--amounts".into(),
+                amounts,
+                "--fee".into(),
+                fee,
+                "--out".into(),
+                output,
+                "--wallet".into(),
+                wallet,
+                "--rpc".into(),
+                default_rpc_addr(),
+            ])?;
+        }
+        value => return Err(format!("unknown QCash selection `{value}`; choose 1-9")),
     }
     Ok(true)
-}
-
-fn print_qcash_denomination_menu() {
-    println!("QCash denominations");
-    for (index, denomination) in QCashDenomination::DESCENDING.iter().rev().enumerate() {
-        println!("{}. {} XPQ", index + 1, denomination.xpq());
-    }
-}
-
-fn qcash_denomination_from_menu(value: &str) -> Result<QCashDenomination, String> {
-    let selection = value
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| format!("invalid denomination menu number `{value}`"))?;
-    if !(1..=QCashDenomination::DESCENDING.len()).contains(&selection) {
-        return Err(format!(
-            "denomination menu number must be between 1 and {}: `{value}`",
-            QCashDenomination::DESCENDING.len()
-        ));
-    }
-    QCashDenomination::DESCENDING
-        .iter()
-        .rev()
-        .nth(selection - 1)
-        .copied()
-        .ok_or_else(|| "denomination menu is unavailable".to_string())
-}
-
-fn qcash_allowed_denominations_from_menu(value: &str) -> Result<String, String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(qcash_denomination_from_menu)
-        .map(|result| result.map(|denomination| denomination.xpq().to_string()))
-        .collect::<Result<Vec<_>, _>>()
-        .and_then(|values| {
-            if values.is_empty() {
-                Err("select at least one denomination menu number".to_string())
-            } else {
-                Ok(values.join(","))
-            }
-        })
-}
-
-fn qcash_exact_denominations_from_menu(value: &str) -> Result<String, String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|item| {
-            let (selection, count) = item
-                .split_once(['x', 'X'])
-                .ok_or_else(|| format!("invalid denomination count `{item}`; use MENUxCOUNT"))?;
-            let denomination = qcash_denomination_from_menu(selection)?;
-            let count = count
-                .trim()
-                .parse::<usize>()
-                .map_err(|_| format!("invalid count in `{item}`"))?;
-            if count == 0 {
-                return Err(format!("count must be positive in `{item}`"));
-            }
-            Ok(format!("{}x{count}", denomination.xpq()))
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .and_then(|values| {
-            if values.is_empty() {
-                Err("enter at least one denomination count".to_string())
-            } else {
-                Ok(values.join(","))
-            }
-        })
 }
 
 fn menu_send_coin() -> Result<bool, String> {
@@ -640,21 +607,19 @@ fn menu_transfer() -> Result<bool, String> {
 fn submit_menu_transfer(to: String, amount: String) -> Result<bool, String> {
     println!("Miner fee output");
     println!("1. Automatic (recommended)");
-    println!("2. Zero fee");
-    println!("3. Custom XPQ amount");
+    println!("2. Custom XPQ amount");
     let Some(fee_choice) = prompt_default_back("Select", "1")? else {
         return Ok(false);
     };
     let fee = match fee_choice.trim() {
         "" | "1" => DEFAULT_TRANSACTION_FEE_XPQ.to_string(),
-        "2" => "0".to_string(),
-        "3" => {
+        "2" => {
             let Some(value) = prompt_back("Custom fee XPQ")? else {
                 return Ok(false);
             };
             value
         }
-        value => return Err(format!("unknown fee selection `{value}`; choose 1-3")),
+        value => return Err(format!("unknown fee selection `{value}`; choose 1-2")),
     };
     let Some(wallet_path) = prompt_default_back("Wallet file", DEFAULT_WALLET_PATH)? else {
         return Ok(false);

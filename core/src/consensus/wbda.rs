@@ -8,41 +8,31 @@
 #[cfg(test)]
 use crate::block::MAX_BLOCK_WEIGHT;
 
-use super::MIN_DIFFICULTY;
 use super::supply::{Amount, BLOCK_REWARD_STEP, MAX_BLOCK_REWARD, MIN_BLOCK_REWARD};
+use super::{MAX_DIFFICULTY, MIN_DIFFICULTY};
 
 /// Fixed number of completed blocks sampled for one WBDA epoch.
-pub const WBDA_WINDOW: usize = 2048;
+pub const WBDA_WINDOW: usize = 4100;
 
 /// Fixed average block-weight target used to calculate epoch utilization.
 pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 5 * 1024 * 1024;
 
-/// Utilization below 30% raises difficulty by one discrete unit.
-pub const WBDA_LOW_UTILIZATION_PPM: u64 = 300_000;
+/// Utilization below 40% raises difficulty by one discrete unit.
+pub const WBDA_LOW_UTILIZATION_PPM: u64 = 400_000;
 
-/// Utilization above 70% lowers difficulty by one discrete unit.
-pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 700_000;
+/// Utilization above 60% lowers difficulty by one discrete unit.
+pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 600_000;
 
 /// One WBDA step changes the integer difficulty by exactly one unit.
 pub const WBDA_DIFFICULTY_STEP: u32 = 1;
 
-pub const WBDA_ALGORITHM: &str = "argon2id-wbda-weight-v1";
+pub const WBDA_ALGORITHM: &str = "argon2id-wbda-weight-reward-half-xpq-v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WbdaAdjustment {
     Decrease,
     Keep,
     Increase,
-}
-
-impl WbdaAdjustment {
-    pub const fn delta(self) -> i8 {
-        match self {
-            Self::Decrease => -1,
-            Self::Keep => 0,
-            Self::Increase => 1,
-        }
-    }
 }
 
 /// Returns true when `height` is the first block of a new WBDA epoch.
@@ -99,7 +89,7 @@ pub fn next_difficulty_from_window(
             WbdaAdjustment::Keep => previous_difficulty,
             WbdaAdjustment::Increase => previous_difficulty.saturating_add(WBDA_DIFFICULTY_STEP),
         }
-        .max(MIN_DIFFICULTY),
+        .clamp(MIN_DIFFICULTY, MAX_DIFFICULTY),
     )
 }
 
@@ -125,11 +115,11 @@ mod tests {
     }
 
     #[test]
-    fn locks_five_mib_target_and_thirty_seventy_zone() {
+    fn locks_five_mib_target_and_forty_sixty_zone() {
         assert_eq!(WBDA_TARGET_BLOCK_WEIGHT, 5 * 1024 * 1024);
         assert_eq!(MAX_BLOCK_WEIGHT, WBDA_TARGET_BLOCK_WEIGHT);
-        assert_eq!(WBDA_LOW_UTILIZATION_PPM, 300_000);
-        assert_eq!(WBDA_HIGH_UTILIZATION_PPM, 700_000);
+        assert_eq!(WBDA_LOW_UTILIZATION_PPM, 400_000);
+        assert_eq!(WBDA_HIGH_UTILIZATION_PPM, 600_000);
     }
 
     #[test]
@@ -206,14 +196,20 @@ mod tests {
         difficulty = next_difficulty_from_window(difficulty, &half_full).unwrap();
         reward = next_reward_from_window(reward, &half_full).unwrap();
         assert_eq!(difficulty, 7);
-        assert_eq!(reward, Amount(10 * crate::consensus::supply::XPQ));
+        assert_eq!(reward, Amount(5 * crate::consensus::supply::XPQ));
 
         // Epoch 2 averages 5 MiB (100%), so epoch 3 is easier and pays less.
         let full = window(MAX_BLOCK_WEIGHT);
         difficulty = next_difficulty_from_window(difficulty, &full).unwrap();
         reward = next_reward_from_window(reward, &full).unwrap();
         assert_eq!(difficulty, 6);
-        assert_eq!(reward, Amount(9 * crate::consensus::supply::XPQ));
+        assert_eq!(
+            reward,
+            Amount(
+                crate::consensus::supply::BASE_BLOCK_REWARD
+                    - crate::consensus::supply::BLOCK_REWARD_STEP
+            )
+        );
     }
 
     #[test]
@@ -221,6 +217,14 @@ mod tests {
         assert_eq!(
             next_difficulty_from_window(MIN_DIFFICULTY, &window(MAX_BLOCK_WEIGHT)),
             Some(MIN_DIFFICULTY)
+        );
+    }
+
+    #[test]
+    fn low_utilization_increase_clamps_at_pow_width() {
+        assert_eq!(
+            next_difficulty_from_window(MAX_DIFFICULTY, &window(0)),
+            Some(MAX_DIFFICULTY)
         );
     }
 

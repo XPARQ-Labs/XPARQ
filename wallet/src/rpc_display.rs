@@ -92,11 +92,11 @@ fn print_protocol_event(response: &serde_json::Value) {
         "QCashRedeemed" => {
             print_field("Signer", event_address_value(fields.get("signer")));
             print_field("Recipient", event_address_value(fields.get("recipient")));
-            print_amount_field("Amount", fields.get("amount"));
+            print_amount_field("Recipient amount", fields.get("amount"));
+            print_amount_field("QCash change", fields.get("qcash_change_amount"));
         }
-        "QCashRecoverRedeemed" => {
+        "QCashSplit" => {
             print_field("Signer", event_address_value(fields.get("signer")));
-            print_field("Claimant", event_address_value(fields.get("claimant")));
             print_amount_field("Amount", fields.get("amount"));
         }
         "EmissionDistributed" => {
@@ -112,7 +112,7 @@ fn protocol_event_label(name: &str) -> &'static str {
         "Transfer" => "transfer",
         "QCashWithdrawn" => "qcash withdrawn",
         "QCashRedeemed" => "qcash redeemed",
-        "QCashRecoverRedeemed" => "legacy qcash recovery redeemed",
+        "QCashSplit" => "qcash split",
         "EmissionDistributed" => "emission distributed",
         _ => "unknown",
     }
@@ -740,7 +740,7 @@ fn event_address_value(value: Option<&serde_json::Value>) -> String {
     let Some(bytes) = value.and_then(json_byte_array) else {
         return short_value(value);
     };
-    let Ok(bytes) = <[u8; 20]>::try_from(bytes.as_slice()) else {
+    let Ok(bytes) = <[u8; xparq::crypto::ADDRESS_SIZE]>::try_from(bytes.as_slice()) else {
         return hex::encode(bytes);
     };
     address_to_string(&Address(bytes))

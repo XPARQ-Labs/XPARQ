@@ -31,15 +31,13 @@ change, or a commitment to publish every internal crate to crates.io.
 
 The current modules have several cross-layer dependencies:
 
-- `block` owns `BlockHeight`, but transaction, state, consensus, QCash recovery,
-  and ledger all need it;
+- `block` owns `BlockHeight`, but transaction, state, consensus, authenticated
+  header sync, and ledger all need it;
 - `consensus::supply` owns `Amount`, although QCash, transaction, state, block,
   and wallet-facing APIs use it;
 - `transaction::qcash` depends on ordinary transaction output types and XPQ
   coin identifiers, while the unified transaction envelope contains QCash;
 - QCash state currently lives under `state::utxo`, not under `qcash`;
-- `qcash::recovery` depends on block headers, genesis, and fork choice, so it
-  cannot remain in a low-level QCash domain crate;
 - the shared `codec` and `error` modules import types from most other modules;
 - block, state, genesis, ledger, and proof code currently know details from
   neighboring layers.
@@ -64,7 +62,7 @@ XPARQ/
 │   ├── xparq-state/
 │   ├── xparq-ledger/
 │   ├── xparq-genesis/
-│   └── xparq-recovery/
+│   └── xparq-sync/
 ├── core/                 # `xparq` compatibility facade
 ├── node/
 ├── wallet/
@@ -109,15 +107,16 @@ QCash crate and unified transaction crate from depending on each other.
 
 Own the complete QCash domain:
 
-- denominations and denomination selection;
+- arbitrary positive amounts in paqs and multi-file amount selection;
 - bearer coin files, keys, commitments, metadata, and file bounds;
-- withdraw and redeem payloads and signatures;
+- withdraw, full/partial redeem, and split payloads and signatures;
 - QCash coin identifiers, UTXO entries, authenticated proofs, and journals;
 - atomic withdraw/redeem state operations;
 - QCash-specific errors and regression tests.
 
-Header-chain rollback/recovery proof verification is deliberately excluded and
-moved to `xparq-recovery`, because it depends on higher-level chain data.
+Header-chain and authenticated checkpoint verification are deliberately
+excluded and moved to `xparq-sync`, because they depend on higher-level chain
+data.
 
 ### `xparq-transaction`
 
@@ -158,12 +157,12 @@ Own chain parameters, genesis construction, frozen genesis checks, snapshot and
 checkpoint artifacts, and trust anchors. It depends on stable block, state,
 consensus, and ledger APIs rather than their internal collections.
 
-### `xparq-recovery`
+### `xparq-sync`
 
-Own QCash header-chain chunks, trusted checkpoints, rollback proofs, and other
-recovery procedures that combine QCash with block, genesis, chain-work, or
-ledger facts. Keeping this high-level logic outside `xparq-qcash` preserves an
-acyclic domain layer.
+Own header-chain chunks, trusted checkpoints, chain-work verification, and
+authenticated synchronization procedures. Reorganization rollback remains in
+the ledger/node execution layer, while QCash transaction recovery remains the
+normal rollback-and-mempool-requeue path rather than a separate protocol.
 
 ### `xparq` facade (`core`)
 
@@ -189,7 +188,7 @@ xparq-primitives
 xparq-state ─────────────────────> primitives, codec, crypto, tx-base, qcash
 xparq-ledger ────────────────────> transaction, block, consensus, state, qcash
 xparq-genesis ───────────────────> block, consensus, state, ledger
-xparq-recovery ──────────────────> qcash, block, consensus, genesis
+xparq-sync ──────────────────────> block, consensus, genesis, ledger
 xparq facade ────────────────────> all domain crates
 ```
 
@@ -246,8 +245,8 @@ bytes match the Phase 0 vectors exactly.
 
 - Move QCash domain/file code, transaction payloads, UTXO state, proofs, and
   journals into the dedicated crate.
-- Keep recovery/header-chain verification in `core` temporarily until
-  `xparq-recovery` exists.
+- Keep authenticated header-chain verification in `core` temporarily until
+  `xparq-sync` exists.
 - Preserve restricted visibility for raw UTXO mutation.
 - Run QCash file roundtrips, proof tampering, failed-withdraw atomicity,
   redeem-delay, value-conservation, and consecutive rollback tests.
@@ -274,13 +273,13 @@ deserialization, snapshot import, transition, and rollback.
 Exit condition: a ledger can be loaded, executed, saved, reopened, rolled back,
 and snapshot-restored with state roots identical to the baseline.
 
-### Phase 7 — Extract genesis and recovery
+### Phase 7 — Extract genesis and authenticated sync
 
-Create `xparq-genesis` and `xparq-recovery` only after block, consensus, state,
+Create `xparq-genesis` and `xparq-sync` only after block, consensus, state,
 and ledger APIs stabilize. Revalidate every frozen artifact and trust anchor.
 
-Exit condition: configured genesis, snapshots, checkpoints, QCash recovery
-proofs, and header-chain verification match the baseline.
+Exit condition: configured genesis, snapshots, checkpoints, chain-work, and
+header-chain verification match the baseline.
 
 ### Phase 8 — Migrate consumers and narrow the facade
 
@@ -342,7 +341,7 @@ Before merging a phase, also verify:
 
 The decomposition is complete when:
 
-- QCash, transaction, block, consensus, state, ledger, genesis, and recovery
+- QCash, transaction, block, consensus, state, ledger, genesis, and sync
   have explicit crate ownership;
 - the workspace dependency graph is acyclic and follows the documented layer
   direction;

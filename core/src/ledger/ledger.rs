@@ -106,6 +106,37 @@ impl Ledger {
             });
     }
 
+    #[doc(hidden)]
+    pub fn rollback_state_before(
+        &self,
+        block_hash: &BlockHash,
+    ) -> Option<(&BTreeMap<Address, Account>, &XpqUtxoSet)> {
+        self.rollback_states
+            .get(block_hash)
+            .map(|state| (&state.accounts, &state.xpq_utxos))
+    }
+
+    #[doc(hidden)]
+    pub fn restore_rollback_state(
+        &mut self,
+        block_hash: BlockHash,
+        block_height: BlockHeight,
+        accounts: BTreeMap<Address, Account>,
+        xpq_utxos: XpqUtxoSet,
+    ) -> Result<(), LedgerError> {
+        let account_state_tree = Arc::new(SparseStateTree::from_accounts(&accounts)?);
+        self.rollback_states.insert(
+            block_hash,
+            AccountRollbackState {
+                block_height,
+                accounts,
+                account_state_tree,
+                xpq_utxos,
+            },
+        );
+        Ok(())
+    }
+
     /// Drops rollback-only state at or below the reorganization finality boundary.
     ///
     /// Canonical blocks, transaction indexes, and protocol events are deliberately
@@ -156,7 +187,7 @@ impl Ledger {
         accounts: BTreeMap<Address, Account>,
         xpq_utxos: XpqUtxoSet,
         qcash_utxos: QCashUtxoSet,
-        headers: &[crate::qcash::recovery::ChainHeader],
+        headers: &[crate::ledger::ChainHeader],
     ) -> Result<Self, LedgerError> {
         let mut chain = Chain::new();
         let checkpoint_height = headers.last().ok_or(LedgerError::InvalidParent)?.height;
@@ -190,7 +221,7 @@ impl Ledger {
     /// header sequence is re-verified before it can become canonical.
     pub fn restore_authenticated_headers(
         &mut self,
-        headers: &[crate::qcash::recovery::ChainHeader],
+        headers: &[crate::ledger::ChainHeader],
         checkpoint_height: BlockHeight,
     ) -> Result<(), LedgerError> {
         self.chain
@@ -241,11 +272,10 @@ impl Ledger {
     pub fn create_account_with_authorization(
         &mut self,
         address: Address,
-        owner_public_key: PublicKey,
-        auth_public_key: PublicKey,
+        public_key: PublicKey,
         balance: Balance,
     ) -> Result<(), LedgerError> {
-        let account = Account::new_with_authorization(address, owner_public_key, auth_public_key)?;
+        let account = Account::new_with_authorization(address, public_key)?;
         self.create_account_record(account, balance)
     }
 
@@ -433,7 +463,7 @@ impl Ledger {
             .get(&signed.transaction.signer)
             .ok_or(LedgerError::AccountNotFound)?;
         let protocol = crate::transaction::SignedProtocolTransaction::from(signed.clone());
-        if let Some((owner, auth)) = protocol
+        if let Some(public_key) = protocol
             .validate_with_account_authorization(account, height)
             .map_err(LedgerError::from)?
         {
@@ -441,7 +471,7 @@ impl Ledger {
                 .accounts
                 .get_mut(&signed.transaction.signer)
                 .ok_or(LedgerError::AccountNotFound)?
-                .register_authorization(owner, auth)?;
+                .register_authorization(public_key)?;
         }
         let applied_tx_hash = signed.transaction.hash()?.as_hash();
         let authorization_proof_hash = signed
@@ -452,9 +482,9 @@ impl Ledger {
             height,
             None,
             authorization_proof_hash,
-            Address([0; 20]),
+            Address::ZERO,
         )?;
-        staged.refresh_qcash_accounts(&signed.transaction, Address([0; 20]))?;
+        staged.refresh_qcash_accounts(&signed.transaction, Address::ZERO)?;
         self.accounts = staged.accounts;
         self.account_state_tree = staged.account_state_tree;
         self.xpq_utxos = staged.xpq_utxos;
@@ -488,12 +518,12 @@ impl Ledger {
             .map_err(LedgerError::from)?;
         staged.capture_qcash_accounts(block_hash, height, &signed.transaction, miner_address)?;
         staged.remember_rollback_state(block_hash, height, self);
-        if let Some((owner, auth)) = registration {
+        if let Some(public_key) = registration {
             staged
                 .accounts
                 .get_mut(&signed.transaction.signer)
                 .ok_or(LedgerError::AccountNotFound)?
-                .register_authorization(owner, auth)?;
+                .register_authorization(public_key)?;
         }
         let applied_tx_hash = signed.transaction.hash()?.as_hash();
         let authorization_proof_hash = signed
@@ -586,6 +616,27 @@ impl Ledger {
         })
     }
 
+    /// Atomically disconnects consecutive active tips in the supplied order.
+    ///
+    /// The first hash must be the current tip and every following hash must be
+    /// its parent. A single staging clone is used for the whole rollback so a
+    /// reorganization scales with its disconnected depth rather than cloning
+    /// the complete ledger once per disconnected block.
+    pub fn rollback_blocks(
+        &mut self,
+        block_hashes: &[BlockHash],
+    ) -> Result<Vec<RollbackEvent>, LedgerError> {
+        let mut staged = self.clone();
+        let mut events = Vec::with_capacity(block_hashes.len());
+        for block_hash in block_hashes {
+            let event = staged.rollback_block_in_place(*block_hash)?;
+            staged.rollback_history.record(event.clone());
+            events.push(event);
+        }
+        *self = staged;
+        Ok(events)
+    }
+
     pub fn rollback_history(&self) -> &RollbackHistory {
         &self.rollback_history
     }
@@ -595,39 +646,48 @@ impl Ledger {
         block_hash: BlockHash,
     ) -> Result<RollbackEvent, LedgerError> {
         let mut staged = self.clone();
-        let block = staged
+        let event = staged.rollback_block_in_place(block_hash)?;
+        *self = staged;
+        Ok(event)
+    }
+
+    fn rollback_block_in_place(
+        &mut self,
+        block_hash: BlockHash,
+    ) -> Result<RollbackEvent, LedgerError> {
+        let block = self
             .chain
-            .block(&staged.tip_height().ok_or(LedgerError::InvalidParent)?)
+            .block(&self.tip_height().ok_or(LedgerError::InvalidParent)?)
             .filter(|block| block.hash() == Ok(block_hash))
             .cloned()
             .ok_or(LedgerError::InvalidParent)?;
         let from_height = block.height();
         let old_tip = block_hash;
-        let before_accounts = staged.accounts.clone();
-        let before_utxos = staged.xpq_utxos.clone();
-        staged.chain.remove_tip(block_hash)?;
-        let rollback_state = staged
+        let before_accounts = self.accounts.clone();
+        let before_utxos = self.xpq_utxos.clone();
+        self.chain.remove_tip(block_hash)?;
+        let rollback_state = self
             .rollback_states
             .remove(&block_hash)
             .ok_or(LedgerError::MissingQCashAccountJournal)?;
-        if staged.qcash_utxos.journal(block_hash).is_some() {
-            staged.qcash_utxos.rollback_block(block_hash)?;
+        if self.qcash_utxos.journal(block_hash).is_some() {
+            self.qcash_utxos.rollback_block(block_hash)?;
         }
-        staged.qcash_account_journals.remove(&block_hash);
-        staged.accounts = rollback_state.accounts;
-        staged.account_state_tree = rollback_state.account_state_tree;
-        staged.xpq_utxos = rollback_state.xpq_utxos;
-        staged.events_by_block.remove(&block_hash);
-        staged.validate_supply()?;
-        let to_height = staged.tip_height().unwrap_or(Height(0));
-        let new_tip = staged.tip_hash().unwrap_or(BlockHash::ZERO);
+        self.qcash_account_journals.remove(&block_hash);
+        self.accounts = rollback_state.accounts;
+        self.account_state_tree = rollback_state.account_state_tree;
+        self.xpq_utxos = rollback_state.xpq_utxos;
+        self.events_by_block.remove(&block_hash);
+        self.validate_supply()?;
+        let to_height = self.tip_height().unwrap_or(Height(0));
+        let new_tip = self.tip_hash().unwrap_or(BlockHash::ZERO);
         let affected_accounts = account_rollbacks(
             &before_accounts,
             &before_utxos,
-            &staged.accounts,
-            &staged.xpq_utxos,
+            &self.accounts,
+            &self.xpq_utxos,
         );
-        let event = RollbackEvent {
+        Ok(RollbackEvent {
             from_height,
             to_height,
             old_tip,
@@ -642,9 +702,7 @@ impl Ledger {
                     .collect::<Result<Vec<_>, _>>()?,
             }],
             affected_accounts,
-        };
-        *self = staged;
-        Ok(event)
+        })
     }
 
     fn apply_qcash_transaction(
@@ -711,46 +769,71 @@ impl Ledger {
                     )?;
                 }
             }
-            QCashTransactionKind::Redeem { outputs, metadata } => {
+            QCashTransactionKind::Redeem {
+                outputs,
+                qcash_outputs,
+                metadata,
+            } => {
                 let transaction_commitment = transaction.redeem_transaction_commitment()?.ok_or(
                     LedgerError::InvalidTransaction(TransactionError::InvalidQCashMetadata),
+                )?;
+                let authorization_address = transaction.redeem_authorization_address().ok_or(
+                    LedgerError::InvalidTransaction(TransactionError::InvalidQCashRecipient),
                 )?;
                 let amount = if let Some(block_hash) = block_hash {
                     self.qcash_utxos.apply_redeem_in_block(
                         block_hash,
                         height,
                         metadata,
-                        transaction
-                            .redeem_recipient()
-                            .ok_or(LedgerError::InvalidTransaction(
-                                TransactionError::InvalidQCashRecipient,
-                            ))?
-                            .0,
+                        authorization_address,
                         transaction_commitment,
                     )?
                 } else {
                     self.qcash_utxos.apply_redeem(
                         metadata,
-                        transaction
-                            .redeem_recipient()
-                            .ok_or(LedgerError::InvalidTransaction(
-                                TransactionError::InvalidQCashRecipient,
-                            ))?
-                            .0,
+                        authorization_address,
                         height,
                         transaction_commitment,
                     )?
                 };
+                let transaction_hash = transaction.hash()?;
+                if let Some(qcash_outputs) = qcash_outputs {
+                    if let Some(block_hash) = block_hash {
+                        self.qcash_utxos.apply_withdraw_in_block(
+                            block_hash,
+                            height,
+                            transaction.signer,
+                            transaction_hash,
+                            qcash_outputs,
+                        )?;
+                    } else {
+                        self.qcash_utxos.apply_withdraw(
+                            transaction.signer,
+                            transaction_hash,
+                            qcash_outputs,
+                            height,
+                        )?;
+                    }
+                }
                 let maturity_height = crate::block::Height(
                     height
                         .0
                         .saturating_add(crate::ledger::QCASH_REDEEM_CREDIT_MATURITY as u64),
                 );
-                let transaction_hash = transaction.hash()?;
                 let output_total = outputs
                     .iter()
                     .try_fold(0_u64, |total, output| total.checked_add(output.amount.0));
-                if output_total != Some(amount.0) {
+                let qcash_output_total = qcash_outputs
+                    .as_ref()
+                    .map(|metadata| metadata.amount())
+                    .transpose()
+                    .map_err(|_| {
+                        LedgerError::InvalidTransaction(TransactionError::InvalidQCashMetadata)
+                    })?
+                    .unwrap_or(Amount(0));
+                if output_total.and_then(|total| total.checked_add(qcash_output_total.0))
+                    != Some(amount.0)
+                {
                     return Err(LedgerError::InvalidTransaction(
                         TransactionError::InvalidQCashOutputs,
                     ));

@@ -1,7 +1,7 @@
 use super::*;
 use crate::block::Height;
 use crate::consensus::supply::Amount;
-use crate::crypto::{Address, dual_address_from_public_keys, generate_keypair, sign};
+use crate::crypto::{Address, address_from_public_key, generate_keypair, sign};
 use crate::state::{XpqCoinId, XpqCoinSource};
 use crate::transaction::{
     QCashTransaction, SignedQCashTransaction, SignedTransfer, Transfer, TransferOutput,
@@ -10,15 +10,10 @@ use crate::transaction::{
 fn funded_ledger(amount: u64) -> (Ledger, crate::crypto::KeyPair, crate::crypto::KeyPair, Address) {
     let owner = generate_keypair();
     let authorization = generate_keypair();
-    let sender = dual_address_from_public_keys(&owner.public_key, &authorization.public_key);
+    let sender = address_from_public_key(&owner.public_key);
     let mut ledger = Ledger::new();
     ledger
-        .create_account_with_authorization(
-            sender,
-            owner.public_key,
-            authorization.public_key,
-            Amount(amount),
-        )
+        .create_account_with_authorization(sender, owner.public_key, Amount(amount))
         .unwrap();
     (ledger, owner, authorization, sender)
 }
@@ -29,12 +24,11 @@ fn sign_transfer(
     authorization: &crate::crypto::KeyPair,
 ) -> SignedTransfer {
     let payload = transaction.signing_bytes().unwrap();
-    SignedTransfer::new_authorized(
+    let _ = authorization;
+    SignedTransfer::new(
         transaction,
         owner.public_key,
         sign(&owner.secret_key, &payload),
-        authorization.public_key,
-        sign(&authorization.secret_key, &payload),
     )
 }
 
@@ -70,11 +64,8 @@ fn stored_key_transfer_uses_registered_account_authorization() {
     let input = ledger.xpq_utxos.coins_for_owner(sender).next().unwrap().id;
     let transaction = Transfer::new(sender, vec![input], recipient, Amount(100));
     let payload = transaction.signing_bytes().unwrap();
-    let signed = SignedTransfer::new_stored_authorized(
-        transaction,
-        sign(&owner.secret_key, &payload),
-        sign(&authorization.secret_key, &payload),
-    );
+    let _ = authorization;
+    let signed = SignedTransfer::new_stored(transaction, sign(&owner.secret_key, &payload));
 
     ledger
         .apply_signed_transaction_at(&signed, Height(0))
@@ -88,7 +79,12 @@ fn stored_key_transfer_uses_registered_account_authorization() {
 fn spent_coin_cannot_be_replayed() {
     let (mut ledger, owner, authorization, sender) = funded_ledger(100);
     let input = ledger.xpq_utxos.coins_for_owner(sender).next().unwrap().id;
-    let transaction = Transfer::new(sender, vec![input], Address([8; 20]), Amount(100));
+    let transaction = Transfer::new(
+        sender,
+        vec![input],
+        Address([8; crate::crypto::ADDRESS_SIZE]),
+        Amount(100),
+    );
     let signed = sign_transfer(transaction, &owner, &authorization);
     ledger
         .apply_signed_transaction_at(&signed, Height(0))
@@ -151,12 +147,12 @@ fn finalized_rollback_pruning_keeps_explorer_history_and_unfinalized_state() {
 
 #[test]
 fn qcash_redeem_creates_recipient_and_block_miner_outputs() {
-    let (mut ledger, owner, authorization, sender) =
+    let (mut ledger, owner, _authorization, sender) =
         funded_ledger(crate::consensus::supply::XPQ);
     let redeem_secret = [0x31; 32];
     let commitment = crate::qcash::qcash_redeem_key_commitment_from_secret(&redeem_secret);
-    let metadata = crate::qcash::QCashWithdrawalMetadata::with_selected_denominations(
-        &[crate::qcash::QCashDenomination::One],
+    let metadata = crate::qcash::QCashWithdrawalMetadata::with_selected_amounts(
+        &[Amount(crate::consensus::supply::XPQ)],
         &[commitment],
     )
     .unwrap();
@@ -170,12 +166,10 @@ fn qcash_redeem_creates_recipient_and_block_miner_outputs() {
     );
     let withdraw_hash = withdraw.hash().unwrap();
     let withdraw_payload = withdraw.signing_bytes().unwrap();
-    let signed_withdraw = SignedQCashTransaction::new_authorized(
+    let signed_withdraw = SignedQCashTransaction::new(
         withdraw,
         owner.public_key,
         sign(&owner.secret_key, &withdraw_payload),
-        authorization.public_key,
-        sign(&authorization.secret_key, &withdraw_payload),
     );
     ledger
         .apply_signed_qcash_transaction(&signed_withdraw, Height(0))
@@ -207,11 +201,8 @@ fn qcash_redeem_creates_recipient_and_block_miner_outputs() {
     .unwrap();
     let redeem_hash = redeem.hash().unwrap();
     let redeem_payload = redeem.signing_bytes().unwrap();
-    let signed_redeem = SignedQCashTransaction::new_stored_authorized(
-        redeem,
-        sign(&owner.secret_key, &redeem_payload),
-        sign(&authorization.secret_key, &redeem_payload),
-    );
+    let signed_redeem =
+        SignedQCashTransaction::new_stored(redeem, sign(&owner.secret_key, &redeem_payload));
     let redeem_block_hash = crate::crypto::BlockHash([0x72; crate::crypto::HASH_SIZE]);
     ledger
         .apply_signed_qcash_transaction_in_block(
@@ -249,12 +240,92 @@ fn qcash_redeem_creates_recipient_and_block_miner_outputs() {
 }
 
 #[test]
+fn qcash_partial_redeem_creates_change_and_rolls_back_atomically() {
+    let (mut ledger, owner, _authorization, sender) =
+        funded_ledger(crate::consensus::supply::XPQ);
+    let input_secret = [0x81; 32];
+    let withdrawal = crate::qcash::QCashWithdrawalMetadata::with_selected_amounts(
+        &[Amount(crate::consensus::supply::XPQ)],
+        &[crate::qcash::qcash_redeem_key_commitment_from_secret(
+            &input_secret,
+        )],
+    )
+    .unwrap();
+    let input = ledger.xpq_utxos.coins_for_owner(sender).next().unwrap().id;
+    let transaction = QCashTransaction::withdraw(
+        sender,
+        vec![input],
+        Vec::new(),
+        Amount(crate::consensus::supply::XPQ),
+        withdrawal.clone(),
+    );
+    let withdrawal_hash = transaction.hash().unwrap();
+    let payload = transaction.signing_bytes().unwrap();
+    ledger
+        .apply_signed_qcash_transaction(
+            &SignedQCashTransaction::new(
+                transaction,
+                owner.public_key,
+                sign(&owner.secret_key, &payload),
+            ),
+            Height(0),
+        )
+        .unwrap();
+    let before_transform = ledger.clone();
+    let input_file = crate::qcash::QCashCoinFile::new(
+        withdrawal_hash,
+        &withdrawal.outputs[0],
+        input_secret,
+    )
+    .unwrap();
+    let change = crate::qcash::QCashWithdrawalMetadata::with_selected_amounts(
+        &[Amount(600_000)],
+        &[crate::qcash::qcash_redeem_key_commitment_from_secret(
+            &[0x82; 32],
+        )],
+    )
+    .unwrap();
+    let transform = QCashTransaction::transform_from_files(
+        sender,
+        vec![
+            TransferOutput::new(sender, Amount(390_000)),
+            TransferOutput::new(crate::transaction::OutputTarget::BlockMiner, Amount(10_000)),
+        ],
+        Some(change.clone()),
+        &[input_file],
+    )
+    .unwrap();
+    let transform_hash = transform.hash().unwrap();
+    let payload = transform.signing_bytes().unwrap();
+    let block_hash = crate::crypto::BlockHash([0x83; crate::crypto::HASH_SIZE]);
+    ledger
+        .apply_signed_qcash_transaction_in_block(
+            &SignedQCashTransaction::new_stored(
+                transform,
+                sign(&owner.secret_key, &payload),
+            ),
+            Height(1),
+            block_hash,
+            Address([0x84; crate::crypto::ADDRESS_SIZE]),
+        )
+        .unwrap();
+
+    assert_eq!(ledger.qcash_utxos.total_value().unwrap(), Amount(600_000));
+    let child_id = crate::state::QCashCoinId::derive(transform_hash, &change.outputs[0]).unwrap();
+    assert_eq!(ledger.qcash_utxos.coin(child_id).unwrap().amount, Amount(600_000));
+    assert_eq!(ledger.economic_supply().unwrap(), Amount(crate::consensus::supply::XPQ));
+
+    ledger.rollback_qcash_block(block_hash).unwrap();
+    assert_eq!(ledger, before_transform);
+}
+
+#[test]
 fn qcash_block_rollback_restores_owned_xpq_and_authorization_state() {
-    let (mut ledger, owner, authorization, sender) =
+    let (mut ledger, owner, _authorization, sender) =
         funded_ledger(crate::consensus::supply::XPQ);
     let before = ledger.clone();
-    let metadata = crate::qcash::QCashWithdrawalMetadata::with_selected_denominations(
-        &[crate::qcash::QCashDenomination::One],
+    let metadata = crate::qcash::QCashWithdrawalMetadata::with_selected_amounts(
+        &[Amount(crate::consensus::supply::XPQ)],
         &[crate::qcash::qcash_redeem_key_commitment_from_secret(
             &[0x51; 32],
         )],
@@ -269,12 +340,10 @@ fn qcash_block_rollback_restores_owned_xpq_and_authorization_state() {
         metadata,
     );
     let payload = transaction.signing_bytes().unwrap();
-    let signed = SignedQCashTransaction::new_authorized(
+    let signed = SignedQCashTransaction::new(
         transaction,
         owner.public_key,
         sign(&owner.secret_key, &payload),
-        authorization.public_key,
-        sign(&authorization.secret_key, &payload),
     );
     let block_hash = crate::crypto::BlockHash([0x52; crate::crypto::HASH_SIZE]);
 

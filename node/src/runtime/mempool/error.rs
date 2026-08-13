@@ -13,7 +13,6 @@ pub enum MempoolError {
     InvalidLedgerState(LedgerError),
     CashCoinReserved,
     Serialization(CodecError),
-    FeeOverflow,
 }
 
 impl fmt::Display for MempoolError {
@@ -34,7 +33,6 @@ impl fmt::Display for MempoolError {
             MempoolError::Serialization(error) => {
                 write!(f, "failed to serialize transaction: {error}")
             }
-            MempoolError::FeeOverflow => f.write_str("block transaction fees overflow"),
         }
     }
 }
@@ -49,7 +47,6 @@ impl Error for MempoolError {
             MempoolError::InvalidLedgerState(error) => Some(error),
             MempoolError::CashCoinReserved => None,
             MempoolError::Serialization(error) => Some(error),
-            MempoolError::FeeOverflow => None,
         }
     }
 }

@@ -1,4 +1,4 @@
-use xparq::block::{Block, CoinbaseTransaction, Nonce};
+use xparq::block::{Block, EmissionTransaction, Nonce};
 use xparq::consensus::DIFFICULTY_START;
 use xparq::consensus::supply::Amount;
 use xparq::crypto::{Address, BlockHash, Hash, PreviousHash};
@@ -31,7 +31,7 @@ pub trait BlockTestExt {
         difficulty: u32,
         timestamp: u64,
         nonce: Nonce,
-        coinbase: Option<CoinbaseTransaction>,
+        coinbase: Option<EmissionTransaction>,
         transactions: Vec<SignedTransaction>,
     ) -> Block;
 }
@@ -97,7 +97,7 @@ impl BlockTestExt for Block {
             Amount(total.0.saturating_add(0))
         });
         let coinbase = (height.0 != 0)
-            .then(|| CoinbaseTransaction::new(miner, xparq::consensus::block_reward(height)));
+            .then(|| EmissionTransaction::new(miner, xparq::consensus::block_reward(height)));
         Self::with_coinbase(
             height,
             previous_hash,
@@ -117,7 +117,7 @@ impl BlockTestExt for Block {
         difficulty: u32,
         timestamp: u64,
         nonce: Nonce,
-        coinbase: Option<CoinbaseTransaction>,
+        coinbase: Option<EmissionTransaction>,
         transactions: Vec<SignedTransaction>,
     ) -> Block {
         Block::from_protocol_transactions(

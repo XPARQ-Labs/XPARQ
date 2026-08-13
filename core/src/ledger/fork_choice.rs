@@ -1,8 +1,8 @@
 use crate::block::Block;
-use crate::block::{BlockHeight, Height};
+use crate::block::{BLOCK_VERSION, BlockHeight, Height, MAX_BLOCK_WEIGHT};
 use crate::consensus::{
-    Consensus, DIFFICULTY_START, MIN_DIFFICULTY, WBDA_WINDOW, is_wbda_epoch_boundary,
-    next_difficulty_from_window,
+    Consensus, DIFFICULTY_START, MAX_DIFFICULTY, MIN_DIFFICULTY, WBDA_WINDOW,
+    is_wbda_epoch_boundary, next_difficulty_from_window,
 };
 use crate::crypto::{BlockHash, HASH_SIZE, Hash};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -95,8 +95,15 @@ impl ForkChoice {
             return Err(ForkChoiceError::DuplicateBlock);
         }
 
-        if block.difficulty() < MIN_DIFFICULTY {
+        if !(MIN_DIFFICULTY..=MAX_DIFFICULTY).contains(&block.difficulty()) {
             return Err(ForkChoiceError::InvalidDifficulty);
+        }
+        if !block.is_genesis()
+            && (block.header.version != BLOCK_VERSION
+                || block.header.block_weight == 0
+                || block.header.block_weight as usize > MAX_BLOCK_WEIGHT)
+        {
+            return Err(ForkChoiceError::InvalidHeader);
         }
 
         let parent = BlockHash(block.previous_hash().0);
@@ -153,7 +160,7 @@ impl ForkChoice {
     /// Header consensus rules and PoW are checked exactly as for a full block.
     pub fn insert_header(
         &mut self,
-        header: crate::qcash::recovery::ChainHeader,
+        header: crate::ledger::ChainHeader,
     ) -> Result<BlockHash, ForkChoiceError> {
         self.insert_block(header.block())
     }
@@ -350,6 +357,7 @@ pub enum ForkChoiceError {
     DuplicateBlock,
     UnexpectedGenesis,
     InvalidDifficulty,
+    InvalidHeader,
     InvalidProofOfWork(crate::error::ConsensusError),
     InvalidHeight,
     MissingParent,
@@ -366,6 +374,7 @@ impl fmt::Display for ForkChoiceError {
                 f.write_str("fork graph genesis does not match the configured chain")
             }
             Self::InvalidDifficulty => f.write_str("block difficulty is invalid for its branch"),
+            Self::InvalidHeader => f.write_str("block header fields are outside consensus bounds"),
             Self::InvalidProofOfWork(error) => write!(f, "block proof of work is invalid: {error}"),
             Self::InvalidHeight => f.write_str("block height does not follow its parent"),
             Self::MissingParent => f.write_str("block parent is missing from fork graph"),
@@ -391,6 +400,9 @@ impl Error for ForkChoiceError {
 }
 
 pub fn block_work(difficulty: u32) -> Work {
+    // `difficulty` is already the branch-local WBDA result validated by the
+    // caller. Applying another utilization multiplier here would count WBDA
+    // twice and let block weight distort fork choice independently of PoW.
     Work::pow2(difficulty)
 }
 
@@ -422,7 +434,7 @@ mod tests {
         let genesis = genesis_block().unwrap();
         let mut fork_choice = ForkChoice::new(genesis.hash().unwrap());
         let genesis_hash = fork_choice.insert_block(genesis.clone()).unwrap();
-        let miner = Address([1; 20]);
+        let miner = Address([1; crate::crypto::ADDRESS_SIZE]);
         let forged = Block::from_protocol_transactions(
             Height(1),
             genesis_hash,
@@ -460,6 +472,36 @@ mod tests {
         assert_eq!(
             compare_chain_tips(lower_work, low_hash, lower_work, low_hash),
             Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn wbda_adjusted_difficulty_drives_cumulative_work_fork_choice() {
+        let base_difficulty = DIFFICULTY_START;
+        let low_utilization_window = vec![1usize; WBDA_WINDOW];
+        let adjusted_difficulty =
+            next_difficulty_from_window(base_difficulty, &low_utilization_window).unwrap();
+
+        assert_eq!(adjusted_difficulty, base_difficulty.saturating_add(1));
+
+        // Two blocks at the WBDA-adjusted difficulty carry more PoW than
+        // three blocks at the previous difficulty. Height/arrival order must
+        // therefore not override the cumulative-work decision.
+        let adjusted_branch_work =
+            block_work(adjusted_difficulty).saturating_add(block_work(adjusted_difficulty));
+        let longer_base_branch_work = block_work(base_difficulty)
+            .saturating_add(block_work(base_difficulty))
+            .saturating_add(block_work(base_difficulty));
+
+        assert!(adjusted_branch_work > longer_base_branch_work);
+        assert!(
+            compare_chain_tips(
+                adjusted_branch_work,
+                BlockHash([9; HASH_SIZE]),
+                longer_base_branch_work,
+                BlockHash([1; HASH_SIZE]),
+            )
+            .is_gt()
         );
     }
 

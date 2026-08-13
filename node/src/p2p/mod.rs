@@ -4,7 +4,7 @@ use crate::runtime::network::{
     CompactBlock, CompactBlockReconstruction, NetworkMessage, PeerInfo, TipInfo, VersionInfo,
 };
 use crate::runtime::node::Node;
-use crate::{node_debug, node_info};
+use crate::{node_debug, node_info, node_warn};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
@@ -21,8 +21,8 @@ use xparq::block::Block;
 use xparq::block::Height;
 use xparq::crypto::BlockHash;
 use xparq::genesis::{ArtifactTrustAnchor, artifact_payload_hash};
+use xparq::ledger::ChainHeader;
 use xparq::ledger::fork_choice::{Work, compare_chain_tips};
-use xparq::qcash::recovery::ChainHeader;
 
 const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(5);
 const PEER_RETRY_BASE: Duration = Duration::from_secs(2);
@@ -42,6 +42,15 @@ const MAX_BLOCK_LOCATOR_HASHES: usize = 32;
 const MAX_MISSING_PARENT_FETCHES_PER_POLL: usize = 64;
 const MAX_MEMPOOL_INVENTORY_FETCH: usize = 128;
 const SYNC_RESULT_QUEUE_CAPACITY: usize = 8;
+const TRANSPORT_ERROR_PREFIX: &str = "transport: ";
+
+fn transport_error(error: String) -> String {
+    format!("{TRANSPORT_ERROR_PREFIX}{error}")
+}
+
+pub fn is_transport_error(error: &str) -> bool {
+    error.starts_with(TRANSPORT_ERROR_PREFIX)
+}
 
 pub struct SyncPipelineMetrics {
     pub queue_depth: AtomicU64,
@@ -149,14 +158,42 @@ impl PeerState {
         self.next_attempt = Instant::now() + Duration::from_secs(secs);
     }
 
+    /// Applies connection backoff without treating an unreliable route as a
+    /// malicious peer. Protocol-invalid data uses `mark_failed` instead.
+    pub fn mark_unreachable(&mut self) {
+        self.failures = self.failures.saturating_add(1);
+        self.last_seen = Some(std::time::SystemTime::now());
+        self.sync_window = self.sync_window.saturating_div(2).max(MIN_BLOCKS_PER_SYNC);
+        let shift = self.failures.saturating_sub(1).min(5);
+        let secs = PEER_RETRY_BASE
+            .as_secs()
+            .saturating_mul(1_u64 << shift)
+            .min(PEER_RETRY_MAX.as_secs());
+        self.next_attempt = Instant::now() + Duration::from_secs(secs);
+    }
+
     pub fn is_banned(&self) -> bool {
         self.ban_until.is_some_and(|until| Instant::now() < until)
     }
 
     pub fn set_latency(&mut self, latency: Duration) {
-        self.latency = Some(latency);
+        self.latency = Some(match self.latency {
+            Some(previous) => duration_ewma(previous, latency),
+            None => latency,
+        });
         self.last_seen = Some(std::time::SystemTime::now());
     }
+}
+
+fn duration_ewma(previous: Duration, sample: Duration) -> Duration {
+    let previous = previous.as_micros();
+    let sample = sample.as_micros();
+    let weighted = previous
+        .saturating_mul(3)
+        .saturating_add(sample)
+        .saturating_div(4)
+        .min(u64::MAX as u128);
+    Duration::from_micros(weighted as u64)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +206,7 @@ pub enum PeerPoll {
         remote_tip: Height,
         synced_blocks: usize,
         latency: Duration,
+        caught_up: bool,
     },
 }
 
@@ -179,6 +217,7 @@ pub struct ParallelSyncReport {
     pub used_peers: usize,
     pub used_peer_addrs: Vec<SocketAddr>,
     pub failed_peer_addrs: Vec<SocketAddr>,
+    pub caught_up: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -199,7 +238,10 @@ pub struct PeerConnection {
 
 impl PeerConnection {
     pub fn connect(addr: SocketAddr) -> Result<Self, String> {
-        swarm::global()?.connect(addr)?;
+        swarm::global()
+            .map_err(transport_error)?
+            .connect(addr)
+            .map_err(transport_error)?;
         Ok(Self {
             addr,
             handshaken: false,
@@ -219,9 +261,11 @@ impl PeerConnection {
             return Err("node shutdown requested".to_string());
         }
         self.check_request_budget()?;
-        swarm::global()?
-            .request(self.addr, message)?
-            .ok_or_else(|| "peer returned no response".to_string())
+        swarm::global()
+            .map_err(transport_error)?
+            .request(self.addr, message)
+            .map_err(transport_error)?
+            .ok_or_else(|| transport_error("peer returned no response".to_string()))
     }
 
     pub fn send(&mut self, message: NetworkMessage) -> Result<(), String> {
@@ -229,7 +273,11 @@ impl PeerConnection {
             return Err("node shutdown requested".to_string());
         }
         self.check_request_budget()?;
-        if let Some(response) = swarm::global()?.request(self.addr, message)? {
+        if let Some(response) = swarm::global()
+            .map_err(transport_error)?
+            .request(self.addr, message)
+            .map_err(transport_error)?
+        {
             self.handle_unsolicited(response)?;
         }
         Ok(())
@@ -607,12 +655,15 @@ pub fn poll_peer_connection(
         let start = Height(0);
         let target = remote_tip.height.0.min(sync_window.saturating_sub(1));
         let headers = request_headers(peer, start, target, BlockHash::ZERO)?;
+        validate_headers_before_body_download(node, &headers)?;
         request_blocks(peer, node, start, target, headers)?;
         request_missing_parent_blocks(peer, node)?;
         return Ok(PeerPoll::Synced {
             remote_tip: remote_tip.height,
             synced_blocks: target.saturating_add(1) as usize,
             latency,
+            caught_up: !local_tip_info(node)?
+                .is_some_and(|local| is_remote_tip_better(&local, &remote_tip)),
         });
     }
     let Some(local_tip) = local_tip else {
@@ -664,6 +715,7 @@ pub fn poll_peer_connection(
         target
     );
     let headers = request_headers(peer, start, target, ancestor.hash)?;
+    validate_headers_before_body_download(node, &headers)?;
     node_debug!(
         "SYNC",
         "headers_received peer={} count={} start={} target={}",
@@ -678,6 +730,8 @@ pub fn poll_peer_connection(
         remote_tip: remote_tip.height,
         synced_blocks: target.saturating_sub(start.0).saturating_add(1) as usize,
         latency,
+        caught_up: !local_tip_info(node)?
+            .is_some_and(|local| is_remote_tip_better(&local, &remote_tip)),
     })
 }
 
@@ -716,10 +770,11 @@ pub fn sync_from_peers_parallel(
             continue;
         }
         match request_tip(&mut peer) {
-            Ok(tip) if local_tip.is_none_or(|local| is_remote_tip_better(&local, &tip)) => {
-                candidates.push((addr, tip, peer))
+            Ok(tip) => {
+                if local_tip.is_none_or(|local| is_remote_tip_better(&local, &tip)) {
+                    candidates.push((addr, tip, peer));
+                }
             }
-            Ok(_) => {}
             Err(error) => node_debug!("SYNC", "candidate_tip_failed peer={addr} error={error:?}"),
         }
     }
@@ -736,6 +791,7 @@ pub fn sync_from_peers_parallel(
             used_peers: 0,
             used_peer_addrs: Vec::new(),
             failed_peer_addrs: Vec::new(),
+            caught_up: true,
         });
     };
 
@@ -758,10 +814,12 @@ pub fn sync_from_peers_parallel(
             used_peers: 0,
             used_peer_addrs: Vec::new(),
             failed_peer_addrs: Vec::new(),
+            caught_up: false,
         });
     }
     let start = Height(ancestor.height.0.saturating_add(1));
     let headers = request_headers(&mut leader_connection, start, target, ancestor.hash)?;
+    validate_headers_before_body_download(node, &headers)?;
     let ranges = plan_parallel_ranges(start, target, &headers, &candidate_tips);
     if ranges.is_empty() {
         return Ok(ParallelSyncReport {
@@ -770,6 +828,7 @@ pub fn sync_from_peers_parallel(
             used_peers: 0,
             used_peer_addrs: Vec::new(),
             failed_peer_addrs: Vec::new(),
+            caught_up: false,
         });
     }
 
@@ -835,14 +894,27 @@ pub fn sync_from_peers_parallel(
     let mut failed_peers = HashSet::new();
     let mut expected_height = start.0;
     let mut applied_blocks = 0_usize;
+    let mut first_error = None;
     for _ in 0..range_count {
-        let result = range_receiver
-            .recv()
-            .map_err(|_| "parallel sync result channel closed".to_string())?;
+        let result = match range_receiver.recv() {
+            Ok(result) => result,
+            Err(_) => {
+                first_error.get_or_insert_with(|| {
+                    "parallel sync result channel closed before every range completed".to_string()
+                });
+                break;
+            }
+        };
         SYNC_PIPELINE_METRICS
             .queue_depth
             .fetch_sub(1, AtomicOrdering::Relaxed);
-        let (range_start, peer, blocks, worker_failed_peers) = result?;
+        let (range_start, peer, blocks, worker_failed_peers) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                first_error.get_or_insert(error);
+                continue;
+            }
+        };
         SYNC_PIPELINE_METRICS
             .downloaded_ranges_total
             .fetch_add(1, AtomicOrdering::Relaxed);
@@ -884,9 +956,14 @@ pub fn sync_from_peers_parallel(
         }
     }
     for handle in handles {
-        handle
-            .join()
-            .map_err(|_| "parallel sync worker panicked".to_string())?;
+        if handle.join().is_err() {
+            first_error.get_or_insert_with(|| "parallel sync worker panicked".to_string());
+        }
+    }
+    if applied_blocks == 0
+        && let Some(error) = &first_error
+    {
+        return Err(error.clone());
     }
     let used_peer_addrs = used_peers.iter().copied().collect::<Vec<_>>();
     for peer in &used_peer_addrs {
@@ -911,12 +988,23 @@ pub fn sync_from_peers_parallel(
             .unwrap_or_else(|| "none".to_string())
     );
 
+    if let Some(error) = &first_error {
+        node_warn!(
+            "SYNC",
+            "pipeline_partial through_height={} applied_blocks={} error={error:?}",
+            expected_height.saturating_sub(1),
+            applied_blocks
+        );
+    }
+
     Ok(ParallelSyncReport {
         remote_tip: remote_tip.height,
         applied_blocks,
         used_peers: used_peers.len(),
         used_peer_addrs,
         failed_peer_addrs,
+        caught_up: !local_tip_from_node(&node)
+            .is_some_and(|local| is_remote_tip_better(&local, &remote_tip)),
     })
 }
 
@@ -1515,6 +1603,26 @@ fn request_headers(
     Ok(headers)
 }
 
+fn validate_headers_before_body_download(
+    node: &Arc<Mutex<Node>>,
+    headers: &[ChainHeader],
+) -> Result<(), String> {
+    let mut preview = node
+        .lock()
+        .map_err(|_| "node state lock poisoned".to_string())?
+        .fork_choice
+        .clone();
+    let _permit = crate::runtime::pow_verification::POW_VERIFICATION_BUDGET
+        .acquire()
+        .map_err(str::to_string)?;
+    for header in headers {
+        preview
+            .insert_header(header.clone())
+            .map_err(|error| format!("header-first PoW validation failed: {error}"))?;
+    }
+    Ok(())
+}
+
 fn request_common_ancestor(
     peer: &mut PeerConnection,
     node: &Arc<Mutex<Node>>,
@@ -1713,6 +1821,49 @@ mod tests {
         let remote = tip(101, [0, 0, 0, 0, 0, 0, 0, 20], 1);
 
         assert!(is_remote_tip_better(&local, &remote));
+    }
+
+    #[test]
+    fn transport_failures_back_off_without_banning_peer() {
+        let mut peer = PeerState::new("198.51.100.8:5555".parse().unwrap());
+        for _ in 0..6 {
+            peer.mark_unreachable();
+        }
+
+        assert_eq!(peer.score, 0);
+        assert_eq!(peer.failures, 6);
+        assert_eq!(peer.sync_window, MIN_BLOCKS_PER_SYNC);
+        assert!(!peer.is_banned());
+        assert!(peer.next_attempt > Instant::now());
+    }
+
+    #[test]
+    fn transport_error_marker_cannot_be_injected_through_context() {
+        let error = transport_error("request timed out".to_string());
+
+        assert!(is_transport_error(&error));
+        assert!(!is_transport_error(&format!("peer rejected: {error}")));
+        assert!(!is_transport_error("peer returned an invalid block"));
+    }
+
+    #[test]
+    fn protocol_failures_still_ban_peer() {
+        let mut peer = PeerState::new("198.51.100.9:5555".parse().unwrap());
+        for _ in 0..5 {
+            peer.mark_failed();
+        }
+
+        assert_eq!(peer.score, PEER_BAN_SCORE_THRESHOLD);
+        assert!(peer.is_banned());
+    }
+
+    #[test]
+    fn latency_uses_weighted_moving_average() {
+        let mut peer = PeerState::new("198.51.100.10:5555".parse().unwrap());
+        peer.set_latency(Duration::from_millis(100));
+        peer.set_latency(Duration::from_millis(300));
+
+        assert_eq!(peer.latency, Some(Duration::from_millis(150)));
     }
 
     #[test]

@@ -7,9 +7,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
-use xparq::crypto::{
-    Address, PublicKey, SecretKey, derive_public_key, dual_address_from_public_keys,
-};
+use xparq::crypto::{Address, SecretKey};
 use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(any(
@@ -872,23 +870,42 @@ const fn default_nat_lease_secs() -> u64 {
     3600
 }
 
-#[derive(Deserialize)]
-struct WalletFile {
-    version: u8,
-    address: String,
-    secret_key: String,
-    auth_public_key: String,
-}
-
-impl Drop for WalletFile {
-    fn drop(&mut self) {
-        self.secret_key.zeroize();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_fee_configuration_remains_allowed() {
+        let mut config = RunConfig {
+            min_relay_fee: 0,
+            market_fee: 0,
+            ..RunConfig::default()
+        };
+
+        normalize(&mut config);
+
+        assert_eq!(config.min_relay_fee, 0);
+        assert_eq!(config.market_fee, 0);
+    }
+
+    #[cfg(feature = "mainnet")]
+    #[test]
+    fn docker_mainnet_example_matches_runtime_schema() {
+        let file = serde_json::from_str::<RunConfigFile>(include_str!(
+            "../../../docker/config.mainnet.example.json"
+        ))
+        .unwrap();
+        assert_eq!(file.network, "mainnet");
+        assert_eq!(file.db_path, "/var/lib/xparq/data/mainnet");
+        assert!(file.wallet.is_none());
+        assert!(file.miner_address.is_none());
+        assert!(!file.mine);
+        let mut config = RunConfig::default();
+        apply_file(&mut config, file).unwrap();
+        assert_eq!(config.listen_addrs.len(), 2);
+        assert!(config.peers.is_empty());
+        assert!(config.public_addrs.is_empty());
+    }
 
     #[test]
     fn generated_config_separates_every_socket_ip_family() {
@@ -971,32 +988,21 @@ mod tests {
 }
 
 pub fn wallet_address(path: &str) -> Result<Address, String> {
+    #[derive(Deserialize)]
+    struct WalletHeader {
+        version: u8,
+        address: String,
+    }
+
     let bytes = Zeroizing::new(
         fs::read(path)
             .map_err(|error| format!("failed to read mining wallet `{path}`: {error}"))?,
     );
-    let wallet: WalletFile = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("invalid plaintext mining wallet `{path}`: {error}"))?;
+    let wallet: WalletHeader = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid mining wallet `{path}`: {error}"))?;
     if wallet.version != 1 {
-        return Err(format!("unsupported plaintext mining wallet `{path}`"));
+        return Err(format!("unsupported mining wallet `{path}`"));
     }
-    let address = address_string(&wallet.address)
-        .map_err(|_| format!("invalid address in mining wallet `{path}`"))?;
-    let secret_key = secret_key(Some(&wallet.secret_key))
-        .map_err(|error| format!("invalid secret_key in mining wallet `{path}`: {error}"))?;
-    let public_key = derive_public_key(&secret_key);
-    let auth_public_key_bytes = hex::decode(&wallet.auth_public_key)
-        .map_err(|_| format!("invalid auth_public_key in mining wallet `{path}`"))?;
-    let auth_public_key = PublicKey(
-        auth_public_key_bytes
-            .try_into()
-            .map_err(|_| format!("invalid auth_public_key in mining wallet `{path}`"))?,
-    );
-    let derived_address = dual_address_from_public_keys(&public_key, &auth_public_key);
-    if derived_address != address {
-        return Err(format!(
-            "mining wallet `{path}` address does not match secret_key"
-        ));
-    }
-    Ok(address)
+    address_string(&wallet.address)
+        .map_err(|_| format!("invalid address in mining wallet `{path}`"))
 }

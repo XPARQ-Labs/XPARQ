@@ -9,7 +9,7 @@ use xparq::block::{Block, BlockHeight, MAX_BLOCK_SIZE, MAX_BLOCK_WEIGHT};
 use xparq::crypto::{BlockHash, TransactionHash};
 use xparq::ledger::Ledger;
 use xparq::state::{QCashCoinId, XpqCoinId};
-use xparq::transaction::{QCashTransactionKind, SignedProtocolTransaction, TransactionFamily};
+use xparq::transaction::{QCashTransactionKind, SignedProtocolTransaction};
 
 /// Ordered pool for every protocol transaction family.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -78,6 +78,10 @@ impl Mempool {
     }
 
     pub fn with_config(config: MempoolConfig) -> Self {
+        let config = MempoolConfig {
+            market_fee: config.market_fee.max(config.min_relay_fee),
+            ..config
+        };
         Self {
             config,
             ..Self::default()
@@ -104,6 +108,7 @@ impl Mempool {
         if self.transactions.contains_key(&hash) {
             return Err(MempoolError::DuplicateTransaction);
         }
+        ensure_minimum_bounty_rate(&transaction, self.config.min_relay_fee)?;
         self.evict_for_capacity(&transaction, transaction_size)?;
         let qcash_coin_ids = redeem_coin_ids(&transaction);
         if qcash_coin_ids
@@ -220,35 +225,12 @@ impl Mempool {
         self.transactions.get(hash)
     }
 
-    #[cfg(test)]
-    pub(crate) fn insert_for_compact_test(
-        &mut self,
-        transaction: SignedProtocolTransaction,
-    ) -> Result<(), xparq::error::CodecError> {
-        self.transactions.insert(transaction.hash()?, transaction);
-        self.staged = None;
-        Ok(())
-    }
-
     pub fn transactions(&self) -> impl Iterator<Item = &SignedProtocolTransaction> {
         self.transactions.values()
     }
 
-    pub fn transactions_for_family(
-        &self,
-        family: TransactionFamily,
-    ) -> impl Iterator<Item = &SignedProtocolTransaction> {
-        self.transactions
-            .values()
-            .filter(move |transaction| transaction.family() == family)
-    }
-
     pub fn len(&self) -> usize {
         self.transactions.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.transactions.is_empty()
     }
 
     pub fn remove(
@@ -388,9 +370,7 @@ impl Mempool {
                     deferred.push(transaction);
                     continue;
                 }
-                if miner_bounty_rate(&transaction)? < min_bounty_rate
-                    && miner_bounty(&transaction) > 0
-                {
+                if ensure_minimum_bounty_rate(&transaction, min_bounty_rate).is_err() {
                     continue;
                 }
                 if transaction.validity().validate_at(height).is_err() {
@@ -449,6 +429,42 @@ impl Mempool {
             self.remove(&hash)?;
         }
         Ok(())
+    }
+
+    /// Rebuild pending state on a new canonical ledger after a reorganization.
+    /// Original insertion order is retained so valid dependent transactions
+    /// survive, while transactions conflicting with the winning branch drop.
+    pub fn revalidate_after_reorg(
+        &mut self,
+        ledger: &Ledger,
+    ) -> Result<Vec<TransactionHash>, MempoolError> {
+        let candidates =
+            self.insertion_order
+                .iter()
+                .filter_map(|hash| {
+                    self.transactions.get(hash).cloned().map(|transaction| {
+                        (*hash, transaction, self.inserted_at.get(hash).copied())
+                    })
+                })
+                .collect::<Vec<_>>();
+        let config = self.config;
+        *self = Self::with_config(config);
+
+        let mut dropped = Vec::new();
+        for (hash, transaction, inserted_at) in candidates {
+            match self.insert_validated(ledger, transaction) {
+                Ok(inserted_hash) => {
+                    if let Some(inserted_at) = inserted_at {
+                        self.inserted_at.insert(inserted_hash, inserted_at);
+                    }
+                }
+                Err(MempoolError::Serialization(error)) => {
+                    return Err(MempoolError::Serialization(error));
+                }
+                Err(_) => dropped.push(hash),
+            }
+        }
+        Ok(dropped)
     }
 }
 
@@ -521,6 +537,34 @@ fn miner_bounty_rate(transaction: &SignedProtocolTransaction) -> Result<u64, Mem
     Ok(fee_rate(miner_bounty(transaction), virtual_size))
 }
 
+fn required_miner_bounty(
+    transaction: &SignedProtocolTransaction,
+    fee_rate_per_vbyte: u64,
+) -> Result<u64, MempoolError> {
+    let virtual_size = u64::try_from(
+        transaction
+            .virtual_size()
+            .map_err(MempoolError::Serialization)?,
+    )
+    .map_err(|_| MempoolError::FeeTooLow)?;
+    let unit = crate::runtime::params::FEE_RATE_UNIT_BYTES as u64;
+    virtual_size
+        .checked_mul(fee_rate_per_vbyte)
+        .and_then(|fee| fee.checked_add(unit.saturating_sub(1)))
+        .map(|fee| fee / unit.max(1))
+        .ok_or(MempoolError::FeeTooLow)
+}
+
+fn ensure_minimum_bounty_rate(
+    transaction: &SignedProtocolTransaction,
+    fee_rate_per_vbyte: u64,
+) -> Result<(), MempoolError> {
+    if miner_bounty(transaction) < required_miner_bounty(transaction, fee_rate_per_vbyte)? {
+        return Err(MempoolError::FeeTooLow);
+    }
+    Ok(())
+}
+
 fn miner_bounty(transaction: &SignedProtocolTransaction) -> u64 {
     match transaction {
         SignedProtocolTransaction::Transfer(transaction) => transaction
@@ -584,37 +628,38 @@ fn redeem_coin_ids(transaction: &SignedProtocolTransaction) -> Vec<QCashCoinId> 
 mod miner_fee_output_tests {
     use super::*;
     use xparq::consensus::supply::Amount;
-    use xparq::crypto::{Address, dual_address_from_public_keys, generate_keypair, sign};
-    use xparq::transaction::{OutputTarget, SignedTransfer, Transfer, TransferOutput};
+    use xparq::crypto::{
+        Address, TransactionHash, address_from_public_key, generate_keypair, sign,
+    };
+    use xparq::qcash::{
+        QCashCoinFile, QCashWithdrawalMetadata, qcash_redeem_key_commitment_from_secret,
+    };
+    use xparq::transaction::{
+        OutputTarget, QCashTransaction, SignedQCashTransaction, SignedTransfer, Transfer,
+        TransferOutput,
+    };
 
     fn funded_payment(ledger: &mut Ledger, recipient: u8) -> SignedProtocolTransaction {
         let owner = generate_keypair();
-        let authorization = generate_keypair();
-        let sender = dual_address_from_public_keys(&owner.public_key, &authorization.public_key);
+        let sender = address_from_public_key(&owner.public_key);
         ledger
-            .create_account_with_authorization(
-                sender,
-                owner.public_key,
-                authorization.public_key,
-                Amount(100_000),
-            )
+            .create_account_with_authorization(sender, owner.public_key, Amount(100_000))
             .unwrap();
         let input = ledger.xpq_utxos.coins_for_owner(sender).next().unwrap().id;
         let transaction = Transfer::from_outputs(
             sender,
             vec![input],
             vec![
-                TransferOutput::new(Address([recipient; 20]), Amount(1)),
-                TransferOutput::new(sender, Amount(99_999)),
+                TransferOutput::new(Address([recipient; xparq::crypto::ADDRESS_SIZE]), Amount(1)),
+                TransferOutput::new(OutputTarget::BlockMiner, Amount(10_000)),
+                TransferOutput::new(sender, Amount(89_999)),
             ],
         );
         let payload = transaction.signing_bytes().unwrap();
-        SignedTransfer::new_authorized(
+        SignedTransfer::new(
             transaction,
             owner.public_key,
             sign(&owner.secret_key, &payload),
-            authorization.public_key,
-            sign(&authorization.secret_key, &payload),
         )
         .into()
     }
@@ -622,26 +667,18 @@ mod miner_fee_output_tests {
     #[test]
     fn payment_with_miner_fee_output_is_selected_by_fee_rate() {
         let owner = generate_keypair();
-        let authorization = generate_keypair();
-        let sender = dual_address_from_public_keys(&owner.public_key, &authorization.public_key);
+        let sender = address_from_public_key(&owner.public_key);
         let mut ledger = Ledger::new();
         ledger
-            .create_account_with_authorization(
-                sender,
-                owner.public_key,
-                authorization.public_key,
-                Amount(100_000),
-            )
+            .create_account_with_authorization(sender, owner.public_key, Amount(100_000))
             .unwrap();
 
         let sign_transfer = |transaction: Transfer| {
             let payload = transaction.signing_bytes().unwrap();
-            SignedTransfer::new_authorized(
+            SignedTransfer::new(
                 transaction,
                 owner.public_key,
                 sign(&owner.secret_key, &payload),
-                authorization.public_key,
-                sign(&authorization.secret_key, &payload),
             )
         };
         let input = ledger.xpq_utxos.coins_for_owner(sender).next().unwrap().id;
@@ -649,7 +686,7 @@ mod miner_fee_output_tests {
             sender,
             vec![input],
             vec![
-                TransferOutput::new(Address([7; 20]), Amount(10)),
+                TransferOutput::new(Address([7; xparq::crypto::ADDRESS_SIZE]), Amount(10)),
                 TransferOutput::new(OutputTarget::BlockMiner, Amount(10_000)),
                 TransferOutput::new(sender, Amount(89_990)),
             ],
@@ -663,6 +700,104 @@ mod miner_fee_output_tests {
             .unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(miner_bounty(&selected[0]), 10_000);
+    }
+
+    #[test]
+    fn zero_fee_transaction_is_rejected_before_state_reservation() {
+        let mut ledger = Ledger::new();
+        let owner = generate_keypair();
+        let sender = address_from_public_key(&owner.public_key);
+        ledger
+            .create_account_with_authorization(sender, owner.public_key, Amount(100_000))
+            .unwrap();
+        let input = ledger.xpq_utxos.coins_for_owner(sender).next().unwrap().id;
+        let transaction = Transfer::from_outputs(
+            sender,
+            vec![input],
+            vec![TransferOutput::new(
+                Address([0x61; xparq::crypto::ADDRESS_SIZE]),
+                Amount(100_000),
+            )],
+        );
+        let payload = transaction.signing_bytes().unwrap();
+        let signed = SignedTransfer::new_stored(transaction, sign(&owner.secret_key, &payload));
+        let mut mempool = Mempool::new();
+
+        assert_eq!(
+            mempool.insert_validated(&ledger, signed.into()),
+            Err(MempoolError::FeeTooLow)
+        );
+        assert_eq!(mempool.len(), 0);
+    }
+
+    #[test]
+    fn zero_fee_transaction_is_accepted_when_local_policy_allows_it() {
+        let mut ledger = Ledger::new();
+        let owner = generate_keypair();
+        let sender = address_from_public_key(&owner.public_key);
+        ledger
+            .create_account_with_authorization(sender, owner.public_key, Amount(100_000))
+            .unwrap();
+        let input = ledger.xpq_utxos.coins_for_owner(sender).next().unwrap().id;
+        let transaction = Transfer::from_outputs(
+            sender,
+            vec![input],
+            vec![TransferOutput::new(
+                Address([0x65; xparq::crypto::ADDRESS_SIZE]),
+                Amount(100_000),
+            )],
+        );
+        let payload = transaction.signing_bytes().unwrap();
+        let signed = SignedTransfer::new_stored(transaction, sign(&owner.secret_key, &payload));
+        let mut mempool = Mempool::with_config(MempoolConfig {
+            min_relay_fee: 0,
+            market_fee: 0,
+            ..MempoolConfig::default()
+        });
+
+        mempool.insert_validated(&ledger, signed.into()).unwrap();
+        assert_eq!(mempool.len(), 1);
+        assert_eq!(mempool.config().min_relay_fee, 0);
+    }
+
+    #[test]
+    fn zero_fee_qcash_redeem_is_rejected_by_the_same_rate_floor() {
+        let owner = generate_keypair();
+        let signer = address_from_public_key(&owner.public_key);
+        let redeem_secret = [0x62; 32];
+        let metadata = QCashWithdrawalMetadata::with_selected_amounts(
+            &[Amount(100_000)],
+            &[qcash_redeem_key_commitment_from_secret(&redeem_secret)],
+        )
+        .unwrap();
+        let file = QCashCoinFile::new(
+            TransactionHash([0x63; 32]),
+            &metadata.outputs[0],
+            redeem_secret,
+        )
+        .unwrap();
+        let transaction = QCashTransaction::redeem_from_files(
+            signer,
+            vec![TransferOutput::new(
+                Address([0x64; xparq::crypto::ADDRESS_SIZE]),
+                Amount(100_000),
+            )],
+            &[file],
+        )
+        .unwrap();
+        let payload = transaction.signing_bytes().unwrap();
+        let signed = SignedQCashTransaction::new(
+            transaction,
+            owner.public_key,
+            sign(&owner.secret_key, &payload),
+        );
+        let mut mempool = Mempool::new();
+
+        assert_eq!(
+            mempool.insert_validated(&Ledger::new(), signed.into()),
+            Err(MempoolError::FeeTooLow)
+        );
+        assert_eq!(mempool.len(), 0);
     }
 
     #[test]
@@ -682,5 +817,27 @@ mod miner_fee_output_tests {
         assert!(mempool.staged.is_none());
         mempool.insert_validated(&ledger, third).unwrap();
         assert_eq!(mempool.staged_rebuilds, 2);
+    }
+
+    #[test]
+    fn reorg_revalidation_drops_canonical_conflicts_and_keeps_valid_transactions() {
+        let mut ledger = Ledger::new();
+        let conflicted = funded_payment(&mut ledger, 7);
+        let retained = funded_payment(&mut ledger, 8);
+        let conflicted_hash = conflicted.hash().unwrap();
+        let retained_hash = retained.hash().unwrap();
+        let mut mempool = Mempool::new();
+        mempool
+            .insert_validated(&ledger, conflicted.clone())
+            .unwrap();
+        mempool.insert_validated(&ledger, retained).unwrap();
+
+        let mut winning_ledger = ledger.clone();
+        apply_extension(&mut winning_ledger, &conflicted, xparq::block::Height(0)).unwrap();
+        let dropped = mempool.revalidate_after_reorg(&winning_ledger).unwrap();
+
+        assert_eq!(dropped, vec![conflicted_hash]);
+        assert!(!mempool.contains(&conflicted_hash));
+        assert!(mempool.contains(&retained_hash));
     }
 }

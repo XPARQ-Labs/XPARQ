@@ -25,7 +25,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     if data.first().copied().unwrap_or(0) & 2 != 0 {
-        redeem.authorization_proof.auth_signature.0[0] ^= 1;
+        redeem.authorization_proof.signature.0[0] ^= 1;
     }
     let before_redeem = ledger.clone();
     let redeem_block = BlockHash([0x82; xparq::crypto::HASH_SIZE]);

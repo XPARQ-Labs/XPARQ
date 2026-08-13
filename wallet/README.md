@@ -4,7 +4,7 @@
 
 - the `wallet` reusable Rust library for wallet key material and files;
 - the `wallet` command-line executable for accounts, payments, QCash, proofs,
-  explorer queries, protocol events, and rollback recovery.
+  explorer queries, and protocol events.
 
 The wallet does not embed a node or open the node database. It communicates
 with `node` over HTTP RPC.
@@ -34,16 +34,18 @@ available for scripting:
 
 ## Wallet identity and authorization
 
-A wallet contains mnemonic-derived owner keys and a separate authorization
-key derived from its authorization password. The stored address is bound to
-both public keys. Entering a wrong authorization password fails the operation;
-it does not replace or reinitialize the wallet's authorization identity.
+A wallet derives one signing key from the recovery mnemonic and wallet
+passphrase. The stored address is bound to that public key, so restoring the
+same address requires both the same mnemonic and the same wallet passphrase.
+The signing secret key is derived only when needed and is never stored in the
+wallet file.
 
-Mnemonic and authorization-password prompts disable terminal echo. If the
+Mnemonic and wallet-passphrase prompts disable terminal echo. If the
 terminal cannot be placed in hidden-input mode, the wallet fails closed rather
-than echoing secrets. `wallet.json`, its mnemonic, its owner secret, and the authorization password
-are sensitive. Keep backups offline and never commit wallet files to Git. A
-mining node needs only the public payout address, not this file.
+than echoing secrets. `wallet.json` contains the recovery mnemonic in plaintext
+and is therefore highly sensitive. Keep backups offline and never commit wallet
+files to Git. A mining node must use only the public payout address, not this
+file.
 
 ## Shared configuration and RPC
 
@@ -71,16 +73,19 @@ Balance is derived from mature, unspent owned-XPQ outputs. The node's draft
 endpoint selects inputs and deterministic change. A normal paid transfer can
 contain a recipient output, change back to the sender, and an ordinary
 `BlockMiner` output used as the miner payment. Core has no separate fee field.
+Standard nodes apply the same configured per-vbyte relay rate to every
+transaction family. Operators may set that local rate to zero.
 
 Use `balance [address]` for the summarized balance view. Account/explorer RPC
 responses expose the underlying UTXO details needed to audit that total.
 
 ## QCash
 
-Withdrawal creates bearer files named with the denomination and full coin ID:
+Withdrawal creates bearer files named with the flexible XPQ amount and full coin ID:
 
 ```text
 100XPQ_<64_HEX_COIN_ID>.QCash
+29.9XPQ_<64_HEX_COIN_ID>.QCash
 ```
 
 The file contains a private opening secret. Anyone who obtains a valid,
@@ -88,16 +93,28 @@ unredeemed file can redeem it, so protect it like physical cash. The ledger
 stores only the corresponding unredeemed QCash UTXO; successful redemption
 consumes and removes it from the active set. The ledger never stores the bearer
 secret. Explorer history can still report the withdrawal and redemption.
-Redeem uses an address output plus an optional `BlockMiner` output. Automatic
-mode deducts the recommended miner payment from the bearer denomination; core
-only validates output value conservation and has no dedicated fee field.
+Redeem uses an address output plus an optional `BlockMiner` output. Automatic mode
+deducts the recommended miner payment from the bearer amount. Withdraw pays
+its miner output from the selected on-chain XPQ inputs. The same rate per
+virtual byte applies to transfers, withdrawals, full and partial redeems, and
+splits. A redeem sent directly to somebody else's wallet is therefore not a
+lower-rate alternative to an ordinary on-chain transfer; it is cheaper only if
+its actual serialized virtual size is smaller.
+Supplying `--amount` performs a partial redeem: the requested value becomes an
+owned XPQ output and the remainder becomes a new QCash file. `cash split`
+creates multiple independently redeemable bearer files. Each operation is one
+transaction with at most one miner output. Generated files are removed if the
+node rejects the transaction, while the source bearer file remains available
+locally and its spendability is determined by canonical chain state.
 
 Useful commands are:
 
 ```bash
-./target/release/wallet cash withdraw AMOUNT_XPQ --out cash
+./target/release/wallet cash withdraw AMOUNT_XPQ --fee auto --out cash
 ./target/release/wallet cash inspect cash/100XPQ_<COIN_ID>.QCash
 ./target/release/wallet cash redeem cash/100XPQ_<COIN_ID>.QCash --to ADDRESS --fee auto
+./target/release/wallet cash redeem cash/100XPQ_<COIN_ID>.QCash --to ADDRESS --amount 39 --fee 1 --out cash
+./target/release/wallet cash split cash/100XPQ_<COIN_ID>.QCash --amounts 50,29.9 --fee 1 --out cash
 ./target/release/wallet cash track 100XPQ_<COIN_ID>.QCash
 ./target/release/wallet cash list cash
 ./target/release/wallet cash backup cash backup-cash
@@ -108,14 +125,18 @@ QCash file names must use `.QCash` and the full coin ID. Backup and recovery
 operate on QCash bearer files; they do not recreate a missing bearer secret
 from the ledger.
 
-## Trusted proofs and rollback recovery
+Event explorer reports partial redeems as `qcash_redeemed`, including the XPQ
+recipient amount and total `qcash_change_amount`. Pure splits use
+`qcash_split`.
+
+## Trusted proofs and automatic reorganization recovery
 
 `wallet proof account`, `wallet proof qcash`, and `wallet proof status` verify
 state against authenticated header checkpoints saved beside the wallet as
-`<wallet-path>.checkpoint`. Public wallet rollback commands can list, inspect,
-and locally verify node-reported recovery proofs. Retrying a rollback issue is
-an authenticated node-admin operation and is intentionally not exposed by the
-wallet CLI.
+`<wallet-path>.checkpoint`. When a reorganization disconnects a transaction,
+the node durably journals the original signed transaction and automatically
+revalidates it into the mempool. No wallet command, proof bundle, bearer file,
+or second signature is needed for this retry.
 
 ## Timestamped diagnostics
 

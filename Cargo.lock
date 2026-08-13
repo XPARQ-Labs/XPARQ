@@ -2482,7 +2482,7 @@ dependencies = [
 
 [[package]]
 name = "node"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "async-trait",
  "axum",
@@ -4110,11 +4110,9 @@ checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 
 [[package]]
 name = "wallet"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
- "argon2",
  "bip39",
- "chacha20poly1305 0.11.0",
  "getrandom 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "hex",
  "serde",
@@ -4509,7 +4507,7 @@ dependencies = [
 
 [[package]]
 name = "xparq"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "argon2",
  "bech32",

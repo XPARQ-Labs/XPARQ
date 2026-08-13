@@ -52,7 +52,7 @@ async fn rpc_faucet(
     Json(request): Json<FaucetRequest>,
 ) -> impl IntoResponse {
     use xparq::consensus::supply::{Amount, XPQ};
-    use xparq::genesis::{FAUCET_MAX_REQUEST, faucet_keypairs};
+    use xparq::genesis::{FAUCET_MAX_REQUEST, faucet_address, faucet_keypair};
     use xparq::transaction::{SignedTransfer as SignedTransaction, Transfer as Transaction};
 
     let recipient = match parse_address_string(&request.address) {
@@ -73,18 +73,17 @@ async fn rpc_faucet(
         }
     };
 
-    let (owner, authorization) = faucet_keypairs();
-    let faucet =
-        xparq::crypto::dual_address_from_public_keys(&owner.public_key, &authorization.public_key);
+    let owner = faucet_keypair();
+    let faucet = faucet_address();
     let transaction = match state.node.lock() {
         Ok(node) => {
-            let Some(account) = node.account_view(&faucet) else {
+            let Ok(balance) = node.ledger.xpq_utxos.balance(faucet) else {
                 return rpc_error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "faucet account is absent; reset this test-network database to the faucet genesis",
                 );
             };
-            if account.balance.0 < amount.0 {
+            if balance.0 < amount.0 {
                 return rpc_error(StatusCode::SERVICE_UNAVAILABLE, "faucet balance exhausted");
             }
             let height = node.tip_height().unwrap_or(xparq::block::Height(0));
@@ -121,12 +120,10 @@ async fn rpc_faucet(
         Ok(payload) => payload,
         Err(error) => return rpc_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     };
-    let signed = SignedTransaction::new_authorized(
+    let signed = SignedTransaction::new(
         transaction,
         owner.public_key,
         xparq::crypto::sign(&owner.secret_key, &payload),
-        authorization.public_key,
-        xparq::crypto::sign(&authorization.secret_key, &payload),
     );
     let hash = match signed.hash() {
         Ok(hash) => hash,

@@ -2,7 +2,7 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 use xparq::crypto::SignatureContext;
 use xparq::crypto::sqisign_candidate::{
-    DualAuthorization, KeyPair, generate_keypair, sign_dual, verify_dual,
+    KeyPair, Signature, generate_keypair, sign as sign_sqisign, verify as verify_sqisign,
 };
 
 const MESSAGE: &[u8] = b"xparq sqisign level 5 candidate benchmark";
@@ -25,15 +25,13 @@ fn main() {
         .filter(|value| *value > 0)
         .unwrap_or(3);
 
-    let (owner, owner_keygen) = timed(|| generate_keypair().expect("owner key generation"));
-    let (authorization, authorization_keygen) =
-        timed(|| generate_keypair().expect("authorization key generation"));
-    let (signatures, initial_sign) = timed(|| sign(&owner, &authorization));
-    assert!(verify(&owner, &authorization, &signatures));
+    let (signer, keygen) = timed(|| generate_keypair().expect("key generation"));
+    let (signature, initial_sign) = timed(|| sign(&signer, MESSAGE));
+    assert!(verify(&signer, MESSAGE, &signature));
 
     let mut sign_total = Duration::ZERO;
     for _ in 0..iterations {
-        let (_, elapsed) = timed(|| black_box(sign(&owner, &authorization)));
+        let (_, elapsed) = timed(|| black_box(sign(&signer, MESSAGE)));
         sign_total += elapsed;
     }
 
@@ -41,24 +39,23 @@ fn main() {
     for _ in 0..iterations {
         let (_, elapsed) = timed(|| {
             black_box(verify(
-                black_box(&owner),
-                black_box(&authorization),
-                black_box(&signatures),
+                black_box(&signer),
+                black_box(MESSAGE),
+                black_box(&signature),
             ))
         });
         verify_total += elapsed;
     }
 
     println!("SQIsign Level 5 candidate ({iterations} measured iterations)");
-    println!("owner keygen:          {owner_keygen:?}");
-    println!("authorization keygen:  {authorization_keygen:?}");
-    println!("initial dual sign:      {initial_sign:?}");
+    println!("keygen:                {keygen:?}");
+    println!("initial sign:          {initial_sign:?}");
     println!(
-        "average dual sign:      {:?}",
+        "average sign:          {:?}",
         average(sign_total, iterations)
     );
     println!(
-        "average dual verify:    {:?}",
+        "average verify:        {:?}",
         average(verify_total, iterations)
     );
 
@@ -68,55 +65,37 @@ fn main() {
         .filter(|value| *value >= 2)
         .unwrap_or(0);
     if timing_samples > 0 {
-        report_timing_diagnostic(&owner, &authorization, timing_samples);
+        report_timing_diagnostic(&signer, timing_samples);
     }
 }
 
-fn sign(owner: &KeyPair, authorization: &KeyPair) -> DualAuthorization {
-    sign_dual(
+fn sign(signer: &KeyPair, message: &[u8]) -> Signature {
+    sign_sqisign(
         SignatureContext::ProtocolTransaction,
-        &owner.secret_key,
-        &authorization.secret_key,
-        MESSAGE,
+        &signer.secret_key,
+        message,
     )
-    .expect("dual signing")
+    .expect("signing")
 }
 
-fn verify(owner: &KeyPair, authorization: &KeyPair, signatures: &DualAuthorization) -> bool {
-    verify_dual(
+fn verify(signer: &KeyPair, message: &[u8], signature: &Signature) -> bool {
+    verify_sqisign(
         SignatureContext::ProtocolTransaction,
-        &owner.public_key,
-        &authorization.public_key,
-        MESSAGE,
-        signatures,
+        &signer.public_key,
+        message,
+        signature,
     )
 }
 
-fn report_timing_diagnostic(owner: &KeyPair, authorization: &KeyPair, samples: usize) {
+fn report_timing_diagnostic(signer: &KeyPair, samples: usize) {
     let class_a = [0_u8; 32];
     let class_b = [0xff_u8; 32];
     let mut timings_a = Vec::with_capacity(samples);
     let mut timings_b = Vec::with_capacity(samples);
 
     for _ in 0..samples {
-        let (_, elapsed_a) = timed(|| {
-            sign_dual(
-                SignatureContext::ProtocolTransaction,
-                &owner.secret_key,
-                &authorization.secret_key,
-                &class_a,
-            )
-            .expect("timing class A signing")
-        });
-        let (_, elapsed_b) = timed(|| {
-            sign_dual(
-                SignatureContext::ProtocolTransaction,
-                &owner.secret_key,
-                &authorization.secret_key,
-                &class_b,
-            )
-            .expect("timing class B signing")
-        });
+        let (_, elapsed_a) = timed(|| sign(signer, &class_a));
+        let (_, elapsed_b) = timed(|| sign(signer, &class_b));
         timings_a.push(elapsed_a.as_secs_f64());
         timings_b.push(elapsed_b.as_secs_f64());
     }
