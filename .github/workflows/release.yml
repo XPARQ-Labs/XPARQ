@@ -73,6 +73,10 @@ jobs:
 
       - name: Run Windows package tests
         if: runner.os == 'Windows'
+        env:
+          # LMDB eagerly reserves its map on Windows. Keep test databases small
+          # enough for the hosted runner while retaining the full test suite.
+          XPARQ_LMDB_MAP_SIZE_BYTES: 67108864
         run: >-
           cargo test --locked
           --target ${{ matrix.target }}

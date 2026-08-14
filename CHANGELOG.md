@@ -23,6 +23,8 @@ No unreleased changes yet.
 - Renamed the user-facing `Wallet passphrase` prompt and documentation to
   `Wallet password` and clarified that it is free-form key-derivation input,
   not a mnemonic word-count selection or encryption of the stored mnemonic.
+- Bounded temporary LMDB maps during Windows release tests so the full node and
+  wallet test suite fits on the hosted runner without changing runtime defaults.
 
 ## [0.2.12] - 2026-08-13
 
