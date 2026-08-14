@@ -9,6 +9,10 @@ the version number alone must not be treated as a database migration mechanism.
 
 ## [Unreleased]
 
+No unreleased changes yet.
+
+## [0.2.14] - 2026-08-13
+
 ### Fixed
 
 - Reused one 64 MiB Argon2id workspace across mining nonce attempts instead
