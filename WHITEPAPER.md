@@ -287,7 +287,7 @@ experimental blockchain-test backend on devnet and is not an active mainnet
 consensus scheme.
 
 The current wallet derives one signing key from the mnemonic entropy together
-with the wallet passphrase. Hardware-wallet integration, address-preserving
+with the wallet password. Hardware-wallet integration, address-preserving
 key rotation, and specialized recovery policies are not active consensus
 features.
 

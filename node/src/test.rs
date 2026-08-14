@@ -73,6 +73,45 @@ fn deeper_cumulative_work_branch_replaces_locally_finalized_display_chain() {
 }
 
 #[test]
+fn common_ancestor_ignores_known_side_branch_hashes() {
+    let genesis = xparq::genesis::genesis_ledger().unwrap();
+    let mut canonical = genesis.clone();
+    let mut side = genesis;
+    let canonical_miner = Address([0x31; xparq::crypto::ADDRESS_SIZE]);
+    let side_miner = Address([0x32; xparq::crypto::ADDRESS_SIZE]);
+
+    for nonce in 1..=2 {
+        let block = next_empty_block(&canonical, canonical_miner, nonce);
+        canonical.apply_block(block).unwrap();
+    }
+    let side_block = next_empty_block(&side, side_miner, 100);
+    let side_hash = side_block.hash().unwrap();
+    side.apply_block(side_block.clone()).unwrap();
+    let genesis_hash = canonical.chain.header(&Height(0)).unwrap().hash().unwrap();
+
+    let mut node = runtime::node::Node::temporary(
+        canonical,
+        xparq::consensus::Consensus::with_default_config(),
+    )
+    .unwrap();
+    node.apply_block(side_block).unwrap();
+
+    let response = runtime::network::handle_message(
+        &mut node,
+        runtime::network::NetworkMessage::GetCommonAncestor {
+            locator: vec![side_hash, genesis_hash],
+        },
+    )
+    .unwrap();
+    let Some(runtime::network::NetworkMessage::CommonAncestor(Some(ancestor))) = response else {
+        panic!("expected a canonical common ancestor");
+    };
+
+    assert_eq!(ancestor.height, Height(0));
+    assert_eq!(ancestor.hash, genesis_hash);
+}
+
+#[test]
 fn protocol_event_filter_accepts_current_emission_name() {
     assert!(rpc::api::is_protocol_event_kind("emission_distributed"));
     assert!(!rpc::api::is_protocol_event_kind("coinbase_paid"));

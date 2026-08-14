@@ -35,17 +35,22 @@ available for scripting:
 ## Wallet identity and authorization
 
 A wallet derives one signing key from the recovery mnemonic and wallet
-passphrase. The stored address is bound to that public key, so restoring the
-same address requires both the same mnemonic and the same wallet passphrase.
+password. The stored address is bound to that public key, so restoring the
+same address requires both the same mnemonic and the same wallet password.
 The signing secret key is derived only when needed and is never stored in the
 wallet file.
 
-Mnemonic and wallet-passphrase prompts disable terminal echo. If the
+Mnemonic and wallet-password prompts disable terminal echo. If the
 terminal cannot be placed in hidden-input mode, the wallet fails closed rather
 than echoing secrets. `wallet.json` contains the recovery mnemonic in plaintext
 and is therefore highly sensitive. Keep backups offline and never commit wallet
 files to Git. A mining node must use only the public payout address, not this
 file.
+
+The wallet password is free-form text, not the mnemonic word count. For
+example, entering `12` means the literal password `12`; it does not select a
+12-word mnemonic. The password participates in signing-key derivation and does
+not encrypt the plaintext mnemonic currently stored in `wallet.json`.
 
 ## Shared configuration and RPC
 

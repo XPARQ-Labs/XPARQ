@@ -74,7 +74,7 @@ pub fn wallet_address_from_file_bytes(bytes: &[u8]) -> Result<Address, String> {
 
 pub fn wallet_from_file_bytes(bytes: &[u8], password: &str) -> Result<Wallet, String> {
     if password.is_empty() {
-        return Err("wallet passphrase must not be empty".to_string());
+        return Err("wallet password must not be empty".to_string());
     }
     let wallet_file: WalletFile = serde_json::from_slice(bytes)
         .map_err(|error| format!("failed to parse wallet: {error}"))?;
@@ -85,7 +85,7 @@ pub fn wallet_from_file_bytes(bytes: &[u8], password: &str) -> Result<Wallet, St
     let stored_address = address_from_string(&wallet_file.address)
         .map_err(|error| format!("invalid wallet address: {error}"))?;
     if wallet.address != stored_address {
-        return Err("wallet passphrase does not match this wallet".to_string());
+        return Err("wallet password does not match this wallet".to_string());
     }
     wallet.mnemonic = Some(wallet_file.mnemonic.clone());
     Ok(wallet)
@@ -103,10 +103,10 @@ pub fn generate_xparq_mnemonic(words: usize) -> Result<Zeroizing<String>, String
     encode_xparq_mnemonic(&entropy).map(Zeroizing::new)
 }
 
-pub fn wallet_from_xparq_mnemonic(phrase: &str, wallet_passphrase: &str) -> Result<Wallet, String> {
+pub fn wallet_from_xparq_mnemonic(phrase: &str, wallet_password: &str) -> Result<Wallet, String> {
     let entropy = decode_xparq_mnemonic(phrase)?;
     let mut key_material = Zeroizing::new(entropy.to_vec());
-    key_material.extend_from_slice(wallet_passphrase.as_bytes());
+    key_material.extend_from_slice(wallet_password.as_bytes());
     let spend_seed = Zeroizing::new(tagged_wallet_hash(XPARQ_MNEMONIC_SPEND_TAG, &key_material));
     let spend = keypair_from_seed(&spend_seed);
     Ok(Wallet::from_keys(spend.public_key, spend.secret_key))
@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(decoded.public_key, wallet.public_key);
         assert_eq!(
             wallet_from_file_bytes(&encoded, "wrong password").unwrap_err(),
-            "wallet passphrase does not match this wallet"
+            "wallet password does not match this wallet"
         );
 
         let json: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn mnemonic_restore_requires_same_wallet_passphrase_for_same_address() {
+    fn mnemonic_restore_requires_same_wallet_password_for_same_address() {
         let mnemonic = encode_xparq_mnemonic(&[9; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
         let mut first = wallet_from_xparq_mnemonic(&mnemonic, "first password").unwrap();
         first.mnemonic = Some(mnemonic.clone());

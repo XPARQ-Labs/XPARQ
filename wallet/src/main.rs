@@ -135,7 +135,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn different_wallet_passphrase_does_not_modify_wallet_file() {
+    fn different_wallet_password_does_not_modify_wallet_file() {
         let mnemonic = xparq_wallet::generate_xparq_mnemonic(12).unwrap();
         let mut wallet =
             xparq_wallet::wallet_from_xparq_mnemonic(&mnemonic, "correct password").unwrap();
@@ -153,7 +153,7 @@ mod tests {
         save_wallet(&wallet_path_string, &wallet).unwrap();
         let bytes_before = fs::read(&wallet_path).unwrap();
         let error = load_wallet_with_password(&wallet_path_string, "wrong password").unwrap_err();
-        assert!(error.ends_with("wallet passphrase does not match this wallet"));
+        assert!(error.ends_with("wallet password does not match this wallet"));
         assert_eq!(fs::read(&wallet_path).unwrap(), bytes_before);
         fs::remove_file(wallet_path).unwrap();
     }

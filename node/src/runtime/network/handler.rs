@@ -83,14 +83,27 @@ pub fn handle_message(
             Ok(Some(NetworkMessage::BlockHeaders(headers)))
         }
         NetworkMessage::GetCommonAncestor { locator } => {
-            let ancestor = locator.into_iter().find_map(|hash| {
-                let indexed = node.fork_choice.get(&hash)?;
-                Some(TipInfo {
+            let mut ancestor = None;
+            for hash in locator {
+                let Some(indexed) = node.fork_choice.get(&hash) else {
+                    continue;
+                };
+                let Some(canonical_header) = node.ledger.chain.header(&indexed.height) else {
+                    continue;
+                };
+                let canonical_hash = canonical_header
+                    .hash()
+                    .map_err(|error| NetworkError::Serialization(std::io::Error::other(error)))?;
+                if canonical_hash != hash {
+                    continue;
+                }
+                ancestor = Some(TipInfo {
                     height: indexed.height,
                     hash,
                     work: indexed.cumulative_work.to_be_limbs(),
-                })
-            });
+                });
+                break;
+            }
             Ok(Some(NetworkMessage::CommonAncestor(ancestor)))
         }
         NetworkMessage::CommonAncestor(_) => Ok(None),

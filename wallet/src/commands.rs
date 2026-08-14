@@ -2,7 +2,7 @@ fn wallet_new(args: &[String]) -> Result<(), String> {
     let show_secret = args.iter().any(|arg| arg == "--show-secret");
     let mut output_path = DEFAULT_WALLET_PATH.to_string();
     let mut mnemonic_words = XPARQ_MNEMONIC_DEFAULT_WORDS;
-    let mut wallet_passphrase = None;
+    let mut wallet_password = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -13,7 +13,7 @@ fn wallet_new(args: &[String]) -> Result<(), String> {
             }
             "--password" | "--auth-password" => {
                 index += 1;
-                wallet_passphrase = Some(required_option(args, index, "--password")?);
+                wallet_password = Some(required_option(args, index, "--password")?);
             }
             value if value.starts_with("-") => {
                 return Err(format!("unknown wallet new option `{value}`"));
@@ -22,14 +22,14 @@ fn wallet_new(args: &[String]) -> Result<(), String> {
         }
         index += 1;
     }
-    let wallet_passphrase = match wallet_passphrase {
+    let wallet_password = match wallet_password {
         Some(password) => Zeroizing::new(password),
-        None => prompt_hidden("Wallet passphrase")?,
+        None => prompt_hidden("Wallet password")?,
     };
-    if wallet_passphrase.is_empty() {
-        return Err("wallet passphrase must not be empty".to_string());
+    if wallet_password.is_empty() {
+        return Err("wallet password must not be empty".to_string());
     }
-    let result = create_mnemonic_wallet_file(&output_path, mnemonic_words, &wallet_passphrase);
+    let result = create_mnemonic_wallet_file(&output_path, mnemonic_words, &wallet_password);
     let (wallet, mnemonic) = result?;
 
     let address_str = wallet_address_string(&wallet).to_string();
@@ -37,7 +37,7 @@ fn wallet_new(args: &[String]) -> Result<(), String> {
     println!("Wallet successfully saved to `{output_path}`");
     println!("address: {address_str}");
     println!("mnemonic: {}", mnemonic.as_str());
-    println!("recovery: mnemonic and wallet passphrase restore this address");
+    println!("recovery: mnemonic and wallet password restore this address");
     println!("signing key: derived when needed and never stored in the wallet file");
     if show_secret {
         let secret_key_hex = Zeroizing::new(hex::encode(wallet.secret_key.0));
@@ -57,7 +57,7 @@ fn parse_mnemonic_words(value: Option<&String>) -> Result<usize, String> {
 
 fn wallet_restore_mnemonic(args: &[String]) -> Result<(), String> {
     let mut mnemonic = None;
-    let mut wallet_passphrase = None;
+    let mut wallet_password = None;
     let mut output_path = DEFAULT_IMPORTED_WALLET_PATH.to_string();
     let mut index = 0;
     while index < args.len() {
@@ -68,7 +68,7 @@ fn wallet_restore_mnemonic(args: &[String]) -> Result<(), String> {
             }
             "--password" | "--auth-password" => {
                 index += 1;
-                wallet_passphrase = Some(required_option(args, index, "--password")?);
+                wallet_password = Some(required_option(args, index, "--password")?);
             }
             value if value.starts_with('-') => {
                 return Err(format!("unknown wallet restore-mnemonic option `{value}`"));
@@ -81,14 +81,14 @@ fn wallet_restore_mnemonic(args: &[String]) -> Result<(), String> {
         Some(value) => value,
         None => prompt_hidden("Mnemonic")?.to_string(),
     });
-    let wallet_passphrase = match wallet_passphrase {
+    let wallet_password = match wallet_password {
         Some(password) => Zeroizing::new(password),
-        None => prompt_hidden("Wallet passphrase")?,
+        None => prompt_hidden("Wallet password")?,
     };
-    if wallet_passphrase.is_empty() {
-        return Err("wallet passphrase must not be empty".to_string());
+    if wallet_password.is_empty() {
+        return Err("wallet password must not be empty".to_string());
     }
-    let result = restore_mnemonic_wallet_file(&output_path, &mnemonic, &wallet_passphrase);
+    let result = restore_mnemonic_wallet_file(&output_path, &mnemonic, &wallet_password);
     let wallet = result?;
     println!("Wallet successfully restored to `{output_path}`");
     println!("address: {}", wallet_address_string(&wallet));
@@ -2008,9 +2008,9 @@ fn submit_wallet_transfer(
     requested_fee: TransferFee,
     rpc_addr: &str,
     submit: bool,
-    wallet_passphrase: Option<Zeroizing<String>>,
+    wallet_password: Option<Zeroizing<String>>,
 ) -> Result<(), String> {
-    let wallet = match wallet_passphrase.as_ref() {
+    let wallet = match wallet_password.as_ref() {
         Some(password) => load_wallet_with_password(wallet_path, password)?,
         _ => load_wallet(wallet_path)?,
     };
@@ -2261,7 +2261,7 @@ fn select_xpq_inputs(
 }
 
 fn load_wallet(path: &str) -> Result<Wallet, String> {
-    let password = prompt_hidden("Wallet passphrase")?;
+    let password = prompt_hidden("Wallet password")?;
     load_wallet_with_password(path, &password)
 }
 
@@ -2713,7 +2713,7 @@ Defaults:
   Wallet path: wallet.json
   Shared config: ${CONFIG_FILE_ENV} or {DEFAULT_SHARED_CONFIG_PATH}
   RPC address: --rpc, ${RPC_ADDR_ENV}, shared config, then {DEFAULT_WALLET_RPC_ADDR}
-  Wallet files contain version, public address, and plaintext mnemonic. The same mnemonic and wallet passphrase restore the same address; derived keys are never stored.
+  Wallet files contain version, public address, and plaintext mnemonic. The same mnemonic and wallet password restore the same address; derived keys are never stored.
 "
     );
 }

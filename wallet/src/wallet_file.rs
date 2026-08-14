@@ -16,10 +16,10 @@ fn save_wallet(path: &str, wallet: &Wallet) -> Result<(), String> {
 fn create_mnemonic_wallet_file(
     path: &str,
     words: usize,
-    wallet_passphrase: &str,
+    wallet_password: &str,
 ) -> Result<(Wallet, Zeroizing<String>), String> {
     let mnemonic = generate_xparq_mnemonic(words)?;
-    let mut wallet = wallet_from_xparq_mnemonic(&mnemonic, wallet_passphrase)?;
+    let mut wallet = wallet_from_xparq_mnemonic(&mnemonic, wallet_password)?;
     wallet.mnemonic = Some(mnemonic.to_string());
     save_wallet(path, &wallet)?;
     Ok((wallet, mnemonic))
@@ -28,9 +28,9 @@ fn create_mnemonic_wallet_file(
 fn restore_mnemonic_wallet_file(
     path: &str,
     mnemonic: &str,
-    wallet_passphrase: &str,
+    wallet_password: &str,
 ) -> Result<Wallet, String> {
-    let mut wallet = wallet_from_xparq_mnemonic(mnemonic, wallet_passphrase)?;
+    let mut wallet = wallet_from_xparq_mnemonic(mnemonic, wallet_password)?;
     wallet.mnemonic = Some(mnemonic.to_string());
     save_wallet(path, &wallet)?;
     Ok(wallet)
