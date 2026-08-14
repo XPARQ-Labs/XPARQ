@@ -289,6 +289,28 @@ pub const POW_ARGON2_ITERATIONS: u32 = 1;
 /// Argon2id proof-of-work parallelism. This is a consensus parameter.
 pub const POW_ARGON2_LANES: u32 = 2;
 
+/// Reusable backing memory for one Argon2id proof-of-work evaluation.
+///
+/// Keeping this allocation across nonce attempts prevents the system allocator
+/// from retaining a new 64 MiB allocation for every mining attempt.
+pub struct PoWMemory {
+    blocks: Vec<argon2::Block>,
+}
+
+impl PoWMemory {
+    pub fn new() -> Self {
+        Self {
+            blocks: vec![argon2::Block::default(); POW_ARGON2_MEMORY_KIB as usize],
+        }
+    }
+}
+
+impl Default for PoWMemory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Evaluates the fixed XPARQ Argon2id work function over an already
 /// domain-separated seed and salt.
 pub(crate) fn argon2id_pow_hash(
@@ -306,6 +328,26 @@ pub(crate) fn argon2id_pow_hash(
     let mut output = [0_u8; POW_HASH_SIZE];
     argon2
         .hash_password_into(seed, salt, &mut output)
+        .map_err(|_| CryptoError::PoWHashFailed)?;
+    Ok(PoWHash(output))
+}
+
+pub(crate) fn argon2id_pow_hash_with_memory(
+    seed: &[u8; HASH_SIZE],
+    salt: &[u8; HASH_SIZE],
+    memory: &mut PoWMemory,
+) -> Result<PoWHash, CryptoError> {
+    let params = argon2::Params::new(
+        POW_ARGON2_MEMORY_KIB,
+        POW_ARGON2_ITERATIONS,
+        POW_ARGON2_LANES,
+        Some(POW_HASH_SIZE),
+    )
+    .map_err(|_| CryptoError::InvalidPoWParameters)?;
+    let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let mut output = [0_u8; POW_HASH_SIZE];
+    argon2
+        .hash_password_into_with_memory(seed, salt, &mut output, &mut memory.blocks)
         .map_err(|_| CryptoError::PoWHashFailed)?;
     Ok(PoWHash(output))
 }

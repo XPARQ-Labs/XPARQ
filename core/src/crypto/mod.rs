@@ -22,8 +22,8 @@ pub use agility::{
 };
 pub use hash::{
     BlockHash, HASH_SIZE, Hash, HashBytes, HashDomain, MerkleHash, POW_ARGON2_ITERATIONS,
-    POW_ARGON2_LANES, POW_ARGON2_MEMORY_KIB, POW_HASH_SIZE, PoWHash, PoWHashBytes, PreviousHash,
-    StateRoot, TransactionHash, domain_hash, hash_bytes, hash_meets_difficulty,
+    POW_ARGON2_LANES, POW_ARGON2_MEMORY_KIB, POW_HASH_SIZE, PoWHash, PoWHashBytes, PoWMemory,
+    PreviousHash, StateRoot, TransactionHash, domain_hash, hash_bytes, hash_meets_difficulty,
 };
 pub use keygen::{
     CachedVerifyingKey, KeyPair, PUBLIC_KEY_SIZE, PublicKey, PublicKeyBytes, SECRET_KEY_SIZE,

@@ -1,7 +1,7 @@
 use crate::runtime::mempool::Mempool;
 use xparq::block::{Block, BlockError, EmissionTransaction, Nonce};
 use xparq::consensus::{Consensus, ConsensusError};
-use xparq::crypto::Address;
+use xparq::crypto::{Address, PoWMemory};
 use xparq::genesis::GenesisError;
 use xparq::genesis::create_genesis_block;
 use xparq::ledger::{Ledger, LedgerError};
@@ -106,6 +106,7 @@ pub fn mine_prepared_block_until_with_attempts(
     } else {
         config.max_attempts
     };
+    let mut pow_memory = (config.difficulty != 0).then(PoWMemory::new);
     for attempt in 0..max_attempts {
         if attempt % 1024 == 0 && should_stop() {
             return Ok((None, attempt));
@@ -116,7 +117,8 @@ pub fn mine_prepared_block_until_with_attempts(
             return Ok((Some(MiningResult { block, attempts }), attempts));
         }
 
-        let hash = consensus.pow_hash(&block)?;
+        let hash = consensus
+            .pow_hash_with_memory(&block, pow_memory.get_or_insert_with(PoWMemory::new))?;
         if consensus
             .validate_pow_hash_with_difficulty(&hash, config.difficulty)
             .is_ok()

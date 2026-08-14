@@ -6,9 +6,10 @@
 
 use crate::block::Header;
 use crate::codec::block_header_bytes;
-use crate::crypto::hash::argon2id_pow_hash;
+use crate::crypto::hash::{argon2id_pow_hash, argon2id_pow_hash_with_memory};
 use crate::crypto::{
-    HASH_SIZE, Hash, HashDomain, PoWHash, PreviousHash, domain_hash, hash_meets_difficulty,
+    HASH_SIZE, Hash, HashDomain, PoWHash, PoWMemory, PreviousHash, domain_hash,
+    hash_meets_difficulty,
 };
 use crate::error::{ConsensusError, CryptoError};
 use crate::genesis::CURRENT_CHAIN_PARAMS;
@@ -33,6 +34,18 @@ pub fn pow_salt(chain_id: u32, previous_hash: &PreviousHash) -> Hash {
 /// Calculates the active network's 256-bit Argon2id proof-of-work hash.
 pub fn calculate_work(header: &Header) -> Result<PoWHash, ConsensusError> {
     calculate_work_for_chain(header, CURRENT_CHAIN_PARAMS.chain_id)
+}
+
+/// Calculates proof of work using caller-owned Argon2id memory.
+///
+/// Miners should retain the memory across nonce attempts.
+pub fn calculate_work_with_memory(
+    header: &Header,
+    memory: &mut PoWMemory,
+) -> Result<PoWHash, ConsensusError> {
+    let seed = pow_seed(header)?;
+    let salt = pow_salt(CURRENT_CHAIN_PARAMS.chain_id, &header.previous_hash);
+    argon2id_pow_hash_with_memory(&seed.0, &salt.0, memory).map_err(map_crypto_error)
 }
 
 fn calculate_work_for_chain(header: &Header, chain_id: u32) -> Result<PoWHash, ConsensusError> {
@@ -128,6 +141,17 @@ mod tests {
         assert_ne!(
             original,
             calculate_work_for_chain(&changed_parent, XPARQ_CHAIN.chain_id).unwrap()
+        );
+    }
+
+    #[test]
+    fn reusable_memory_produces_the_canonical_work_hash() {
+        let header = vector_header();
+        let expected = calculate_work(&header).unwrap();
+        let mut memory = PoWMemory::new();
+        assert_eq!(
+            calculate_work_with_memory(&header, &mut memory).unwrap(),
+            expected
         );
     }
 

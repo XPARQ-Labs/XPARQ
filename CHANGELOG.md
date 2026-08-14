@@ -9,7 +9,13 @@ the version number alone must not be treated as a database migration mechanism.
 
 ## [Unreleased]
 
-No unreleased changes yet.
+### Fixed
+
+- Reused one 64 MiB Argon2id workspace across mining nonce attempts instead
+  of allocating a new workspace for every hash. This prevents the system
+  allocator from retaining multiple gigabytes of anonymous resident memory
+  during continuous mining without changing proof-of-work output or consensus
+  parameters.
 
 ## [0.2.13] - 2026-08-13
 

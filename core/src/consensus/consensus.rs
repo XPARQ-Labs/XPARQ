@@ -191,6 +191,14 @@ impl Consensus {
         crate::consensus::calculate_work(&block.header)
     }
 
+    pub fn pow_hash_with_memory(
+        &self,
+        block: &Block,
+        memory: &mut crate::crypto::PoWMemory,
+    ) -> Result<PoWHash, ConsensusError> {
+        crate::consensus::calculate_work_with_memory(&block.header, memory)
+    }
+
     pub fn proof_of_work_hash(&self, block: &Block) -> Result<PoWHash, ConsensusError> {
         self.pow_hash(block)
     }

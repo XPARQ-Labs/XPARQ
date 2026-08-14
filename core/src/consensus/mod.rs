@@ -10,7 +10,9 @@ pub use consensus::{
     Consensus, ConsensusConfig, DIFFICULTY_START, GENESIS_DIFFICULTY, MAX_DIFFICULTY,
     MIN_DIFFICULTY,
 };
-pub use pow::{POW_ALGORITHM, calculate_work, pow_salt, pow_seed, verify_pow};
+pub use pow::{
+    POW_ALGORITHM, calculate_work, calculate_work_with_memory, pow_salt, pow_seed, verify_pow,
+};
 pub use supply::{
     BASE_BLOCK_REWARD, BLOCK_REWARD_STEP, MAX_BLOCK_REWARD, MIN_BLOCK_REWARD, base_block_reward,
 };
