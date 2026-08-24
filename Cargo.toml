@@ -42,6 +42,8 @@ chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["
 ctrlc = "3.4"
 futures-util = "0.3"
 getrandom = { version = "0.4.3", default-features = false }
+fn-dsa = { version = "0.4.0", default-features = false }
+rand_core_06 = { package = "rand_core", version = "0.6.4", features = ["getrandom"] }
 hex = "0.4"
 igd-next = "0.16"
 redb = "4.2.0"

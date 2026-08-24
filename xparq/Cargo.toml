@@ -28,6 +28,7 @@ testnet = [
     "xparq-genesis/testnet",
 ]
 devnet = ["sqisign-blockchain-test"]
+falcon-candidate = ["xparq-crypto/falcon-candidate"]
 sqisign-blockchain-test = [
     "xparq-crypto/sqisign-blockchain-test",
     "xparq-coin/sqisign-blockchain-test",

@@ -6,7 +6,7 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-#[cfg(feature = "sqisign-blockchain-test")]
+#[cfg(any(feature = "sqisign-blockchain-test", feature = "falcon-candidate"))]
 pub mod candidate;
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -17,6 +17,8 @@ pub enum SignatureScheme {
     MlDsa65 = 2,
     MlDsa87 = 3,
     SqisignLevel5 = 4,
+    Falcon512 = 5,
+    Falcon1024 = 6,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]

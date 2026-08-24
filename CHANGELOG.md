@@ -14,6 +14,8 @@
 - Added wallet history, paginated UTXO tracking, QCash partial redeem/change,
   and one-amount split behavior.
 - Migrated release packaging to `xparq-runtime` and `wallet`.
+- Added inactive FN-DSA/Falcon-512 (level I) and Falcon-1024 (level V)
+  crypto-agility candidates behind `falcon-candidate`; no consensus activation.
 - Retired old Docker, tutorial, roadmap, whitepaper, and legacy fuzzing files
   because they described the removed architecture. Current behavior lives in
   the root, runtime, and wallet READMEs.

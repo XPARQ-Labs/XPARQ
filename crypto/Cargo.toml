@@ -11,6 +11,7 @@ mainnet = []
 testnet = []
 devnet = ["sqisign-blockchain-test"]
 sqisign-blockchain-test = ["dep:rand_10", "dep:sqisign_rs", "dep:chacha20"]
+falcon-candidate = ["dep:fn-dsa", "dep:rand_core_06"]
 
 [dependencies]
 xparq-common.workspace = true
@@ -26,3 +27,5 @@ zeroize.workspace = true
 argon2.workspace = true
 getrandom.workspace = true
 static_assertions.workspace = true
+fn-dsa = { workspace = true, optional = true }
+rand_core_06 = { workspace = true, optional = true }
