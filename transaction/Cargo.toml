@@ -1,0 +1,23 @@
+[package]
+name = "xparq-transaction"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "mod.rs"
+
+[features]
+default = ["mainnet"]
+mainnet = ["xparq-crypto/mainnet", "xparq-coin/mainnet", "xparq-qcash/mainnet"]
+testnet = ["xparq-crypto/testnet", "xparq-coin/testnet", "xparq-qcash/testnet"]
+devnet = ["xparq-crypto/devnet", "xparq-coin/devnet", "xparq-qcash/devnet"]
+
+[dependencies]
+xparq-common.workspace = true
+xparq-crypto.workspace = true
+xparq-coin.workspace = true
+xparq-qcash.workspace = true
+blake3.workspace = true
+borsh.workspace = true

@@ -1,0 +1,23 @@
+[package]
+name = "xparq-ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["mainnet"]
+mainnet = ["xparq-blockchain/mainnet", "xparq-coin/mainnet", "xparq-qcash/mainnet", "xparq-transaction/mainnet", "xparq-consensus/mainnet", "xparq-crypto/mainnet"]
+testnet = ["xparq-blockchain/testnet", "xparq-coin/testnet", "xparq-qcash/testnet", "xparq-transaction/testnet", "xparq-consensus/testnet", "xparq-crypto/testnet"]
+devnet = ["xparq-blockchain/devnet", "xparq-coin/devnet", "xparq-qcash/devnet", "xparq-transaction/devnet", "xparq-consensus/devnet", "xparq-crypto/devnet"]
+sqisign-blockchain-test = ["xparq-blockchain/sqisign-blockchain-test", "xparq-coin/sqisign-blockchain-test", "xparq-consensus/sqisign-blockchain-test", "xparq-crypto/sqisign-blockchain-test"]
+
+[dependencies]
+xparq-common.workspace = true
+xparq-crypto.workspace = true
+xparq-coin.workspace = true
+xparq-qcash.workspace = true
+xparq-transaction.workspace = true
+xparq-blockchain.workspace = true
+xparq-consensus.workspace = true
+borsh.workspace = true

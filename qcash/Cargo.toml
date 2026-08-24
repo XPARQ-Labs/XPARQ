@@ -1,0 +1,19 @@
+[package]
+name = "xparq-qcash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["mainnet"]
+mainnet = ["xparq-coin/mainnet", "xparq-crypto/mainnet"]
+testnet = ["xparq-coin/testnet", "xparq-crypto/testnet"]
+devnet = ["xparq-coin/devnet", "xparq-crypto/devnet"]
+
+[dependencies]
+xparq-coin.workspace = true
+xparq-crypto.workspace = true
+borsh.workspace = true
+getrandom.workspace = true
+zeroize.workspace = true

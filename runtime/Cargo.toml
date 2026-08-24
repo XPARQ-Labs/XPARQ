@@ -1,0 +1,31 @@
+[package]
+name = "xparq-runtime"
+version = "0.2.14"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "node"
+path = "src/main.rs"
+
+[features]
+default = ["mainnet"]
+mainnet = ["xparq/mainnet", "xparq-wallet/mainnet"]
+testnet = ["xparq/testnet", "xparq-wallet/testnet"]
+devnet = ["xparq/devnet", "xparq-wallet/devnet"]
+sqisign-blockchain-test = ["xparq/sqisign-blockchain-test", "xparq-wallet/sqisign-blockchain-test"]
+
+[dependencies]
+borsh.workspace = true
+hex.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+igd-next.workspace = true
+getrandom.workspace = true
+redb.workspace = true
+xparq.workspace = true
+
+[dev-dependencies]
+xparq-wallet = { package = "wallet", path = "../wallet", default-features = false }

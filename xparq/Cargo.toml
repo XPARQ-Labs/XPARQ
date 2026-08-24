@@ -1,0 +1,51 @@
+[package]
+name = "xparq"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["mainnet"]
+mainnet = [
+    "xparq-crypto/mainnet",
+    "xparq-coin/mainnet",
+    "xparq-qcash/mainnet",
+    "xparq-transaction/mainnet",
+    "xparq-blockchain/mainnet",
+    "xparq-consensus/mainnet",
+    "xparq-ledger/mainnet",
+    "xparq-genesis/mainnet",
+]
+testnet = [
+    "xparq-crypto/testnet",
+    "xparq-coin/testnet",
+    "xparq-qcash/testnet",
+    "xparq-transaction/testnet",
+    "xparq-blockchain/testnet",
+    "xparq-consensus/testnet",
+    "xparq-ledger/testnet",
+    "xparq-genesis/testnet",
+]
+devnet = ["sqisign-blockchain-test"]
+sqisign-blockchain-test = [
+    "xparq-crypto/sqisign-blockchain-test",
+    "xparq-coin/sqisign-blockchain-test",
+    "xparq-qcash/devnet",
+    "xparq-transaction/devnet",
+    "xparq-blockchain/sqisign-blockchain-test",
+    "xparq-consensus/sqisign-blockchain-test",
+    "xparq-ledger/sqisign-blockchain-test",
+    "xparq-genesis/sqisign-blockchain-test",
+]
+
+[dependencies]
+xparq-common.workspace = true
+xparq-crypto.workspace = true
+xparq-coin.workspace = true
+xparq-qcash.workspace = true
+xparq-transaction.workspace = true
+xparq-blockchain.workspace = true
+xparq-consensus.workspace = true
+xparq-ledger.workspace = true
+xparq-genesis = { path = "../genesis", default-features = false }

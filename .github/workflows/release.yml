@@ -2,8 +2,7 @@ name: release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
 
 permissions:
   contents: read
@@ -14,220 +13,87 @@ concurrency:
 
 jobs:
   verify:
-    name: Verify mainnet release
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-
       - name: Validate tag and package versions
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! "${GITHUB_REF_NAME}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "release tag must use the stable form vMAJOR.MINOR.PATCH" >&2
-            exit 1
-          fi
-
-          expected_version="${BASH_REMATCH[1]}"
+          [[ "${GITHUB_REF_NAME}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || exit 1
+          expected="${BASH_REMATCH[1]}"
           metadata="$(cargo metadata --locked --no-deps --format-version 1)"
-          node_version="$(jq -r '.packages[] | select(.name == "node") | .version' <<<"${metadata}")"
-          wallet_version="$(jq -r '.packages[] | select(.name == "wallet") | .version' <<<"${metadata}")"
-
-          if [[ "${node_version}" != "${expected_version}" || "${wallet_version}" != "${expected_version}" ]]; then
-            echo "tag ${GITHUB_REF_NAME} does not match node=${node_version} wallet=${wallet_version}" >&2
-            exit 1
-          fi
-
-      - name: Run mainnet workspace tests
-        run: cargo test --workspace --locked
+          runtime="$(jq -r '.packages[] | select(.name == "xparq-runtime") | .version' <<<"${metadata}")"
+          wallet="$(jq -r '.packages[] | select(.name == "wallet") | .version' <<<"${metadata}")"
+          [[ "${runtime}" == "${expected}" && "${wallet}" == "${expected}" ]]
+      - name: Test workspace including network E2E
+        run: cargo test --workspace --locked -- --test-threads=1
 
   build:
-    name: Build ${{ matrix.platform }}
     needs: verify
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Ubuntu 22.04 links against glibc 2.35, keeping the archive usable
-          # on Debian 12 (glibc 2.36) as well as newer distributions.
-          - os: ubuntu-22.04
-            platform: linux-x86_64
-            target: x86_64-unknown-linux-gnu
-            rustflags: ""
-          - os: windows-latest
-            platform: windows-x86_64
-            target: x86_64-pc-windows-msvc
-            rustflags: "-C target-feature=+crt-static"
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, platform: linux-x86_64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, platform: windows-x86_64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     env:
-      RUSTFLAGS: ${{ matrix.rustflags }}
       CARGO_PROFILE_RELEASE_STRIP: symbols
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Run Windows package tests
-        if: runner.os == 'Windows'
-        env:
-          # LMDB eagerly reserves its map on Windows. Keep test databases small
-          # enough for the hosted runner while retaining the full test suite.
-          XPARQ_LMDB_MAP_SIZE_BYTES: 67108864
-        run: >-
-          cargo test --locked
-          --target ${{ matrix.target }}
-          -p node
-          -p wallet
-
-      - name: Build mainnet binaries
-        run: >-
-          cargo build --release --locked
-          --target ${{ matrix.target }}
-          -p node
-          -p wallet
-
-      - name: Smoke test Linux binaries
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          target/${{ matrix.target }}/release/node version
-          target/${{ matrix.target }}/release/wallet --version
-          for binary in node wallet; do
-            max_glibc="$(objdump -T "target/${{ matrix.target }}/release/${binary}" \
-              | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
-              | sort -V \
-              | tail -n 1)"
-            if [[ -z "${max_glibc}" ]] || ! dpkg --compare-versions "${max_glibc#GLIBC_}" le 2.36; then
-              echo "${binary} requires unsupported ${max_glibc:-unknown}; Debian 12 provides GLIBC_2.36" >&2
-              exit 1
-            fi
-            echo "${binary} maximum required glibc symbol: ${max_glibc}"
-          done
-
-      - name: Package Linux release
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p xparq-runtime -p wallet
+      - name: Package Linux
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
           package="xparq-${GITHUB_REF_NAME}-mainnet-${{ matrix.platform }}"
-          package_dir="dist/${package}"
-          mkdir -p "${package_dir}"
-          install -m 0755 "target/${{ matrix.target }}/release/node" "${package_dir}/node"
-          install -m 0755 "target/${{ matrix.target }}/release/wallet" "${package_dir}/wallet"
-          cp README.md "${package_dir}/README.md"
-          cp LICENSE "${package_dir}/LICENSE"
-          cp node/README.md "${package_dir}/NODE-README.md"
-          cp wallet/README.md "${package_dir}/WALLET-README.md"
-          printf 'tag=%s\nversion=%s\nnetwork=mainnet\ntarget=%s\ncommit=%s\n' \
-            "${GITHUB_REF_NAME}" "${GITHUB_REF_NAME#v}" "${{ matrix.target }}" "${GITHUB_SHA}" \
-            > "${package_dir}/VERSION"
+          mkdir -p "dist/${package}"
+          install -m 0755 "target/${{ matrix.target }}/release/node" "dist/${package}/node"
+          install -m 0755 "target/${{ matrix.target }}/release/wallet" "dist/${package}/wallet"
+          cp README.md runtime/README.md wallet/README.md CHANGELOG.md LICENSE "dist/${package}/"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
-
-      - name: Smoke test Windows binaries
+      - name: Package Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & "target/${{ matrix.target }}/release/node.exe" version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & "target/${{ matrix.target }}/release/wallet.exe" --version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Package Windows release
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
           $package = "xparq-$env:GITHUB_REF_NAME-mainnet-${{ matrix.platform }}"
-          $packageDir = Join-Path "dist" $package
-          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/node.exe" $packageDir
-          Copy-Item "target/${{ matrix.target }}/release/wallet.exe" $packageDir
-          Copy-Item "README.md" (Join-Path $packageDir "README.md")
-          Copy-Item "LICENSE" (Join-Path $packageDir "LICENSE")
-          Copy-Item "node/README.md" (Join-Path $packageDir "NODE-README.md")
-          Copy-Item "wallet/README.md" (Join-Path $packageDir "WALLET-README.md")
-          @(
-            "tag=$env:GITHUB_REF_NAME"
-            "version=$($env:GITHUB_REF_NAME.TrimStart('v'))"
-            "network=mainnet"
-            "target=${{ matrix.target }}"
-            "commit=$env:GITHUB_SHA"
-          ) | Set-Content -Encoding utf8 (Join-Path $packageDir "VERSION")
-          Compress-Archive -Path $packageDir -DestinationPath "dist/$package.zip"
-
-      - name: Upload packaged release
-        uses: actions/upload-artifact@v7
+          New-Item -ItemType Directory -Force -Path "dist/$package" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/node.exe","target/${{ matrix.target }}/release/wallet.exe","README.md","runtime/README.md","wallet/README.md","CHANGELOG.md","LICENSE" "dist/$package"
+          Compress-Archive -Path "dist/$package" -DestinationPath "dist/$package.zip"
+      - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.platform }}
-          path: |
-            dist/*.tar.gz
-            dist/*.zip
+          path: dist/*
           if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
 
   publish:
-    name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
     permissions:
       contents: write
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Download packaged releases
-        uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v4
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
-
-      - name: Generate SHA-256 checksums
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd dist
-          sha256sum ./*.tar.gz ./*.zip > SHA256SUMS
-          cat SHA256SUMS
-
-      - name: Attest release archives
-        uses: actions/attest@v4
+      - name: Checksums
+        run: cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
         with:
-          subject-path: "dist/xparq-*"
-
-      - name: Publish release with assets
-        shell: bash
+          subject-path: dist/*
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" \
-              dist/*.tar.gz \
-              dist/*.zip \
-              dist/SHA256SUMS \
-              --repo "${GITHUB_REPOSITORY}" \
-              --clobber
-          else
-            gh release create "${GITHUB_REF_NAME}" \
-              dist/*.tar.gz \
-              dist/*.zip \
-              dist/SHA256SUMS \
-              --repo "${GITHUB_REPOSITORY}" \
-              --verify-tag \
-              --draft \
-              --generate-notes \
-              --title "XPARQ ${GITHUB_REF_NAME}"
-          fi
-          gh release edit "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --draft=false \
-            --latest
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes --latest

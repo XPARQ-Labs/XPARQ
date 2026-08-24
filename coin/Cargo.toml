@@ -1,0 +1,17 @@
+[package]
+name = "xparq-coin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["mainnet"]
+mainnet = []
+testnet = []
+devnet = []
+sqisign-blockchain-test = []
+
+[dependencies]
+blake3.workspace = true
+borsh.workspace = true

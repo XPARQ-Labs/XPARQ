@@ -5,11 +5,13 @@ use xparq::{
         Address, PublicKey, SecretKey, address_from_public_key, address_from_string,
         address_to_string, hash_bytes, keypair_from_seed, sign,
     },
-    transaction::{QCashTransaction, SignedQCashTransaction, SignedTransfer, Transfer},
+    transaction::{
+        AccountAuthorization, AccountIntent, AuthorizedAccountIntent, OnChainSpendIntent,
+        WithdrawIntent,
+    },
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const WALLET_VERSION: u8 = 1;
 pub const XPARQ_MNEMONIC_DEFAULT_WORDS: usize = 12;
 pub const XPARQ_MNEMONIC_12_ENTROPY_BYTES: usize = 16;
 pub const XPARQ_MNEMONIC_24_ENTROPY_BYTES: usize = 32;
@@ -32,14 +34,12 @@ impl Drop for Wallet {
 #[derive(Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
 struct WalletFile {
-    version: u8,
     address: String,
     mnemonic: String,
 }
 
 #[derive(Deserialize)]
 struct WalletHeader {
-    version: u8,
     address: String,
 }
 
@@ -54,7 +54,6 @@ pub fn wallet_file_bytes(wallet: &Wallet) -> Result<Zeroizing<Vec<u8>>, String> 
         .ok_or_else(|| "wallet has no mnemonic recovery material".to_string())?;
     decode_xparq_mnemonic(mnemonic)?;
     let wallet_file = WalletFile {
-        version: WALLET_VERSION,
         address: address_to_string(&wallet.address),
         mnemonic: mnemonic.to_string(),
     };
@@ -66,26 +65,17 @@ pub fn wallet_file_bytes(wallet: &Wallet) -> Result<Zeroizing<Vec<u8>>, String> 
 pub fn wallet_address_from_file_bytes(bytes: &[u8]) -> Result<Address, String> {
     let header: WalletHeader = serde_json::from_slice(bytes)
         .map_err(|error| format!("failed to parse wallet: {error}"))?;
-    if header.version != WALLET_VERSION {
-        return Err("unsupported wallet format".to_string());
-    }
     address_from_string(&header.address).map_err(|error| format!("invalid wallet address: {error}"))
 }
 
-pub fn wallet_from_file_bytes(bytes: &[u8], password: &str) -> Result<Wallet, String> {
-    if password.is_empty() {
-        return Err("wallet password must not be empty".to_string());
-    }
+pub fn wallet_from_file_bytes(bytes: &[u8]) -> Result<Wallet, String> {
     let wallet_file: WalletFile = serde_json::from_slice(bytes)
         .map_err(|error| format!("failed to parse wallet: {error}"))?;
-    if wallet_file.version != WALLET_VERSION {
-        return Err("unsupported wallet format".to_string());
-    }
-    let mut wallet = wallet_from_xparq_mnemonic(&wallet_file.mnemonic, password)?;
+    let mut wallet = wallet_from_xparq_mnemonic(&wallet_file.mnemonic)?;
     let stored_address = address_from_string(&wallet_file.address)
         .map_err(|error| format!("invalid wallet address: {error}"))?;
     if wallet.address != stored_address {
-        return Err("wallet password does not match this wallet".to_string());
+        return Err("wallet address does not match its mnemonic".to_string());
     }
     wallet.mnemonic = Some(wallet_file.mnemonic.clone());
     Ok(wallet)
@@ -103,11 +93,9 @@ pub fn generate_xparq_mnemonic(words: usize) -> Result<Zeroizing<String>, String
     encode_xparq_mnemonic(&entropy).map(Zeroizing::new)
 }
 
-pub fn wallet_from_xparq_mnemonic(phrase: &str, wallet_password: &str) -> Result<Wallet, String> {
+pub fn wallet_from_xparq_mnemonic(phrase: &str) -> Result<Wallet, String> {
     let entropy = decode_xparq_mnemonic(phrase)?;
-    let mut key_material = Zeroizing::new(entropy.to_vec());
-    key_material.extend_from_slice(wallet_password.as_bytes());
-    let spend_seed = Zeroizing::new(tagged_wallet_hash(XPARQ_MNEMONIC_SPEND_TAG, &key_material));
+    let spend_seed = Zeroizing::new(tagged_wallet_hash(XPARQ_MNEMONIC_SPEND_TAG, &entropy));
     let spend = keypair_from_seed(&spend_seed);
     Ok(Wallet::from_keys(spend.public_key, spend.secret_key))
 }
@@ -152,49 +140,64 @@ impl Wallet {
         }
     }
 
-    pub fn sign_transaction(
+    pub fn sign_onchain_spend(
         &self,
-        transaction: Transfer,
-        authorization_registered: bool,
-    ) -> Result<SignedTransfer, String> {
-        let signing_bytes = transaction
-            .signing_bytes()
-            .map_err(|error| format!("failed to serialize transaction: {error}"))?;
-        let signature = sign(&self.secret_key, &signing_bytes);
-        let signed = if authorization_registered {
-            SignedTransfer::new_stored(transaction, signature)
-        } else {
-            SignedTransfer::new(transaction, self.public_key, signature)
-        };
-        if authorization_registered {
-            signed.validate_stored_keys_for_height(xparq::block::Height(0), &self.public_key)
-        } else {
-            signed.validate_signed()
-        }
-        .map_err(|error| format!("signed transaction failed validation: {error}"))?;
-        Ok(signed)
+        intent: OnChainSpendIntent,
+    ) -> Result<AuthorizedAccountIntent<OnChainSpendIntent>, String> {
+        self.sign_account_intent(intent, false)
     }
 
-    pub fn sign_qcash_transaction(
+    pub fn sign_known_onchain_spend(
         &self,
-        transaction: QCashTransaction,
-        authorization_registered: bool,
-    ) -> Result<SignedQCashTransaction, String> {
-        let signing_bytes = transaction
-            .signing_bytes()
-            .map_err(|error| format!("failed to serialize QCash transaction: {error}"))?;
-        let signature = sign(&self.secret_key, &signing_bytes);
-        let signed = if authorization_registered {
-            SignedQCashTransaction::new_stored(transaction, signature)
+        intent: OnChainSpendIntent,
+    ) -> Result<AuthorizedAccountIntent<OnChainSpendIntent>, String> {
+        self.sign_account_intent(intent, true)
+    }
+
+    pub fn sign_withdraw(
+        &self,
+        intent: WithdrawIntent,
+    ) -> Result<AuthorizedAccountIntent<WithdrawIntent>, String> {
+        self.sign_account_intent(intent, false)
+    }
+
+    pub fn sign_known_withdraw(
+        &self,
+        intent: WithdrawIntent,
+    ) -> Result<AuthorizedAccountIntent<WithdrawIntent>, String> {
+        self.sign_account_intent(intent, true)
+    }
+
+    fn sign_account_intent<T: AccountIntent>(
+        &self,
+        intent: T,
+        public_key_known: bool,
+    ) -> Result<AuthorizedAccountIntent<T>, String> {
+        let chain = xparq::genesis::chain_context()
+            .map_err(|error| format!("failed to load chain identity: {error}"))?;
+        let commitment = intent
+            .commitment(chain)
+            .map_err(|error| format!("invalid transaction intent: {error}"))?;
+        let signature = sign(&self.secret_key, commitment.as_bytes());
+        let authorization = if public_key_known {
+            AccountAuthorization::Known { signature }
         } else {
-            SignedQCashTransaction::new(transaction, self.public_key, signature)
+            AccountAuthorization::Reveal {
+                public_key: self.public_key,
+                signature,
+            }
         };
-        if authorization_registered {
-            signed.validate_stored_keys_for_height(xparq::block::Height(0), &self.public_key)
-        } else {
-            signed.validate_signed()
+        let signed = AuthorizedAccountIntent {
+            intent,
+            authorization,
+        };
+        if !public_key_known
+            && !signed
+                .verify_revealed_signature(chain)
+                .map_err(|error| format!("signed transaction validation failed: {error}"))?
+        {
+            return Err("signed transaction authorization is invalid".to_string());
         }
-        .map_err(|error| format!("signed QCash transaction failed validation: {error}"))?;
         Ok(signed)
     }
 }
@@ -206,20 +209,16 @@ mod tests {
     #[test]
     fn wallet_file_roundtrip_preserves_signing_identity() {
         let mnemonic = encode_xparq_mnemonic(&[7; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
-        let mut wallet = wallet_from_xparq_mnemonic(&mnemonic, "correct horse").unwrap();
+        let mut wallet = wallet_from_xparq_mnemonic(&mnemonic).unwrap();
         wallet.mnemonic = Some(mnemonic.clone());
         let encoded = wallet_file_bytes(&wallet).unwrap();
-        let decoded = wallet_from_file_bytes(&encoded, "correct horse").unwrap();
+        let decoded = wallet_from_file_bytes(&encoded).unwrap();
 
         assert_eq!(decoded.address, wallet.address);
         assert_eq!(decoded.public_key, wallet.public_key);
-        assert_eq!(
-            wallet_from_file_bytes(&encoded, "wrong password").unwrap_err(),
-            "wallet password does not match this wallet"
-        );
 
         let json: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(json.as_object().unwrap().len(), 3);
+        assert_eq!(json.as_object().unwrap().len(), 2);
         assert_eq!(json.get("mnemonic").unwrap(), &mnemonic);
         assert_eq!(
             json.get("address").unwrap().as_str(),
@@ -230,31 +229,35 @@ mod tests {
     }
 
     #[test]
-    fn mnemonic_restore_requires_same_wallet_password_for_same_address() {
+    fn wallet_address_reader_accepts_legacy_version_field() {
+        let mnemonic = encode_xparq_mnemonic(&[8; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+        let wallet = wallet_from_xparq_mnemonic(&mnemonic).unwrap();
+        let encoded = serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "address": wallet_address_string(&wallet),
+            "mnemonic": mnemonic,
+        }))
+        .unwrap();
+
+        assert_eq!(wallet_address_from_file_bytes(&encoded), Ok(wallet.address));
+    }
+
+    #[test]
+    fn mnemonic_restore_preserves_signing_identity() {
         let mnemonic = encode_xparq_mnemonic(&[9; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
-        let mut first = wallet_from_xparq_mnemonic(&mnemonic, "first password").unwrap();
+        let mut first = wallet_from_xparq_mnemonic(&mnemonic).unwrap();
         first.mnemonic = Some(mnemonic.clone());
         let first_file = wallet_file_bytes(&first).unwrap();
 
-        let mut restored = wallet_from_xparq_mnemonic(&mnemonic, "first password").unwrap();
+        let mut restored = wallet_from_xparq_mnemonic(&mnemonic).unwrap();
         restored.mnemonic = Some(mnemonic);
         let restored_file = wallet_file_bytes(&restored).unwrap();
 
-        let different_auth =
-            wallet_from_xparq_mnemonic(restored.mnemonic.as_deref().unwrap(), "different password")
-                .unwrap();
-
         assert_eq!(first.address, restored.address);
         assert_eq!(first.public_key, restored.public_key);
-        assert_ne!(first.address, different_auth.address);
-        assert!(wallet_from_file_bytes(&first_file, "different password").is_err());
         assert_eq!(
-            wallet_from_file_bytes(&first_file, "first password")
-                .unwrap()
-                .address,
-            wallet_from_file_bytes(&restored_file, "first password")
-                .unwrap()
-                .address
+            wallet_from_file_bytes(&first_file).unwrap().address,
+            wallet_from_file_bytes(&restored_file).unwrap().address
         );
     }
 }

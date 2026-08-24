@@ -1,13 +1,21 @@
 [workspace]
 resolver = "3"
 members = [
-    "core",
-    "node",
+    "common",
+    "crypto",
+    "coin",
+    "qcash",
+    "transaction",
+    "blockchain",
+    "consensus",
+    "ledger",
+    "genesis",
+    "xparq",
+    "runtime",
     "wallet",
 ]
 exclude = [
     "depend",
-    "core/fuzz",
 ]
 
 [workspace.package]
@@ -22,6 +30,7 @@ debug = true
 
 [workspace.dependencies]
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc"], path = "depend/argon2/argon2" }
+blake3 = { version = "1.8", path = "depend/blake3" }
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 async-trait = "0.1"
@@ -35,7 +44,7 @@ futures-util = "0.3"
 getrandom = { version = "0.4.3", default-features = false }
 hex = "0.4"
 igd-next = "0.16"
-lmdb = "0.8"
+redb = "4.2.0"
 libp2p = { version = "0.54", default-features = false, features = ["identify", "kad", "macros", "noise", "ping", "request-response", "tcp", "tokio", "yamux"] }
 ml_dsa = { package = "ml-dsa", version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "zeroize"], path = "depend/mldsa/ml-dsa" }
 prost = "0.14"
@@ -56,7 +65,15 @@ tower-http = { version = "0.6", features = ["cors", "limit", "timeout"] }
 zeroize = { version = "1.9.0", features = ["alloc", "derive"], path = "depend/traits/zeroize" }
 rand_10 = { package = "rand", version = "0.10.2", features = ["sys_rng"], path = "depend/sqisign/rand-0.10" }
 
-xparq = { path = "core", default-features = false }
+xparq-common = { path = "common" }
+xparq-crypto = { path = "crypto", default-features = false }
+xparq-coin = { path = "coin", default-features = false }
+xparq-qcash = { path = "qcash", default-features = false }
+xparq-transaction = { path = "transaction", default-features = false }
+xparq-blockchain = { path = "blockchain", default-features = false }
+xparq-consensus = { path = "consensus", default-features = false }
+xparq-ledger = { path = "ledger", default-features = false }
+xparq = { path = "xparq", default-features = false }
 
 [patch.crates-io]
 serde = { path = "depend/traits/serde" }

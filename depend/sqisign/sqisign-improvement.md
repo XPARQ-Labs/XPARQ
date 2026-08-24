@@ -65,8 +65,9 @@ in the same change.
 - [x] Make candidate key/signature fields private and require canonical vendor
   parsing through typed `from_bytes` constructors.
 - [x] Make candidate verification fail closed when a vendor invariant panics.
-- [x] Add parser fuzzing for public keys, signatures, and signing keys at
-  Levels 1, 3, and 5 (`core/fuzz/fuzz_targets/sqisign_parser.rs`).
+- [x] The retired nested-core parser fuzz target covered public keys,
+  signatures, and signing keys at Levels 1, 3, and 5. A replacement harness
+  must be introduced deliberately before SQIsign activation work resumes.
 - Add differential fuzzing against the official reference implementation.
 - [x] Add deterministic worst-case verification work accounting before any
   mainnet/testnet consensus activation.
@@ -75,15 +76,11 @@ in the same change.
 
 ## Current XPARQ validation automation
 
-- The legacy core fuzz fixtures have been migrated to the owned-XPQ UTXO and
-  current QCash APIs.
-- The normal fuzz workspace and the SQIsign Level 1/3/5 parser target compile
-  independently.
+- The legacy nested-core fuzz fixtures were retired during the root-crate
+  migration; no current fuzz harness is claimed by the validation script.
 - Pinned KAT checksums are verified before KAT execution.
 - The official C/Rust bidirectional runner now resolves the XPARQ workspace
   correctly and runs when `SQISIGN_C_SOURCE` points at the pinned checkout.
-- Weekly CI compiles and runs the local SQIsign validation gates.
-- Weekly bounded fuzzing covers both the protocol targets and SQIsign parsers.
 - `verify_batch_parallel_accounted` reports signature checks, worst-case key
   decodes, and message bytes independently of the process-local verifier cache.
 - `XPARQ_SQISIGN_TIMING_SAMPLES=N` enables the benchmark timing diagnostic;
@@ -100,7 +97,7 @@ Still deliberately excluded:
 
 Completed:
 
-- XPARQ default and `sqisign-candidate` builds.
+- XPARQ default workspace and isolated SQIsign dependency builds.
 - Level 1, 3, and 5 seeded keygen/sign/verify round trips.
 - Modified-message and wrong-key rejection.
 - `signature` 3 randomized signing and signature encoding.
