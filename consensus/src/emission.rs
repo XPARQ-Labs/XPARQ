@@ -1,27 +1,24 @@
 use crate::block::{Block, BlockHeight, Height};
-use crate::consensus::{WBDA_WINDOW, is_wbda_epoch_boundary, reward_first_emission_from_windows};
+use crate::consensus::{WBDA_WINDOW, is_wbda_epoch_boundary, next_emission_from_window};
 use static_assertions::const_assert;
 use std::{error::Error, fmt};
 use xparq_coin::{Amount, COIN};
 use xparq_crypto::{Address, Hash, HashDomain, domain_hash};
 
-/// Consensus lower bound for epoch emission.
 pub const MIN_BLOCK_EMISSION: u64 = 1_000_000;
-/// Consensus upper bound for epoch emission.
 pub const MAX_BLOCK_EMISSION: u64 = 10_000_000;
-/// One utilization adjustment changes emission by exactly 0.1 XPQ.
+pub const BASE_BLOCK_EMISSION: u64 = 5_000_000;
 pub const BLOCK_EMISSION_STEP: u64 = 100_000;
-/// Shared confirmation depth for security-sensitive consensus lifecycles.
 pub const STANDARD_CONFIRMATIONS: u64 = 50;
-/// Number of blocks before a newly created emission output is spendable.
 pub const BLOCK_EMISSION_MATURITY: u64 = STANDARD_CONFIRMATIONS;
 
 const_assert!(MIN_BLOCK_EMISSION == COIN);
 const_assert!(MAX_BLOCK_EMISSION == 10 * COIN);
+const_assert!(BASE_BLOCK_EMISSION == 5 * COIN);
 const_assert!(BLOCK_EMISSION_STEP == COIN / 10);
 
 pub const fn initial_block_emission() -> Amount {
-    Amount(MIN_BLOCK_EMISSION)
+    Amount(BASE_BLOCK_EMISSION)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,27 +116,22 @@ pub(crate) fn authorize_emission(
 /// Calculates the subsidy permitted at `height` from canonical block weights.
 ///
 /// State storage remains outside consensus; callers provide historical header
-/// weights through `weight_at`.
+/// weights through `weight_at`. Moves every epoch in lockstep with
+/// `expected_difficulty_for_height` — same completed window, same signal.
 pub fn expected_emission_for_height(
     height: BlockHeight,
     parent_emission: Amount,
     mut weight_at: impl FnMut(Height) -> Option<u32>,
 ) -> Result<Amount, EmissionError> {
     if height.0 <= 1 {
-        return Ok(Amount(MIN_BLOCK_EMISSION));
+        return Ok(Amount(BASE_BLOCK_EMISSION));
     }
 
     if !is_wbda_epoch_boundary(height.0) {
         return Ok(parent_emission);
     }
 
-    let has_prior_epoch = height.0 > WBDA_WINDOW as u64 + 1;
-    let history_len = if has_prior_epoch {
-        WBDA_WINDOW as u64 * 2
-    } else {
-        WBDA_WINDOW as u64
-    };
-    let start = height.0 - history_len;
+    let start = height.0 - WBDA_WINDOW as u64;
     let weights = (start..height.0)
         .map(|height| {
             let height = Height(height);
@@ -147,14 +139,7 @@ pub fn expected_emission_for_height(
             usize::try_from(weight).map_err(|_| EmissionError::InvalidBlockWeight(height))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let (prior, current) = if has_prior_epoch {
-        let (prior, current) = weights.split_at(WBDA_WINDOW);
-        (Some(prior), current)
-    } else {
-        (None, weights.as_slice())
-    };
-    reward_first_emission_from_windows(parent_emission, prior, current)
-        .ok_or(EmissionError::InvalidAdjustment)
+    next_emission_from_window(parent_emission, &weights).ok_or(EmissionError::InvalidAdjustment)
 }
 
 #[cfg(test)]
@@ -163,7 +148,7 @@ mod tests {
 
     #[test]
     fn non_boundary_emission_uses_parent_without_loading_history() {
-        let parent = Amount(MIN_BLOCK_EMISSION + BLOCK_EMISSION_STEP);
+        let parent = Amount(BASE_BLOCK_EMISSION + BLOCK_EMISSION_STEP);
         let emission = expected_emission_for_height(Height(2), parent, |_| {
             panic!("non-boundary emission must not load history")
         })
@@ -176,17 +161,15 @@ mod tests {
         let boundary = Height((WBDA_WINDOW * 3) as u64 + 1);
         let mut loaded = Vec::new();
         let emission =
-            expected_emission_for_height(boundary, Amount(MIN_BLOCK_EMISSION), |height| {
+            expected_emission_for_height(boundary, Amount(BASE_BLOCK_EMISSION), |height| {
                 loaded.push(height);
                 Some(MAX_BLOCK_EMISSION as u32)
             })
             .unwrap();
-        assert_eq!(loaded.len(), WBDA_WINDOW * 2);
-        assert_eq!(
-            loaded.first(),
-            Some(&Height(boundary.0 - (WBDA_WINDOW * 2) as u64))
-        );
+        assert_eq!(loaded.len(), WBDA_WINDOW);
+        assert_eq!(loaded.first(), Some(&Height(boundary.0 - WBDA_WINDOW as u64)));
         assert_eq!(loaded.last(), Some(&Height(boundary.0 - 1)));
-        assert_eq!(emission, Amount(MIN_BLOCK_EMISSION));
+        // Full utilization decreases emission by one step from the parent.
+        assert_eq!(emission, Amount(BASE_BLOCK_EMISSION - BLOCK_EMISSION_STEP));
     }
 }

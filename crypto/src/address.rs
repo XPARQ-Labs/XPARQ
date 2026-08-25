@@ -31,12 +31,12 @@ impl Address {
     pub const ZERO: Self = Self([0; ADDRESS_SIZE]);
 }
 
-pub const ADDRESS_HRP: &str = "z";
+pub const ADDRESS_HRP: &str = "XPQ";
 const BECH32_CHECKSUM_LEN: usize = 6;
 const BECH32_ADDRESS_LEN: usize =
     ADDRESS_HRP.len() + 1 + (ADDRESS_SIZE * 8).div_ceil(5) + BECH32_CHECKSUM_LEN;
 const_assert_eq!(BECH32_CHECKSUM_LEN, 6);
-const_assert_eq!(BECH32_ADDRESS_LEN, 40);
+const_assert_eq!(BECH32_ADDRESS_LEN, 42);
 
 pub fn wallet_address_from_public_key(public_key: &PublicKey) -> String {
     address_to_string(&address_from_public_key(public_key))
@@ -115,7 +115,7 @@ mod tests {
     fn every_network_address_uses_lowercase_z_hrp() {
         let address = Address([7; ADDRESS_SIZE]);
         let encoded = address_to_string(&address);
-        assert!(encoded.starts_with("z1"));
+        assert!(encoded.starts_with("xpq1"));
         assert_eq!(encoded.len(), BECH32_ADDRESS_LEN);
         assert_eq!(address_from_string(&encoded), Ok(address));
 

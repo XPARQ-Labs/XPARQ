@@ -5,17 +5,16 @@ mod wbda;
 
 pub(crate) use emission::authorize_emission;
 pub use emission::{
-    BLOCK_EMISSION_MATURITY, BLOCK_EMISSION_STEP, EmissionError, MAX_BLOCK_EMISSION,
-    MIN_BLOCK_EMISSION, STANDARD_CONFIRMATIONS, ValidatedEmission, expected_emission_for_height,
-    initial_block_emission,
+    BASE_BLOCK_EMISSION, BLOCK_EMISSION_MATURITY, BLOCK_EMISSION_STEP, EmissionError,
+    MAX_BLOCK_EMISSION, MIN_BLOCK_EMISSION, STANDARD_CONFIRMATIONS, ValidatedEmission,
+    expected_emission_for_height, initial_block_emission,
 };
 pub use wbda::{
     WBDA_ALGORITHM, WBDA_ALGORITHM as DIFFICULTY_ALGORITHM, WBDA_DIFFICULTY_STEP,
     WBDA_HIGH_UTILIZATION_PPM, WBDA_LOW_UTILIZATION_PPM, WBDA_TARGET_BLOCK_WEIGHT, WBDA_WINDOW,
     WbdaAdjustment, adjustment_for_utilization_ppm, adjustment_for_window, average_block_weight,
-    confirmed_difficulty_from_windows, expected_difficulty_for_height,
-    expected_difficulty_from_windows, is_wbda_epoch_boundary, next_difficulty_from_window,
-    next_emission_from_window, reward_first_emission_from_windows, utilization_ppm,
+    expected_difficulty_for_height, expected_difficulty_from_window, is_wbda_epoch_boundary,
+    next_difficulty_from_window, next_emission_from_window, utilization_ppm,
 };
 
 use crate::block::Block;

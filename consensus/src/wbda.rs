@@ -12,22 +12,12 @@ use super::emission::{BLOCK_EMISSION_STEP, MAX_BLOCK_EMISSION, MIN_BLOCK_EMISSIO
 use crate::validate::{MAX_DIFFICULTY, MIN_DIFFICULTY};
 use xparq_coin::Amount;
 
-/// Fixed number of completed blocks sampled for one WBDA epoch.
-pub const WBDA_WINDOW: usize = 512;
-
-/// Fixed average block-weight target used to calculate epoch utilization.
+pub const WBDA_WINDOW: usize = 1024;
 pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 5 * 1024 * 1024;
-
-/// Utilization below 40% raises difficulty by one discrete unit.
 pub const WBDA_LOW_UTILIZATION_PPM: u64 = 400_000;
-
-/// Utilization above 60% lowers difficulty by one discrete unit.
 pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 600_000;
-
-/// One WBDA step changes the integer difficulty by exactly one unit.
 pub const WBDA_DIFFICULTY_STEP: u32 = 1;
-
-pub const WBDA_ALGORITHM: &str = "argon2id-wbda-reward-first-confirmed-difficulty-v1";
+pub const WBDA_ALGORITHM: &str = "argon2id-wbda-lockstep-v2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WbdaAdjustment {
@@ -94,34 +84,16 @@ pub fn next_difficulty_from_window(
     )
 }
 
-/// Applies difficulty only after the same non-neutral utilization signal is
-/// observed in two consecutive completed epochs.
-pub fn confirmed_difficulty_from_windows(
-    previous_difficulty: u32,
-    prior_window: Option<&[usize]>,
-    current_window: &[usize],
-) -> Option<u32> {
-    let current = adjustment_for_window(current_window)?;
-    let Some(prior) = prior_window else {
-        return Some(previous_difficulty);
-    };
-    let prior = adjustment_for_window(prior)?;
-    if current == WbdaAdjustment::Keep || current != prior {
-        Some(previous_difficulty)
-    } else {
-        next_difficulty_from_window(previous_difficulty, current_window)
-    }
-}
-
 /// Returns the difficulty required at `next_height`.
 ///
 /// A complete weight window is required only when the next block starts a new
 /// WBDA epoch. Keeping this boundary rule here prevents block admission, fork
 /// choice, and header synchronization from implementing it independently.
-pub fn expected_difficulty_from_windows(
+/// Moves every epoch, in lockstep with `next_emission_from_window` — same
+/// signal, same window, no confirmation delay.
+pub fn expected_difficulty_from_window(
     next_height: u64,
     parent_difficulty: u32,
-    prior_window: Option<&[usize]>,
     current_window: &[usize],
 ) -> Option<u32> {
     if next_height == 1 {
@@ -130,7 +102,7 @@ pub fn expected_difficulty_from_windows(
     if !is_wbda_epoch_boundary(next_height) {
         return Some(parent_difficulty);
     }
-    confirmed_difficulty_from_windows(parent_difficulty, prior_window, current_window)
+    next_difficulty_from_window(parent_difficulty, current_window)
 }
 
 /// Resolves the complete WBDA rule for one candidate height.
@@ -148,27 +120,14 @@ pub fn expected_difficulty_for_height<E>(
     if !is_wbda_epoch_boundary(next_height) {
         return Ok(Some(parent_difficulty));
     }
-    let has_prior_epoch = next_height > WBDA_WINDOW as u64 + 1;
-    let history_len = if has_prior_epoch {
-        WBDA_WINDOW as u64 * 2
-    } else {
-        WBDA_WINDOW as u64
-    };
-    let start = next_height - history_len;
+    let start = next_height - WBDA_WINDOW as u64;
     let weights = (start..next_height)
         .map(&mut weight_at)
         .collect::<Result<Vec<_>, _>>()?;
-    let (prior, current) = if has_prior_epoch {
-        let (prior, current) = weights.split_at(WBDA_WINDOW);
-        (Some(prior), current)
-    } else {
-        (None, weights.as_slice())
-    };
-    Ok(expected_difficulty_from_windows(
+    Ok(expected_difficulty_from_window(
         next_height,
         parent_difficulty,
-        prior,
-        current,
+        &weights,
     ))
 }
 
@@ -188,23 +147,6 @@ pub fn next_emission_from_window(
     Some(Amount(
         emission.clamp(MIN_BLOCK_EMISSION, MAX_BLOCK_EMISSION),
     ))
-}
-
-/// Changes emission on the first non-neutral signal. If the same signal is
-/// repeated, emission stays fixed and the confirmed difficulty path responds.
-pub fn reward_first_emission_from_windows(
-    previous_emission: Amount,
-    prior_window: Option<&[usize]>,
-    current_window: &[usize],
-) -> Option<Amount> {
-    let current = adjustment_for_window(current_window)?;
-    if let Some(prior_window) = prior_window {
-        let prior = adjustment_for_window(prior_window)?;
-        if current == prior {
-            return Some(previous_emission);
-        }
-    }
-    next_emission_from_window(previous_emission, current_window)
 }
 
 #[cfg(test)]
@@ -267,23 +209,18 @@ mod tests {
     }
 
     #[test]
-    fn first_signal_changes_reward_before_difficulty() {
+    fn difficulty_moves_with_every_completed_epoch() {
         assert_eq!(
-            expected_difficulty_from_windows(1, GENESIS_DIFFICULTY, None, &[]),
+            expected_difficulty_from_window(1, GENESIS_DIFFICULTY, &[]),
             Some(DIFFICULTY_START)
         );
-        assert_eq!(expected_difficulty_from_windows(2, 7, None, &[]), Some(7));
+        assert_eq!(expected_difficulty_from_window(2, 7, &[]), Some(7));
         assert_eq!(
-            expected_difficulty_from_windows(
-                WBDA_WINDOW as u64 + 1,
-                7,
-                None,
-                &window(MAX_BLOCK_WEIGHT),
-            ),
-            Some(7)
+            expected_difficulty_from_window(WBDA_WINDOW as u64 + 1, 7, &window(MAX_BLOCK_WEIGHT)),
+            Some(6)
         );
         assert_eq!(
-            expected_difficulty_from_windows(WBDA_WINDOW as u64 + 1, 7, None, &[]),
+            expected_difficulty_from_window(WBDA_WINDOW as u64 + 1, 7, &[]),
             None
         );
     }
@@ -298,11 +235,8 @@ mod tests {
         })
         .unwrap();
         assert_eq!(difficulty, Some(6));
-        assert_eq!(requested.len(), WBDA_WINDOW * 2);
-        assert_eq!(
-            requested.first(),
-            Some(&(boundary - (WBDA_WINDOW * 2) as u64))
-        );
+        assert_eq!(requested.len(), WBDA_WINDOW);
+        assert_eq!(requested.first(), Some(&(boundary - WBDA_WINDOW as u64)));
         assert_eq!(requested.last(), Some(&(boundary - 1)));
 
         let mut called = false;
@@ -347,36 +281,31 @@ mod tests {
     }
 
     #[test]
-    fn reward_moves_first_and_repeated_signal_moves_difficulty() {
+    fn difficulty_and_reward_move_together_every_epoch() {
         let mut difficulty = 7;
         let mut emission = Amount(crate::consensus::MIN_BLOCK_EMISSION);
 
+        // Low utilization: both rise, same epoch, no confirmation wait.
         let sparse = window(MAX_BLOCK_WEIGHT / 10);
-        difficulty = confirmed_difficulty_from_windows(difficulty, None, &sparse).unwrap();
-        emission = reward_first_emission_from_windows(emission, None, &sparse).unwrap();
-        assert_eq!(difficulty, 7);
-        assert_eq!(
-            emission,
-            Amount(crate::consensus::MIN_BLOCK_EMISSION + BLOCK_EMISSION_STEP)
-        );
-
-        difficulty = confirmed_difficulty_from_windows(difficulty, Some(&sparse), &sparse).unwrap();
-        emission = reward_first_emission_from_windows(emission, Some(&sparse), &sparse).unwrap();
+        difficulty = next_difficulty_from_window(difficulty, &sparse).unwrap();
+        emission = next_emission_from_window(emission, &sparse).unwrap();
         assert_eq!(difficulty, 8);
         assert_eq!(
             emission,
             Amount(crate::consensus::MIN_BLOCK_EMISSION + BLOCK_EMISSION_STEP)
         );
 
+        // Normal utilization: both hold.
         let normal = window(MAX_BLOCK_WEIGHT / 2);
-        assert_eq!(
-            confirmed_difficulty_from_windows(difficulty, Some(&sparse), &normal),
-            Some(difficulty)
-        );
-        assert_eq!(
-            reward_first_emission_from_windows(emission, Some(&sparse), &normal),
-            Some(emission)
-        );
+        assert_eq!(next_difficulty_from_window(difficulty, &normal), Some(difficulty));
+        assert_eq!(next_emission_from_window(emission, &normal), Some(emission));
+
+        // High utilization: both fall together.
+        let dense = window(MAX_BLOCK_WEIGHT);
+        difficulty = next_difficulty_from_window(difficulty, &dense).unwrap();
+        emission = next_emission_from_window(emission, &dense).unwrap();
+        assert_eq!(difficulty, 7);
+        assert_eq!(emission, Amount(crate::consensus::MIN_BLOCK_EMISSION));
     }
 
     #[test]
