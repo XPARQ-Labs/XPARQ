@@ -1141,6 +1141,7 @@ dependencies = [
 name = "xparq-coin"
 version = "0.2.15"
 dependencies = [
+ "base64",
  "blake3",
  "borsh",
 ]

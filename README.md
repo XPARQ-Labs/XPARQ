@@ -136,6 +136,11 @@ confirmed. QCash files are created with owner-only `0600` permissions on Unix.
 
 ## RPC separation
 
+Interactive API documentation is available from a running node at `/docs`.
+The machine-readable OpenAPI 3.1 specification is served at `/openapi.json` and
+is also tracked in [`docs/openapi.json`](docs/openapi.json). See
+[`docs/API.md`](docs/API.md) for transaction encoding and compatibility notes.
+
 - `/status`: canonical tip and node status
 - `/account/<address>`: wallet-only balance and paginated UTXO selection data
 - `/explorer/address/<address>`: aggregate balance and canonical activity

@@ -15,3 +15,4 @@ sqisign-blockchain-test = []
 [dependencies]
 blake3.workspace = true
 borsh.workspace = true
+base64.workspace = true

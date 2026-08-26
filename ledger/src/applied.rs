@@ -3,8 +3,8 @@ use std::{error::Error, fmt};
 use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_coin::{Coin, CoinId};
 use xparq_common::Height;
-use xparq_consensus::{AuthorizationValidated, ValidatedTransaction};
-use xparq_crypto::{Address, PublicKey};
+use xparq_consensus::{AuthorizationValidated, RevealedAccountKey, ValidatedTransaction};
+use xparq_crypto::Address;
 use xparq_qcash::QCash;
 use xparq_transaction::{
     MergeIntent, OnChainSpendIntent, OutputTarget, RedeemIntent, SpendCommitment, SplitIntent,
@@ -48,9 +48,26 @@ impl LedgerState {
             }
         }?;
         if let Some((address, public_key)) = revealed_account_key(transaction) {
-            match self.account_keys.register(address, public_key) {
-                Ok(true) => journal.registered_public_keys.push(address),
-                Ok(false) => {}
+            let result = match public_key {
+                RevealedAccountKey::MlDsa44(public_key) => self
+                    .account_keys
+                    .register(address, public_key)
+                    .map(|inserted| (inserted, 0_u8)),
+                RevealedAccountKey::Falcon512(public_key) => self
+                    .account_keys
+                    .register_falcon(address, public_key)
+                    .map(|inserted| (inserted, 1_u8)),
+                RevealedAccountKey::Profile(public_key) => self
+                    .account_keys
+                    .register_profile(address, public_key)
+                    .map(|inserted| (inserted, 2_u8)),
+            };
+            match result {
+                Ok((true, 0)) => journal.registered_public_keys.push(address),
+                Ok((true, 1)) => journal.registered_falcon_public_keys.push(address),
+                Ok((true, 2)) => journal.registered_profile_public_keys.push(address),
+                Ok((true, _)) => unreachable!("known account key registry kind"),
+                Ok((false, _)) => {}
                 Err(error) => {
                     self.rollback(journal)?;
                     return Err(error.into());
@@ -252,6 +269,12 @@ impl LedgerState {
         for address in journal.registered_public_keys {
             self.account_keys.remove(&address)?;
         }
+        for address in journal.registered_falcon_public_keys {
+            self.account_keys.remove_falcon(&address)?;
+        }
+        for address in journal.registered_profile_public_keys {
+            self.account_keys.remove_profile(&address)?;
+        }
         Ok(())
     }
 
@@ -322,15 +345,17 @@ impl LedgerState {
     }
 }
 
-fn revealed_account_key(transaction: &ValidatedTransaction) -> Option<(Address, PublicKey)> {
+fn revealed_account_key(
+    transaction: &ValidatedTransaction,
+) -> Option<(Address, RevealedAccountKey)> {
     match transaction {
         ValidatedTransaction::OnChainSpend(validated) => validated
-            .revealed_public_key()
-            .copied()
+            .revealed_account_key()
+            .cloned()
             .map(|key| (validated.intent().sender, key)),
         ValidatedTransaction::Withdraw(validated) => validated
-            .revealed_public_key()
-            .copied()
+            .revealed_account_key()
+            .cloned()
             .map(|key| (validated.intent().sender, key)),
         _ => None,
     }

@@ -15,7 +15,6 @@ type XPARQSigningKey = SigningKey<MlDsa44>;
 type XPARQExpandedSigningKey = ExpandedSigningKey<MlDsa44>;
 type XPARQVerifyingKey = VerifyingKey<MlDsa44>;
 type XPARQSignature = MlDsaSignature<MlDsa44>;
-const VERIFICATION_QUEUE_CAPACITY: usize = 256;
 
 pub const PUBLIC_KEY_SIZE: usize = 1_312;
 pub const SECRET_KEY_SIZE: usize = 2_560;
@@ -200,22 +199,6 @@ pub fn sign(secret_key: &SecretKey, message: &[u8]) -> Signature {
 
 pub fn verify(public_key: &PublicKey, message: &[u8], signature: &Signature) -> bool {
     verify_result(public_key, message, signature).is_ok()
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct VerificationQueueSnapshot {
-    pub depth: u64,
-    pub capacity: usize,
-    pub queued_total: u64,
-    pub fallback_total: u64,
-    pub wait_micros_total: u64,
-}
-
-pub fn verification_queue_snapshot() -> VerificationQueueSnapshot {
-    VerificationQueueSnapshot {
-        capacity: VERIFICATION_QUEUE_CAPACITY,
-        ..VerificationQueueSnapshot::default()
-    }
 }
 
 pub fn cached_verifying_key(public_key: &PublicKey) -> CachedVerifyingKey {

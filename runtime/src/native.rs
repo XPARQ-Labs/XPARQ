@@ -40,8 +40,22 @@ const MAX_STORED_MEMPOOL_SIZE: u64 = 64 * 1024 * 1024;
 const MAX_RPC_HEADER_SIZE: usize = 16 * 1024;
 const MAX_ACCOUNT_UTXOS_PER_PAGE: usize = 1_000;
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
+const OPENAPI_JSON: &[u8] = include_bytes!("../../docs/openapi.json");
+const API_DOCS_HTML: &[u8] = br#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>XPARQ Node RPC API</title>
+</head>
+<body>
+  <script id="api-reference" data-url="/openapi.json"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+</body>
+</html>
+"#;
 const P2P_MAGIC: [u8; 8] = *b"XPQP2P01";
-const P2P_PROTOCOL_VERSION: u32 = 3;
+const P2P_PROTOCOL_VERSION: u32 = 4;
 const CAPABILITY_PEER_DISCOVERY: u64 = 1 << 0;
 const CAPABILITY_RELAY: u64 = 1 << 1;
 const LOCAL_CAPABILITIES: u64 = CAPABILITY_PEER_DISCOVERY | CAPABILITY_RELAY;
@@ -520,7 +534,7 @@ fn account_response(
         .map(|utxo| {
             let is_reserved = reserved.contains(&utxo.coin.id);
             serde_json::json!({
-                "id": utxo.coin.id.to_string(),
+                "id": utxo.coin.id.to_text_at_height(next_height),
                 "amount": utxo.coin.amount.0,
                 "spendable_height": utxo.spendable_height.0,
                 "reserved": is_reserved,
@@ -530,9 +544,29 @@ fn account_response(
     let next_utxo_offset = utxo_offset
         .checked_add(utxos.len())
         .filter(|offset| *offset < account_utxos.len());
+    let registered_signature_profile = ledger
+        .state()
+        .account_keys
+        .get_profile(&address)
+        .map(|key| key.profile.as_str())
+        .or_else(|| {
+            ledger
+                .state()
+                .account_keys
+                .get_falcon(&address)
+                .map(|_| "legacy-falcon512")
+        })
+        .or_else(|| {
+            ledger
+                .state()
+                .account_keys
+                .get(&address)
+                .map(|_| "legacy-mldsa44")
+        });
     Ok(serde_json::json!({
         "address": xparq::crypto::address_to_string(&address),
-        "public_key_registered": ledger.state().account_keys.get(&address).is_some(),
+        "public_key_registered": registered_signature_profile.is_some(),
+        "signature_profile": registered_signature_profile,
         "tip_height": ledger.tip_height().map_or(0, |height| height.0),
         "next_height": next_height,
         "total": total.0,
@@ -830,6 +864,15 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
     if !request.body.is_empty() {
         return Err("GET request body is not allowed".into());
     }
+    match route {
+        "/openapi.json" => {
+            return write_http_bytes(stream, 200, "application/json", OPENAPI_JSON);
+        }
+        "/docs" | "/docs/" => {
+            return write_http_bytes(stream, 200, "text/html; charset=utf-8", API_DOCS_HTML);
+        }
+        _ => {}
+    }
     let ledger = load_or_initialize(database)?;
     let response = match route {
         "/status" => status_response(&ledger)?,
@@ -1035,10 +1078,19 @@ fn write_http_response(
     value: &serde_json::Value,
 ) -> Result<(), String> {
     let body = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    write_http_bytes(stream, status, "application/json", &body)
+}
+
+fn write_http_bytes(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), String> {
     let reason = if status == 200 { "OK" } else { "Bad Request" };
     write!(
         stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n\r\n",
         body.len()
     )
     .and_then(|_| stream.write_all(&body))
@@ -3000,6 +3052,32 @@ fn default_database() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_api_documentation_is_valid_and_references_every_rpc_route() {
+        let specification: serde_json::Value = serde_json::from_slice(OPENAPI_JSON).unwrap();
+        assert_eq!(specification["openapi"], "3.1.0");
+        for route in [
+            "/status",
+            "/fee-policy",
+            "/blocks/latest",
+            "/block/{height}",
+            "/account/{address}",
+            "/explorer/address/{address}",
+            "/explorer/transaction/{transaction_id}",
+            "/transaction",
+        ] {
+            assert!(
+                specification["paths"].get(route).is_some(),
+                "missing {route}"
+            );
+        }
+        assert!(
+            API_DOCS_HTML
+                .windows(b"/openapi.json".len())
+                .any(|window| window == b"/openapi.json")
+        );
+    }
 
     fn policy_split_transaction(fee: u64) -> AuthorizedTransaction {
         let input_seed = xparq::qcash::QCashSigningSeed::from_bytes([0x41; 32]);

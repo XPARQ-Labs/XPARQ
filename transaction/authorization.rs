@@ -1,7 +1,9 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_common::canonical_bytes;
 use xparq_crypto::{
-    Address, PublicKey, QCashSignature, Signature, address_from_public_key, verify,
+    Address, FalconPublicKey, FalconSignature, ProfilePublicKey, ProfileSignature, PublicKey,
+    QCashSignature, Signature, address_from_falcon_public_key, address_from_profile_public_key,
+    address_from_public_key, falcon_verify, profile_verify, verify,
 };
 use xparq_qcash::QCash;
 
@@ -48,19 +50,65 @@ pub enum AccountAuthorization {
     Known {
         signature: Signature,
     },
+    Falcon512Reveal {
+        public_key: FalconPublicKey,
+        signature: FalconSignature,
+    },
+    Falcon512Known {
+        signature: FalconSignature,
+    },
+    ProfileReveal {
+        public_key: ProfilePublicKey,
+        signature: ProfileSignature,
+    },
+    ProfileKnown {
+        profile: xparq_crypto::SignatureProfile,
+        signature: ProfileSignature,
+    },
 }
 
 impl AccountAuthorization {
-    pub const fn signature(&self) -> &Signature {
+    pub const fn ml_dsa_signature(&self) -> Option<&Signature> {
         match self {
-            Self::Reveal { signature, .. } | Self::Known { signature } => signature,
+            Self::Reveal { signature, .. } | Self::Known { signature } => Some(signature),
+            Self::Falcon512Reveal { .. }
+            | Self::Falcon512Known { .. }
+            | Self::ProfileReveal { .. }
+            | Self::ProfileKnown { .. } => None,
         }
     }
 
-    pub const fn revealed_public_key(&self) -> Option<&PublicKey> {
+    pub const fn revealed_ml_dsa_public_key(&self) -> Option<&PublicKey> {
         match self {
             Self::Reveal { public_key, .. } => Some(public_key),
-            Self::Known { .. } => None,
+            Self::Known { .. }
+            | Self::Falcon512Reveal { .. }
+            | Self::Falcon512Known { .. }
+            | Self::ProfileReveal { .. }
+            | Self::ProfileKnown { .. } => None,
+        }
+    }
+
+    pub const fn falcon_signature(&self) -> Option<&FalconSignature> {
+        match self {
+            Self::Falcon512Reveal { signature, .. } | Self::Falcon512Known { signature } => {
+                Some(signature)
+            }
+            Self::Reveal { .. }
+            | Self::Known { .. }
+            | Self::ProfileReveal { .. }
+            | Self::ProfileKnown { .. } => None,
+        }
+    }
+
+    pub const fn revealed_falcon_public_key(&self) -> Option<&FalconPublicKey> {
+        match self {
+            Self::Falcon512Reveal { public_key, .. } => Some(public_key),
+            Self::Reveal { .. }
+            | Self::Known { .. }
+            | Self::Falcon512Known { .. }
+            | Self::ProfileReveal { .. }
+            | Self::ProfileKnown { .. } => None,
         }
     }
 }
@@ -78,15 +126,31 @@ impl<T: AccountIntent> AuthorizedAccountIntent<T> {
     /// ledger state and must be verified by consensus validation instead.
     pub fn verify_revealed_signature(&self, chain: ChainContext) -> Result<bool, IntentError> {
         let commitment = self.intent.commitment(chain)?;
-        let Some(public_key) = self.authorization.revealed_public_key() else {
-            return Ok(false);
-        };
-        Ok(address_from_public_key(public_key) == self.intent.sender()
-            && verify(
+        match &self.authorization {
+            AccountAuthorization::Reveal {
                 public_key,
-                commitment.as_bytes(),
-                self.authorization.signature(),
-            ))
+                signature,
+            } => Ok(address_from_public_key(public_key) == self.intent.sender()
+                && verify(public_key, commitment.as_bytes(), signature)),
+            AccountAuthorization::Falcon512Reveal {
+                public_key,
+                signature,
+            } => Ok(public_key.level() == xparq_crypto::FalconLevel::Level1
+                && signature.level() == xparq_crypto::FalconLevel::Level1
+                && address_from_falcon_public_key(public_key) == self.intent.sender()
+                && falcon_verify(public_key, commitment.as_bytes(), signature).unwrap_or(false)),
+            AccountAuthorization::ProfileReveal {
+                public_key,
+                signature,
+            } => Ok(
+                address_from_profile_public_key(public_key) == self.intent.sender()
+                    && profile_verify(public_key, commitment.as_bytes(), signature),
+            ),
+            AccountAuthorization::Known { .. } | AccountAuthorization::Falcon512Known { .. } => {
+                Ok(false)
+            }
+            AccountAuthorization::ProfileKnown { .. } => Ok(false),
+        }
     }
 }
 
@@ -178,3 +242,21 @@ macro_rules! impl_intent_validation {
 }
 
 impl_intent_validation!(RedeemIntent, MergeIntent, SplitIntent);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adding_falcon_variants_preserves_legacy_authorization_tags() {
+        let reveal = AccountAuthorization::Reveal {
+            public_key: PublicKey([1; xparq_crypto::PUBLIC_KEY_SIZE]),
+            signature: Signature([2; xparq_crypto::SIGNATURE_SIZE]),
+        };
+        let known = AccountAuthorization::Known {
+            signature: Signature([3; xparq_crypto::SIGNATURE_SIZE]),
+        };
+        assert_eq!(borsh::to_vec(&reveal).unwrap()[0], 0);
+        assert_eq!(borsh::to_vec(&known).unwrap()[0], 1);
+    }
+}

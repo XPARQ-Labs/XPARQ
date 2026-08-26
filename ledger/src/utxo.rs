@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_coin::{Coin, CoinId};
 use xparq_common::Height;
-use xparq_crypto::{Address, PublicKey, QCashPublicKey};
+use xparq_crypto::{Address, FalconPublicKey, ProfilePublicKey, PublicKey, QCashPublicKey};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct CoinUtxo {
@@ -106,11 +106,15 @@ pub struct UtxoRollbackJournal {
     pub(crate) consumed_qcash: Vec<QCashUtxo>,
     pub(crate) created_qcash_ids: Vec<CoinId>,
     pub(crate) registered_public_keys: Vec<Address>,
+    pub(crate) registered_falcon_public_keys: Vec<Address>,
+    pub(crate) registered_profile_public_keys: Vec<Address>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AccountKeyRegistry {
     keys: BTreeMap<Address, PublicKey>,
+    falcon_keys: BTreeMap<Address, FalconPublicKey>,
+    profile_keys: BTreeMap<Address, ProfilePublicKey>,
 }
 
 impl AccountKeyRegistry {
@@ -132,6 +136,58 @@ impl AccountKeyRegistry {
 
     pub fn remove(&mut self, address: &Address) -> Result<PublicKey, UtxoError> {
         self.keys
+            .remove(address)
+            .ok_or(UtxoError::PublicKeyNotFound)
+    }
+
+    pub fn get_falcon(&self, address: &Address) -> Option<&FalconPublicKey> {
+        self.falcon_keys.get(address)
+    }
+
+    pub fn register_falcon(
+        &mut self,
+        address: Address,
+        public_key: FalconPublicKey,
+    ) -> Result<bool, UtxoError> {
+        if let Some(existing) = self.falcon_keys.get(&address) {
+            return if existing == &public_key {
+                Ok(false)
+            } else {
+                Err(UtxoError::PublicKeyConflict)
+            };
+        }
+        self.falcon_keys.insert(address, public_key);
+        Ok(true)
+    }
+
+    pub fn remove_falcon(&mut self, address: &Address) -> Result<FalconPublicKey, UtxoError> {
+        self.falcon_keys
+            .remove(address)
+            .ok_or(UtxoError::PublicKeyNotFound)
+    }
+
+    pub fn get_profile(&self, address: &Address) -> Option<&ProfilePublicKey> {
+        self.profile_keys.get(address)
+    }
+
+    pub fn register_profile(
+        &mut self,
+        address: Address,
+        public_key: ProfilePublicKey,
+    ) -> Result<bool, UtxoError> {
+        if let Some(existing) = self.profile_keys.get(&address) {
+            return if existing == &public_key {
+                Ok(false)
+            } else {
+                Err(UtxoError::PublicKeyConflict)
+            };
+        }
+        self.profile_keys.insert(address, public_key);
+        Ok(true)
+    }
+
+    pub fn remove_profile(&mut self, address: &Address) -> Result<ProfilePublicKey, UtxoError> {
+        self.profile_keys
             .remove(address)
             .ok_or(UtxoError::PublicKeyNotFound)
     }
@@ -251,6 +307,33 @@ mod tests {
         assert_eq!(
             qcash.get(&id).unwrap().coin,
             Coin::new(id, xparq_coin::Amount(5))
+        );
+    }
+
+    #[test]
+    fn account_registry_keeps_signature_schemes_separate() {
+        let ml = xparq_crypto::keypair_from_seed(&[20; 32]);
+        let falcon =
+            xparq_crypto::falcon_keypair_from_seed(xparq_crypto::FalconLevel::Level1, &[21; 32])
+                .unwrap();
+        let ml_address = xparq_crypto::address_from_public_key(&ml.public_key);
+        let falcon_address = xparq_crypto::address_from_falcon_public_key(&falcon.public_key);
+        let mut registry = AccountKeyRegistry::default();
+
+        assert!(registry.register(ml_address, ml.public_key).unwrap());
+        assert!(
+            registry
+                .register_falcon(falcon_address, falcon.public_key.clone())
+                .unwrap()
+        );
+        assert_eq!(registry.get(&ml_address), Some(&ml.public_key));
+        assert_eq!(
+            registry.get_falcon(&falcon_address),
+            Some(&falcon.public_key)
+        );
+        assert_eq!(
+            registry.remove_falcon(&falcon_address).unwrap(),
+            falcon.public_key
         );
     }
 }

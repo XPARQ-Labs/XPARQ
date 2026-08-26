@@ -6,7 +6,6 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-#[cfg(any(feature = "sqisign-blockchain-test", feature = "falcon-candidate"))]
 pub mod candidate;
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -138,6 +137,21 @@ pub enum SignatureContext {
     RecoveryProof = 3,
 }
 
+/// First height at which Falcon-512 account authorizations are accepted.
+/// ML-DSA-44 remains valid after this height; this is coexistence, not replacement.
+pub const FALCON_512_ACTIVATION_HEIGHT: u64 = 10_000;
+
+pub const fn account_signature_scheme_active_at_height(
+    scheme: SignatureScheme,
+    height: u64,
+) -> bool {
+    match scheme {
+        SignatureScheme::MlDsa44 => true,
+        SignatureScheme::Falcon512 => height >= FALCON_512_ACTIVATION_HEIGHT,
+        _ => false,
+    }
+}
+
 #[cfg(not(feature = "sqisign-blockchain-test"))]
 pub const INITIAL_SIGNATURE_SCHEME: SignatureScheme = SignatureScheme::MlDsa44;
 #[cfg(feature = "sqisign-blockchain-test")]
@@ -242,5 +256,25 @@ mod tests {
             plan.validate(),
             Err(CryptoUpgradeError::PrimitiveFamilyMismatch)
         );
+    }
+
+    #[test]
+    fn falcon_512_coexists_with_ml_dsa_after_height_10_000() {
+        assert!(account_signature_scheme_active_at_height(
+            SignatureScheme::MlDsa44,
+            FALCON_512_ACTIVATION_HEIGHT - 1,
+        ));
+        assert!(!account_signature_scheme_active_at_height(
+            SignatureScheme::Falcon512,
+            FALCON_512_ACTIVATION_HEIGHT - 1,
+        ));
+        assert!(account_signature_scheme_active_at_height(
+            SignatureScheme::MlDsa44,
+            FALCON_512_ACTIVATION_HEIGHT,
+        ));
+        assert!(account_signature_scheme_active_at_height(
+            SignatureScheme::Falcon512,
+            FALCON_512_ACTIVATION_HEIGHT,
+        ));
     }
 }

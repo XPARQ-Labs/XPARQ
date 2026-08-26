@@ -2,8 +2,11 @@ use bip39::{Language, Mnemonic};
 use serde::{Deserialize, Serialize};
 use xparq::{
     crypto::{
-        Address, PublicKey, SecretKey, address_from_public_key, address_from_string,
-        address_to_string, hash_bytes, keypair_from_seed, sign,
+        Address, FalconLevel, FalconPublicKey, FalconSecretKey, ProfilePublicKey,
+        ProfileSigningSeed, PublicKey, SecretKey, SignatureProfile, address_from_falcon_public_key,
+        address_from_profile_public_key, address_from_public_key, address_from_string,
+        address_to_string, falcon_keypair_from_seed, falcon_sign, hash_bytes, keypair_from_seed,
+        sign,
     },
     transaction::{
         AccountAuthorization, AccountIntent, AuthorizedAccountIntent, OnChainSpendIntent,
@@ -16,6 +19,7 @@ pub const XPARQ_MNEMONIC_DEFAULT_WORDS: usize = 12;
 pub const XPARQ_MNEMONIC_12_ENTROPY_BYTES: usize = 16;
 pub const XPARQ_MNEMONIC_24_ENTROPY_BYTES: usize = 32;
 const XPARQ_MNEMONIC_SPEND_TAG: &[u8] = b"XPARQ_WALLET_SPEND_ML_DSA44_V1";
+const XPARQ_MNEMONIC_FALCON_SPEND_TAG: &[u8] = b"XPARQ_WALLET_SPEND_FALCON512_V1";
 
 #[derive(Clone, Debug)]
 pub struct Wallet {
@@ -23,6 +27,34 @@ pub struct Wallet {
     pub address: Address,
     pub public_key: PublicKey,
     pub secret_key: SecretKey,
+}
+
+#[derive(Debug)]
+pub struct FalconWallet {
+    pub mnemonic: Option<String>,
+    pub address: Address,
+    pub public_key: FalconPublicKey,
+    pub secret_key: FalconSecretKey,
+}
+
+#[derive(Debug)]
+pub struct ProfileWallet {
+    pub mnemonic: Option<String>,
+    pub address: Address,
+    pub public_key: ProfilePublicKey,
+    signing_seed: ProfileSigningSeed,
+}
+
+impl Drop for ProfileWallet {
+    fn drop(&mut self) {
+        self.mnemonic.zeroize();
+    }
+}
+
+impl Drop for FalconWallet {
+    fn drop(&mut self) {
+        self.mnemonic.zeroize();
+    }
 }
 
 impl Drop for Wallet {
@@ -36,6 +68,8 @@ impl Drop for Wallet {
 struct WalletFile {
     address: String,
     mnemonic: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signature_profile: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -56,6 +90,7 @@ pub fn wallet_file_bytes(wallet: &Wallet) -> Result<Zeroizing<Vec<u8>>, String> 
     let wallet_file = WalletFile {
         address: address_to_string(&wallet.address),
         mnemonic: mnemonic.to_string(),
+        signature_profile: None,
     };
     serde_json::to_vec_pretty(&wallet_file)
         .map(Zeroizing::new)
@@ -71,6 +106,9 @@ pub fn wallet_address_from_file_bytes(bytes: &[u8]) -> Result<Address, String> {
 pub fn wallet_from_file_bytes(bytes: &[u8]) -> Result<Wallet, String> {
     let wallet_file: WalletFile = serde_json::from_slice(bytes)
         .map_err(|error| format!("failed to parse wallet: {error}"))?;
+    if wallet_file.signature_profile.is_some() {
+        return Err("wallet uses a signature profile; load it as a profile wallet".to_string());
+    }
     let mut wallet = wallet_from_xparq_mnemonic(&wallet_file.mnemonic)?;
     let stored_address = address_from_string(&wallet_file.address)
         .map_err(|error| format!("invalid wallet address: {error}"))?;
@@ -79,6 +117,51 @@ pub fn wallet_from_file_bytes(bytes: &[u8]) -> Result<Wallet, String> {
     }
     wallet.mnemonic = Some(wallet_file.mnemonic.clone());
     Ok(wallet)
+}
+
+pub fn profile_wallet_file_bytes(wallet: &ProfileWallet) -> Result<Zeroizing<Vec<u8>>, String> {
+    let mnemonic = wallet
+        .mnemonic
+        .as_deref()
+        .ok_or_else(|| "wallet has no mnemonic recovery material".to_string())?;
+    decode_xparq_mnemonic(mnemonic)?;
+    let wallet_file = WalletFile {
+        address: address_to_string(&wallet.address),
+        mnemonic: mnemonic.to_string(),
+        signature_profile: Some(wallet.profile().as_str().to_string()),
+    };
+    serde_json::to_vec_pretty(&wallet_file)
+        .map(Zeroizing::new)
+        .map_err(|error| format!("failed to encode wallet file: {error}"))
+}
+
+pub fn profile_wallet_from_file_bytes(bytes: &[u8]) -> Result<ProfileWallet, String> {
+    let wallet_file: WalletFile = serde_json::from_slice(bytes)
+        .map_err(|error| format!("failed to parse wallet: {error}"))?;
+    let profile = wallet_file
+        .signature_profile
+        .as_deref()
+        .ok_or("wallet file does not contain a signature profile")?
+        .parse::<SignatureProfile>()
+        .map_err(str::to_string)?;
+    let mut wallet = profile_wallet_from_xparq_mnemonic(&wallet_file.mnemonic, profile)?;
+    let stored_address = address_from_string(&wallet_file.address)
+        .map_err(|error| format!("invalid wallet address: {error}"))?;
+    if wallet.address != stored_address {
+        return Err("wallet address does not match its mnemonic and signature profile".to_string());
+    }
+    wallet.mnemonic = Some(wallet_file.mnemonic.clone());
+    Ok(wallet)
+}
+
+pub fn wallet_file_signature_profile(bytes: &[u8]) -> Result<Option<SignatureProfile>, String> {
+    let wallet_file: WalletFile = serde_json::from_slice(bytes)
+        .map_err(|error| format!("failed to parse wallet: {error}"))?;
+    wallet_file
+        .signature_profile
+        .as_deref()
+        .map(|profile| profile.parse::<SignatureProfile>().map_err(str::to_string))
+        .transpose()
 }
 
 pub fn generate_xparq_mnemonic(words: usize) -> Result<Zeroizing<String>, String> {
@@ -98,6 +181,40 @@ pub fn wallet_from_xparq_mnemonic(phrase: &str) -> Result<Wallet, String> {
     let spend_seed = Zeroizing::new(tagged_wallet_hash(XPARQ_MNEMONIC_SPEND_TAG, &entropy));
     let spend = keypair_from_seed(&spend_seed);
     Ok(Wallet::from_keys(spend.public_key, spend.secret_key))
+}
+
+pub fn falcon_wallet_from_xparq_mnemonic(phrase: &str) -> Result<FalconWallet, String> {
+    let entropy = decode_xparq_mnemonic(phrase)?;
+    let spend_seed = Zeroizing::new(tagged_wallet_hash(
+        XPARQ_MNEMONIC_FALCON_SPEND_TAG,
+        &entropy,
+    ));
+    let spend = falcon_keypair_from_seed(FalconLevel::Level1, &spend_seed)
+        .map_err(|error| format!("failed to derive Falcon-512 wallet key: {error:?}"))?;
+    Ok(FalconWallet {
+        mnemonic: None,
+        address: address_from_falcon_public_key(&spend.public_key),
+        public_key: spend.public_key,
+        secret_key: spend.secret_key,
+    })
+}
+
+pub fn profile_wallet_from_xparq_mnemonic(
+    phrase: &str,
+    profile: SignatureProfile,
+) -> Result<ProfileWallet, String> {
+    let entropy = decode_xparq_mnemonic(phrase)?;
+    let mut tag = Vec::from(b"XPARQ_WALLET_SIGNATURE_PROFILE_V1".as_slice());
+    tag.push(profile as u8);
+    let seed = tagged_wallet_hash(&tag, &entropy);
+    let signing_seed = ProfileSigningSeed::new(profile, seed);
+    let public_key = signing_seed.public_key();
+    Ok(ProfileWallet {
+        mnemonic: None,
+        address: address_from_profile_public_key(&public_key),
+        public_key,
+        signing_seed,
+    })
 }
 
 pub fn encode_xparq_mnemonic(entropy: &[u8]) -> Result<String, String> {
@@ -202,6 +319,91 @@ impl Wallet {
     }
 }
 
+impl FalconWallet {
+    pub fn sign_onchain_spend(
+        &self,
+        intent: OnChainSpendIntent,
+        public_key_known: bool,
+    ) -> Result<AuthorizedAccountIntent<OnChainSpendIntent>, String> {
+        self.sign_account_intent(intent, public_key_known)
+    }
+
+    pub fn sign_withdraw(
+        &self,
+        intent: WithdrawIntent,
+        public_key_known: bool,
+    ) -> Result<AuthorizedAccountIntent<WithdrawIntent>, String> {
+        self.sign_account_intent(intent, public_key_known)
+    }
+
+    fn sign_account_intent<T: AccountIntent>(
+        &self,
+        intent: T,
+        public_key_known: bool,
+    ) -> Result<AuthorizedAccountIntent<T>, String> {
+        let chain = xparq::genesis::chain_context()
+            .map_err(|error| format!("failed to load chain identity: {error}"))?;
+        let commitment = intent
+            .commitment(chain)
+            .map_err(|error| format!("invalid transaction intent: {error}"))?;
+        let signature = falcon_sign(&self.secret_key, commitment.as_bytes())
+            .map_err(|error| format!("Falcon-512 signing failed: {error:?}"))?;
+        let authorization = if public_key_known {
+            AccountAuthorization::Falcon512Known { signature }
+        } else {
+            AccountAuthorization::Falcon512Reveal {
+                public_key: self.public_key.clone(),
+                signature,
+            }
+        };
+        let signed = AuthorizedAccountIntent {
+            intent,
+            authorization,
+        };
+        if !public_key_known
+            && !signed
+                .verify_revealed_signature(chain)
+                .map_err(|error| format!("signed transaction validation failed: {error}"))?
+        {
+            return Err("signed Falcon-512 transaction authorization is invalid".to_string());
+        }
+        Ok(signed)
+    }
+}
+
+impl ProfileWallet {
+    pub const fn profile(&self) -> SignatureProfile {
+        self.signing_seed.profile()
+    }
+
+    pub fn sign_account_intent<T: AccountIntent>(
+        &self,
+        intent: T,
+        public_key_known: bool,
+    ) -> Result<AuthorizedAccountIntent<T>, String> {
+        let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
+        let commitment = intent
+            .commitment(chain)
+            .map_err(|error| error.to_string())?;
+        let signature = self.signing_seed.sign(commitment.as_bytes());
+        let authorization = if public_key_known {
+            AccountAuthorization::ProfileKnown {
+                profile: self.profile(),
+                signature,
+            }
+        } else {
+            AccountAuthorization::ProfileReveal {
+                public_key: self.public_key.clone(),
+                signature,
+            }
+        };
+        Ok(AuthorizedAccountIntent {
+            intent,
+            authorization,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +461,63 @@ mod tests {
             wallet_from_file_bytes(&first_file).unwrap().address,
             wallet_from_file_bytes(&restored_file).unwrap().address
         );
+    }
+
+    #[test]
+    fn mnemonic_restore_preserves_falcon_signing_identity() {
+        let mnemonic = encode_xparq_mnemonic(&[10; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+        let first = falcon_wallet_from_xparq_mnemonic(&mnemonic).unwrap();
+        let restored = falcon_wallet_from_xparq_mnemonic(&mnemonic).unwrap();
+        assert_eq!(first.address, restored.address);
+        assert_eq!(first.public_key, restored.public_key);
+        assert_eq!(first.secret_key, restored.secret_key);
+    }
+
+    #[test]
+    fn mnemonic_derives_distinct_recoverable_profile_addresses() {
+        let mnemonic = encode_xparq_mnemonic(&[12; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+        let profiles = [
+            SignatureProfile::MlDsa44,
+            SignatureProfile::MlDsa65,
+            SignatureProfile::MlDsa87,
+            SignatureProfile::Falcon512,
+            SignatureProfile::Falcon1024,
+        ];
+        let first =
+            profiles.map(|profile| profile_wallet_from_xparq_mnemonic(&mnemonic, profile).unwrap());
+        let second =
+            profiles.map(|profile| profile_wallet_from_xparq_mnemonic(&mnemonic, profile).unwrap());
+        for (left, right) in first.iter().zip(&second) {
+            assert_eq!(left.address, right.address);
+        }
+        let unique = first
+            .iter()
+            .map(|wallet| wallet.address)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), profiles.len());
+    }
+
+    #[test]
+    fn profile_wallet_file_roundtrip_preserves_profile_and_identity() {
+        let mnemonic = encode_xparq_mnemonic(&[13; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+        for profile in [
+            SignatureProfile::MlDsa44,
+            SignatureProfile::MlDsa65,
+            SignatureProfile::MlDsa87,
+            SignatureProfile::Falcon512,
+            SignatureProfile::Falcon1024,
+        ] {
+            let mut wallet = profile_wallet_from_xparq_mnemonic(&mnemonic, profile).unwrap();
+            wallet.mnemonic = Some(mnemonic.clone());
+            let bytes = profile_wallet_file_bytes(&wallet).unwrap();
+            assert_eq!(
+                wallet_file_signature_profile(&bytes).unwrap(),
+                Some(profile)
+            );
+            let restored = profile_wallet_from_file_bytes(&bytes).unwrap();
+            assert_eq!(restored.profile(), profile);
+            assert_eq!(restored.address, wallet.address);
+            assert_eq!(restored.public_key, wallet.public_key);
+        }
     }
 }

@@ -10,7 +10,10 @@ use xparq_consensus::{
     POW_ARGON2_LANES, POW_ARGON2_MEMORY_KIB, WBDA_ALGORITHM, WBDA_DIFFICULTY_STEP,
     WBDA_HIGH_UTILIZATION_PPM, WBDA_LOW_UTILIZATION_PPM, WBDA_TARGET_BLOCK_WEIGHT, WBDA_WINDOW,
 };
-use xparq_crypto::{ADDRESS_SIZE, BlockHash, HASH_SIZE, Hash, HashDomain, domain_hash};
+use xparq_crypto::{
+    ADDRESS_SIZE, BlockHash, FALCON_512_ACTIVATION_HEIGHT, HASH_SIZE, Hash, HashDomain,
+    SIGNATURE_PROFILE_ACTIVATION_HEIGHT, domain_hash,
+};
 use xparq_ledger::{Ledger, LedgerError};
 use xparq_transaction::ChainContext;
 
@@ -25,7 +28,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 ]);
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`] changes.
-pub const CHAIN_SPEC_VERSION: u32 = 3;
+pub const CHAIN_SPEC_VERSION: u32 = 5;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -52,6 +55,8 @@ struct ChainSpecIdentity<'a> {
     address_size: u32,
     hash_size: u32,
     fork_choice_algorithm: &'a str,
+    falcon_512_activation_height: u64,
+    signature_profile_activation_height: u64,
 }
 
 /// Domain-separated identity of every consensus parameter that nodes must agree on.
@@ -80,6 +85,8 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         address_size: ADDRESS_SIZE as u32,
         hash_size: HASH_SIZE as u32,
         fork_choice_algorithm: FORK_CHOICE_ALGORITHM,
+        falcon_512_activation_height: FALCON_512_ACTIVATION_HEIGHT,
+        signature_profile_activation_height: SIGNATURE_PROFILE_ACTIVATION_HEIGHT,
     };
     let bytes = xparq_common::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
     Ok(domain_hash(HashDomain::ChainSpec, &bytes))

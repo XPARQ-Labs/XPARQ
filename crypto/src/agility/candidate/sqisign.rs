@@ -18,9 +18,7 @@ use sqisign_rs::{
 use static_assertions::const_assert_eq;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, OnceLock};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 type XparqSigningKey = SqisignSigningKey<Level5>;
@@ -34,30 +32,6 @@ const_assert_eq!(PUBLIC_KEY_SIZE, 129);
 const_assert_eq!(SECRET_KEY_SIZE, 705);
 const_assert_eq!(SIGNATURE_SIZE, 292);
 const VERIFYING_KEY_CACHE_CAPACITY: usize = 4_096;
-const VERIFICATION_QUEUE_CAPACITY: usize = 256;
-static VERIFICATION_QUEUE_DEPTH: AtomicU64 = AtomicU64::new(0);
-static VERIFICATION_QUEUE_QUEUED: AtomicU64 = AtomicU64::new(0);
-static VERIFICATION_QUEUE_FALLBACK: AtomicU64 = AtomicU64::new(0);
-static VERIFICATION_QUEUE_WAIT_MICROS: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct VerificationQueueSnapshot {
-    pub depth: u64,
-    pub capacity: usize,
-    pub queued_total: u64,
-    pub fallback_total: u64,
-    pub wait_micros_total: u64,
-}
-
-pub fn verification_queue_snapshot() -> VerificationQueueSnapshot {
-    VerificationQueueSnapshot {
-        depth: VERIFICATION_QUEUE_DEPTH.load(Ordering::Relaxed),
-        capacity: VERIFICATION_QUEUE_CAPACITY,
-        queued_total: VERIFICATION_QUEUE_QUEUED.load(Ordering::Relaxed),
-        fallback_total: VERIFICATION_QUEUE_FALLBACK.load(Ordering::Relaxed),
-        wait_micros_total: VERIFICATION_QUEUE_WAIT_MICROS.load(Ordering::Relaxed),
-    }
-}
 
 /// Deterministic, non-consensus accounting for SQIsign verification jobs.
 /// Public-key decodes are charged at their worst-case count because cache
@@ -284,67 +258,16 @@ pub fn verify(public_key: &PublicKey, message: &[u8], signature: &Signature) -> 
     verify_result(public_key, message, signature).is_ok()
 }
 
-/// Verifies independent SQIsign jobs concurrently using the persistent pool.
-///
-/// The returned booleans preserve input order. This is the primitive used for
-/// block-level preverification experiments; state-dependent transaction rules
-/// must still execute in consensus order.
-pub fn verify_batch_parallel(jobs: &[(PublicKey, Vec<u8>, Signature)]) -> Vec<bool> {
-    verify_batch_parallel_accounted(jobs).0
-}
-
-/// Verifies independent jobs and returns their deterministic worst-case work.
-pub fn verify_batch_parallel_accounted(
+/// Verifies independent jobs in input order and returns their deterministic
+/// worst-case work. A node may schedule calls concurrently according to its
+/// own worker and backpressure policy.
+pub fn verify_batch_accounted(
     jobs: &[(PublicKey, Vec<u8>, Signature)],
 ) -> (Vec<bool>, SqisignVerificationWork) {
     let work = SqisignVerificationWork::for_jobs(jobs);
-    let Some(workers) = verification_workers() else {
-        return (
-            jobs.iter()
-                .map(|(key, message, signature)| verify(key, message, signature))
-                .collect(),
-            work,
-        );
-    };
-
-    let mut pending = Vec::with_capacity(jobs.len());
-    for (key, message, signature) in jobs {
-        let cached = cached_verifying_key(key);
-        let (result_sender, result_receiver) = mpsc::sync_channel(1);
-        let job = VerificationJob {
-            verifying_key: cached.clone(),
-            message: message.clone(),
-            signature: *signature,
-            result: result_sender,
-            queued_at: Instant::now(),
-        };
-        VERIFICATION_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
-        match workers.try_send(job) {
-            Ok(()) => {
-                VERIFICATION_QUEUE_QUEUED.fetch_add(1, Ordering::Relaxed);
-                pending.push((
-                    Some(result_receiver),
-                    cached,
-                    message.as_slice(),
-                    *signature,
-                ));
-            }
-            Err(_) => {
-                VERIFICATION_QUEUE_DEPTH.fetch_sub(1, Ordering::Relaxed);
-                VERIFICATION_QUEUE_FALLBACK.fetch_add(1, Ordering::Relaxed);
-                pending.push((None, cached, message.as_slice(), *signature));
-            }
-        }
-    }
-
     (
-        pending
-            .into_iter()
-            .map(|(receiver, cached, message, signature)| {
-                receiver
-                    .and_then(|receiver| receiver.recv().ok())
-                    .unwrap_or_else(|| cached.verify(message, &signature).is_ok())
-            })
+        jobs.iter()
+            .map(|(key, message, signature)| verify(key, message, signature))
             .collect(),
         work,
     )
@@ -450,69 +373,6 @@ pub fn clear_verifying_key_cache() {
         .clear();
 }
 
-struct VerificationJob {
-    verifying_key: CachedVerifyingKey,
-    message: Vec<u8>,
-    signature: Signature,
-    result: mpsc::SyncSender<bool>,
-    queued_at: Instant,
-}
-
-fn verification_workers() -> Option<&'static mpsc::SyncSender<VerificationJob>> {
-    static WORKERS: OnceLock<Option<mpsc::SyncSender<VerificationJob>>> = OnceLock::new();
-    WORKERS
-        .get_or_init(|| {
-            let worker_count = std::thread::available_parallelism()
-                .map(usize::from)
-                .unwrap_or(1)
-                .saturating_sub(1);
-            if worker_count == 0 {
-                return None;
-            }
-            let (sender, receiver) =
-                mpsc::sync_channel::<VerificationJob>(VERIFICATION_QUEUE_CAPACITY);
-            let receiver = Arc::new(Mutex::new(receiver));
-            for index in 0..worker_count {
-                let receiver = Arc::clone(&receiver);
-                if std::thread::Builder::new()
-                    .name(format!("Xparq-sqisign-l5-{index}"))
-                    .spawn(move || {
-                        loop {
-                            let job = {
-                                let Ok(receiver) = receiver.lock() else {
-                                    return;
-                                };
-                                let Ok(job) = receiver.recv() else {
-                                    return;
-                                };
-                                job
-                            };
-                            VERIFICATION_QUEUE_DEPTH.fetch_sub(1, Ordering::Relaxed);
-                            VERIFICATION_QUEUE_WAIT_MICROS.fetch_add(
-                                job.queued_at
-                                    .elapsed()
-                                    .as_micros()
-                                    .min(u128::from(u64::MAX))
-                                    as u64,
-                                Ordering::Relaxed,
-                            );
-                            let valid = job
-                                .verifying_key
-                                .verify(&job.message, &job.signature)
-                                .is_ok();
-                            let _ = job.result.send(valid);
-                        }
-                    })
-                    .is_err()
-                {
-                    return None;
-                }
-            }
-            Some(sender)
-        })
-        .as_ref()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,7 +408,7 @@ mod tests {
             ),
             (owner.public_key, b"modified".to_vec(), owner_signature),
         ];
-        assert_eq!(verify_batch_parallel(&jobs), vec![true, true, false]);
+        assert_eq!(verify_batch_accounted(&jobs).0, vec![true, true, false]);
     }
 
     #[test]
@@ -567,8 +427,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         clear_verifying_key_cache();
-        let (cold_results, cold_work) = verify_batch_parallel_accounted(&jobs);
-        let (warm_results, warm_work) = verify_batch_parallel_accounted(&jobs);
+        let (cold_results, cold_work) = verify_batch_accounted(&jobs);
+        let (warm_results, warm_work) = verify_batch_accounted(&jobs);
         assert_eq!(cold_results, vec![true, true]);
         assert_eq!(warm_results, cold_results);
         assert_eq!(warm_work, cold_work);
