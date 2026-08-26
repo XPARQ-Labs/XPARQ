@@ -390,7 +390,9 @@ fn signed_transactions_are_valid_for_height(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{Signature, address_from_public_key, generate_keypair, sign};
+    use crate::crypto::{
+        ProfileSignature, ProfileSigningSeed, SignatureProfile, address_from_profile_public_key,
+    };
     use std::io::Cursor;
     use xparq_coin::CoinId;
     use xparq_transaction::{
@@ -412,8 +414,9 @@ mod tests {
 
     #[test]
     fn zero_fee_transaction_is_valid_block_structure() {
-        let owner = generate_keypair();
-        let sender = address_from_public_key(&owner.public_key);
+        let owner = ProfileSigningSeed::new(SignatureProfile::MlDsa44, [7; 32]);
+        let public_key = owner.public_key();
+        let sender = address_from_profile_public_key(&public_key);
         let transaction = OnChainSpendIntent::new(
             sender,
             vec![CoinId::from_bytes([0x31; crate::crypto::HASH_SIZE])],
@@ -424,11 +427,11 @@ mod tests {
             1,
         )
         .unwrap();
-        let signature = sign(&owner.secret_key, b"block structure test");
+        let signature = owner.sign(b"block structure test");
         let signed = AuthorizedAccountIntent {
             intent: transaction,
-            authorization: AccountAuthorization::Reveal {
-                public_key: owner.public_key,
+            authorization: AccountAuthorization::ProfileReveal {
+                public_key,
                 signature,
             },
         };
@@ -469,8 +472,12 @@ mod tests {
         .unwrap();
         AuthorizedTransaction::OnChainSpend(Box::new(AuthorizedAccountIntent {
             intent: transaction,
-            authorization: AccountAuthorization::Known {
-                signature: Signature([1; crate::crypto::SIGNATURE_SIZE]),
+            authorization: AccountAuthorization::ProfileKnown {
+                profile: SignatureProfile::MlDsa44,
+                signature: ProfileSignature {
+                    profile: SignatureProfile::MlDsa44,
+                    bytes: vec![1; 16],
+                },
             },
         }))
     }

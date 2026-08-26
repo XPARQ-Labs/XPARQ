@@ -7,8 +7,8 @@ use std::{
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 const DATABASE_FILE: &str = "xparq.redb";
-// Version 3 adds the scheme-separated Falcon-512 account-key registry.
-const SCHEMA_VERSION: u32 = 3;
+// Version 4 replaces scheme-specific account registries with one profile registry.
+const SCHEMA_VERSION: u32 = 4;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("canonical_blocks");

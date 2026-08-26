@@ -2,40 +2,16 @@ use bip39::{Language, Mnemonic};
 use serde::{Deserialize, Serialize};
 use xparq::{
     crypto::{
-        Address, FalconLevel, FalconPublicKey, FalconSecretKey, ProfilePublicKey,
-        ProfileSigningSeed, PublicKey, SecretKey, SignatureProfile, address_from_falcon_public_key,
-        address_from_profile_public_key, address_from_public_key, address_from_string,
-        address_to_string, falcon_keypair_from_seed, falcon_sign, hash_bytes, keypair_from_seed,
-        sign,
+        Address, ProfilePublicKey, ProfileSigningSeed, SignatureProfile,
+        address_from_profile_public_key, address_from_string, address_to_string, hash_bytes,
     },
-    transaction::{
-        AccountAuthorization, AccountIntent, AuthorizedAccountIntent, OnChainSpendIntent,
-        WithdrawIntent,
-    },
+    transaction::{AccountAuthorization, AccountIntent, AuthorizedAccountIntent},
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub const XPARQ_MNEMONIC_DEFAULT_WORDS: usize = 12;
 pub const XPARQ_MNEMONIC_12_ENTROPY_BYTES: usize = 16;
 pub const XPARQ_MNEMONIC_24_ENTROPY_BYTES: usize = 32;
-const XPARQ_MNEMONIC_SPEND_TAG: &[u8] = b"XPARQ_WALLET_SPEND_ML_DSA44_V1";
-const XPARQ_MNEMONIC_FALCON_SPEND_TAG: &[u8] = b"XPARQ_WALLET_SPEND_FALCON512_V1";
-
-#[derive(Clone, Debug)]
-pub struct Wallet {
-    pub mnemonic: Option<String>,
-    pub address: Address,
-    pub public_key: PublicKey,
-    pub secret_key: SecretKey,
-}
-
-#[derive(Debug)]
-pub struct FalconWallet {
-    pub mnemonic: Option<String>,
-    pub address: Address,
-    pub public_key: FalconPublicKey,
-    pub secret_key: FalconSecretKey,
-}
 
 #[derive(Debug)]
 pub struct ProfileWallet {
@@ -46,18 +22,6 @@ pub struct ProfileWallet {
 }
 
 impl Drop for ProfileWallet {
-    fn drop(&mut self) {
-        self.mnemonic.zeroize();
-    }
-}
-
-impl Drop for FalconWallet {
-    fn drop(&mut self) {
-        self.mnemonic.zeroize();
-    }
-}
-
-impl Drop for Wallet {
     fn drop(&mut self) {
         self.mnemonic.zeroize();
     }
@@ -77,46 +41,10 @@ struct WalletHeader {
     address: String,
 }
 
-pub fn wallet_address_string(wallet: &Wallet) -> String {
-    address_to_string(&wallet.address)
-}
-
-pub fn wallet_file_bytes(wallet: &Wallet) -> Result<Zeroizing<Vec<u8>>, String> {
-    let mnemonic = wallet
-        .mnemonic
-        .as_deref()
-        .ok_or_else(|| "wallet has no mnemonic recovery material".to_string())?;
-    decode_xparq_mnemonic(mnemonic)?;
-    let wallet_file = WalletFile {
-        address: address_to_string(&wallet.address),
-        mnemonic: mnemonic.to_string(),
-        signature_profile: None,
-    };
-    serde_json::to_vec_pretty(&wallet_file)
-        .map(Zeroizing::new)
-        .map_err(|error| format!("failed to encode wallet file: {error}"))
-}
-
 pub fn wallet_address_from_file_bytes(bytes: &[u8]) -> Result<Address, String> {
     let header: WalletHeader = serde_json::from_slice(bytes)
         .map_err(|error| format!("failed to parse wallet: {error}"))?;
     address_from_string(&header.address).map_err(|error| format!("invalid wallet address: {error}"))
-}
-
-pub fn wallet_from_file_bytes(bytes: &[u8]) -> Result<Wallet, String> {
-    let wallet_file: WalletFile = serde_json::from_slice(bytes)
-        .map_err(|error| format!("failed to parse wallet: {error}"))?;
-    if wallet_file.signature_profile.is_some() {
-        return Err("wallet uses a signature profile; load it as a profile wallet".to_string());
-    }
-    let mut wallet = wallet_from_xparq_mnemonic(&wallet_file.mnemonic)?;
-    let stored_address = address_from_string(&wallet_file.address)
-        .map_err(|error| format!("invalid wallet address: {error}"))?;
-    if wallet.address != stored_address {
-        return Err("wallet address does not match its mnemonic".to_string());
-    }
-    wallet.mnemonic = Some(wallet_file.mnemonic.clone());
-    Ok(wallet)
 }
 
 pub fn profile_wallet_file_bytes(wallet: &ProfileWallet) -> Result<Zeroizing<Vec<u8>>, String> {
@@ -176,29 +104,6 @@ pub fn generate_xparq_mnemonic(words: usize) -> Result<Zeroizing<String>, String
     encode_xparq_mnemonic(&entropy).map(Zeroizing::new)
 }
 
-pub fn wallet_from_xparq_mnemonic(phrase: &str) -> Result<Wallet, String> {
-    let entropy = decode_xparq_mnemonic(phrase)?;
-    let spend_seed = Zeroizing::new(tagged_wallet_hash(XPARQ_MNEMONIC_SPEND_TAG, &entropy));
-    let spend = keypair_from_seed(&spend_seed);
-    Ok(Wallet::from_keys(spend.public_key, spend.secret_key))
-}
-
-pub fn falcon_wallet_from_xparq_mnemonic(phrase: &str) -> Result<FalconWallet, String> {
-    let entropy = decode_xparq_mnemonic(phrase)?;
-    let spend_seed = Zeroizing::new(tagged_wallet_hash(
-        XPARQ_MNEMONIC_FALCON_SPEND_TAG,
-        &entropy,
-    ));
-    let spend = falcon_keypair_from_seed(FalconLevel::Level1, &spend_seed)
-        .map_err(|error| format!("failed to derive Falcon-512 wallet key: {error:?}"))?;
-    Ok(FalconWallet {
-        mnemonic: None,
-        address: address_from_falcon_public_key(&spend.public_key),
-        public_key: spend.public_key,
-        secret_key: spend.secret_key,
-    })
-}
-
 pub fn profile_wallet_from_xparq_mnemonic(
     phrase: &str,
     profile: SignatureProfile,
@@ -247,16 +152,8 @@ fn tagged_wallet_hash(tag: &[u8], bytes: &[u8]) -> [u8; 32] {
     hash_bytes(&payload).0
 }
 
+/* Legacy wallet signing was removed after the profile-only chain reset.
 impl Wallet {
-    pub fn from_keys(public_key: PublicKey, secret_key: SecretKey) -> Self {
-        Self {
-            mnemonic: None,
-            address: address_from_public_key(&public_key),
-            public_key,
-            secret_key,
-        }
-    }
-
     pub fn sign_onchain_spend(
         &self,
         intent: OnChainSpendIntent,
@@ -370,6 +267,7 @@ impl FalconWallet {
         Ok(signed)
     }
 }
+*/
 
 impl ProfileWallet {
     pub const fn profile(&self) -> SignatureProfile {
@@ -408,6 +306,7 @@ impl ProfileWallet {
 mod tests {
     use super::*;
 
+    /* Legacy wallet tests removed with the profile-only chain reset.
     #[test]
     fn wallet_file_roundtrip_preserves_signing_identity() {
         let mnemonic = encode_xparq_mnemonic(&[7; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
@@ -473,6 +372,7 @@ mod tests {
         assert_eq!(first.secret_key, restored.secret_key);
     }
 
+    */
     #[test]
     fn mnemonic_derives_distinct_recoverable_profile_addresses() {
         let mnemonic = encode_xparq_mnemonic(&[12; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();

@@ -7,7 +7,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{FalconLevel, falcon_keypair_from_seed, falcon_sign, falcon_verify};
 
-pub const SIGNATURE_PROFILE_ACTIVATION_HEIGHT: u64 = 10_000;
+pub const SIGNATURE_PROFILE_ACTIVATION_HEIGHT: u64 = 0;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn every_profile_authorization_activates_at_height_10_000() {
+    fn every_profile_authorization_is_active_from_genesis() {
         for profile in [
             SignatureProfile::MlDsa44,
             SignatureProfile::MlDsa65,
@@ -259,8 +259,7 @@ mod tests {
             SignatureProfile::Falcon512,
             SignatureProfile::Falcon1024,
         ] {
-            assert!(!profile.active_at_height(SIGNATURE_PROFILE_ACTIVATION_HEIGHT - 1));
-            assert!(profile.active_at_height(SIGNATURE_PROFILE_ACTIVATION_HEIGHT));
+            assert!(profile.active_at_height(0));
         }
     }
 }

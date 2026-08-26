@@ -1,6 +1,4 @@
-use crate::FalconPublicKey;
 use crate::ProfilePublicKey;
-use crate::crypto::PublicKey;
 use crate::error::CryptoError;
 use bech32::primitives::decode::CheckedHrpstring;
 use bech32::{Bech32, Hrp};
@@ -40,35 +38,12 @@ const BECH32_ADDRESS_LEN: usize =
 const_assert_eq!(BECH32_CHECKSUM_LEN, 6);
 const_assert_eq!(BECH32_ADDRESS_LEN, 42);
 
-pub fn wallet_address_from_public_key(public_key: &PublicKey) -> String {
-    address_to_string(&address_from_public_key(public_key))
-}
-
-pub fn address_from_public_key(public_key: &PublicKey) -> Address {
-    address_from_key_material(&public_key.0)
-}
-
-pub fn address_from_falcon_public_key(public_key: &FalconPublicKey) -> Address {
-    let mut material = Vec::with_capacity(24 + public_key.as_bytes().len());
-    material.extend_from_slice(b"XPARQ Falcon-512 address");
-    material.extend_from_slice(public_key.as_bytes());
-    address_from_key_material(&material)
-}
-
 pub fn address_from_profile_public_key(public_key: &ProfilePublicKey) -> Address {
     let mut material = Vec::with_capacity(32 + public_key.bytes.len());
     material.extend_from_slice(b"XPARQ signature profile address v1");
     material.push(public_key.profile as u8);
     material.extend_from_slice(&public_key.bytes);
     address_from_key_material(&material)
-}
-
-pub fn try_address_from_public_key(public_key: &PublicKey) -> Result<Address, CryptoError> {
-    if public_key.0.iter().all(|byte| *byte == 0) {
-        return Err(CryptoError::InvalidPublicKey);
-    }
-
-    Ok(address_from_key_material(&public_key.0))
 }
 
 fn address_from_key_material(public_key: &[u8]) -> Address {
@@ -117,17 +92,6 @@ fn address_from_string_with_hrp(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::keygen::keypair_from_seed;
-
-    #[test]
-    fn single_key_address_uses_the_last_20_sha3_256_bytes() {
-        let public_key = keypair_from_seed(&[4; 32]).public_key;
-        let digest = Sha3_256::digest(public_key.0);
-        let expected: [u8; ADDRESS_SIZE] = digest[12..].try_into().unwrap();
-
-        assert_eq!(address_from_public_key(&public_key), Address(expected));
-    }
-
     #[test]
     fn every_network_address_uses_lowercase_xpq_hrp() {
         let address = Address([7; ADDRESS_SIZE]);

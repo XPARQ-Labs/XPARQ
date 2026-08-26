@@ -9,10 +9,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use std::{collections::BTreeSet, error::Error, fmt};
 use xparq_coin::{Amount, CoinId};
 use xparq_common::Height as LedgerHeight;
-use xparq_crypto::{
-    Address, FalconPublicKey, ProfilePublicKey, PublicKey, QCashPublicKey, SignatureScheme,
-    account_signature_scheme_active_at_height,
-};
+use xparq_crypto::{Address, ProfilePublicKey, QCashPublicKey};
 use xparq_transaction::{
     AccountAuthorization, AuthorizedAccountIntent, AuthorizedQCashIntent, AuthorizedTransaction,
     ChainContext, IntentError, MergeIntent, OnChainSpendIntent, QCashIntent, RedeemIntent,
@@ -112,8 +109,6 @@ pub struct AuthorizationValidated<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RevealedAccountKey {
-    MlDsa44(PublicKey),
-    Falcon512(FalconPublicKey),
     Profile(ProfilePublicKey),
 }
 
@@ -159,8 +154,6 @@ pub struct QCashInputState {
 pub trait TransactionStateView {
     fn coin(&self, id: CoinId) -> Option<CoinInputState>;
     fn qcash(&self, id: CoinId) -> Option<QCashInputState>;
-    fn public_key(&self, address: Address) -> Option<PublicKey>;
-    fn falcon_public_key(&self, address: Address) -> Option<FalconPublicKey>;
     fn profile_public_key(&self, address: Address) -> Option<ProfilePublicKey>;
 }
 
@@ -252,86 +245,6 @@ where
     let commitment = structurally_validated.commitment();
     let commitment_bytes = commitment.as_bytes();
     let revealed_account_key = match authorized.authorization {
-        AccountAuthorization::Reveal {
-            public_key,
-            signature,
-        } => {
-            let registered = state.public_key(sender);
-            let public_key = match registered {
-                Some(registered) if registered == public_key => registered,
-                None if xparq_crypto::address_from_public_key(&public_key) == sender => public_key,
-                _ => return Err(TransactionConsensusError::InvalidAuthorization),
-            };
-            if !xparq_crypto::verify(&public_key, commitment_bytes, &signature) {
-                return Err(TransactionConsensusError::InvalidAuthorization);
-            }
-            registered
-                .is_none()
-                .then_some(RevealedAccountKey::MlDsa44(public_key))
-        }
-        AccountAuthorization::Known { signature } => {
-            let public_key = state
-                .public_key(sender)
-                .ok_or(TransactionConsensusError::InvalidAuthorization)?;
-            if !xparq_crypto::verify(&public_key, commitment_bytes, &signature) {
-                return Err(TransactionConsensusError::InvalidAuthorization);
-            }
-            None
-        }
-        AccountAuthorization::Falcon512Reveal {
-            public_key,
-            signature,
-        } => {
-            if !account_signature_scheme_active_at_height(
-                SignatureScheme::Falcon512,
-                current_height,
-            ) {
-                return Err(TransactionConsensusError::SignatureSchemeInactive);
-            }
-            if public_key.level() != xparq_crypto::FalconLevel::Level1
-                || signature.level() != xparq_crypto::FalconLevel::Level1
-            {
-                return Err(TransactionConsensusError::InvalidAuthorization);
-            }
-            let registered = state.falcon_public_key(sender);
-            let was_registered = registered.is_some();
-            let public_key = match registered.as_ref() {
-                Some(registered) if registered == &public_key => registered.clone(),
-                None if xparq_crypto::address_from_falcon_public_key(&public_key) == sender => {
-                    public_key
-                }
-                _ => return Err(TransactionConsensusError::InvalidAuthorization),
-            };
-            if !xparq_crypto::falcon_verify(&public_key, commitment_bytes, &signature)
-                .unwrap_or(false)
-            {
-                return Err(TransactionConsensusError::InvalidAuthorization);
-            }
-            (!was_registered).then_some(RevealedAccountKey::Falcon512(public_key))
-        }
-        AccountAuthorization::Falcon512Known { signature } => {
-            if !account_signature_scheme_active_at_height(
-                SignatureScheme::Falcon512,
-                current_height,
-            ) {
-                return Err(TransactionConsensusError::SignatureSchemeInactive);
-            }
-            if signature.level() != xparq_crypto::FalconLevel::Level1 {
-                return Err(TransactionConsensusError::InvalidAuthorization);
-            }
-            let public_key = state
-                .falcon_public_key(sender)
-                .ok_or(TransactionConsensusError::InvalidAuthorization)?;
-            if public_key.level() != xparq_crypto::FalconLevel::Level1 {
-                return Err(TransactionConsensusError::InvalidAuthorization);
-            }
-            if !xparq_crypto::falcon_verify(&public_key, commitment_bytes, &signature)
-                .unwrap_or(false)
-            {
-                return Err(TransactionConsensusError::InvalidAuthorization);
-            }
-            None
-        }
         AccountAuthorization::ProfileReveal {
             public_key,
             signature,
@@ -560,13 +473,6 @@ mod transaction_tests {
             })
         }
 
-        fn public_key(&self, _: Address) -> Option<PublicKey> {
-            None
-        }
-
-        fn falcon_public_key(&self, _: Address) -> Option<FalconPublicKey> {
-            None
-        }
         fn profile_public_key(&self, _: Address) -> Option<ProfilePublicKey> {
             None
         }
@@ -671,67 +577,13 @@ mod transaction_tests {
             None
         }
 
-        fn public_key(&self, _: Address) -> Option<PublicKey> {
-            None
-        }
-
-        fn falcon_public_key(&self, _: Address) -> Option<FalconPublicKey> {
-            None
-        }
         fn profile_public_key(&self, _: Address) -> Option<ProfilePublicKey> {
             None
         }
     }
 
     #[test]
-    fn falcon_account_is_rejected_before_activation_and_accepted_at_activation() {
-        let keypair =
-            xparq_crypto::falcon_keypair_from_seed(xparq_crypto::FalconLevel::Level1, &[17; 32])
-                .unwrap();
-        let sender = xparq_crypto::address_from_falcon_public_key(&keypair.public_key);
-        let id = CoinId::from_bytes([18; CoinId::SIZE]);
-        let intent = OnChainSpendIntent::new(
-            sender,
-            vec![id],
-            vec![xparq_transaction::SpendOutput::new(sender, Amount(10))],
-            xparq_crypto::FALCON_512_ACTIVATION_HEIGHT + 10,
-        )
-        .unwrap();
-        let chain = ChainContext::new([19; 32]);
-        let commitment = intent.commitment(chain).unwrap();
-        let signature =
-            xparq_crypto::falcon_sign(&keypair.secret_key, commitment.as_bytes()).unwrap();
-        let transaction = AuthorizedTransaction::OnChainSpend(Box::new(AuthorizedAccountIntent {
-            intent,
-            authorization: AccountAuthorization::Falcon512Reveal {
-                public_key: keypair.public_key,
-                signature,
-            },
-        }));
-        let state = FalconAccountState { id, owner: sender };
-
-        assert_eq!(
-            validate_transaction(
-                transaction.clone(),
-                chain,
-                xparq_crypto::FALCON_512_ACTIVATION_HEIGHT - 1,
-                &state,
-            ),
-            Err(TransactionConsensusError::SignatureSchemeInactive)
-        );
-        assert!(matches!(
-            validate_transaction(
-                transaction,
-                chain,
-                xparq_crypto::FALCON_512_ACTIVATION_HEIGHT,
-                &state,
-            ),
-            Ok(ValidatedTransaction::OnChainSpend(_))
-        ));
-    }
-
-    #[test]
-    fn profile_authorization_is_height_gated_and_verified() {
+    fn profile_authorization_is_active_from_genesis_and_verified() {
         let signing = xparq_crypto::ProfileSigningSeed::new(
             xparq_crypto::SignatureProfile::MlDsa65,
             [26; 32],
@@ -756,22 +608,8 @@ mod transaction_tests {
             },
         }));
         let state = FalconAccountState { id, owner: sender };
-        assert_eq!(
-            validate_transaction(
-                transaction.clone(),
-                chain,
-                xparq_crypto::SIGNATURE_PROFILE_ACTIVATION_HEIGHT - 1,
-                &state,
-            ),
-            Err(TransactionConsensusError::SignatureSchemeInactive)
-        );
         assert!(matches!(
-            validate_transaction(
-                transaction,
-                chain,
-                xparq_crypto::SIGNATURE_PROFILE_ACTIVATION_HEIGHT,
-                &state,
-            ),
+            validate_transaction(transaction, chain, 0, &state),
             Ok(ValidatedTransaction::OnChainSpend(_))
         ));
     }

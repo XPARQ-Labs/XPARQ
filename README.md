@@ -165,5 +165,5 @@ using it with assets of real value.
 
 Signed wallet transactions are submitted to node RPC automatically. Use
 `--offline` only when canonical transaction hex is needed. This migration uses
-P2P v2, redb schema v2, snapshot v2, and chain-spec v2; old node data and peers
+P2P v5, redb schema v4, snapshot v4, and chain-spec v7; old node data and peers
 are intentionally incompatible.

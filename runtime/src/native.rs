@@ -55,7 +55,7 @@ const API_DOCS_HTML: &[u8] = br#"<!doctype html>
 </html>
 "#;
 const P2P_MAGIC: [u8; 8] = *b"XPQP2P01";
-const P2P_PROTOCOL_VERSION: u32 = 4;
+const P2P_PROTOCOL_VERSION: u32 = 5;
 const CAPABILITY_PEER_DISCOVERY: u64 = 1 << 0;
 const CAPABILITY_RELAY: u64 = 1 << 1;
 const LOCAL_CAPABILITIES: u64 = CAPABILITY_PEER_DISCOVERY | CAPABILITY_RELAY;
@@ -548,21 +548,7 @@ fn account_response(
         .state()
         .account_keys
         .get_profile(&address)
-        .map(|key| key.profile.as_str())
-        .or_else(|| {
-            ledger
-                .state()
-                .account_keys
-                .get_falcon(&address)
-                .map(|_| "legacy-falcon512")
-        })
-        .or_else(|| {
-            ledger
-                .state()
-                .account_keys
-                .get(&address)
-                .map(|_| "legacy-mldsa44")
-        });
+        .map(|key| key.profile.as_str());
     Ok(serde_json::json!({
         "address": xparq::crypto::address_to_string(&address),
         "public_key_registered": registered_signature_profile.is_some(),
@@ -3137,7 +3123,11 @@ mod tests {
     #[test]
     fn explorer_activity_reports_net_transfer_for_sender_and_recipient() {
         let mnemonic = xparq_wallet::encode_xparq_mnemonic(&[3; 16]).unwrap();
-        let sender = xparq_wallet::wallet_from_xparq_mnemonic(&mnemonic).unwrap();
+        let sender = xparq_wallet::profile_wallet_from_xparq_mnemonic(
+            &mnemonic,
+            xparq::crypto::SignatureProfile::MlDsa44,
+        )
+        .unwrap();
         let recipient = Address([4; 20]);
         let miner = Address([5; 20]);
         let intent = xparq::transaction::OnChainSpendIntent::new(
@@ -3151,7 +3141,7 @@ mod tests {
         )
         .unwrap();
         let transaction = AuthorizedTransaction::OnChainSpend(Box::new(
-            sender.sign_onchain_spend(intent).unwrap(),
+            sender.sign_account_intent(intent, false).unwrap(),
         ));
         let genesis = genesis_block().unwrap();
         let block = Block::from_protocol_transactions(

@@ -7,7 +7,7 @@ use xparq_consensus::{
     ApplyBlockState, CoinInputState, ConsensusError, QCashInputState, TransactionConsensusError,
     TransactionStateView, ValidatedBlock, validate_transaction,
 };
-use xparq_crypto::{Address, BlockHash, FalconPublicKey, ProfilePublicKey, PublicKey};
+use xparq_crypto::{Address, BlockHash, ProfilePublicKey};
 
 use crate::{CoinUtxo, LedgerState, SpendStateError, UtxoRollbackJournal};
 
@@ -179,13 +179,6 @@ impl TransactionStateView for LedgerState {
         })
     }
 
-    fn public_key(&self, address: Address) -> Option<PublicKey> {
-        self.account_keys.get(&address).copied()
-    }
-
-    fn falcon_public_key(&self, address: Address) -> Option<FalconPublicKey> {
-        self.account_keys.get_falcon(&address).cloned()
-    }
     fn profile_public_key(&self, address: Address) -> Option<ProfilePublicKey> {
         self.account_keys.get_profile(&address).cloned()
     }

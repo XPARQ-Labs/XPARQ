@@ -26,10 +26,9 @@ use xparq::{
     },
 };
 use xparq_wallet::{
-    ProfileWallet, Wallet, generate_xparq_mnemonic, profile_wallet_file_bytes,
+    ProfileWallet, generate_xparq_mnemonic, profile_wallet_file_bytes,
     profile_wallet_from_file_bytes, profile_wallet_from_xparq_mnemonic,
-    wallet_address_from_file_bytes, wallet_file_bytes, wallet_file_signature_profile,
-    wallet_from_file_bytes, wallet_from_xparq_mnemonic,
+    wallet_address_from_file_bytes,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -37,17 +36,11 @@ const DEFAULT_WALLET_PATH: &str = "wallet.json";
 const AUTOMATIC_FEE_PAQS_PER_BYTE: u64 = 1;
 const MAX_FEE_CONVERGENCE_ROUNDS: usize = 8;
 
-enum LoadedWallet {
-    Legacy(Wallet),
-    Profile(ProfileWallet),
-}
+struct LoadedWallet(ProfileWallet);
 
 impl LoadedWallet {
     fn address(&self) -> Address {
-        match self {
-            Self::Legacy(wallet) => wallet.address,
-            Self::Profile(wallet) => wallet.address,
-        }
+        self.0.address
     }
 
     fn sign_onchain_spend(
@@ -55,11 +48,7 @@ impl LoadedWallet {
         intent: OnChainSpendIntent,
         public_key_known: bool,
     ) -> Result<xparq::transaction::AuthorizedAccountIntent<OnChainSpendIntent>, String> {
-        match self {
-            Self::Legacy(wallet) if public_key_known => wallet.sign_known_onchain_spend(intent),
-            Self::Legacy(wallet) => wallet.sign_onchain_spend(intent),
-            Self::Profile(wallet) => wallet.sign_account_intent(intent, public_key_known),
-        }
+        self.0.sign_account_intent(intent, public_key_known)
     }
 
     fn sign_withdraw(
@@ -67,11 +56,7 @@ impl LoadedWallet {
         intent: WithdrawIntent,
         public_key_known: bool,
     ) -> Result<xparq::transaction::AuthorizedAccountIntent<WithdrawIntent>, String> {
-        match self {
-            Self::Legacy(wallet) if public_key_known => wallet.sign_known_withdraw(intent),
-            Self::Legacy(wallet) => wallet.sign_withdraw(intent),
-            Self::Profile(wallet) => wallet.sign_account_intent(intent, public_key_known),
-        }
+        self.0.sign_account_intent(intent, public_key_known)
     }
 }
 #[cfg(feature = "mainnet")]
@@ -198,9 +183,7 @@ fn interactive_menu() -> Result<(), String> {
                 let words = prompt_default("Mnemonic words (12 or 24)", "12")?;
                 let profile = prompt_signature_profile()?;
                 let mut args = vec!["--wallet".into(), path, "--words".into(), words];
-                if profile != "legacy-mldsa44" {
-                    args.extend(["--profile".into(), profile]);
-                }
+                args.extend(["--profile".into(), profile]);
                 create_wallet(&args)?;
             }
             "2" => {
@@ -208,9 +191,7 @@ fn interactive_menu() -> Result<(), String> {
                 let phrase = prompt("Mnemonic")?;
                 let profile = prompt_signature_profile()?;
                 let mut args = vec!["--wallet".into(), path, "--mnemonic".into(), phrase];
-                if profile != "legacy-mldsa44" {
-                    args.extend(["--profile".into(), profile]);
-                }
+                args.extend(["--profile".into(), profile]);
                 restore_wallet(&args)?;
             }
             "3" => {
@@ -239,10 +220,10 @@ fn interactive_menu() -> Result<(), String> {
 fn prompt_signature_profile() -> Result<String, String> {
     loop {
         let value = prompt_default(
-            "Signature profile (legacy-mldsa44, mldsa44, mldsa65, mldsa87, falcon512, falcon1024)",
-            "legacy-mldsa44",
+            "Signature profile (mldsa44, mldsa65, mldsa87, falcon512, falcon1024)",
+            "mldsa44",
         )?;
-        if value == "legacy-mldsa44" || value.parse::<SignatureProfile>().is_ok() {
+        if value.parse::<SignatureProfile>().is_ok() {
             return Ok(value);
         }
         println!("Unknown signature profile `{value}`");
@@ -422,21 +403,12 @@ fn create_wallet(args: &[String]) -> Result<(), String> {
         .parse::<usize>()
         .map_err(|_| "--words must be 12 or 24".to_string())?;
     let mnemonic = generate_xparq_mnemonic(words)?;
-    let address = if let Some(profile) = signature_profile_option(args)? {
-        let mut wallet = profile_wallet_from_xparq_mnemonic(&mnemonic, profile)?;
-        wallet.mnemonic = Some(mnemonic.to_string());
-        let address = wallet.address;
-        write_profile_wallet(path, &wallet)?;
-        println!("signature_profile: {profile}");
-        address
-    } else {
-        let mut wallet = wallet_from_xparq_mnemonic(&mnemonic)?;
-        wallet.mnemonic = Some(mnemonic.to_string());
-        let address = wallet.address;
-        write_wallet(path, &wallet)?;
-        println!("signature_profile: legacy-mldsa44");
-        address
-    };
+    let profile = signature_profile_option(args)?.unwrap_or(SignatureProfile::MlDsa44);
+    let mut wallet = profile_wallet_from_xparq_mnemonic(&mnemonic, profile)?;
+    wallet.mnemonic = Some(mnemonic.to_string());
+    let address = wallet.address;
+    write_profile_wallet(path, &wallet)?;
+    println!("signature_profile: {profile}");
     println!("address: {}", xparq::crypto::address_to_string(&address));
     println!("mnemonic: {}", mnemonic.as_str());
     println!("wallet: {path}");
@@ -446,21 +418,12 @@ fn create_wallet(args: &[String]) -> Result<(), String> {
 fn restore_wallet(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
     let phrase = option(args, "--mnemonic").ok_or("missing --mnemonic")?;
-    let address = if let Some(profile) = signature_profile_option(args)? {
-        let mut wallet = profile_wallet_from_xparq_mnemonic(phrase, profile)?;
-        wallet.mnemonic = Some(phrase.to_string());
-        let address = wallet.address;
-        write_profile_wallet(path, &wallet)?;
-        println!("signature_profile: {profile}");
-        address
-    } else {
-        let mut wallet = wallet_from_xparq_mnemonic(phrase)?;
-        wallet.mnemonic = Some(phrase.to_string());
-        let address = wallet.address;
-        write_wallet(path, &wallet)?;
-        println!("signature_profile: legacy-mldsa44");
-        address
-    };
+    let profile = signature_profile_option(args)?.unwrap_or(SignatureProfile::MlDsa44);
+    let mut wallet = profile_wallet_from_xparq_mnemonic(phrase, profile)?;
+    wallet.mnemonic = Some(phrase.to_string());
+    let address = wallet.address;
+    write_profile_wallet(path, &wallet)?;
+    println!("signature_profile: {profile}");
     println!("address: {}", xparq::crypto::address_to_string(&address));
     println!("wallet: {path}");
     Ok(())
@@ -1228,16 +1191,7 @@ fn http_post_bytes<T: for<'de> Deserialize<'de>>(
 fn load_wallet(path: &str) -> Result<LoadedWallet, String> {
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
-    if wallet_file_signature_profile(&bytes)?.is_some() {
-        profile_wallet_from_file_bytes(&bytes).map(LoadedWallet::Profile)
-    } else {
-        wallet_from_file_bytes(&bytes).map(LoadedWallet::Legacy)
-    }
-}
-
-fn write_wallet(path: &str, wallet: &Wallet) -> Result<(), String> {
-    let bytes = wallet_file_bytes(wallet)?;
-    write_private_file_atomically(Path::new(path), &bytes)
+    profile_wallet_from_file_bytes(&bytes).map(LoadedWallet)
 }
 
 fn write_profile_wallet(path: &str, wallet: &ProfileWallet) -> Result<(), String> {
@@ -1357,7 +1311,7 @@ fn format_amount(units: u64) -> String {
 
 fn print_help() {
     println!(
-        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--profile mldsa44|mldsa65|mldsa87|falcon512|falcon1024]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--profile mldsa44|mldsa65|mldsa87|falcon512|falcon1024]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ --expiry HEIGHT [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet sign-withdraw --qcash XPQ... --expiry HEIGHT [--input COIN_ID...] [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--cash-dir PATH] [--wallet PATH] [--offline]\nwallet qcash-redeem --file FILE --to ADDRESS [--amount XPQ] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-split --file FILE --qcash XPQ [--qcash XPQ...] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-merge --file FILE --file FILE... [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet version\n\nOmitting --profile creates/restores a legacy ML-DSA-44 wallet for compatibility. Profile wallets activate at height 10000. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 paqs per canonical transaction byte; manual --miner fee input is not supported. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs. A split automatically creates QCash change when requested outputs are smaller than the input after the automatic fee. QCash operations use ML-DSA-44 bearer authorization, and the automatic block-miner fee is deducted from QCash inputs. Keep input QCash files until the transaction is canonically confirmed.\nRunning without a command opens the interactive menu.\nWithout --input, spend and withdraw select active XPQ inputs and calculate change through node RPC."
+        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--profile mldsa44|mldsa65|mldsa87|falcon512|falcon1024]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--profile mldsa44|mldsa65|mldsa87|falcon512|falcon1024]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ --expiry HEIGHT [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet sign-withdraw --qcash XPQ... --expiry HEIGHT [--input COIN_ID...] [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--cash-dir PATH] [--wallet PATH] [--offline]\nwallet qcash-redeem --file FILE --to ADDRESS [--amount XPQ] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-split --file FILE --qcash XPQ [--qcash XPQ...] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-merge --file FILE --file FILE... [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet version\n\nOmitting --profile selects the ML-DSA-44 profile. All signature profiles are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 paqs per canonical transaction byte; manual --miner fee input is not supported. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs. A split automatically creates QCash change when requested outputs are smaller than the input after the automatic fee. QCash operations use ML-DSA-44 bearer authorization, and the automatic block-miner fee is deducted from QCash inputs. Keep input QCash files until the transaction is canonically confirmed.\nRunning without a command opens the interactive menu.\nWithout --input, spend and withdraw select active XPQ inputs and calculate change through node RPC."
     );
 }
 
@@ -1613,12 +1567,14 @@ mod tests {
         assert!(load_qcash_file(&merged_paths[0]).unwrap().qcash.amount() < Amount(5 * COIN));
 
         let mnemonic = xparq_wallet::encode_xparq_mnemonic(&[7; 16]).unwrap();
-        let recipient = wallet_from_xparq_mnemonic(&mnemonic).unwrap();
+        let recipient =
+            xparq_wallet::profile_wallet_from_xparq_mnemonic(&mnemonic, SignatureProfile::MlDsa44)
+                .unwrap();
         redeem_qcash(&[
             "--file".into(),
             merged_paths[0].to_string_lossy().into_owned(),
             "--to".into(),
-            xparq_wallet::wallet_address_string(&recipient),
+            xparq::crypto::address_to_string(&recipient.address),
             "--amount".into(),
             "4".into(),
             "--expiry".into(),

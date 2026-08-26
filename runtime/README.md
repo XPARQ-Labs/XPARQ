@@ -16,13 +16,13 @@ peers. RPC is plain HTTP and should remain on loopback or a trusted network.
 
 The runtime rejects incompatible state at four explicit boundaries:
 
-- P2P protocol version 2 and handshake `chain_spec_hash`;
-- redb schema version 2 and persisted `chain_spec_hash`;
-- snapshot version 2, checksum, genesis, canonical tip, and `chain_spec_hash`;
-- chain-spec version 2, committing frozen genesis plus active PoW, difficulty,
+- P2P protocol version 5 and handshake `chain_spec_hash`;
+- redb schema version 4 and persisted `chain_spec_hash`;
+- snapshot version 4, checksum, genesis, canonical tip, and `chain_spec_hash`;
+- chain-spec version 7, committing frozen genesis plus active PoW, difficulty,
   WBDA, emission, size, address, and hash parameters.
 
-There is intentionally no schema-v1 or snapshot-v1 compatibility path. Reset
+There is intentionally no migration from older schemas or snapshots. Reset
 old node data before starting this build, and upgrade peers together.
 
 ```bash

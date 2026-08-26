@@ -12,10 +12,12 @@ use serde_json::Value;
 use xparq::{
     coin::{Amount, CoinId},
     common::canonical_bytes,
-    crypto::{address_from_public_key, address_to_string, keypair_from_seed},
+    crypto::{
+        ProfileSigningSeed, SignatureProfile, address_from_profile_public_key, address_to_string,
+    },
     transaction::{AuthorizedTransaction, OnChainSpendIntent, SpendOutput},
 };
-use xparq_wallet::Wallet;
+use xparq_wallet::{ProfileWallet, encode_xparq_mnemonic, profile_wallet_from_xparq_mnemonic};
 
 const WAIT: Duration = Duration::from_secs(120);
 const MATURE_FIXTURE: &str = "tests/fixtures/mature";
@@ -50,13 +52,12 @@ fn free_address() -> String {
 }
 
 fn miner_address() -> String {
-    let keypair = keypair_from_seed(&[42; 32]);
-    address_to_string(&address_from_public_key(&keypair.public_key))
+    address_to_string(&sender_wallet().address)
 }
 
-fn sender_wallet() -> Wallet {
-    let keypair = keypair_from_seed(&[42; 32]);
-    Wallet::from_keys(keypair.public_key, keypair.secret_key)
+fn sender_wallet() -> ProfileWallet {
+    let mnemonic = encode_xparq_mnemonic(&[42; 16]).unwrap();
+    profile_wallet_from_xparq_mnemonic(&mnemonic, SignatureProfile::MlDsa44).unwrap()
 }
 
 fn mine(database: &Path, blocks: u64) {
@@ -313,8 +314,8 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
 
     let sender = sender_wallet();
     let sender_address = address_to_string(&sender.address);
-    let recipient_keys = keypair_from_seed(&[43; 32]);
-    let recipient = address_from_public_key(&recipient_keys.public_key);
+    let recipient_keys = ProfileSigningSeed::new(SignatureProfile::MlDsa44, [43; 32]);
+    let recipient = address_from_profile_public_key(&recipient_keys.public_key());
     let recipient_address = address_to_string(&recipient);
     let sender_account = account(&a_rpc, &sender_address).unwrap();
     let input = sender_account["utxos"]
@@ -336,8 +337,9 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
         100,
     )
     .unwrap();
-    let transaction =
-        AuthorizedTransaction::OnChainSpend(Box::new(sender.sign_onchain_spend(intent).unwrap()));
+    let transaction = AuthorizedTransaction::OnChainSpend(Box::new(
+        sender.sign_account_intent(intent, false).unwrap(),
+    ));
     let submitted = post_transaction(&a_rpc, &transaction);
     assert_eq!(
         submitted["transaction_id"],

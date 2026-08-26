@@ -137,9 +137,9 @@ pub enum SignatureContext {
     RecoveryProof = 3,
 }
 
-/// First height at which Falcon-512 account authorizations are accepted.
-/// ML-DSA-44 remains valid after this height; this is coexistence, not replacement.
-pub const FALCON_512_ACTIVATION_HEIGHT: u64 = 10_000;
+/// Falcon-512 account authorizations are accepted from genesis.
+/// ML-DSA-44 remains valid; this is coexistence, not replacement.
+pub const FALCON_512_ACTIVATION_HEIGHT: u64 = 0;
 
 pub const fn account_signature_scheme_active_at_height(
     scheme: SignatureScheme,
@@ -259,22 +259,18 @@ mod tests {
     }
 
     #[test]
-    fn falcon_512_coexists_with_ml_dsa_after_height_10_000() {
+    fn falcon_512_coexists_with_ml_dsa_from_genesis() {
         assert!(account_signature_scheme_active_at_height(
             SignatureScheme::MlDsa44,
-            FALCON_512_ACTIVATION_HEIGHT - 1,
-        ));
-        assert!(!account_signature_scheme_active_at_height(
-            SignatureScheme::Falcon512,
-            FALCON_512_ACTIVATION_HEIGHT - 1,
+            0,
         ));
         assert!(account_signature_scheme_active_at_height(
             SignatureScheme::MlDsa44,
-            FALCON_512_ACTIVATION_HEIGHT,
+            0,
         ));
         assert!(account_signature_scheme_active_at_height(
             SignatureScheme::Falcon512,
-            FALCON_512_ACTIVATION_HEIGHT,
+            0,
         ));
     }
 }

@@ -30,8 +30,8 @@ The response contains the accepted transaction ID:
 
 Coin IDs returned before height 10,000 use legacy hexadecimal text. Starting at
 height 10,000 the account RPC emits `xpq:` plus unpadded base64url. Both formats
-remain accepted by the wallet parser. Signature profiles also activate at
-height 10,000.
+remain accepted by the wallet parser. All five signature profiles are active
+from genesis.
 
 The interactive `/docs` page loads its renderer from a public CDN. The
 `/openapi.json` specification itself is embedded in the node binary and remains
