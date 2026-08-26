@@ -1,7 +1,7 @@
 #[path = "pow.rs"]
 mod pow;
 
-use crate::block::{Block, BlockHeight, Header, Height};
+use crate::block::{Block, BlockHeight, Header, Height, MAX_BLOCK_WEIGHT};
 use crate::consensus::fork::Work;
 use crate::crypto::{BlockHash, HASH_SIZE, Hash, PoWHash};
 use crate::error::ConsensusError;
@@ -16,7 +16,7 @@ use xparq_transaction::{
     SplitIntent, WithdrawIntent,
 };
 
-pub const MAX_QCASH_TRANSACTION_LIFETIME: u64 = 100;
+pub const MAX_QCASH_TRANSACTION_LIFETIME: u64 = 50;
 
 pub fn validate_emission(
     block: &xparq_blockchain::Block,
@@ -761,6 +761,7 @@ pub struct HeaderValidationState {
     pub height: BlockHeight,
     pub header: Header,
     pub cumulative_work: Work,
+    pub cumulative_weight: u128,
     pub difficulty_anchor: HeaderAtHeight,
     pub recent_headers: Vec<HeaderAtHeight>,
 }
@@ -816,6 +817,13 @@ pub fn verify_header_chain(
     let mut recent = vec![first.clone()];
     let mut pow_memory = (headers.len() > 1).then(crate::consensus::new_pow_memory);
     for current in &headers[1..] {
+        if current.header.block_weight == 0
+            || current.header.block_weight as usize > MAX_BLOCK_WEIGHT
+        {
+            return Err(HeaderChainError::InvalidHeaderChain(
+                crate::consensus::fork::ForkChoiceError::InvalidHeader,
+            ));
+        }
         if current.height.0 != previous.height.0.saturating_add(1)
             || BlockHash(current.header.previous_hash.0)
                 != previous.hash().map_err(HeaderChainError::Serialization)?
@@ -901,6 +909,12 @@ pub fn header_validation_state(
         height: tip.height,
         header: tip.header,
         cumulative_work,
+        cumulative_weight: validated_headers
+            .iter()
+            .skip(1)
+            .fold(0_u128, |total, header| {
+                total.saturating_add(u128::from(header.header.block_weight))
+            }),
         difficulty_anchor,
         recent_headers: validated_headers[start..].to_vec(),
     })
@@ -947,6 +961,11 @@ fn verify_header_chain_extension_inner(
     let mut recent = state.recent_headers.clone();
     for chain_header in headers {
         let header = &chain_header.header;
+        if header.block_weight == 0 || header.block_weight as usize > MAX_BLOCK_WEIGHT {
+            return Err(HeaderChainError::InvalidHeaderChain(
+                crate::consensus::fork::ForkChoiceError::InvalidHeader,
+            ));
+        }
         if chain_header.height.0 != previous_height.0.saturating_add(1)
             || BlockHash(header.previous_hash.0) != previous_hash
         {
@@ -1043,6 +1062,11 @@ fn advanced_header_validation_state(
             .map(|header| header.header.clone())
             .unwrap_or_else(|| state.header.clone()),
         cumulative_work,
+        cumulative_weight: headers
+            .iter()
+            .fold(state.cumulative_weight, |total, header| {
+                total.saturating_add(u128::from(header.header.block_weight))
+            }),
         difficulty_anchor: state.difficulty_anchor.clone(),
         recent_headers,
     })

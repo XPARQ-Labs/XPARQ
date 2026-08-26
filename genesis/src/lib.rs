@@ -14,6 +14,8 @@ use xparq_crypto::{ADDRESS_SIZE, BlockHash, HASH_SIZE, Hash, HashDomain, domain_
 use xparq_ledger::{Ledger, LedgerError};
 use xparq_transaction::ChainContext;
 
+const FORK_CHOICE_ALGORITHM: &str = "cumulative-work/cumulative-weight/hash-v1";
+
 #[cfg(feature = "mainnet")]
 pub const GENESIS_NONCE: u64 = 4;
 #[cfg(feature = "mainnet")]
@@ -23,7 +25,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 ]);
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`] changes.
-pub const CHAIN_SPEC_VERSION: u32 = 2;
+pub const CHAIN_SPEC_VERSION: u32 = 3;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -49,6 +51,7 @@ struct ChainSpecIdentity<'a> {
     max_block_weight: u64,
     address_size: u32,
     hash_size: u32,
+    fork_choice_algorithm: &'a str,
 }
 
 /// Domain-separated identity of every consensus parameter that nodes must agree on.
@@ -76,6 +79,7 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         max_block_weight: MAX_BLOCK_WEIGHT as u64,
         address_size: ADDRESS_SIZE as u32,
         hash_size: HASH_SIZE as u32,
+        fork_choice_algorithm: FORK_CHOICE_ALGORITHM,
     };
     let bytes = xparq_common::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
     Ok(domain_hash(HashDomain::ChainSpec, &bytes))

@@ -1048,7 +1048,7 @@ version = "0.9.5"
 
 [[package]]
 name = "wallet"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "bip39",
  "getrandom 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "xparq"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "xparq-blockchain",
  "xparq-coin",
@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "xparq-blockchain"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "borsh",
  "serde",
@@ -1139,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "xparq-coin"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "blake3",
  "borsh",
@@ -1147,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "xparq-common"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "borsh",
  "serde",
@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "xparq-consensus"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "argon2",
  "borsh",
@@ -1171,7 +1171,7 @@ dependencies = [
 
 [[package]]
 name = "xparq-crypto"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "argon2",
  "bech32",
@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "xparq-genesis"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "borsh",
  "xparq-blockchain",
@@ -1205,7 +1205,7 @@ dependencies = [
 
 [[package]]
 name = "xparq-ledger"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "borsh",
  "xparq-blockchain",
@@ -1219,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "xparq-qcash"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "borsh",
  "getrandom 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "xparq-transaction"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "blake3",
  "borsh",

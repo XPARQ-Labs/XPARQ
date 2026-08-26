@@ -48,6 +48,11 @@ Merge consumes at least two inputs.
 ./target/release/wallet qcash-redeem --file cash/FILE.QCash --to ADDRESS --amount 40 --cash-dir cash
 ```
 
+The wallet automatically adds a `BlockMiner` output paying `1 paqs` per
+canonical transaction byte. There is no manual fee prompt or `--miner` fee
+option. For QCash redeem, split, and merge, this fee is deducted from the
+QCash value; ordinary spend and withdraw select enough XPQ input value for it.
+
 Output bearer files are saved before submission so private signing material
 cannot be lost. Keep every input file until canonical confirmation; never
 print, upload, or share `.QCash` contents. Keep plain HTTP RPC on loopback or a

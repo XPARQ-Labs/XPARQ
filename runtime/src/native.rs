@@ -41,7 +41,7 @@ const MAX_RPC_HEADER_SIZE: usize = 16 * 1024;
 const MAX_ACCOUNT_UTXOS_PER_PAGE: usize = 1_000;
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 const P2P_MAGIC: [u8; 8] = *b"XPQP2P01";
-const P2P_PROTOCOL_VERSION: u32 = 2;
+const P2P_PROTOCOL_VERSION: u32 = 3;
 const CAPABILITY_PEER_DISCOVERY: u64 = 1 << 0;
 const CAPABILITY_RELAY: u64 = 1 << 1;
 const LOCAL_CAPABILITIES: u64 = CAPABILITY_PEER_DISCOVERY | CAPABILITY_RELAY;
@@ -71,6 +71,7 @@ const MAX_HEADER_REQUESTS_PER_SESSION: usize =
     MAX_SYNC_HEADERS.div_ceil(MAX_HEADER_CHAIN_CHUNK_HEADERS) + 1;
 const MAX_GOSSIP_INVENTORY_ITEMS: usize = 1_024;
 const MAX_MEMPOOL_TRANSACTIONS: usize = MAX_GOSSIP_INVENTORY_ITEMS;
+const MIN_RELAY_FEE_PAQS_PER_BYTE: u64 = 1;
 const MAX_GOSSIP_INVENTORY_SIZE: usize = 64 * 1024;
 const GOSSIP_HEARTBEAT: Duration = Duration::from_secs(2);
 const MAX_INBOUND_CONNECTIONS: usize = 64;
@@ -86,6 +87,7 @@ struct HeaderSyncResult {
     ancestor_hash: BlockHash,
     headers: Vec<xparq::consensus::HeaderAtHeight>,
     peer_work: Work,
+    peer_weight: u128,
     preferred: bool,
 }
 
@@ -122,6 +124,7 @@ struct Handshake {
     tip_height: Height,
     tip_hash: [u8; 32],
     cumulative_work: [u64; 8],
+    cumulative_weight: u128,
 }
 
 struct ConnectedPeer {
@@ -139,6 +142,7 @@ struct GossipInventory {
     tip_height: Height,
     tip_hash: [u8; 32],
     cumulative_work: [u64; 8],
+    cumulative_weight: u128,
     transaction_ids: Vec<[u8; 32]>,
 }
 
@@ -829,6 +833,9 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
     let ledger = load_or_initialize(database)?;
     let response = match route {
         "/status" => status_response(&ledger)?,
+        "/fee-policy" => serde_json::json!({
+            "minimum_fee_rate_paqs_per_byte": MIN_RELAY_FEE_PAQS_PER_BYTE,
+        }),
         "/blocks/latest" => latest_blocks_response(&ledger)?,
         route if route.starts_with("/block/") => {
             let height = route
@@ -980,12 +987,20 @@ fn status_response(ledger: &Ledger) -> Result<serde_json::Value, String> {
         .fold(xparq::consensus::Work::ZERO, |work, block| {
             work.saturating_add(xparq::consensus::block_work(block.difficulty()))
         });
+    let cumulative_weight = ledger
+        .chain
+        .blocks()
+        .filter(|block| !block.is_genesis())
+        .fold(0_u128, |total, block| {
+            total.saturating_add(u128::from(block.block_weight()))
+        });
     Ok(serde_json::json!({
         "tip_height": tip_height.0,
         "next_height": tip_height.0.saturating_add(1),
         "tip_hash": hex::encode(tip_hash.0),
         "next_difficulty": next_difficulty,
         "cumulative_work": format_work(cumulative_work.to_be_limbs()),
+        "cumulative_weight": cumulative_weight.to_string(),
     }))
 }
 
@@ -1453,9 +1468,7 @@ fn gossip_inventory(database: &Path) -> Result<GossipInventory, String> {
         .into_iter()
         .map(|(height, header)| xparq::consensus::HeaderAtHeight::new(height, header))
         .collect::<Vec<_>>();
-    let cumulative_work = validated_header_state(&headers)?
-        .cumulative_work
-        .to_be_limbs();
+    let state = validated_header_state(&headers)?;
     let transactions = read_mempool(database)?;
     let start = transactions
         .len()
@@ -1467,7 +1480,8 @@ fn gossip_inventory(database: &Path) -> Result<GossipInventory, String> {
     Ok(GossipInventory {
         tip_height,
         tip_hash,
-        cumulative_work,
+        cumulative_work: state.cumulative_work.to_be_limbs(),
+        cumulative_weight: state.cumulative_weight,
         transaction_ids,
     })
 }
@@ -1475,8 +1489,10 @@ fn gossip_inventory(database: &Path) -> Result<GossipInventory, String> {
 fn inventory_preferred(candidate: &GossipInventory, current: &GossipInventory) -> bool {
     compare_chain_tips(
         Work::from_be_limbs(candidate.cumulative_work),
+        candidate.cumulative_weight,
         BlockHash(candidate.tip_hash),
         Work::from_be_limbs(current.cumulative_work),
+        current.cumulative_weight,
         BlockHash(current.tip_hash),
     )
     .is_gt()
@@ -1487,6 +1503,7 @@ fn handshake_from_inventory(handshake: &Handshake, inventory: &GossipInventory) 
     current.tip_height = inventory.tip_height;
     current.tip_hash = inventory.tip_hash;
     current.cumulative_work = inventory.cumulative_work;
+    current.cumulative_weight = inventory.cumulative_weight;
     current
 }
 
@@ -1495,7 +1512,7 @@ fn decode_gossip_inventory(bytes: &[u8]) -> Result<GossipInventory, String> {
         return Err("gossip inventory exceeds size limit".into());
     }
     let declared = bytes
-        .get(104..108)
+        .get(120..124)
         .and_then(|count| count.try_into().ok())
         .map(u32::from_le_bytes)
         .ok_or("gossip inventory is truncated")? as usize;
@@ -1932,19 +1949,29 @@ fn synchronize_headers(
             }
             if state.header.hash().map_err(|error| error.to_string())?.0 != peer.tip_hash
                 || state.cumulative_work.to_be_limbs() != peer.cumulative_work
+                || state.cumulative_weight != peer.cumulative_weight
             {
                 return Err("peer handshake tip/work does not match verified headers".into());
             }
             let local = validated_header_state(&local_headers)?;
             let peer_work = state.cumulative_work;
+            let peer_weight = state.cumulative_weight;
             let local_hash = local.header.hash().map_err(|error| error.to_string())?.0;
-            let preferred = peer_work > local.cumulative_work
-                || (peer_work == local.cumulative_work && peer.tip_hash < local_hash);
+            let preferred = compare_chain_tips(
+                peer_work,
+                peer_weight,
+                BlockHash(peer.tip_hash),
+                local.cumulative_work,
+                local.cumulative_weight,
+                BlockHash(local_hash),
+            )
+            .is_gt();
             return Ok(HeaderSyncResult {
                 ancestor_height: ancestor_height.unwrap_or(state.height),
                 ancestor_hash: BlockHash(ancestor_hash.unwrap_or(ancestor)),
                 headers: downloaded,
                 peer_work,
+                peer_weight,
                 preferred,
             });
         }
@@ -2067,9 +2094,18 @@ fn synchronize_blocks(
         .into_iter()
         .map(|(height, header)| xparq::consensus::HeaderAtHeight::new(height, header))
         .collect::<Vec<_>>();
-    let current_work = validated_header_state(&current_headers)?.cumulative_work;
+    let current_state = validated_header_state(&current_headers)?;
     let current_tip = old_tip.ok_or("canonical chain has no tip during reorg")?;
-    if !compare_chain_tips(sync.peer_work, new_tip, current_work, current_tip).is_gt() {
+    if !compare_chain_tips(
+        sync.peer_work,
+        sync.peer_weight,
+        new_tip,
+        current_state.cumulative_work,
+        current_state.cumulative_weight,
+        current_tip,
+    )
+    .is_gt()
+    {
         println!("sync: downloaded peer branch is no longer preferred after local tip advanced");
         return Ok(0);
     }
@@ -2179,6 +2215,9 @@ fn reconcile_mempool(
         if encoded.len() > xparq::block::MAX_BLOCK_WEIGHT {
             continue;
         }
+        if !meets_minimum_relay_fee(&transaction, encoded.len()) {
+            continue;
+        }
         let Ok(validated) = validate_transaction(transaction.clone(), chain, height.0, &state)
         else {
             continue;
@@ -2245,6 +2284,9 @@ fn validated_header_state(
         .fold(xparq::consensus::Work::ZERO, |work, header| {
             work.saturating_add(xparq::consensus::block_work(header.header.difficulty))
         });
+    let cumulative_weight = headers.iter().skip(1).fold(0_u128, |total, header| {
+        total.saturating_add(u128::from(header.header.block_weight))
+    });
     let start = headers
         .len()
         .saturating_sub(xparq::consensus::RECENT_HEADER_WINDOW);
@@ -2252,6 +2294,7 @@ fn validated_header_state(
         height: tip.height,
         header: tip.header.clone(),
         cumulative_work,
+        cumulative_weight,
         difficulty_anchor: headers[usize::from(tip.height.0 > 0)].clone(),
         recent_headers: headers[start..].to_vec(),
     })
@@ -2343,7 +2386,7 @@ fn local_handshake(database: &Path, ledger: &Ledger) -> Result<Handshake, String
         .into_iter()
         .map(|(height, header)| xparq::consensus::HeaderAtHeight::new(height, header))
         .collect::<Vec<_>>();
-    let work = validated_header_state(&headers)?.cumulative_work;
+    let state = validated_header_state(&headers)?;
     Ok(Handshake {
         magic: P2P_MAGIC,
         protocol_version: P2P_PROTOCOL_VERSION,
@@ -2356,7 +2399,8 @@ fn local_handshake(database: &Path, ledger: &Ledger) -> Result<Handshake, String
             .tip_hash()
             .ok_or("local chain has no canonical tip")?
             .0,
-        cumulative_work: work.to_be_limbs(),
+        cumulative_work: state.cumulative_work.to_be_limbs(),
+        cumulative_weight: state.cumulative_weight,
     })
 }
 
@@ -2506,6 +2550,14 @@ fn validate_mempool(ledger: &Ledger, transactions: &[AuthorizedTransaction]) -> 
         if encoded.len() > xparq::block::MAX_BLOCK_WEIGHT {
             return Err("transaction cannot fit in a block".into());
         }
+        let required_fee = minimum_relay_fee(encoded.len())?;
+        let paid_fee = transaction_miner_fee(transaction)?;
+        if paid_fee < required_fee {
+            return Err(format!(
+                "mempool transaction fee is too low: paid {paid_fee} paqs, required {required_fee} paqs for {} bytes",
+                encoded.len()
+            ));
+        }
         let validated = validate_transaction(transaction.clone(), chain, height.0, &state)
             .map_err(|error| format!("mempool transaction is invalid: {error}"))?;
         state
@@ -2513,6 +2565,52 @@ fn validate_mempool(ledger: &Ledger, transactions: &[AuthorizedTransaction]) -> 
             .map_err(|error| format!("mempool state transition is invalid: {error}"))?;
     }
     Ok(())
+}
+
+fn minimum_relay_fee(encoded_size: usize) -> Result<u64, String> {
+    u64::try_from(encoded_size)
+        .ok()
+        .and_then(|size| size.checked_mul(MIN_RELAY_FEE_PAQS_PER_BYTE))
+        .ok_or("minimum relay fee overflow".into())
+}
+
+fn meets_minimum_relay_fee(transaction: &AuthorizedTransaction, encoded_size: usize) -> bool {
+    minimum_relay_fee(encoded_size)
+        .and_then(|required| transaction_miner_fee(transaction).map(|paid| paid >= required))
+        .unwrap_or(false)
+}
+
+fn transaction_miner_fee(transaction: &AuthorizedTransaction) -> Result<u64, String> {
+    fn fee_from_outputs(outputs: &[xparq::transaction::SpendOutput]) -> Result<u64, String> {
+        let mut fees = outputs
+            .iter()
+            .filter(|output| output.target == xparq::transaction::OutputTarget::BlockMiner);
+        let fee = fees.next().map_or(0, |output| output.amount.0);
+        if fees.next().is_some() {
+            return Err("transaction has multiple block-miner fee outputs".into());
+        }
+        Ok(fee)
+    }
+
+    match transaction {
+        AuthorizedTransaction::OnChainSpend(transaction) => {
+            fee_from_outputs(&transaction.intent.outputs)
+        }
+        AuthorizedTransaction::Withdraw(transaction) => {
+            fee_from_outputs(&transaction.intent.outputs)
+        }
+        AuthorizedTransaction::Redeem(transaction) => fee_from_outputs(&transaction.intent.outputs),
+        AuthorizedTransaction::Merge(transaction) => {
+            transaction.intent.miner_output.map_or(Ok(0), |output| {
+                fee_from_outputs(std::slice::from_ref(&output))
+            })
+        }
+        AuthorizedTransaction::Split(transaction) => {
+            transaction.intent.miner_output.map_or(Ok(0), |output| {
+                fee_from_outputs(std::slice::from_ref(&output))
+            })
+        }
+    }
 }
 
 fn read_mempool(path: &Path) -> Result<Vec<AuthorizedTransaction>, String> {
@@ -2903,6 +3001,52 @@ fn default_database() -> &'static str {
 mod tests {
     use super::*;
 
+    fn policy_split_transaction(fee: u64) -> AuthorizedTransaction {
+        let input_seed = xparq::qcash::QCashSigningSeed::from_bytes([0x41; 32]);
+        let input = xparq::qcash::QCash::new(
+            xparq::coin::CoinId::from_bytes([0x42; xparq::coin::CoinId::SIZE]),
+            Amount(1_000_000),
+        );
+        let intent = xparq::transaction::SplitIntent::new(
+            input,
+            vec![
+                xparq::transaction::QCashOutput::new(
+                    Amount(1),
+                    xparq::qcash::QCashSigningSeed::from_bytes([0x43; 32]).public_key(),
+                ),
+                xparq::transaction::QCashOutput::new(
+                    Amount(999_999 - fee),
+                    xparq::qcash::QCashSigningSeed::from_bytes([0x44; 32]).public_key(),
+                ),
+            ],
+            Some(SpendOutput::block_miner(Amount(fee))),
+            10,
+        )
+        .unwrap();
+        let chain = xparq::genesis::chain_context().unwrap();
+        let commitment = intent.commitment(chain).unwrap();
+        let authorized = xparq::transaction::AuthorizedQCashIntent::new(
+            intent,
+            vec![xparq::transaction::QCashAuthorization {
+                signature: input_seed.sign(commitment.as_bytes()),
+            }],
+        )
+        .unwrap();
+        AuthorizedTransaction::Split(Box::new(authorized))
+    }
+
+    #[test]
+    fn relay_policy_requires_one_paqs_per_canonical_byte() {
+        let underpaid = policy_split_transaction(1);
+        let underpaid_size = canonical_bytes(&underpaid).unwrap().len();
+        assert!(!meets_minimum_relay_fee(&underpaid, underpaid_size));
+
+        let paid = policy_split_transaction(10_000);
+        let paid_size = canonical_bytes(&paid).unwrap().len();
+        assert!(meets_minimum_relay_fee(&paid, paid_size));
+        assert_eq!(transaction_miner_fee(&paid), Ok(10_000));
+    }
+
     #[test]
     fn explorer_address_response_is_aggregate_only() {
         let ledger = xparq::genesis::genesis_ledger().unwrap();
@@ -2995,6 +3139,7 @@ mod tests {
             tip_height: Height(0),
             tip_hash: EXPECTED_GENESIS_HASH.0,
             cumulative_work: [0; 8],
+            cumulative_weight: 0,
         };
         assert!(
             validate_handshake(&handshake)
@@ -3063,6 +3208,7 @@ mod tests {
             tip_height: Height(7),
             tip_hash: [3; 32],
             cumulative_work: Work::pow2(7).to_be_limbs(),
+            cumulative_weight: 123,
             transaction_ids: vec![[4; 32], [5; 32]],
         };
         let encoded = canonical_bytes(&inventory).unwrap();
@@ -3070,10 +3216,11 @@ mod tests {
         assert_eq!(decoded.tip_height, inventory.tip_height);
         assert_eq!(decoded.tip_hash, inventory.tip_hash);
         assert_eq!(decoded.cumulative_work, inventory.cumulative_work);
+        assert_eq!(decoded.cumulative_weight, inventory.cumulative_weight);
         assert_eq!(decoded.transaction_ids, inventory.transaction_ids);
 
         let mut oversized = encoded;
-        oversized[104..108]
+        oversized[120..124]
             .copy_from_slice(&((MAX_GOSSIP_INVENTORY_ITEMS + 1) as u32).to_le_bytes());
         assert!(
             decode_gossip_inventory(&oversized)
@@ -3083,19 +3230,24 @@ mod tests {
     }
 
     #[test]
-    fn gossip_inventory_prefers_work_then_smaller_tip_hash() {
-        let inventory = |work, tip_hash| GossipInventory {
+    fn gossip_inventory_prefers_work_then_weight_then_smaller_tip_hash() {
+        let inventory = |work, weight, tip_hash| GossipInventory {
             tip_height: Height(7),
             tip_hash,
             cumulative_work: Work::from_be_limbs(work).to_be_limbs(),
+            cumulative_weight: weight,
             transaction_ids: Vec::new(),
         };
-        let weaker = inventory([0, 0, 0, 0, 0, 0, 0, 7], [1; 32]);
-        let stronger = inventory([0, 0, 0, 0, 0, 0, 0, 8], [9; 32]);
+        let weaker = inventory([0, 0, 0, 0, 0, 0, 0, 7], 999, [1; 32]);
+        let stronger = inventory([0, 0, 0, 0, 0, 0, 0, 8], 1, [9; 32]);
         assert!(inventory_preferred(&stronger, &weaker));
 
-        let larger_hash = inventory([0, 0, 0, 0, 0, 0, 0, 8], [9; 32]);
-        let smaller_hash = inventory([0, 0, 0, 0, 0, 0, 0, 8], [2; 32]);
+        let lighter = inventory([0, 0, 0, 0, 0, 0, 0, 8], 10, [1; 32]);
+        let heavier = inventory([0, 0, 0, 0, 0, 0, 0, 8], 11, [9; 32]);
+        assert!(inventory_preferred(&heavier, &lighter));
+
+        let larger_hash = inventory([0, 0, 0, 0, 0, 0, 0, 8], 11, [9; 32]);
+        let smaller_hash = inventory([0, 0, 0, 0, 0, 0, 0, 8], 11, [2; 32]);
         assert!(inventory_preferred(&smaller_hash, &larger_hash));
     }
 

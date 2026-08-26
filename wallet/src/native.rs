@@ -32,6 +32,8 @@ use xparq_wallet::{
 use zeroize::{Zeroize, Zeroizing};
 
 const DEFAULT_WALLET_PATH: &str = "wallet.json";
+const AUTOMATIC_FEE_PAQS_PER_BYTE: u64 = 1;
+const MAX_FEE_CONVERGENCE_ROUNDS: usize = 8;
 #[cfg(feature = "mainnet")]
 const DEFAULT_RPC_ADDR: &str = "127.0.0.1:6666";
 #[cfg(feature = "testnet")]
@@ -203,7 +205,6 @@ fn interactive_spend() -> Result<(), String> {
         "--rpc".into(),
         rpc,
     ];
-    append_optional_argument(&mut args, "--miner", "Miner output XPQ (blank for none)")?;
     args.extend([
         "--wallet".into(),
         prompt_default("Wallet file", DEFAULT_WALLET_PATH)?,
@@ -216,7 +217,6 @@ fn interactive_withdraw() -> Result<(), String> {
     let expiry = automatic_expiry_height(&rpc)?;
     let mut args = vec!["--qcash".into(), prompt("Amount to withdraw in XPQ")?];
     args.extend(["--expiry".into(), expiry.to_string(), "--rpc".into(), rpc]);
-    append_optional_argument(&mut args, "--miner", "Miner output XPQ (blank for none)")?;
     append_optional_argument(
         &mut args,
         "--cash-dir",
@@ -237,7 +237,6 @@ fn interactive_split() -> Result<(), String> {
         args.extend(["--qcash".into(), amount.into()]);
     }
     args.extend(["--rpc".into(), rpc]);
-    append_optional_argument(&mut args, "--miner", "Miner output XPQ (blank for none)")?;
     append_optional_argument(&mut args, "--cash-dir", "Output directory (blank for cash)")?;
     split_qcash(&args)
 }
@@ -255,9 +254,8 @@ fn interactive_redeem() -> Result<(), String> {
     append_optional_argument(
         &mut args,
         "--amount",
-        "Recipient XPQ (blank for all minus miner output)",
+        "Recipient XPQ (blank for all minus automatic fee)",
     )?;
-    append_optional_argument(&mut args, "--miner", "Miner output XPQ (blank for none)")?;
     append_optional_argument(
         &mut args,
         "--cash-dir",
@@ -273,7 +271,6 @@ fn interactive_merge() -> Result<(), String> {
         args.extend(["--file".into(), file.into()]);
     }
     args.extend(["--rpc".into(), rpc]);
-    append_optional_argument(&mut args, "--miner", "Miner output XPQ (blank for none)")?;
     append_optional_argument(&mut args, "--cash-dir", "Output directory (blank for cash)")?;
     merge_qcash(&args)
 }
@@ -513,6 +510,7 @@ fn summarize_balance(account: &AccountResponse) -> Result<BalanceSummary, String
 }
 
 fn sign_spend(args: &[String]) -> Result<(), String> {
+    reject_manual_fee(args)?;
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
     let recipient = address_option(args, "--to")?;
     let amount = parse_amount(option(args, "--amount").ok_or("missing --amount")?)?;
@@ -520,48 +518,54 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
         .ok_or("missing --expiry")?
         .parse::<u64>()
         .map_err(|_| "invalid --expiry".to_string())?;
-    let mut inputs = repeated_options(args, "--input")
+    let inputs = repeated_options(args, "--input")
         .into_iter()
         .map(xparq::coin::CoinId::from_str)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "invalid --input coin id".to_string())?;
     let wallet = load_wallet(path)?;
-    let miner_fee = option(args, "--miner").map(parse_amount).transpose()?;
-    let required = amount
-        .checked_add(miner_fee.unwrap_or(Amount(0)))
-        .ok_or_else(|| "transaction amount overflow".to_string())?
-        .0;
-    let mut outputs = vec![SpendOutput::new(recipient, amount)];
-    if inputs.is_empty() {
-        if option(args, "--change").is_some() || option(args, "--change-to").is_some() {
-            return Err("automatic input selection also calculates change automatically".into());
-        }
-        let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-        let (selected, selected_total) = select_account_inputs(rpc, &wallet, required)?;
-        inputs = selected;
-        let change = selected_total - required;
-        if change > 0 {
-            outputs.push(SpendOutput::new(wallet.address, Amount(change)));
-        }
-    } else if let Some(change) = option(args, "--change") {
-        outputs.push(SpendOutput::new(
-            address_option(args, "--change-to")?,
-            parse_amount(change)?,
-        ));
-    }
-    if let Some(fee) = miner_fee {
-        outputs.push(SpendOutput::block_miner(fee));
-    }
-    let intent = OnChainSpendIntent::new(wallet.address, inputs, outputs, expiry_height)
-        .map_err(|error| error.to_string())?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let known = account_public_key_registered(rpc, &wallet);
-    let signed = if known {
-        wallet.sign_known_onchain_spend(intent)?
-    } else {
-        wallet.sign_onchain_spend(intent)?
-    };
-    let transaction = AuthorizedTransaction::OnChainSpend(Box::new(signed));
+    let explicit_change = option(args, "--change").map(parse_amount).transpose()?;
+    let change_target = option(args, "--change-to")
+        .map(|address| address_from_string(address).map_err(|error| error.to_string()))
+        .transpose()?;
+    if inputs.is_empty() && (explicit_change.is_some() || change_target.is_some()) {
+        return Err("automatic input selection also calculates change automatically".into());
+    }
+    let transaction = automatic_fee_transaction(|fee| {
+        let required = amount
+            .0
+            .checked_add(fee)
+            .ok_or("transaction amount plus fee overflow")?;
+        let (selected, change, change_address) = if inputs.is_empty() {
+            let (selected, total) = select_account_inputs(rpc, &wallet, required)?;
+            (selected, total - required, wallet.address)
+        } else {
+            let gross_change = explicit_change.map_or(0, |amount| amount.0);
+            let change = gross_change
+                .checked_sub(fee)
+                .ok_or("explicit change is smaller than the automatic fee")?;
+            (
+                inputs.clone(),
+                change,
+                change_target.unwrap_or(wallet.address),
+            )
+        };
+        let mut outputs = vec![SpendOutput::new(recipient, amount)];
+        if change > 0 {
+            outputs.push(SpendOutput::new(change_address, Amount(change)));
+        }
+        outputs.push(SpendOutput::block_miner(Amount(fee)));
+        let intent = OnChainSpendIntent::new(wallet.address, selected, outputs, expiry_height)
+            .map_err(|error| error.to_string())?;
+        let signed = if known {
+            wallet.sign_known_onchain_spend(intent)?
+        } else {
+            wallet.sign_onchain_spend(intent)?
+        };
+        Ok(AuthorizedTransaction::OnChainSpend(Box::new(signed)))
+    })?;
     submit_or_print_transaction(args, &transaction)
 }
 
@@ -677,13 +681,14 @@ fn read_json_response<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) -> R
 }
 
 fn sign_withdraw(args: &[String]) -> Result<(), String> {
+    reject_manual_fee(args)?;
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
     let cash_dir = PathBuf::from(option(args, "--cash-dir").unwrap_or("cash"));
     let expiry_height = option(args, "--expiry")
         .ok_or("missing --expiry")?
         .parse::<u64>()
         .map_err(|_| "invalid --expiry".to_string())?;
-    let mut inputs = repeated_options(args, "--input")
+    let inputs = repeated_options(args, "--input")
         .into_iter()
         .map(xparq::coin::CoinId::from_str)
         .collect::<Result<Vec<_>, _>>()
@@ -702,62 +707,68 @@ fn sign_withdraw(args: &[String]) -> Result<(), String> {
                 .map_err(|error| format!("secure random generation failed: {error}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let qcash_outputs = amounts
+    let qcash_outputs: Vec<QCashOutput> = amounts
         .iter()
         .zip(&secrets)
         .map(|(amount, secret)| QCashOutput::new(*amount, secret.public_key()))
         .collect();
-    let mut public_outputs = Vec::new();
-    if let Some(change) = option(args, "--change") {
-        public_outputs.push(SpendOutput::new(
-            address_option(args, "--change-to")?,
-            parse_amount(change)?,
-        ));
-    }
-    if let Some(fee) = option(args, "--miner") {
-        public_outputs.push(SpendOutput::block_miner(parse_amount(fee)?));
-    }
     let wallet = load_wallet(path)?;
-    if inputs.is_empty() {
-        if option(args, "--change").is_some() || option(args, "--change-to").is_some() {
-            return Err("automatic input selection also calculates change automatically".into());
-        }
-        let qcash_total = checked_amount_sum(amounts.iter().copied())?;
-        let miner_total = option(args, "--miner")
-            .map(parse_amount)
-            .transpose()?
-            .map_or(0, |amount| amount.0);
-        let required = qcash_total
-            .checked_add(miner_total)
-            .ok_or("withdraw amount overflow")?;
-        let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-        let (selected, selected_total) = select_account_inputs(rpc, &wallet, required)?;
-        inputs = selected;
-        let change = selected_total - required;
-        if change > 0 {
-            public_outputs.push(SpendOutput::new(wallet.address, Amount(change)));
-        }
-    }
-    let intent = WithdrawIntent::new(
-        wallet.address,
-        inputs,
-        qcash_outputs,
-        public_outputs,
-        expiry_height,
-    )
-    .map_err(|error| error.to_string())?;
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
-    let commitment = intent
-        .commitment(chain)
-        .map_err(|error| error.to_string())?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let known = account_public_key_registered(rpc, &wallet);
-    let signed = if known {
-        wallet.sign_known_withdraw(intent)?
-    } else {
-        wallet.sign_withdraw(intent)?
+    let explicit_change = option(args, "--change").map(parse_amount).transpose()?;
+    let change_target = option(args, "--change-to")
+        .map(|address| address_from_string(address).map_err(|error| error.to_string()))
+        .transpose()?;
+    if inputs.is_empty() && (explicit_change.is_some() || change_target.is_some()) {
+        return Err("automatic input selection also calculates change automatically".into());
+    }
+    let qcash_total = checked_amount_sum(amounts.iter().copied())?;
+    let transaction = automatic_fee_transaction(|fee| {
+        let required = qcash_total
+            .checked_add(fee)
+            .ok_or("withdraw amount plus fee overflow")?;
+        let (selected, change, change_address) = if inputs.is_empty() {
+            let (selected, total) = select_account_inputs(rpc, &wallet, required)?;
+            (selected, total - required, wallet.address)
+        } else {
+            let gross_change = explicit_change.map_or(0, |amount| amount.0);
+            let change = gross_change
+                .checked_sub(fee)
+                .ok_or("explicit change is smaller than the automatic fee")?;
+            (
+                inputs.clone(),
+                change,
+                change_target.unwrap_or(wallet.address),
+            )
+        };
+        let mut public_outputs = Vec::new();
+        if change > 0 {
+            public_outputs.push(SpendOutput::new(change_address, Amount(change)));
+        }
+        public_outputs.push(SpendOutput::block_miner(Amount(fee)));
+        let intent = WithdrawIntent::new(
+            wallet.address,
+            selected,
+            qcash_outputs.clone(),
+            public_outputs,
+            expiry_height,
+        )
+        .map_err(|error| error.to_string())?;
+        let signed = if known {
+            wallet.sign_known_withdraw(intent)?
+        } else {
+            wallet.sign_withdraw(intent)?
+        };
+        Ok(AuthorizedTransaction::Withdraw(Box::new(signed)))
+    })?;
+    let commitment = match &transaction {
+        AuthorizedTransaction::Withdraw(transaction) => transaction
+            .intent
+            .commitment(chain)
+            .map_err(|error| error.to_string())?,
+        _ => unreachable!("withdraw fee builder returned another transaction kind"),
     };
-    let transaction = AuthorizedTransaction::Withdraw(Box::new(signed));
 
     let mut files = Vec::with_capacity(amounts.len());
     for (index, (amount, secret)) in amounts.into_iter().zip(secrets).enumerate() {
@@ -769,68 +780,72 @@ fn sign_withdraw(args: &[String]) -> Result<(), String> {
 }
 
 fn redeem_qcash(args: &[String]) -> Result<(), String> {
+    reject_manual_fee(args)?;
     let input_path = option(args, "--file").ok_or("missing --file")?;
     let input = load_qcash_file(Path::new(input_path))?;
     let recipient = address_option(args, "--to")?;
-    let miner_output = miner_output_option(args)?;
-    let miner_amount = miner_output.map_or(0, |output| output.amount.0);
-    let available = input
-        .qcash
-        .amount()
-        .0
-        .checked_sub(miner_amount)
-        .filter(|amount| *amount > 0)
-        .ok_or("redeem miner output must be smaller than the QCash amount")?;
-    let recipient_amount = option(args, "--amount")
-        .map(parse_amount)
-        .transpose()?
-        .map_or(available, |amount| amount.0);
-    let change_amount = available
-        .checked_sub(recipient_amount)
-        .ok_or("redeem amount plus miner output exceeds the QCash amount")?;
-
-    let mut outputs = vec![SpendOutput::new(recipient, Amount(recipient_amount))];
-    if let Some(miner_output) = miner_output {
-        outputs.push(miner_output);
-    }
-    let change_secret = if change_amount > 0 {
-        Some(
+    let requested_amount = option(args, "--amount").map(parse_amount).transpose()?;
+    let change_secret = requested_amount
+        .map(|_| {
             QCashSigningSeed::random()
-                .map_err(|error| format!("secure random generation failed: {error}"))?,
-        )
-    } else {
-        None
-    };
-    let qcash_outputs = change_secret
-        .as_ref()
-        .map(|secret| QCashOutput::new(Amount(change_amount), secret.public_key()))
-        .into_iter()
-        .collect();
+                .map_err(|error| format!("secure random generation failed: {error}"))
+        })
+        .transpose()?;
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
-    let intent = RedeemIntent::new(
-        vec![input.qcash],
-        outputs,
-        qcash_outputs,
-        qcash_expiry_height(args)?,
-    )
-    .map_err(|error| error.to_string())?;
-    let commitment = intent
-        .commitment(chain)
-        .map_err(|error| error.to_string())?;
-    let authorized = authorize_qcash_intent(intent, std::slice::from_ref(&input), chain)?;
+    let expiry_height = qcash_expiry_height(args)?;
+    let transaction = automatic_fee_transaction(|fee| {
+        let available = input
+            .qcash
+            .amount()
+            .0
+            .checked_sub(fee)
+            .filter(|amount| *amount > 0)
+            .ok_or("QCash amount is too small for the automatic fee")?;
+        let recipient_amount = requested_amount.map_or(available, |amount| amount.0);
+        let change_amount = available
+            .checked_sub(recipient_amount)
+            .ok_or("redeem amount plus automatic fee exceeds the QCash amount")?;
+        let mut outputs = vec![SpendOutput::new(recipient, Amount(recipient_amount))];
+        outputs.push(SpendOutput::block_miner(Amount(fee)));
+        let qcash_outputs = change_secret
+            .as_ref()
+            .filter(|_| change_amount > 0)
+            .map(|secret| QCashOutput::new(Amount(change_amount), secret.public_key()))
+            .into_iter()
+            .collect();
+        let intent = RedeemIntent::new(vec![input.qcash], outputs, qcash_outputs, expiry_height)
+            .map_err(|error| error.to_string())?;
+        let authorized = authorize_qcash_intent(intent, std::slice::from_ref(&input), chain)?;
+        Ok(AuthorizedTransaction::Redeem(Box::new(authorized)))
+    })?;
+    let (commitment, change_amount) = match &transaction {
+        AuthorizedTransaction::Redeem(transaction) => (
+            transaction
+                .intent
+                .commitment(chain)
+                .map_err(|error| error.to_string())?,
+            transaction
+                .intent
+                .qcash_outputs
+                .first()
+                .map_or(0, |output| output.amount.0),
+        ),
+        _ => unreachable!("redeem fee builder returned another transaction kind"),
+    };
 
-    if let Some(secret) = change_secret {
+    if let Some(secret) = change_secret.filter(|_| change_amount > 0) {
         let id = redeem_qcash_change_output_id(commitment, 0).map_err(|error| error.to_string())?;
         let change_file = QCashFile::new(QCash::new(id, Amount(change_amount)), secret);
         write_qcash_files(&cash_dir_option(args), &[change_file])?;
     }
-    submit_or_print_transaction(args, &AuthorizedTransaction::Redeem(Box::new(authorized)))
+    submit_or_print_transaction(args, &transaction)
 }
 
 fn split_qcash(args: &[String]) -> Result<(), String> {
+    reject_manual_fee(args)?;
     let input_path = option(args, "--file").ok_or("missing --file")?;
     let input = load_qcash_file(Path::new(input_path))?;
-    let mut amounts = repeated_options(args, "--qcash")
+    let amounts = repeated_options(args, "--qcash")
         .into_iter()
         .map(parse_amount)
         .collect::<Result<Vec<_>, _>>()?;
@@ -838,44 +853,61 @@ fn split_qcash(args: &[String]) -> Result<(), String> {
         return Err("QCash split requires at least one --qcash amount".into());
     }
     let expiry_height = qcash_expiry_height(args)?;
-    let miner_output = miner_output_option(args)?;
     let requested = checked_amount_sum(amounts.iter().copied())?;
-    let miner_amount = miner_output.map_or(0, |output| output.amount.0);
-    let available = input
-        .qcash
-        .amount()
-        .0
-        .checked_sub(miner_amount)
-        .ok_or("split miner output exceeds the QCash amount")?;
-    let remainder = available
-        .checked_sub(requested)
-        .ok_or("split outputs plus miner output exceed the QCash amount")?;
-    if remainder > 0 {
-        amounts.push(Amount(remainder));
-    }
-    if amounts.len() < 2 {
-        return Err(
-            "QCash split must produce at least two outputs; request less than the available amount"
-                .into(),
-        );
-    }
+    let maximum_outputs = amounts.len().saturating_add(1);
     let secrets = fresh_qcash_secrets(
-        amounts.len(),
+        maximum_outputs,
         std::iter::once(input.signing_seed.public_key()),
     )?;
-    let outputs = amounts
-        .iter()
-        .zip(&secrets)
-        .map(|(amount, secret)| QCashOutput::new(*amount, secret.public_key()))
-        .collect::<Vec<_>>();
-    let intent = SplitIntent::new(input.qcash, outputs, miner_output, expiry_height)
-        .map_err(|error| error.to_string())?;
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
-    let commitment = intent
-        .commitment(chain)
+    let transaction = automatic_fee_transaction(|fee| {
+        let available = input
+            .qcash
+            .amount()
+            .0
+            .checked_sub(fee)
+            .ok_or("split automatic fee exceeds the QCash amount")?;
+        let remainder = available
+            .checked_sub(requested)
+            .ok_or("split outputs plus automatic fee exceed the QCash amount")?;
+        let mut final_amounts = amounts.clone();
+        if remainder > 0 {
+            final_amounts.push(Amount(remainder));
+        }
+        if final_amounts.len() < 2 {
+            return Err("QCash split must produce at least two outputs after fee".into());
+        }
+        let outputs = final_amounts
+            .iter()
+            .zip(&secrets)
+            .map(|(amount, secret)| QCashOutput::new(*amount, secret.public_key()))
+            .collect::<Vec<_>>();
+        let intent = SplitIntent::new(
+            input.qcash,
+            outputs,
+            Some(SpendOutput::block_miner(Amount(fee))),
+            expiry_height,
+        )
         .map_err(|error| error.to_string())?;
-    let authorized = authorize_qcash_intent(intent, std::slice::from_ref(&input), chain)?;
-    let files = amounts
+        let authorized = authorize_qcash_intent(intent, std::slice::from_ref(&input), chain)?;
+        Ok(AuthorizedTransaction::Split(Box::new(authorized)))
+    })?;
+    let (commitment, final_amounts) = match &transaction {
+        AuthorizedTransaction::Split(transaction) => (
+            transaction
+                .intent
+                .commitment(chain)
+                .map_err(|error| error.to_string())?,
+            transaction
+                .intent
+                .outputs
+                .iter()
+                .map(|output| output.amount)
+                .collect::<Vec<_>>(),
+        ),
+        _ => unreachable!("split fee builder returned another transaction kind"),
+    };
+    let files = final_amounts
         .into_iter()
         .zip(secrets)
         .enumerate()
@@ -886,10 +918,11 @@ fn split_qcash(args: &[String]) -> Result<(), String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     write_qcash_files(&cash_dir_option(args), &files)?;
-    submit_or_print_transaction(args, &AuthorizedTransaction::Split(Box::new(authorized)))
+    submit_or_print_transaction(args, &transaction)
 }
 
 fn merge_qcash(args: &[String]) -> Result<(), String> {
+    reject_manual_fee(args)?;
     let paths = repeated_options(args, "--file");
     if paths.len() < 2 {
         return Err("QCash merge requires at least two --file inputs".into());
@@ -899,26 +932,35 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
         .map(|path| load_qcash_file(Path::new(path)))
         .collect::<Result<Vec<_>, _>>()?;
     let total = checked_amount_sum(inputs.iter().map(|file| file.qcash.amount()))?;
-    let miner_output = miner_output_option(args)?;
-    let miner_amount = miner_output.map_or(0, |output| output.amount.0);
-    let output_amount = total
-        .checked_sub(miner_amount)
-        .filter(|amount| *amount > 0)
-        .ok_or("merge miner output must be smaller than the merged QCash amount")?;
     let forbidden = inputs.iter().map(|file| file.signing_seed.public_key());
     let secret = fresh_qcash_secrets(1, forbidden)?.remove(0);
-    let intent = MergeIntent::new(
-        inputs.iter().map(|file| file.qcash).collect(),
-        QCashOutput::new(Amount(output_amount), secret.public_key()),
-        miner_output,
-        qcash_expiry_height(args)?,
-    )
-    .map_err(|error| error.to_string())?;
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
-    let commitment = intent
-        .commitment(chain)
+    let expiry_height = qcash_expiry_height(args)?;
+    let transaction = automatic_fee_transaction(|fee| {
+        let output_amount = total
+            .checked_sub(fee)
+            .filter(|amount| *amount > 0)
+            .ok_or("merged QCash amount is too small for the automatic fee")?;
+        let intent = MergeIntent::new(
+            inputs.iter().map(|file| file.qcash).collect(),
+            QCashOutput::new(Amount(output_amount), secret.public_key()),
+            Some(SpendOutput::block_miner(Amount(fee))),
+            expiry_height,
+        )
         .map_err(|error| error.to_string())?;
-    let authorized = authorize_qcash_intent(intent, &inputs, chain)?;
+        let authorized = authorize_qcash_intent(intent, &inputs, chain)?;
+        Ok(AuthorizedTransaction::Merge(Box::new(authorized)))
+    })?;
+    let (commitment, output_amount) = match &transaction {
+        AuthorizedTransaction::Merge(transaction) => (
+            transaction
+                .intent
+                .commitment(chain)
+                .map_err(|error| error.to_string())?,
+            transaction.intent.output.amount.0,
+        ),
+        _ => unreachable!("merge fee builder returned another transaction kind"),
+    };
     let id = merge_qcash_output_id(commitment).map_err(|error| error.to_string())?;
     write_qcash_files(
         &cash_dir_option(args),
@@ -927,7 +969,7 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
             secret,
         )],
     )?;
-    submit_or_print_transaction(args, &AuthorizedTransaction::Merge(Box::new(authorized)))
+    submit_or_print_transaction(args, &transaction)
 }
 
 fn expiry_option(args: &[String]) -> Result<u64, String> {
@@ -944,11 +986,34 @@ fn qcash_expiry_height(args: &[String]) -> Result<u64, String> {
     automatic_expiry_height(option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR))
 }
 
-fn miner_output_option(args: &[String]) -> Result<Option<SpendOutput>, String> {
-    option(args, "--miner")
-        .map(parse_amount)
-        .transpose()
-        .map(|amount| amount.map(SpendOutput::block_miner))
+fn reject_manual_fee(args: &[String]) -> Result<(), String> {
+    if option(args, "--miner").is_some() {
+        return Err(
+            "--miner is no longer supported; wallet fee is automatic at 1 paqs/byte".into(),
+        );
+    }
+    Ok(())
+}
+
+fn automatic_fee_transaction(
+    mut build: impl FnMut(u64) -> Result<AuthorizedTransaction, String>,
+) -> Result<AuthorizedTransaction, String> {
+    let mut fee = AUTOMATIC_FEE_PAQS_PER_BYTE;
+    for _ in 0..MAX_FEE_CONVERGENCE_ROUNDS {
+        let transaction = build(fee)?;
+        let size = canonical_bytes(&transaction)
+            .map_err(|error| error.to_string())?
+            .len();
+        let required = u64::try_from(size)
+            .ok()
+            .and_then(|size| size.checked_mul(AUTOMATIC_FEE_PAQS_PER_BYTE))
+            .ok_or("automatic transaction fee overflow")?;
+        if required == fee {
+            return Ok(transaction);
+        }
+        fee = required;
+    }
+    Err("automatic transaction fee did not converge".into())
 }
 
 fn cash_dir_option(args: &[String]) -> PathBuf {
@@ -1193,7 +1258,7 @@ fn format_amount(units: u64) -> String {
 
 fn print_help() {
     println!(
-        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24]\nwallet restore --mnemonic PHRASE [--wallet PATH]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ --expiry HEIGHT [--change XPQ --change-to ADDRESS] [--miner XPQ] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet sign-withdraw --qcash XPQ... --expiry HEIGHT [--input COIN_ID...] [--change XPQ --change-to ADDRESS] [--miner XPQ] [--rpc ADDRESS] [--cash-dir PATH] [--wallet PATH] [--offline]\nwallet qcash-redeem --file FILE --to ADDRESS [--amount XPQ] [--miner XPQ] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-split --file FILE --qcash XPQ [--qcash XPQ...] [--miner XPQ] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-merge --file FILE --file FILE... [--miner XPQ] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet version\n\nSigned transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs. A split automatically creates QCash change when requested outputs are smaller than the input after miner output. QCash operations use ML-DSA-44 bearer authorization, and block-miner value is deducted from QCash inputs. Keep input QCash files until the transaction is canonically confirmed.\nRunning without a command opens the interactive menu.\nWithout --input, spend and withdraw select active XPQ inputs and calculate change through node RPC."
+        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24]\nwallet restore --mnemonic PHRASE [--wallet PATH]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ --expiry HEIGHT [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet sign-withdraw --qcash XPQ... --expiry HEIGHT [--input COIN_ID...] [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--cash-dir PATH] [--wallet PATH] [--offline]\nwallet qcash-redeem --file FILE --to ADDRESS [--amount XPQ] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-split --file FILE --qcash XPQ [--qcash XPQ...] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-merge --file FILE --file FILE... [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet version\n\nSigned transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 paqs per canonical transaction byte; manual --miner fee input is not supported. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs. A split automatically creates QCash change when requested outputs are smaller than the input after the automatic fee. QCash operations use ML-DSA-44 bearer authorization, and the automatic block-miner fee is deducted from QCash inputs. Keep input QCash files until the transaction is canonically confirmed.\nRunning without a command opens the interactive menu.\nWithout --input, spend and withdraw select active XPQ inputs and calculate change through node RPC."
     );
 }
 
@@ -1336,6 +1401,52 @@ mod tests {
     }
 
     #[test]
+    fn automatic_fee_equals_canonical_transaction_size() {
+        let input_seed = QCashSigningSeed::from_bytes([0x31; 32]);
+        let output_seed = QCashSigningSeed::from_bytes([0x32; 32]);
+        let input = QCash::new(
+            xparq::coin::CoinId::from_bytes([0x33; xparq::coin::CoinId::SIZE]),
+            Amount(COIN),
+        );
+        let chain = xparq::genesis::chain_context().unwrap();
+        let transaction = automatic_fee_transaction(|fee| {
+            let intent = SplitIntent::new(
+                input,
+                vec![
+                    QCashOutput::new(Amount(1), output_seed.public_key()),
+                    QCashOutput::new(
+                        Amount(COIN - fee - 1),
+                        QCashSigningSeed::from_bytes([0x34; 32]).public_key(),
+                    ),
+                ],
+                Some(SpendOutput::block_miner(Amount(fee))),
+                10,
+            )
+            .map_err(|error| error.to_string())?;
+            let commitment = intent
+                .commitment(chain)
+                .map_err(|error| error.to_string())?;
+            let authorized = AuthorizedQCashIntent::new(
+                intent,
+                vec![QCashAuthorization {
+                    signature: input_seed.sign(commitment.as_bytes()),
+                }],
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(AuthorizedTransaction::Split(Box::new(authorized)))
+        })
+        .unwrap();
+        let size = canonical_bytes(&transaction).unwrap().len() as u64;
+        let fee = match transaction {
+            AuthorizedTransaction::Split(transaction) => {
+                transaction.intent.miner_output.unwrap().amount.0
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(fee, size);
+    }
+
+    #[test]
     fn redeem_split_and_merge_create_canonical_validated_qcash_files() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1400,10 +1511,7 @@ mod tests {
             .map(|entry| entry.unwrap().path())
             .collect::<Vec<_>>();
         assert_eq!(merged_paths.len(), 1);
-        assert_eq!(
-            load_qcash_file(&merged_paths[0]).unwrap().qcash.amount(),
-            Amount(5 * COIN)
-        );
+        assert!(load_qcash_file(&merged_paths[0]).unwrap().qcash.amount() < Amount(5 * COIN));
 
         let mnemonic = xparq_wallet::encode_xparq_mnemonic(&[7; 16]).unwrap();
         let recipient = wallet_from_xparq_mnemonic(&mnemonic).unwrap();
@@ -1426,10 +1534,7 @@ mod tests {
             .map(|entry| entry.unwrap().path())
             .collect::<Vec<_>>();
         assert_eq!(redeem_paths.len(), 1);
-        assert_eq!(
-            load_qcash_file(&redeem_paths[0]).unwrap().qcash.amount(),
-            Amount(COIN)
-        );
+        assert!(load_qcash_file(&redeem_paths[0]).unwrap().qcash.amount() < Amount(COIN));
 
         fs::remove_dir_all(root).unwrap();
     }
