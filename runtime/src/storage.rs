@@ -7,8 +7,8 @@ use std::{
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 const DATABASE_FILE: &str = "xparq.redb";
-// Version 4 replaces scheme-specific account registries with one profile registry.
-const SCHEMA_VERSION: u32 = 4;
+// Version 5 stores fixed-size Falcon-512 QCash public keys and signatures.
+const SCHEMA_VERSION: u32 = 5;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("canonical_blocks");

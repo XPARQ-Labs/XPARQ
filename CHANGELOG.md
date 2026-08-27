@@ -27,10 +27,8 @@
   single profile-tagged representation on the reset chain.
 - Removed the legacy fixed ML-DSA-44 `keygen` account API; all account key
   derivation, addressing, signing, and verification now use signature profiles.
-- Added the height-aware textual XPQ CoinId encoding
-  `xpq:<base64url-without-padding>` from height 10,000. The parser continues to
-  accept legacy 64-character hexadecimal IDs and the canonical 32-byte CoinId
-  and its hash derivation are unchanged.
+- Replaced QCash ML-DSA-44 bearer authorization with fixed-size Falcon-512 keys
+  and signatures (897-byte public keys and 666-byte signatures) on the reset chain.
 - Retired old Docker, tutorial, roadmap, whitepaper, and legacy fuzzing files
   because they described the removed architecture. Current behavior lives in
   the root, runtime, and wallet READMEs.

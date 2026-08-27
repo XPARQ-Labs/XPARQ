@@ -334,7 +334,6 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
             SpendOutput::new(recipient, sent),
             SpendOutput::new(sender.address, Amount(input_amount - sent.0)),
         ],
-        100,
     )
     .unwrap();
     let transaction = AuthorizedTransaction::OnChainSpend(Box::new(

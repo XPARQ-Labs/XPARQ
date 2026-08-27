@@ -468,7 +468,6 @@ mod tests {
                 ),
             ],
             None,
-            100,
         )
         .unwrap();
         let chain = ChainContext::new([6; 32]);

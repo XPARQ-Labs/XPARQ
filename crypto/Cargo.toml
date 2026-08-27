@@ -25,7 +25,6 @@ serde.workspace = true
 bech32.workspace = true
 zeroize.workspace = true
 argon2.workspace = true
-getrandom.workspace = true
 static_assertions.workspace = true
 fn-dsa.workspace = true
 rand_core_06.workspace = true

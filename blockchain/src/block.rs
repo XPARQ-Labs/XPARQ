@@ -201,7 +201,7 @@ impl Block {
             return Err(BlockError::InvalidBlockWeight);
         }
 
-        if !signed_transactions_are_valid_for_height(&self.body.transactions, self.height()) {
+        if !signed_transactions_are_structurally_valid(&self.body.transactions) {
             return Err(BlockError::InvalidTransaction);
         }
         if self.header.merkle_root
@@ -378,13 +378,10 @@ fn has_duplicate_transactions(
     Ok(false)
 }
 
-fn signed_transactions_are_valid_for_height(
-    transactions: &[AuthorizedTransaction],
-    height: Height,
-) -> bool {
+fn signed_transactions_are_structurally_valid(transactions: &[AuthorizedTransaction]) -> bool {
     transactions
         .iter()
-        .all(|tx| tx.expiry_height() >= height.0 && tx.validate_structure().is_ok())
+        .all(|tx| tx.validate_structure().is_ok())
 }
 
 #[cfg(test)]
@@ -424,7 +421,6 @@ mod tests {
                 Address([0x32; crate::crypto::ADDRESS_SIZE]),
                 Amount(100_000),
             )],
-            1,
         )
         .unwrap();
         let signature = owner.sign(b"block structure test");
@@ -467,7 +463,6 @@ mod tests {
                 Address([seed as u8; crate::crypto::ADDRESS_SIZE]),
                 Amount(1),
             )],
-            u64::MAX,
         )
         .unwrap();
         AuthorizedTransaction::OnChainSpend(Box::new(AuthorizedAccountIntent {

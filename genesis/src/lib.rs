@@ -12,6 +12,7 @@ use xparq_consensus::{
 };
 use xparq_crypto::{
     ADDRESS_SIZE, BlockHash, FALCON_512_ACTIVATION_HEIGHT, HASH_SIZE, Hash, HashDomain,
+    QCASH_PUBLIC_KEY_SIZE, QCASH_SIGNATURE_ALGORITHM, QCASH_SIGNATURE_SIZE,
     SIGNATURE_PROFILE_ACTIVATION_HEIGHT, domain_hash,
 };
 use xparq_ledger::{Ledger, LedgerError};
@@ -28,7 +29,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 ]);
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`] changes.
-pub const CHAIN_SPEC_VERSION: u32 = 7;
+pub const CHAIN_SPEC_VERSION: u32 = 8;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -57,6 +58,9 @@ struct ChainSpecIdentity<'a> {
     fork_choice_algorithm: &'a str,
     falcon_512_activation_height: u64,
     signature_profile_activation_height: u64,
+    qcash_signature_algorithm: &'a str,
+    qcash_public_key_size: u32,
+    qcash_signature_size: u32,
 }
 
 /// Domain-separated identity of every consensus parameter that nodes must agree on.
@@ -87,6 +91,9 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         fork_choice_algorithm: FORK_CHOICE_ALGORITHM,
         falcon_512_activation_height: FALCON_512_ACTIVATION_HEIGHT,
         signature_profile_activation_height: SIGNATURE_PROFILE_ACTIVATION_HEIGHT,
+        qcash_signature_algorithm: QCASH_SIGNATURE_ALGORITHM,
+        qcash_public_key_size: QCASH_PUBLIC_KEY_SIZE as u32,
+        qcash_signature_size: QCASH_SIGNATURE_SIZE as u32,
     };
     let bytes = xparq_common::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
     Ok(domain_hash(HashDomain::ChainSpec, &bytes))

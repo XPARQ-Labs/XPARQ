@@ -80,7 +80,6 @@ pub struct OnChainSpendIntent {
     pub sender: Address,
     pub inputs: Vec<CoinId>,
     pub outputs: Vec<SpendOutput>,
-    pub expiry_height: u64,
 }
 
 impl OnChainSpendIntent {
@@ -88,13 +87,11 @@ impl OnChainSpendIntent {
         sender: Address,
         inputs: Vec<CoinId>,
         outputs: Vec<SpendOutput>,
-        expiry_height: u64,
     ) -> Result<Self, IntentError> {
         let intent = Self {
             sender,
             inputs,
             outputs,
-            expiry_height,
         };
         intent.validate()?;
         Ok(intent)
@@ -125,7 +122,6 @@ pub struct WithdrawIntent {
     pub inputs: Vec<CoinId>,
     pub qcash_outputs: Vec<QCashOutput>,
     pub outputs: Vec<SpendOutput>,
-    pub expiry_height: u64,
 }
 
 impl WithdrawIntent {
@@ -134,14 +130,12 @@ impl WithdrawIntent {
         inputs: Vec<CoinId>,
         qcash_outputs: Vec<QCashOutput>,
         outputs: Vec<SpendOutput>,
-        expiry_height: u64,
     ) -> Result<Self, IntentError> {
         let intent = Self {
             sender,
             inputs,
             qcash_outputs,
             outputs,
-            expiry_height,
         };
         intent.validate()?;
         Ok(intent)
@@ -213,7 +207,6 @@ pub struct RedeemIntent {
     pub inputs: Vec<QCash>,
     pub outputs: Vec<SpendOutput>,
     pub qcash_outputs: Vec<QCashOutput>,
-    pub expiry_height: u64,
 }
 
 impl RedeemIntent {
@@ -221,13 +214,11 @@ impl RedeemIntent {
         inputs: Vec<QCash>,
         outputs: Vec<SpendOutput>,
         qcash_outputs: Vec<QCashOutput>,
-        expiry_height: u64,
     ) -> Result<Self, IntentError> {
         let intent = Self {
             inputs,
             outputs,
             qcash_outputs,
-            expiry_height,
         };
         intent.validate()?;
         Ok(intent)
@@ -292,7 +283,6 @@ pub struct MergeIntent {
     pub inputs: Vec<QCash>,
     pub output: QCashOutput,
     pub miner_output: Option<SpendOutput>,
-    pub expiry_height: u64,
 }
 
 impl MergeIntent {
@@ -300,13 +290,11 @@ impl MergeIntent {
         inputs: Vec<QCash>,
         output: QCashOutput,
         miner_output: Option<SpendOutput>,
-        expiry_height: u64,
     ) -> Result<Self, IntentError> {
         let intent = Self {
             inputs,
             output,
             miner_output,
-            expiry_height,
         };
         intent.validate()?;
         Ok(intent)
@@ -351,7 +339,6 @@ pub struct SplitIntent {
     pub input: QCash,
     pub outputs: Vec<QCashOutput>,
     pub miner_output: Option<SpendOutput>,
-    pub expiry_height: u64,
 }
 
 impl SplitIntent {
@@ -359,13 +346,11 @@ impl SplitIntent {
         input: QCash,
         outputs: Vec<QCashOutput>,
         miner_output: Option<SpendOutput>,
-        expiry_height: u64,
     ) -> Result<Self, IntentError> {
         let intent = Self {
             input,
             outputs,
             miner_output,
-            expiry_height,
         };
         intent.validate()?;
         Ok(intent)
@@ -490,7 +475,6 @@ mod tests {
                     QCashOutput::new(Amount(6), repeated),
                 ],
                 None,
-                10,
             ),
             Err(IntentError::DuplicateBearerOutput)
         );
@@ -506,7 +490,6 @@ mod tests {
                 QCashOutput::new(Amount(6), qcash_key(4)),
             ],
             None,
-            10,
         )
         .unwrap();
         let second = SplitIntent::new(
@@ -516,7 +499,6 @@ mod tests {
                 QCashOutput::new(Amount(6), qcash_key(6)),
             ],
             None,
-            10,
         )
         .unwrap();
         let chain = ChainContext::new([7; 32]);
@@ -536,7 +518,6 @@ mod tests {
                     SpendOutput::block_miner(Amount(1)),
                 ],
                 vec![QCashOutput::new(Amount(59), qcash_key(8))],
-                10,
             )
             .is_ok()
         );
@@ -548,7 +529,6 @@ mod tests {
                     SpendOutput::block_miner(Amount(1)),
                 ],
                 vec![QCashOutput::new(Amount(60), qcash_key(8))],
-                10,
             ),
             Err(IntentError::ValueMismatch)
         );

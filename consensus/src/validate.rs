@@ -16,8 +16,6 @@ use xparq_transaction::{
     SpendCommitment, SplitIntent, WithdrawIntent,
 };
 
-pub const MAX_QCASH_TRANSACTION_LIFETIME: u64 = 50;
-
 pub fn validate_emission(
     block: &xparq_blockchain::Block,
     parent_emission: Amount,
@@ -35,7 +33,6 @@ pub use pow::{
 pub trait ConsensusIntent: Clone {
     fn validate_structure(&self) -> Result<(), IntentError>;
     fn commitment_for(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError>;
-    fn expiry_height(&self) -> u64;
 }
 
 macro_rules! impl_consensus_intent {
@@ -47,10 +44,6 @@ macro_rules! impl_consensus_intent {
 
             fn commitment_for(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
                 self.commitment(chain)
-            }
-
-            fn expiry_height(&self) -> u64 {
-                self.expiry_height
             }
         }
     };
@@ -86,14 +79,10 @@ impl<T> StructurallyValidated<T> {
 pub fn validate_intent<T: ConsensusIntent>(
     intent: T,
     chain: ChainContext,
-    current_height: u64,
 ) -> Result<StructurallyValidated<T>, TransactionConsensusError> {
     intent
         .validate_structure()
         .map_err(TransactionConsensusError::Intent)?;
-    if current_height > intent.expiry_height() {
-        return Err(TransactionConsensusError::Expired);
-    }
     let commitment = intent
         .commitment_for(chain)
         .map_err(TransactionConsensusError::Intent)?;
@@ -201,12 +190,11 @@ pub fn validate_transaction(
             Ok(ValidatedTransaction::Withdraw(validated))
         }
         AuthorizedTransaction::Redeem(transaction) => {
-            validate_bearer_authorization(*transaction, chain, current_height, state)
+            validate_bearer_authorization(*transaction, chain, state)
                 .map(ValidatedTransaction::Redeem)
         }
         AuthorizedTransaction::Merge(transaction) => {
-            let validated =
-                validate_bearer_authorization(*transaction, chain, current_height, state)?;
+            let validated = validate_bearer_authorization(*transaction, chain, state)?;
             ensure_fresh_bearer_outputs(
                 validated.intent().inputs.iter().map(|input| input.id()),
                 std::iter::once(validated.intent().output.public_key),
@@ -215,8 +203,7 @@ pub fn validate_transaction(
             Ok(ValidatedTransaction::Merge(validated))
         }
         AuthorizedTransaction::Split(transaction) => {
-            let validated =
-                validate_bearer_authorization(*transaction, chain, current_height, state)?;
+            let validated = validate_bearer_authorization(*transaction, chain, state)?;
             ensure_fresh_bearer_outputs(
                 std::iter::once(validated.intent().input.id()),
                 validated
@@ -240,7 +227,7 @@ fn validate_account_authorization<T>(
 where
     T: ConsensusIntent + xparq_transaction::AccountIntent,
 {
-    let structurally_validated = validate_intent(authorized.intent, chain, current_height)?;
+    let structurally_validated = validate_intent(authorized.intent, chain)?;
     let sender = xparq_transaction::AccountIntent::sender(structurally_validated.intent());
     let commitment = structurally_validated.commitment();
     let commitment_bytes = commitment.as_bytes();
@@ -291,7 +278,6 @@ where
 fn validate_bearer_authorization<T>(
     authorized: AuthorizedQCashIntent<T>,
     chain: ChainContext,
-    current_height: u64,
     state: &impl TransactionStateView,
 ) -> Result<AuthorizationValidated<T>, TransactionConsensusError>
 where
@@ -302,15 +288,7 @@ where
     if inputs.len() != authorized.authorizations.len() {
         return Err(TransactionConsensusError::InvalidAuthorization);
     }
-    let structurally_validated = validate_intent(authorized.intent, chain, current_height)?;
-    if structurally_validated
-        .intent()
-        .expiry_height()
-        .saturating_sub(current_height)
-        > MAX_QCASH_TRANSACTION_LIFETIME
-    {
-        return Err(TransactionConsensusError::ExpiryTooFar);
-    }
+    let structurally_validated = validate_intent(authorized.intent, chain)?;
     for (input, authorization) in inputs.iter().zip(&authorized.authorizations) {
         let input_state = state
             .qcash(input.id())
@@ -405,8 +383,6 @@ fn ensure_fresh_bearer_outputs(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransactionConsensusError {
     Intent(IntentError),
-    Expired,
-    ExpiryTooFar,
     InvalidAuthorization,
     SignatureSchemeInactive,
     UtxoNotFound,
@@ -422,10 +398,6 @@ impl fmt::Display for TransactionConsensusError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Intent(error) => write!(formatter, "invalid transaction intent: {error}"),
-            Self::Expired => formatter.write_str("transaction intent has expired"),
-            Self::ExpiryTooFar => {
-                formatter.write_str("transaction expiry exceeds the allowed lifetime")
-            }
             Self::InvalidAuthorization => {
                 formatter.write_str("transaction authorization is invalid")
             }
@@ -520,7 +492,6 @@ mod transaction_tests {
                 ),
             ],
             None,
-            100,
         )
         .unwrap();
         let chain = ChainContext::new([8; 32]);
@@ -595,7 +566,6 @@ mod transaction_tests {
             sender,
             vec![id],
             vec![xparq_transaction::SpendOutput::new(sender, Amount(10))],
-            xparq_crypto::SIGNATURE_PROFILE_ACTIVATION_HEIGHT + 10,
         )
         .unwrap();
         let chain = ChainContext::new([28; 32]);

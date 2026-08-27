@@ -1,4 +1,3 @@
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::{fmt, str::FromStr};
 
@@ -36,8 +35,6 @@ impl Amount {
 
 pub const COIN_ID_SIZE: usize = blake3::OUT_LEN;
 const COIN_ID_CONTEXT: &str = "XPARQ CoinId v1";
-pub const COIN_ID_BASE64URL_ACTIVATION_HEIGHT: u64 = 10_000;
-pub const COIN_ID_TEXT_PREFIX: &str = "xpq:";
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
@@ -69,15 +66,6 @@ impl CoinId {
         self.0
     }
 
-    /// Height-aware RPC/UI representation. The underlying 32-byte identifier
-    /// and its consensus derivation never change.
-    pub fn to_text_at_height(&self, height: u64) -> String {
-        if height < COIN_ID_BASE64URL_ACTIVATION_HEIGHT {
-            self.to_string()
-        } else {
-            format!("{COIN_ID_TEXT_PREFIX}{}", URL_SAFE_NO_PAD.encode(self.0))
-        }
-    }
 }
 
 impl fmt::Display for CoinId {
@@ -93,16 +81,6 @@ impl FromStr for CoinId {
     type Err = CoinIdParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if let Some(encoded) = value.strip_prefix(COIN_ID_TEXT_PREFIX) {
-            let decoded = URL_SAFE_NO_PAD
-                .decode(encoded)
-                .map_err(|_| CoinIdParseError)?;
-            let bytes: [u8; COIN_ID_SIZE] = decoded.try_into().map_err(|_| CoinIdParseError)?;
-            if URL_SAFE_NO_PAD.encode(bytes) != encoded {
-                return Err(CoinIdParseError);
-            }
-            return Ok(Self(bytes));
-        }
         if value.len() != COIN_ID_SIZE * 2 {
             return Err(CoinIdParseError);
         }
@@ -163,19 +141,6 @@ mod tests {
     fn coin_id_text_round_trips() {
         let id = CoinId::derive(&[b"field one", b"field two"]);
         assert_eq!(id.to_string().parse::<CoinId>(), Ok(id));
-    }
-
-    #[test]
-    fn height_10_000_activates_prefixed_base64url_without_changing_bytes() {
-        let id = CoinId::from_bytes([0xfb; COIN_ID_SIZE]);
-        let legacy = id.to_text_at_height(COIN_ID_BASE64URL_ACTIVATION_HEIGHT - 1);
-        let activated = id.to_text_at_height(COIN_ID_BASE64URL_ACTIVATION_HEIGHT);
-        assert_eq!(legacy, id.to_string());
-        assert!(activated.starts_with(COIN_ID_TEXT_PREFIX));
-        assert!(!activated.contains(['+', '/', '=']));
-        assert_eq!(legacy.parse::<CoinId>(), Ok(id));
-        assert_eq!(activated.parse::<CoinId>(), Ok(id));
-        assert_eq!(id.into_bytes(), [0xfb; COIN_ID_SIZE]);
     }
 
     #[test]

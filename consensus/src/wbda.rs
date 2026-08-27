@@ -297,7 +297,10 @@ mod tests {
 
         // Normal utilization: both hold.
         let normal = window(MAX_BLOCK_WEIGHT / 2);
-        assert_eq!(next_difficulty_from_window(difficulty, &normal), Some(difficulty));
+        assert_eq!(
+            next_difficulty_from_window(difficulty, &normal),
+            Some(difficulty)
+        );
         assert_eq!(next_emission_from_window(emission, &normal), Some(emission));
 
         // High utilization: both fall together.

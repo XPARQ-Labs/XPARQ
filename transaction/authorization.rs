@@ -116,16 +116,6 @@ impl AuthorizedTransaction {
         Ok(blake3::derive_key(TRANSACTION_ID_CONTEXT, &bytes))
     }
 
-    pub fn expiry_height(&self) -> u64 {
-        match self {
-            Self::OnChainSpend(tx) => tx.intent.expiry_height,
-            Self::Withdraw(tx) => tx.intent.expiry_height,
-            Self::Redeem(tx) => tx.intent.expiry_height,
-            Self::Merge(tx) => tx.intent.expiry_height,
-            Self::Split(tx) => tx.intent.expiry_height,
-        }
-    }
-
     pub fn validate_structure(&self) -> Result<(), IntentError> {
         match self {
             Self::OnChainSpend(tx) => tx.intent.validate(),

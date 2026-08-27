@@ -19,7 +19,7 @@ created atomically, never overwritten, and use owner-only `0600` permissions
 on Unix. Back up the mnemonic offline and never commit wallet files. A miner
 needs only the public payout address.
 
-QCash files are plaintext ML-DSA-44 bearer credentials. Whoever possesses a
+QCash files are plaintext Falcon-512 bearer credentials. Whoever possesses a
 valid unspent file can spend it. The `XPQCASH1` format includes a
 domain-separated checksum and is written with `0600` permissions on Unix.
 

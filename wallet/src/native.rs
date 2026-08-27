@@ -10,7 +10,7 @@ use std::{
 use serde::Deserialize;
 use xparq::{
     codec::canonical_bytes,
-    consensus::{Amount, COIN, DECIMALS, MAX_QCASH_TRANSACTION_LIFETIME},
+    consensus::{Amount, COIN, DECIMALS},
     crypto::{Address, QCashPublicKey, SignatureProfile, address_from_string},
     ledger::{
         merge_qcash_output_id, redeem_qcash_change_output_id, split_qcash_output_id,
@@ -119,11 +119,6 @@ fn utxo_status(utxo: &AccountUtxo, next_height: u64) -> &'static str {
     } else {
         "spendable"
     }
-}
-
-#[derive(Deserialize)]
-struct StatusResponse {
-    next_height: u64,
 }
 
 #[derive(Deserialize)]
@@ -238,14 +233,11 @@ fn interactive_wallet_query(query: fn(&[String]) -> Result<(), String>) -> Resul
 
 fn interactive_spend() -> Result<(), String> {
     let rpc = prompt_default("Node RPC address", DEFAULT_RPC_ADDR)?;
-    let expiry = automatic_expiry_height(&rpc)?;
     let mut args = vec![
         "--to".into(),
         prompt("Recipient address")?,
         "--amount".into(),
         prompt("Amount XPQ")?,
-        "--expiry".into(),
-        expiry.to_string(),
         "--rpc".into(),
         rpc,
     ];
@@ -258,9 +250,8 @@ fn interactive_spend() -> Result<(), String> {
 
 fn interactive_withdraw() -> Result<(), String> {
     let rpc = prompt_default("Node RPC address", DEFAULT_RPC_ADDR)?;
-    let expiry = automatic_expiry_height(&rpc)?;
     let mut args = vec!["--qcash".into(), prompt("Amount to withdraw in XPQ")?];
-    args.extend(["--expiry".into(), expiry.to_string(), "--rpc".into(), rpc]);
+    args.extend(["--rpc".into(), rpc]);
     append_optional_argument(
         &mut args,
         "--cash-dir",
@@ -317,14 +308,6 @@ fn interactive_merge() -> Result<(), String> {
     args.extend(["--rpc".into(), rpc]);
     append_optional_argument(&mut args, "--cash-dir", "Output directory (blank for cash)")?;
     merge_qcash(&args)
-}
-
-fn automatic_expiry_height(rpc: &str) -> Result<u64, String> {
-    let status: StatusResponse = http_get_json(rpc, "/status")?;
-    status
-        .next_height
-        .checked_add(MAX_QCASH_TRANSACTION_LIFETIME)
-        .ok_or_else(|| "automatic expiry height overflow".to_string())
 }
 
 fn interactive_block_explorer() -> Result<(), String> {
@@ -575,10 +558,6 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
     let recipient = address_option(args, "--to")?;
     let amount = parse_amount(option(args, "--amount").ok_or("missing --amount")?)?;
-    let expiry_height = option(args, "--expiry")
-        .ok_or("missing --expiry")?
-        .parse::<u64>()
-        .map_err(|_| "invalid --expiry".to_string())?;
     let inputs = repeated_options(args, "--input")
         .into_iter()
         .map(xparq::coin::CoinId::from_str)
@@ -618,7 +597,7 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
             outputs.push(SpendOutput::new(change_address, Amount(change)));
         }
         outputs.push(SpendOutput::block_miner(Amount(fee)));
-        let intent = OnChainSpendIntent::new(wallet.address(), selected, outputs, expiry_height)
+        let intent = OnChainSpendIntent::new(wallet.address(), selected, outputs)
             .map_err(|error| error.to_string())?;
         let signed = wallet.sign_onchain_spend(intent, known)?;
         Ok(AuthorizedTransaction::OnChainSpend(Box::new(signed)))
@@ -741,10 +720,6 @@ fn sign_withdraw(args: &[String]) -> Result<(), String> {
     reject_manual_fee(args)?;
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
     let cash_dir = PathBuf::from(option(args, "--cash-dir").unwrap_or("cash"));
-    let expiry_height = option(args, "--expiry")
-        .ok_or("missing --expiry")?
-        .parse::<u64>()
-        .map_err(|_| "invalid --expiry".to_string())?;
     let inputs = repeated_options(args, "--input")
         .into_iter()
         .map(xparq::coin::CoinId::from_str)
@@ -809,7 +784,6 @@ fn sign_withdraw(args: &[String]) -> Result<(), String> {
             selected,
             qcash_outputs.clone(),
             public_outputs,
-            expiry_height,
         )
         .map_err(|error| error.to_string())?;
         let signed = wallet.sign_withdraw(intent, known)?;
@@ -845,7 +819,6 @@ fn redeem_qcash(args: &[String]) -> Result<(), String> {
         })
         .transpose()?;
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
-    let expiry_height = qcash_expiry_height(args)?;
     let transaction = automatic_fee_transaction(|fee| {
         let available = input
             .qcash
@@ -866,7 +839,7 @@ fn redeem_qcash(args: &[String]) -> Result<(), String> {
             .map(|secret| QCashOutput::new(Amount(change_amount), secret.public_key()))
             .into_iter()
             .collect();
-        let intent = RedeemIntent::new(vec![input.qcash], outputs, qcash_outputs, expiry_height)
+        let intent = RedeemIntent::new(vec![input.qcash], outputs, qcash_outputs)
             .map_err(|error| error.to_string())?;
         let authorized = authorize_qcash_intent(intent, std::slice::from_ref(&input), chain)?;
         Ok(AuthorizedTransaction::Redeem(Box::new(authorized)))
@@ -905,7 +878,6 @@ fn split_qcash(args: &[String]) -> Result<(), String> {
     if amounts.is_empty() {
         return Err("QCash split requires at least one --qcash amount".into());
     }
-    let expiry_height = qcash_expiry_height(args)?;
     let requested = checked_amount_sum(amounts.iter().copied())?;
     let maximum_outputs = amounts.len().saturating_add(1);
     let secrets = fresh_qcash_secrets(
@@ -939,7 +911,6 @@ fn split_qcash(args: &[String]) -> Result<(), String> {
             input.qcash,
             outputs,
             Some(SpendOutput::block_miner(Amount(fee))),
-            expiry_height,
         )
         .map_err(|error| error.to_string())?;
         let authorized = authorize_qcash_intent(intent, std::slice::from_ref(&input), chain)?;
@@ -988,7 +959,6 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
     let forbidden = inputs.iter().map(|file| file.signing_seed.public_key());
     let secret = fresh_qcash_secrets(1, forbidden)?.remove(0);
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
-    let expiry_height = qcash_expiry_height(args)?;
     let transaction = automatic_fee_transaction(|fee| {
         let output_amount = total
             .checked_sub(fee)
@@ -998,7 +968,6 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
             inputs.iter().map(|file| file.qcash).collect(),
             QCashOutput::new(Amount(output_amount), secret.public_key()),
             Some(SpendOutput::block_miner(Amount(fee))),
-            expiry_height,
         )
         .map_err(|error| error.to_string())?;
         let authorized = authorize_qcash_intent(intent, &inputs, chain)?;
@@ -1023,20 +992,6 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
         )],
     )?;
     submit_or_print_transaction(args, &transaction)
-}
-
-fn expiry_option(args: &[String]) -> Result<u64, String> {
-    option(args, "--expiry")
-        .ok_or("missing --expiry")?
-        .parse::<u64>()
-        .map_err(|_| "invalid --expiry".to_string())
-}
-
-fn qcash_expiry_height(args: &[String]) -> Result<u64, String> {
-    if option(args, "--expiry").is_some() {
-        return expiry_option(args);
-    }
-    automatic_expiry_height(option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR))
 }
 
 fn reject_manual_fee(args: &[String]) -> Result<(), String> {
@@ -1311,7 +1266,7 @@ fn format_amount(units: u64) -> String {
 
 fn print_help() {
     println!(
-        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--profile mldsa44|mldsa65|mldsa87|falcon512|falcon1024]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--profile mldsa44|mldsa65|mldsa87|falcon512|falcon1024]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ --expiry HEIGHT [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet sign-withdraw --qcash XPQ... --expiry HEIGHT [--input COIN_ID...] [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--cash-dir PATH] [--wallet PATH] [--offline]\nwallet qcash-redeem --file FILE --to ADDRESS [--amount XPQ] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-split --file FILE --qcash XPQ [--qcash XPQ...] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-merge --file FILE --file FILE... [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet version\n\nOmitting --profile selects the ML-DSA-44 profile. All signature profiles are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 paqs per canonical transaction byte; manual --miner fee input is not supported. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs. A split automatically creates QCash change when requested outputs are smaller than the input after the automatic fee. QCash operations use ML-DSA-44 bearer authorization, and the automatic block-miner fee is deducted from QCash inputs. Keep input QCash files until the transaction is canonically confirmed.\nRunning without a command opens the interactive menu.\nWithout --input, spend and withdraw select active XPQ inputs and calculate change through node RPC."
+        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--profile mldsa44|mldsa65|mldsa87|falcon512|falcon1024]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--profile mldsa44|mldsa65|mldsa87|falcon512|falcon1024]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ --expiry HEIGHT [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet sign-withdraw --qcash XPQ... --expiry HEIGHT [--input COIN_ID...] [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--cash-dir PATH] [--wallet PATH] [--offline]\nwallet qcash-redeem --file FILE --to ADDRESS [--amount XPQ] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-split --file FILE --qcash XPQ [--qcash XPQ...] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-merge --file FILE --file FILE... [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet version\n\nOmitting --profile selects the ML-DSA-44 profile. All signature profiles are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 paqs per canonical transaction byte; manual --miner fee input is not supported. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs. A split automatically creates QCash change when requested outputs are smaller than the input after the automatic fee. QCash operations use Falcon-512 bearer authorization, and the automatic block-miner fee is deducted from QCash inputs. Keep input QCash files until the transaction is canonically confirmed.\nRunning without a command opens the interactive menu.\nWithout --input, spend and withdraw select active XPQ inputs and calculate change through node RPC."
     );
 }
 
@@ -1473,7 +1428,6 @@ mod tests {
                     ),
                 ],
                 Some(SpendOutput::block_miner(Amount(fee))),
-                10,
             )
             .map_err(|error| error.to_string())?;
             let commitment = intent
@@ -1529,8 +1483,6 @@ mod tests {
             input_path.to_string_lossy().into_owned(),
             "--qcash".into(),
             "2".into(),
-            "--expiry".into(),
-            "100".into(),
             "--cash-dir".into(),
             split_dir.to_string_lossy().into_owned(),
             "--offline".into(),
@@ -1548,8 +1500,6 @@ mod tests {
         }
 
         let mut merge_args = vec![
-            "--expiry".into(),
-            "101".into(),
             "--cash-dir".into(),
             merge_dir.to_string_lossy().into_owned(),
             "--offline".into(),
@@ -1577,8 +1527,6 @@ mod tests {
             xparq::crypto::address_to_string(&recipient.address),
             "--amount".into(),
             "4".into(),
-            "--expiry".into(),
-            "102".into(),
             "--cash-dir".into(),
             redeem_dir.to_string_lossy().into_owned(),
             "--offline".into(),

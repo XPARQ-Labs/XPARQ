@@ -55,7 +55,7 @@ const API_DOCS_HTML: &[u8] = br#"<!doctype html>
 </html>
 "#;
 const P2P_MAGIC: [u8; 8] = *b"XPQP2P01";
-const P2P_PROTOCOL_VERSION: u32 = 5;
+const P2P_PROTOCOL_VERSION: u32 = 6;
 const CAPABILITY_PEER_DISCOVERY: u64 = 1 << 0;
 const CAPABILITY_RELAY: u64 = 1 << 1;
 const LOCAL_CAPABILITIES: u64 = CAPABILITY_PEER_DISCOVERY | CAPABILITY_RELAY;
@@ -534,7 +534,7 @@ fn account_response(
         .map(|utxo| {
             let is_reserved = reserved.contains(&utxo.coin.id);
             serde_json::json!({
-                "id": utxo.coin.id.to_text_at_height(next_height),
+                "id": utxo.coin.id.to_string(),
                 "amount": utxo.coin.amount.0,
                 "spendable_height": utxo.spendable_height.0,
                 "reserved": is_reserved,
@@ -723,32 +723,27 @@ fn transaction_response(transaction: &AuthorizedTransaction, miner: Address) -> 
         AuthorizedTransaction::OnChainSpend(tx) => serde_json::json!({
             "sender": xparq::crypto::address_to_string(&tx.intent.sender),
             "outputs": public_outputs_response(&tx.intent.outputs, miner),
-            "expiry_height": tx.intent.expiry_height,
         }),
         AuthorizedTransaction::Withdraw(tx) => serde_json::json!({
             "sender": xparq::crypto::address_to_string(&tx.intent.sender),
             "outputs": public_outputs_response(&tx.intent.outputs, miner),
             "qcash_output_count": tx.intent.qcash_outputs.len(),
             "qcash_amount": tx.intent.qcash_outputs.iter().map(|output| output.amount.0).sum::<u64>(),
-            "expiry_height": tx.intent.expiry_height,
         }),
         AuthorizedTransaction::Redeem(tx) => serde_json::json!({
             "outputs": public_outputs_response(&tx.intent.outputs, miner),
             "qcash_input_count": tx.intent.inputs.len(),
             "qcash_output_count": tx.intent.qcash_outputs.len(),
-            "expiry_height": tx.intent.expiry_height,
         }),
         AuthorizedTransaction::Merge(tx) => serde_json::json!({
             "qcash_input_count": tx.intent.inputs.len(),
             "qcash_output_count": 1,
             "miner_output": public_outputs_response(tx.intent.miner_output.as_slice(), miner),
-            "expiry_height": tx.intent.expiry_height,
         }),
         AuthorizedTransaction::Split(tx) => serde_json::json!({
             "qcash_input_count": 1,
             "qcash_output_count": tx.intent.outputs.len(),
             "miner_output": public_outputs_response(tx.intent.miner_output.as_slice(), miner),
-            "expiry_height": tx.intent.expiry_height,
         }),
     }
 }
@@ -3084,7 +3079,6 @@ mod tests {
                 ),
             ],
             Some(SpendOutput::block_miner(Amount(fee))),
-            10,
         )
         .unwrap();
         let chain = xparq::genesis::chain_context().unwrap();
@@ -3137,7 +3131,6 @@ mod tests {
                 SpendOutput::new(recipient, Amount(10)),
                 SpendOutput::new(sender.address, Amount(5)),
             ],
-            100,
         )
         .unwrap();
         let transaction = AuthorizedTransaction::OnChainSpend(Box::new(

@@ -26,5 +26,4 @@ hex.workspace = true
 xparq.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-time.workspace = true
 zeroize.workspace = true

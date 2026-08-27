@@ -166,7 +166,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(loaded.len(), WBDA_WINDOW);
-        assert_eq!(loaded.first(), Some(&Height(boundary.0 - WBDA_WINDOW as u64)));
+        assert_eq!(
+            loaded.first(),
+            Some(&Height(boundary.0 - WBDA_WINDOW as u64))
+        );
         assert_eq!(loaded.last(), Some(&Height(boundary.0 - 1)));
         // Full utilization decreases emission by one step from the parent.
         assert_eq!(emission, Amount(BASE_BLOCK_EMISSION - BLOCK_EMISSION_STEP));

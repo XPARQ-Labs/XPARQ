@@ -20,6 +20,4 @@ xparq-qcash.workspace = true
 xparq-transaction.workspace = true
 xparq-blockchain.workspace = true
 borsh.workspace = true
-serde.workspace = true
-argon2.workspace = true
 static_assertions.workspace = true
