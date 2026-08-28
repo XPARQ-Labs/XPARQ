@@ -20,3 +20,4 @@ xparq-blockchain.workspace = true
 xparq-consensus.workspace = true
 xparq-ledger.workspace = true
 xparq-transaction.workspace = true
+xparq-extension.workspace = true

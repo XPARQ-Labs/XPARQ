@@ -9,14 +9,14 @@ use xparq_crypto::{Address, ProfilePublicKey, QCashPublicKey};
 pub struct CoinUtxo {
     pub coin: Coin,
     pub owner: Address,
-    pub spendable_height: Height,
+    pub maturity_height: Option<Height>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 struct StoredCoinUtxo {
     amount: xparq_coin::Amount,
     owner: Address,
-    spendable_height: Height,
+    maturity_height: Option<Height>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -29,7 +29,7 @@ impl CoinUtxoSet {
         self.utxos.get(id).map(|stored| CoinUtxo {
             coin: Coin::new(*id, stored.amount),
             owner: stored.owner,
-            spendable_height: stored.spendable_height,
+            maturity_height: stored.maturity_height,
         })
     }
 
@@ -42,7 +42,7 @@ impl CoinUtxoSet {
             StoredCoinUtxo {
                 amount: utxo.coin.amount,
                 owner: utxo.owner,
-                spendable_height: utxo.spendable_height,
+                maturity_height: utxo.maturity_height,
             },
         );
         Ok(())
@@ -54,7 +54,7 @@ impl CoinUtxoSet {
             .map(|stored| CoinUtxo {
                 coin: Coin::new(*id, stored.amount),
                 owner: stored.owner,
-                spendable_height: stored.spendable_height,
+                maturity_height: stored.maturity_height,
             })
             .ok_or(UtxoError::UtxoNotFound)
     }
@@ -67,7 +67,7 @@ impl CoinUtxoSet {
         self.utxos.iter().map(|(id, stored)| CoinUtxo {
             coin: Coin::new(*id, stored.amount),
             owner: stored.owner,
-            spendable_height: stored.spendable_height,
+            maturity_height: stored.maturity_height,
         })
     }
 
@@ -228,22 +228,22 @@ mod tests {
         let mut coins = CoinUtxoSet::default();
         coins
             .insert(CoinUtxo {
-                coin: Coin::new(id, xparq_coin::Amount(2)),
+                coin: Coin::new(id, xparq_coin::Amount::from_esca(2)),
                 owner: Address([3; xparq_crypto::ADDRESS_SIZE]),
-                spendable_height: Height(4),
+                maturity_height: Some(Height(4)),
             })
             .unwrap();
         let coin_bytes = xparq_common::canonical_bytes(&coins).unwrap();
-        assert_eq!(coin_bytes.len(), 4 + 32 + 8 + 20 + 8);
+        assert_eq!(coin_bytes.len(), 4 + 32 + 8 + 20 + 1 + 8);
         assert_eq!(
             coins.get(&id).unwrap().coin,
-            Coin::new(id, xparq_coin::Amount(2))
+            Coin::new(id, xparq_coin::Amount::from_esca(2))
         );
 
         let mut qcash = QCashUtxoSet::default();
         qcash
             .insert(QCashUtxo {
-                coin: Coin::new(id, xparq_coin::Amount(5)),
+                coin: Coin::new(id, xparq_coin::Amount::from_esca(5)),
                 public_key: QCashPublicKey([6; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
             })
             .unwrap();
@@ -254,7 +254,7 @@ mod tests {
         );
         assert_eq!(
             qcash.get(&id).unwrap().coin,
-            Coin::new(id, xparq_coin::Amount(5))
+            Coin::new(id, xparq_coin::Amount::from_esca(5))
         );
     }
 

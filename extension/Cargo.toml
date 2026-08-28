@@ -1,0 +1,12 @@
+[package]
+name = "xparq-extension"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+xparq-common.workspace = true
+xparq-asset = { path = "asset" }
+xparq-bridge = { path = "bridge" }

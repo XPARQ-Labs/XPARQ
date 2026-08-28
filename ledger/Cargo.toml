@@ -13,6 +13,7 @@ devnet = ["xparq-blockchain/devnet", "xparq-coin/devnet", "xparq-qcash/devnet", 
 sqisign-blockchain-test = ["xparq-blockchain/sqisign-blockchain-test", "xparq-coin/sqisign-blockchain-test", "xparq-consensus/sqisign-blockchain-test", "xparq-crypto/sqisign-blockchain-test"]
 
 [dependencies]
+blake3.workspace = true
 xparq-common.workspace = true
 xparq-crypto.workspace = true
 xparq-coin.workspace = true
@@ -20,4 +21,5 @@ xparq-qcash.workspace = true
 xparq-transaction.workspace = true
 xparq-blockchain.workspace = true
 xparq-consensus.workspace = true
+xparq-extension.workspace = true
 borsh.workspace = true

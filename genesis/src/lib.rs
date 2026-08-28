@@ -29,7 +29,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 ]);
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`] changes.
-pub const CHAIN_SPEC_VERSION: u32 = 8;
+pub const CHAIN_SPEC_VERSION: u32 = 14;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -54,6 +54,7 @@ struct ChainSpecIdentity<'a> {
     block_emission_maturity: u64,
     max_block_weight: u64,
     address_size: u32,
+    address_encoding: &'a str,
     hash_size: u32,
     fork_choice_algorithm: &'a str,
     falcon_512_activation_height: u64,
@@ -61,6 +62,9 @@ struct ChainSpecIdentity<'a> {
     qcash_signature_algorithm: &'a str,
     qcash_public_key_size: u32,
     qcash_signature_size: u32,
+    extension_protocol: &'a str,
+    asset_extension_id: [u8; 32],
+    asset_extension_activation_height: u64,
 }
 
 /// Domain-separated identity of every consensus parameter that nodes must agree on.
@@ -87,6 +91,7 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         block_emission_maturity: BLOCK_EMISSION_MATURITY,
         max_block_weight: MAX_BLOCK_WEIGHT as u64,
         address_size: ADDRESS_SIZE as u32,
+        address_encoding: "xparq-0x-sha3-checksum-v1",
         hash_size: HASH_SIZE as u32,
         fork_choice_algorithm: FORK_CHOICE_ALGORITHM,
         falcon_512_activation_height: FALCON_512_ACTIVATION_HEIGHT,
@@ -94,6 +99,9 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         qcash_signature_algorithm: QCASH_SIGNATURE_ALGORITHM,
         qcash_public_key_size: QCASH_PUBLIC_KEY_SIZE as u32,
         qcash_signature_size: QCASH_SIGNATURE_SIZE as u32,
+        extension_protocol: "xparq-extension-asset-u128-v4",
+        asset_extension_id: *xparq_extension::asset::asset_extension_id().as_bytes(),
+        asset_extension_activation_height: xparq_extension::asset::ASSET_ACTIVATION_HEIGHT.0,
     };
     let bytes = xparq_common::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
     Ok(domain_hash(HashDomain::ChainSpec, &bytes))

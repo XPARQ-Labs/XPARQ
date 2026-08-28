@@ -34,6 +34,10 @@ struct WalletFile {
     mnemonic: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     signature_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    private_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -57,6 +61,8 @@ pub fn profile_wallet_file_bytes(wallet: &ProfileWallet) -> Result<Zeroizing<Vec
         address: address_to_string(&wallet.address),
         mnemonic: mnemonic.to_string(),
         signature_profile: Some(wallet.profile().as_str().to_string()),
+        public_key: Some(hex::encode(&wallet.public_key.bytes)),
+        private_key: Some(hex::encode(wallet.signing_seed.to_bytes())),
     };
     serde_json::to_vec_pretty(&wallet_file)
         .map(Zeroizing::new)
@@ -77,6 +83,16 @@ pub fn profile_wallet_from_file_bytes(bytes: &[u8]) -> Result<ProfileWallet, Str
         .map_err(|error| format!("invalid wallet address: {error}"))?;
     if wallet.address != stored_address {
         return Err("wallet address does not match its mnemonic and signature profile".to_string());
+    }
+    if let Some(public_key) = wallet_file.public_key.as_deref()
+        && public_key != hex::encode(&wallet.public_key.bytes)
+    {
+        return Err("wallet public key does not match its mnemonic and signature profile".into());
+    }
+    if let Some(private_key) = wallet_file.private_key.as_deref()
+        && private_key != hex::encode(wallet.signing_seed.to_bytes())
+    {
+        return Err("wallet private key does not match its mnemonic and signature profile".into());
     }
     wallet.mnemonic = Some(wallet_file.mnemonic.clone());
     Ok(wallet)
@@ -300,6 +316,22 @@ impl ProfileWallet {
             authorization,
         })
     }
+
+    pub fn sign_asset_call(
+        &self,
+        action: xparq::extension::asset::AssetAction,
+        nonce: u64,
+    ) -> Result<xparq::common::ExtensionCall, String> {
+        let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
+        xparq::extension::asset::AssetCall::sign(
+            chain.genesis_hash,
+            action,
+            nonce,
+            &self.signing_seed,
+        )
+        .and_then(xparq::extension::asset::AssetCall::into_extension_call)
+        .map_err(|error| format!("asset call signing failed: {error:?}"))
+    }
 }
 
 #[cfg(test)]
@@ -410,6 +442,12 @@ mod tests {
             let mut wallet = profile_wallet_from_xparq_mnemonic(&mnemonic, profile).unwrap();
             wallet.mnemonic = Some(mnemonic.clone());
             let bytes = profile_wallet_file_bytes(&wallet).unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(json["public_key"], hex::encode(&wallet.public_key.bytes));
+            assert_eq!(
+                json["private_key"],
+                hex::encode(wallet.signing_seed.to_bytes())
+            );
             assert_eq!(
                 wallet_file_signature_profile(&bytes).unwrap(),
                 Some(profile)
@@ -419,5 +457,32 @@ mod tests {
             assert_eq!(restored.address, wallet.address);
             assert_eq!(restored.public_key, wallet.public_key);
         }
+    }
+
+    #[test]
+    fn profile_wallet_file_rejects_keys_that_do_not_match_recovery_material() {
+        let mnemonic = encode_xparq_mnemonic(&[14; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+        let mut wallet =
+            profile_wallet_from_xparq_mnemonic(&mnemonic, SignatureProfile::MlDsa44).unwrap();
+        wallet.mnemonic = Some(mnemonic);
+        let bytes = profile_wallet_file_bytes(&wallet).unwrap();
+        let mut json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        json["public_key"] = serde_json::Value::String("00".repeat(wallet.public_key.bytes.len()));
+        let tampered_public = serde_json::to_vec(&json).unwrap();
+        assert!(
+            profile_wallet_from_file_bytes(&tampered_public)
+                .unwrap_err()
+                .contains("public key does not match")
+        );
+
+        json["public_key"] = serde_json::Value::String(hex::encode(&wallet.public_key.bytes));
+        json["private_key"] = serde_json::Value::String("00".repeat(32));
+        let tampered_private = serde_json::to_vec(&json).unwrap();
+        assert!(
+            profile_wallet_from_file_bytes(&tampered_private)
+                .unwrap_err()
+                .contains("private key does not match")
+        );
     }
 }

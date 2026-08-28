@@ -1,5 +1,5 @@
 use borsh::{BorshDeserialize, BorshSerialize};
-use xparq_common::canonical_bytes;
+use xparq_common::{ExtensionCall, canonical_bytes};
 use xparq_crypto::{
     Address, ProfilePublicKey, ProfileSignature, QCashSignature, address_from_profile_public_key,
     profile_verify,
@@ -11,7 +11,7 @@ use crate::{
     SpendCommitment, SplitIntent, TransactionEncodingError, WithdrawIntent,
 };
 
-const TRANSACTION_ID_CONTEXT: &str = "XPARQ transaction id v1";
+const TRANSACTION_ID_CONTEXT: &str = "XPARQ Transaction ID";
 
 pub trait AccountIntent {
     fn sender(&self) -> Address;
@@ -89,6 +89,12 @@ pub struct AuthorizedQCashIntent<T> {
     pub authorizations: Vec<QCashAuthorization>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct AuthorizedExtensionTransaction {
+    pub call: ExtensionCall,
+    pub fee: AuthorizedAccountIntent<OnChainSpendIntent>,
+}
+
 impl<T: QCashIntent> AuthorizedQCashIntent<T> {
     pub fn new(intent: T, authorizations: Vec<QCashAuthorization>) -> Result<Self, IntentError> {
         if intent.qcash_inputs().len() != authorizations.len() {
@@ -108,6 +114,7 @@ pub enum AuthorizedTransaction {
     Redeem(Box<AuthorizedQCashIntent<RedeemIntent>>),
     Merge(Box<AuthorizedQCashIntent<MergeIntent>>),
     Split(Box<AuthorizedQCashIntent<SplitIntent>>),
+    Extension(Box<AuthorizedExtensionTransaction>),
 }
 
 impl AuthorizedTransaction {
@@ -123,6 +130,7 @@ impl AuthorizedTransaction {
             Self::Redeem(tx) => validate_bearer_shape(tx, &tx.intent.inputs),
             Self::Merge(tx) => validate_bearer_shape(tx, &tx.intent.inputs),
             Self::Split(tx) => validate_bearer_shape(tx, std::slice::from_ref(&tx.intent.input)),
+            Self::Extension(tx) => tx.fee.intent.validate(),
         }
     }
 }
@@ -182,5 +190,42 @@ mod tests {
         };
         assert_eq!(borsh::to_vec(&reveal).unwrap()[0], 0);
         assert_eq!(borsh::to_vec(&known).unwrap()[0], 1);
+    }
+
+    #[test]
+    fn extension_transaction_tag_and_payload_round_trip_are_stable() {
+        let call = ExtensionCall::new(
+            xparq_common::ExtensionId::derive("test-extension"),
+            b"canonical payload".to_vec(),
+        )
+        .unwrap();
+        let fee = AuthorizedAccountIntent {
+            intent: OnChainSpendIntent {
+                sender: Address::ZERO,
+                inputs: vec![xparq_coin::CoinId::from_bytes([9; 32])],
+                outputs: vec![crate::SpendOutput::block_miner(
+                    xparq_coin::Amount::from_esca(1),
+                )],
+            },
+            authorization: AccountAuthorization::ProfileKnown {
+                profile: xparq_crypto::SignatureProfile::MlDsa44,
+                signature: ProfileSignature {
+                    profile: xparq_crypto::SignatureProfile::MlDsa44,
+                    bytes: vec![],
+                },
+            },
+        };
+        let transaction =
+            AuthorizedTransaction::Extension(Box::new(AuthorizedExtensionTransaction {
+                call,
+                fee,
+            }));
+        let encoded = borsh::to_vec(&transaction).unwrap();
+        assert_eq!(encoded[0], 5);
+        assert_eq!(
+            AuthorizedTransaction::try_from_slice(&encoded).unwrap(),
+            transaction
+        );
+        assert_eq!(transaction.validate_structure(), Ok(()));
     }
 }

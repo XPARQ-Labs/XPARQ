@@ -4,7 +4,7 @@ use std::{fmt, str::FromStr};
 use crate::CoinIdParseError;
 
 pub const COIN_NAME: &str = "XPQ";
-pub const UNIT_NAME: &str = "paqs";
+pub const UNIT_NAME: &str = "esca";
 pub const UNIT: u64 = 1;
 pub const COIN: u64 = 1_000_000;
 pub const DECIMALS: u8 = 6;
@@ -15,26 +15,37 @@ const _: () = assert!(UNIT == 1);
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
 )]
-pub struct Amount(pub u64);
+pub struct Amount {
+    esca: u64,
+}
 
 impl Amount {
+    pub const fn from_esca(esca: u64) -> Self {
+        Self { esca }
+    }
+
+    pub const fn as_esca(self) -> u64 {
+        self.esca
+    }
+
     pub const fn checked_add(self, rhs: Self) -> Option<Self> {
-        match self.0.checked_add(rhs.0) {
-            Some(value) => Some(Self(value)),
+        match self.esca.checked_add(rhs.esca) {
+            Some(esca) => Some(Self { esca }),
             None => None,
         }
     }
 
     pub const fn checked_sub(self, rhs: Self) -> Option<Self> {
-        match self.0.checked_sub(rhs.0) {
-            Some(value) => Some(Self(value)),
+        match self.esca.checked_sub(rhs.esca) {
+            Some(esca) => Some(Self { esca }),
             None => None,
         }
     }
 }
 
 pub const COIN_ID_SIZE: usize = blake3::OUT_LEN;
-const COIN_ID_CONTEXT: &str = "XPARQ CoinId v1";
+pub const COIN_ID_PREFIX: &str = "XPQ:";
+const COIN_ID_CONTEXT: &str = "XPARQ Native Coin";
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
@@ -65,11 +76,11 @@ impl CoinId {
     pub const fn into_bytes(self) -> [u8; COIN_ID_SIZE] {
         self.0
     }
-
 }
 
 impl fmt::Display for CoinId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(COIN_ID_PREFIX)?;
         for byte in self.0 {
             write!(formatter, "{byte:02x}")?;
         }
@@ -81,6 +92,7 @@ impl FromStr for CoinId {
     type Err = CoinIdParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.strip_prefix(COIN_ID_PREFIX).ok_or(CoinIdParseError)?;
         if value.len() != COIN_ID_SIZE * 2 {
             return Err(CoinIdParseError);
         }
@@ -121,7 +133,7 @@ impl Coin {
     }
 
     pub const fn is_zero(self) -> bool {
-        self.amount.0 == 0
+        self.amount.as_esca() == 0
     }
 }
 
@@ -131,22 +143,60 @@ mod tests {
 
     #[test]
     fn amount_checked_arithmetic_preserves_the_amount_type() {
-        assert_eq!(Amount(2).checked_add(Amount(3)), Some(Amount(5)));
-        assert_eq!(Amount(u64::MAX).checked_add(Amount(1)), None);
-        assert_eq!(Amount(5).checked_sub(Amount(3)), Some(Amount(2)));
-        assert_eq!(Amount(0).checked_sub(Amount(1)), None);
+        let amount = Amount::from_esca(7);
+        assert_eq!(amount.as_esca(), 7);
+        assert_eq!(borsh::to_vec(&amount).unwrap(), 7_u64.to_le_bytes());
+        assert_eq!(
+            Amount::try_from_slice(&7_u64.to_le_bytes()).unwrap(),
+            amount
+        );
+        assert_eq!(
+            Amount::from_esca(2).checked_add(Amount::from_esca(3)),
+            Some(Amount::from_esca(5))
+        );
+        assert_eq!(
+            Amount::from_esca(u64::MAX).checked_add(Amount::from_esca(1)),
+            None
+        );
+        assert_eq!(
+            Amount::from_esca(5).checked_sub(Amount::from_esca(3)),
+            Some(Amount::from_esca(2))
+        );
+        assert_eq!(
+            Amount::from_esca(0).checked_sub(Amount::from_esca(1)),
+            None
+        );
     }
 
     #[test]
     fn coin_id_text_round_trips() {
         let id = CoinId::derive(&[b"field one", b"field two"]);
+        assert!(id.to_string().starts_with(COIN_ID_PREFIX));
         assert_eq!(id.to_string().parse::<CoinId>(), Ok(id));
     }
 
     #[test]
+    fn coin_id_parser_requires_exact_xpq_prefix() {
+        let encoded = "00".repeat(COIN_ID_SIZE);
+        assert_eq!(encoded.parse::<CoinId>(), Err(CoinIdParseError));
+        assert_eq!(
+            format!("xpq:{encoded}").parse::<CoinId>(),
+            Err(CoinIdParseError)
+        );
+        assert_eq!(
+            format!("XPQ:{encoded}").parse::<CoinId>(),
+            Ok(CoinId::from_bytes([0; COIN_ID_SIZE]))
+        );
+    }
+
+    #[test]
     fn coin_id_parser_rejects_non_ascii_without_panicking() {
-        let non_ascii_with_valid_byte_length = format!("{}{}", "0".repeat(61), "\u{20ac}");
-        assert_eq!(non_ascii_with_valid_byte_length.len(), COIN_ID_SIZE * 2);
+        let non_ascii_with_valid_byte_length =
+            format!("{COIN_ID_PREFIX}{}{}", "0".repeat(61), "\u{20ac}");
+        assert_eq!(
+            non_ascii_with_valid_byte_length.len(),
+            COIN_ID_PREFIX.len() + COIN_ID_SIZE * 2
+        );
         assert_eq!(
             non_ascii_with_valid_byte_length.parse::<CoinId>(),
             Err(CoinIdParseError)

@@ -17,7 +17,7 @@ const_assert!(BASE_BLOCK_EMISSION == 5 * COIN);
 const_assert!(BLOCK_EMISSION_STEP == COIN / 10);
 
 pub const fn initial_block_emission() -> Amount {
-    Amount(BASE_BLOCK_EMISSION)
+    Amount::from_esca(BASE_BLOCK_EMISSION)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,7 +123,7 @@ pub fn expected_emission_for_height(
     mut weight_at: impl FnMut(Height) -> Option<u32>,
 ) -> Result<Amount, EmissionError> {
     if height.0 <= 1 {
-        return Ok(Amount(BASE_BLOCK_EMISSION));
+        return Ok(Amount::from_esca(BASE_BLOCK_EMISSION));
     }
 
     if !is_wbda_epoch_boundary(height.0) {
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn non_boundary_emission_uses_parent_without_loading_history() {
-        let parent = Amount(BASE_BLOCK_EMISSION + BLOCK_EMISSION_STEP);
+        let parent = Amount::from_esca(BASE_BLOCK_EMISSION + BLOCK_EMISSION_STEP);
         let emission = expected_emission_for_height(Height(2), parent, |_| {
             panic!("non-boundary emission must not load history")
         })
@@ -159,12 +159,15 @@ mod tests {
     fn boundary_emission_loads_only_the_completed_epoch() {
         let boundary = Height((WBDA_WINDOW * 3) as u64 + 1);
         let mut loaded = Vec::new();
-        let emission =
-            expected_emission_for_height(boundary, Amount(BASE_BLOCK_EMISSION), |height| {
+        let emission = expected_emission_for_height(
+            boundary,
+            Amount::from_esca(BASE_BLOCK_EMISSION),
+            |height| {
                 loaded.push(height);
                 Some(MAX_BLOCK_EMISSION as u32)
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         assert_eq!(loaded.len(), WBDA_WINDOW);
         assert_eq!(
             loaded.first(),
@@ -172,6 +175,9 @@ mod tests {
         );
         assert_eq!(loaded.last(), Some(&Height(boundary.0 - 1)));
         // Full utilization decreases emission by one step from the parent.
-        assert_eq!(emission, Amount(BASE_BLOCK_EMISSION - BLOCK_EMISSION_STEP));
+        assert_eq!(
+            emission,
+            Amount::from_esca(BASE_BLOCK_EMISSION - BLOCK_EMISSION_STEP)
+        );
     }
 }

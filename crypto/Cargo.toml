@@ -22,7 +22,7 @@ rand_10 = { workspace = true, optional = true }
 chacha20 = { workspace = true, optional = true }
 borsh.workspace = true
 serde.workspace = true
-bech32.workspace = true
+hex.workspace = true
 zeroize.workspace = true
 argon2.workspace = true
 static_assertions.workspace = true

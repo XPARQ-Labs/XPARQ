@@ -50,3 +50,4 @@ xparq-blockchain.workspace = true
 xparq-consensus.workspace = true
 xparq-ledger.workspace = true
 xparq-genesis = { path = "../genesis", default-features = false }
+xparq-extension.workspace = true

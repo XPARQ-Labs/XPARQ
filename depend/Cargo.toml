@@ -9,6 +9,5 @@ exclude = [
     "sqisign/*",
     "traits/*",
     "utils/*",
-    "bech32",
     "keccak",
 ]

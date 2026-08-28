@@ -8,6 +8,7 @@ use crate::error::ConsensusError;
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::{collections::BTreeSet, error::Error, fmt};
 use xparq_coin::{Amount, CoinId};
+use xparq_common::ExtensionCall;
 use xparq_common::Height as LedgerHeight;
 use xparq_crypto::{Address, ProfilePublicKey, QCashPublicKey};
 use xparq_transaction::{
@@ -124,13 +125,20 @@ pub enum ValidatedTransaction {
     Redeem(AuthorizationValidated<RedeemIntent>),
     Merge(AuthorizationValidated<MergeIntent>),
     Split(AuthorizationValidated<SplitIntent>),
+    Extension(ValidatedExtensionTransaction),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedExtensionTransaction {
+    pub call: ExtensionCall,
+    pub fee: AuthorizationValidated<OnChainSpendIntent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoinInputState {
     pub amount: Amount,
     pub owner: Address,
-    pub spendable_height: LedgerHeight,
+    pub maturity_height: Option<LedgerHeight>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +222,28 @@ pub fn validate_transaction(
                 state,
             )?;
             Ok(ValidatedTransaction::Split(validated))
+        }
+        AuthorizedTransaction::Extension(transaction) => {
+            let transaction = *transaction;
+            let fee =
+                validate_account_authorization(transaction.fee, chain, current_height, state)?;
+            validate_coin_inputs(
+                &fee.intent().inputs,
+                fee.intent().sender,
+                &fee.intent()
+                    .outputs
+                    .iter()
+                    .map(|output| output.amount)
+                    .collect::<Vec<_>>(),
+                current_height,
+                state,
+            )?;
+            Ok(ValidatedTransaction::Extension(
+                ValidatedExtensionTransaction {
+                    call: transaction.call,
+                    fee,
+                },
+            ))
         }
     }
 }
@@ -320,7 +350,7 @@ fn validate_coin_inputs(
     state: &impl TransactionStateView,
 ) -> Result<(), TransactionConsensusError> {
     ensure_unique_coin_ids(inputs.iter().copied())?;
-    let mut input_total = Amount(0);
+    let mut input_total = Amount::from_esca(0);
     for id in inputs {
         let input = state
             .coin(*id)
@@ -328,17 +358,22 @@ fn validate_coin_inputs(
         if input.owner != owner {
             return Err(TransactionConsensusError::OwnerMismatch);
         }
-        if current_height < input.spendable_height.0 {
+        if input
+            .maturity_height
+            .is_some_and(|height| current_height < height.0)
+        {
             return Err(TransactionConsensusError::ImmatureCoin);
         }
         input_total = input_total
             .checked_add(input.amount)
             .ok_or(TransactionConsensusError::AmountOverflow)?;
     }
-    let output_total = outputs.iter().try_fold(Amount(0), |sum, amount| {
-        sum.checked_add(*amount)
-            .ok_or(TransactionConsensusError::AmountOverflow)
-    })?;
+    let output_total = outputs
+        .iter()
+        .try_fold(Amount::from_esca(0), |sum, amount| {
+            sum.checked_add(*amount)
+                .ok_or(TransactionConsensusError::AmountOverflow)
+        })?;
     if input_total != output_total {
         return Err(TransactionConsensusError::ValueMismatch);
     }
@@ -440,7 +475,7 @@ mod transaction_tests {
 
         fn qcash(&self, id: CoinId) -> Option<QCashInputState> {
             (id == self.id).then_some(QCashInputState {
-                amount: Amount(10),
+                amount: Amount::from_esca(10),
                 public_key: self.public_key,
             })
         }
@@ -480,14 +515,14 @@ mod transaction_tests {
         let id = CoinId::from_bytes([4; CoinId::SIZE]);
         let seed = xparq_qcash::QCashSigningSeed::from_bytes([5; 32]);
         let intent = SplitIntent::new(
-            xparq_qcash::QCash::new(id, Amount(10)),
+            xparq_qcash::QCash::new(id, Amount::from_esca(10)),
             vec![
                 xparq_transaction::QCashOutput::new(
-                    Amount(4),
+                    Amount::from_esca(4),
                     QCashPublicKey([6; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
                 ),
                 xparq_transaction::QCashOutput::new(
-                    Amount(6),
+                    Amount::from_esca(6),
                     QCashPublicKey([7; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
                 ),
             ],
@@ -517,8 +552,8 @@ mod transaction_tests {
             Ok(ValidatedTransaction::Split(_))
         ));
         let mut tampered = signed;
-        tampered.intent.outputs[0].amount = Amount(5);
-        tampered.intent.outputs[1].amount = Amount(5);
+        tampered.intent.outputs[0].amount = Amount::from_esca(5);
+        tampered.intent.outputs[1].amount = Amount::from_esca(5);
         assert_eq!(
             validate_transaction(
                 AuthorizedTransaction::Split(Box::new(tampered)),
@@ -538,9 +573,9 @@ mod transaction_tests {
     impl TransactionStateView for FalconAccountState {
         fn coin(&self, id: CoinId) -> Option<CoinInputState> {
             (id == self.id).then_some(CoinInputState {
-                amount: Amount(10),
+                amount: Amount::from_esca(10),
                 owner: self.owner,
-                spendable_height: LedgerHeight(0),
+                maturity_height: None,
             })
         }
 
@@ -565,7 +600,10 @@ mod transaction_tests {
         let intent = OnChainSpendIntent::new(
             sender,
             vec![id],
-            vec![xparq_transaction::SpendOutput::new(sender, Amount(10))],
+            vec![xparq_transaction::SpendOutput::new(
+                sender,
+                Amount::from_esca(10),
+            )],
         )
         .unwrap();
         let chain = ChainContext::new([28; 32]);

@@ -17,7 +17,7 @@ pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 5 * 1024 * 1024;
 pub const WBDA_LOW_UTILIZATION_PPM: u64 = 400_000;
 pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 600_000;
 pub const WBDA_DIFFICULTY_STEP: u32 = 1;
-pub const WBDA_ALGORITHM: &str = "argon2id-wbda-lockstep-v2";
+pub const WBDA_ALGORITHM: &str = "argon2id-wbda-algorithm";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WbdaAdjustment {
@@ -140,11 +140,15 @@ pub fn next_emission_from_window(
 ) -> Option<Amount> {
     let adjustment = adjustment_for_window(block_weights)?;
     let emission = match adjustment {
-        WbdaAdjustment::Decrease => previous_emission.0.saturating_sub(BLOCK_EMISSION_STEP),
-        WbdaAdjustment::Keep => previous_emission.0,
-        WbdaAdjustment::Increase => previous_emission.0.saturating_add(BLOCK_EMISSION_STEP),
+        WbdaAdjustment::Decrease => previous_emission
+            .as_esca()
+            .saturating_sub(BLOCK_EMISSION_STEP),
+        WbdaAdjustment::Keep => previous_emission.as_esca(),
+        WbdaAdjustment::Increase => previous_emission
+            .as_esca()
+            .saturating_add(BLOCK_EMISSION_STEP),
     };
-    Some(Amount(
+    Some(Amount::from_esca(
         emission.clamp(MIN_BLOCK_EMISSION, MAX_BLOCK_EMISSION),
     ))
 }
@@ -263,27 +267,39 @@ mod tests {
         use crate::consensus::{MAX_BLOCK_EMISSION, MIN_BLOCK_EMISSION};
 
         assert_eq!(
-            next_emission_from_window(Amount(MIN_BLOCK_EMISSION), &window(MAX_BLOCK_WEIGHT / 2)),
-            Some(Amount(MIN_BLOCK_EMISSION))
+            next_emission_from_window(
+                Amount::from_esca(MIN_BLOCK_EMISSION),
+                &window(MAX_BLOCK_WEIGHT / 2)
+            ),
+            Some(Amount::from_esca(MIN_BLOCK_EMISSION))
         );
         assert_eq!(
-            next_emission_from_window(Amount(MIN_BLOCK_EMISSION), &window(MAX_BLOCK_WEIGHT)),
-            Some(Amount(MIN_BLOCK_EMISSION))
+            next_emission_from_window(
+                Amount::from_esca(MIN_BLOCK_EMISSION),
+                &window(MAX_BLOCK_WEIGHT)
+            ),
+            Some(Amount::from_esca(MIN_BLOCK_EMISSION))
         );
         assert_eq!(
-            next_emission_from_window(Amount(MAX_BLOCK_EMISSION), &window(MAX_BLOCK_WEIGHT / 10)),
-            Some(Amount(MAX_BLOCK_EMISSION))
+            next_emission_from_window(
+                Amount::from_esca(MAX_BLOCK_EMISSION),
+                &window(MAX_BLOCK_WEIGHT / 10)
+            ),
+            Some(Amount::from_esca(MAX_BLOCK_EMISSION))
         );
         assert_eq!(
-            next_emission_from_window(Amount(MIN_BLOCK_EMISSION), &window(MAX_BLOCK_WEIGHT)),
-            Some(Amount(MIN_BLOCK_EMISSION))
+            next_emission_from_window(
+                Amount::from_esca(MIN_BLOCK_EMISSION),
+                &window(MAX_BLOCK_WEIGHT)
+            ),
+            Some(Amount::from_esca(MIN_BLOCK_EMISSION))
         );
     }
 
     #[test]
     fn difficulty_and_reward_move_together_every_epoch() {
         let mut difficulty = 7;
-        let mut emission = Amount(crate::consensus::MIN_BLOCK_EMISSION);
+        let mut emission = Amount::from_esca(crate::consensus::MIN_BLOCK_EMISSION);
 
         // Low utilization: both rise, same epoch, no confirmation wait.
         let sparse = window(MAX_BLOCK_WEIGHT / 10);
@@ -292,7 +308,7 @@ mod tests {
         assert_eq!(difficulty, 8);
         assert_eq!(
             emission,
-            Amount(crate::consensus::MIN_BLOCK_EMISSION + BLOCK_EMISSION_STEP)
+            Amount::from_esca(crate::consensus::MIN_BLOCK_EMISSION + BLOCK_EMISSION_STEP)
         );
 
         // Normal utilization: both hold.
@@ -308,7 +324,10 @@ mod tests {
         difficulty = next_difficulty_from_window(difficulty, &dense).unwrap();
         emission = next_emission_from_window(emission, &dense).unwrap();
         assert_eq!(difficulty, 7);
-        assert_eq!(emission, Amount(crate::consensus::MIN_BLOCK_EMISSION));
+        assert_eq!(
+            emission,
+            Amount::from_esca(crate::consensus::MIN_BLOCK_EMISSION)
+        );
     }
 
     #[test]

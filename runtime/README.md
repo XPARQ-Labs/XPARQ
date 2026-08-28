@@ -9,18 +9,19 @@ cargo build --release --locked -p xparq-runtime
 ./target/release/node run --data data/node --p2p 0.0.0.0:6677 --rpc 127.0.0.1:6666
 ```
 
-Add `--miner XPQ_ADDRESS` to mine, and repeat `--peer HOST:PORT` for initial
-peers. RPC is plain HTTP and should remain on loopback or a trusted network.
+Add `--miner 0xADDRESS_WITH_CHECKSUM` to mine, and repeat `--peer HOST:PORT`
+for initial peers. RPC is plain HTTP and should remain on loopback or a trusted
+network.
 
 ## Compatibility boundary
 
 The runtime rejects incompatible state at four explicit boundaries:
 
 - P2P protocol version 6 and handshake `chain_spec_hash`;
-- redb schema version 5 and persisted `chain_spec_hash`;
-- snapshot version 5, checksum, genesis, canonical tip, and `chain_spec_hash`;
-- chain-spec version 8, committing frozen genesis plus active PoW, difficulty,
-  WBDA, emission, size, address, and hash parameters.
+- redb schema version 10 and persisted `chain_spec_hash`;
+- snapshot version 9, checksum, genesis, canonical tip, and `chain_spec_hash`;
+- chain-spec version 14, committing frozen genesis plus active PoW, difficulty,
+  WBDA, emission, size, address, hash, and native asset-extension parameters.
 
 There is intentionally no migration from older schemas or snapshots. Reset
 old node data before starting this build, and upgrade peers together.

@@ -146,7 +146,11 @@ impl WithdrawIntent {
         if self.qcash_outputs.is_empty() {
             return Err(IntentError::EmptyOutputs);
         }
-        if self.qcash_outputs.iter().any(|output| output.amount.0 == 0) {
+        if self
+            .qcash_outputs
+            .iter()
+            .any(|output| output.amount.as_esca() == 0)
+        {
             return Err(IntentError::ZeroAmount);
         }
         validate_public_outputs(&self.outputs, true)
@@ -187,7 +191,7 @@ fn validate_public_outputs(outputs: &[SpendOutput], allow_empty: bool) -> Result
     if outputs.is_empty() && !allow_empty {
         return Err(IntentError::EmptyOutputs);
     }
-    if outputs.iter().any(|output| output.amount.0 == 0) {
+    if outputs.iter().any(|output| output.amount.as_esca() == 0) {
         return Err(IntentError::ZeroAmount);
     }
     if outputs
@@ -232,8 +236,14 @@ impl RedeemIntent {
             return Err(IntentError::EmptyOutputs);
         }
         if self.inputs.iter().any(|coin| coin.is_zero())
-            || self.outputs.iter().any(|output| output.amount.0 == 0)
-            || self.qcash_outputs.iter().any(|output| output.amount.0 == 0)
+            || self
+                .outputs
+                .iter()
+                .any(|output| output.amount.as_esca() == 0)
+            || self
+                .qcash_outputs
+                .iter()
+                .any(|output| output.amount.as_esca() == 0)
         {
             return Err(IntentError::ZeroAmount);
         }
@@ -396,8 +406,8 @@ fn validate_transform(
     miner_output: Option<&SpendOutput>,
 ) -> Result<(), IntentError> {
     if inputs.iter().any(|coin| coin.is_zero())
-        || outputs.iter().any(|output| output.amount.0 == 0)
-        || miner_output.is_some_and(|output| output.amount.0 == 0)
+        || outputs.iter().any(|output| output.amount.as_esca() == 0)
+        || miner_output.is_some_and(|output| output.amount.as_esca() == 0)
     {
         return Err(IntentError::ZeroAmount);
     }
@@ -419,7 +429,7 @@ fn validate_transform(
 
     let input_amount = checked_sum(inputs.iter().map(|qcash| qcash.amount()))?;
     let qcash_amount = checked_sum(outputs.iter().map(|output| output.amount))?;
-    let miner_amount = miner_output.map_or(Amount(0), |output| output.amount);
+    let miner_amount = miner_output.map_or(Amount::from_esca(0), |output| output.amount);
     let output_amount = qcash_amount
         .checked_add(miner_amount)
         .ok_or(IntentError::AmountOverflow)?;
@@ -431,7 +441,7 @@ fn validate_transform(
 
 fn checked_sum(mut amounts: impl Iterator<Item = Amount>) -> Result<Amount, IntentError> {
     amounts
-        .try_fold(Amount(0), Amount::checked_add)
+        .try_fold(Amount::from_esca(0), Amount::checked_add)
         .ok_or(IntentError::AmountOverflow)
 }
 
@@ -465,14 +475,14 @@ mod tests {
 
     #[test]
     fn split_rejects_reused_output_bearer_keys() {
-        let input = QCash::new(CoinId::from_bytes([1; COIN_ID_SIZE]), Amount(10));
+        let input = QCash::new(CoinId::from_bytes([1; COIN_ID_SIZE]), Amount::from_esca(10));
         let repeated = qcash_key(7);
         assert_eq!(
             SplitIntent::new(
                 input,
                 vec![
-                    QCashOutput::new(Amount(4), repeated),
-                    QCashOutput::new(Amount(6), repeated),
+                    QCashOutput::new(Amount::from_esca(4), repeated),
+                    QCashOutput::new(Amount::from_esca(6), repeated),
                 ],
                 None,
             ),
@@ -482,12 +492,12 @@ mod tests {
 
     #[test]
     fn qcash_commitment_binds_outputs() {
-        let input = QCash::new(CoinId::from_bytes([2; COIN_ID_SIZE]), Amount(10));
+        let input = QCash::new(CoinId::from_bytes([2; COIN_ID_SIZE]), Amount::from_esca(10));
         let first = SplitIntent::new(
             input,
             vec![
-                QCashOutput::new(Amount(4), qcash_key(3)),
-                QCashOutput::new(Amount(6), qcash_key(4)),
+                QCashOutput::new(Amount::from_esca(4), qcash_key(3)),
+                QCashOutput::new(Amount::from_esca(6), qcash_key(4)),
             ],
             None,
         )
@@ -495,8 +505,8 @@ mod tests {
         let second = SplitIntent::new(
             input,
             vec![
-                QCashOutput::new(Amount(4), qcash_key(5)),
-                QCashOutput::new(Amount(6), qcash_key(6)),
+                QCashOutput::new(Amount::from_esca(4), qcash_key(5)),
+                QCashOutput::new(Amount::from_esca(6), qcash_key(6)),
             ],
             None,
         )
@@ -509,15 +519,18 @@ mod tests {
 
     #[test]
     fn partial_redeem_deducts_recipient_change_and_miner_from_bearer_input() {
-        let input = QCash::new(CoinId::from_bytes([9; COIN_ID_SIZE]), Amount(100));
+        let input = QCash::new(
+            CoinId::from_bytes([9; COIN_ID_SIZE]),
+            Amount::from_esca(100),
+        );
         assert!(
             RedeemIntent::new(
                 vec![input],
                 vec![
-                    SpendOutput::new(Address::ZERO, Amount(40)),
-                    SpendOutput::block_miner(Amount(1)),
+                    SpendOutput::new(Address::ZERO, Amount::from_esca(40)),
+                    SpendOutput::block_miner(Amount::from_esca(1)),
                 ],
-                vec![QCashOutput::new(Amount(59), qcash_key(8))],
+                vec![QCashOutput::new(Amount::from_esca(59), qcash_key(8))],
             )
             .is_ok()
         );
@@ -525,10 +538,10 @@ mod tests {
             RedeemIntent::new(
                 vec![input],
                 vec![
-                    SpendOutput::new(Address::ZERO, Amount(40)),
-                    SpendOutput::block_miner(Amount(1)),
+                    SpendOutput::new(Address::ZERO, Amount::from_esca(40)),
+                    SpendOutput::block_miner(Amount::from_esca(1)),
                 ],
-                vec![QCashOutput::new(Amount(60), qcash_key(8))],
+                vec![QCashOutput::new(Amount::from_esca(60), qcash_key(8))],
             ),
             Err(IntentError::ValueMismatch)
         );

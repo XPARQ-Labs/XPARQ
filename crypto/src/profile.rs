@@ -100,6 +100,11 @@ impl ProfileSigningSeed {
         self.profile
     }
 
+    /// Returns the deterministic 32-byte private signing seed.
+    pub const fn to_bytes(&self) -> [u8; 32] {
+        self.seed
+    }
+
     pub fn public_key(&self) -> ProfilePublicKey {
         profile_public_key_from_seed(self.profile, &self.seed)
     }

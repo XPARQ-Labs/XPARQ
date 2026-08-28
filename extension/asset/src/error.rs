@@ -5,7 +5,7 @@ pub struct AssetIdParseError;
 
 impl fmt::Display for AssetIdParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("coin ID must be exactly 32 bytes encoded as hexadecimal")
+        formatter.write_str("asset ID must be exactly 32 bytes encoded as hexadecimal")
     }
 }
 

@@ -28,6 +28,10 @@ pub mod genesis {
     pub use xparq_genesis::*;
 }
 
+pub mod extension {
+    pub use xparq_extension::*;
+}
+
 pub mod ledger {
     pub use xparq_blockchain::Chain;
     pub use xparq_consensus::{ForkChoice, ForkChoiceError};

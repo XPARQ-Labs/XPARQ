@@ -8,6 +8,7 @@ use std::{
 };
 
 use serde::Deserialize;
+use xparq::extension::asset::{AssetAction, AssetId};
 use xparq::{
     codec::canonical_bytes,
     consensus::{Amount, COIN, DECIMALS},
@@ -16,13 +17,11 @@ use xparq::{
         merge_qcash_output_id, redeem_qcash_change_output_id, split_qcash_output_id,
         withdraw_qcash_output_id,
     },
-    qcash::{
-        QCash, QCashFile, QCashSigningSeed, canonical_qcash_file_name, validate_qcash_file_name,
-    },
+    qcash::{QCash, QCashFile, QCashSigningSeed, qcash_file_name, validate_qcash_file_name},
     transaction::{
-        AuthorizedQCashIntent, AuthorizedTransaction, MergeIntent, OnChainSpendIntent,
-        QCashAuthorization, QCashIntent, QCashOutput, RedeemIntent, SpendOutput, SplitIntent,
-        WithdrawIntent,
+        AuthorizedExtensionTransaction, AuthorizedQCashIntent, AuthorizedTransaction, MergeIntent,
+        OnChainSpendIntent, QCashAuthorization, QCashIntent, QCashOutput, RedeemIntent,
+        SpendOutput, SplitIntent, WithdrawIntent,
     },
 };
 use xparq_wallet::{
@@ -33,7 +32,7 @@ use xparq_wallet::{
 use zeroize::{Zeroize, Zeroizing};
 
 const DEFAULT_WALLET_PATH: &str = "wallet.json";
-const AUTOMATIC_FEE_PAQS_PER_BYTE: u64 = 1;
+const AUTOMATIC_FEE_ESCA_PER_BYTE: u64 = 1;
 const MAX_FEE_CONVERGENCE_ROUNDS: usize = 8;
 
 struct LoadedWallet(ProfileWallet);
@@ -72,13 +71,24 @@ struct AccountResponse {
     public_key_registered: bool,
     utxos: Vec<AccountUtxo>,
     next_utxo_offset: Option<usize>,
+    #[serde(default)]
+    assets: Vec<AccountAssetBalance>,
+}
+
+#[derive(Deserialize)]
+struct AccountAssetBalance {
+    asset_id: String,
+    name: String,
+    symbol: String,
+    decimals: u8,
+    balance: String,
 }
 
 #[derive(Deserialize)]
 struct AccountUtxo {
     id: String,
     amount: u64,
-    spendable_height: u64,
+    maturity_height: Option<u64>,
     reserved: bool,
 }
 
@@ -107,15 +117,18 @@ struct AddressActivity {
 struct BalanceSummary {
     total: u64,
     spendable: u64,
-    locked: u64,
+    immature: u64,
     reserved: u64,
 }
 
 fn utxo_status(utxo: &AccountUtxo, next_height: u64) -> &'static str {
     if utxo.reserved {
         "reserved"
-    } else if utxo.spendable_height > next_height {
-        "locked"
+    } else if utxo
+        .maturity_height
+        .is_some_and(|height| height > next_height)
+    {
+        "immature"
     } else {
         "spendable"
     }
@@ -124,6 +137,11 @@ fn utxo_status(utxo: &AccountUtxo, next_height: u64) -> &'static str {
 #[derive(Deserialize)]
 struct SubmitTransactionResponse {
     transaction_id: String,
+}
+
+#[derive(Deserialize)]
+struct AssetNonceResponse {
+    nonce: u64,
 }
 
 pub fn run(mut args: Vec<String>) -> Result<(), String> {
@@ -140,6 +158,12 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         Some("redeem") | Some("qcash-redeem") => redeem_qcash(&args[1..]),
         Some("split") | Some("qcash-split") => split_qcash(&args[1..]),
         Some("merge") | Some("qcash-merge") => merge_qcash(&args[1..]),
+        Some("asset-register") => asset_register(&args[1..]),
+        Some("asset-mint") => asset_mint(&args[1..]),
+        Some("asset-burn") => asset_burn(&args[1..]),
+        Some("asset-transfer") => asset_transfer(&args[1..]),
+        Some("asset-info") => asset_info(&args[1..]),
+        Some("asset-balance") => asset_balance(&args[1..]),
         Some("version") | Some("--version") | Some("-V") => {
             println!("wallet {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -152,6 +176,170 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
     };
     args.zeroize();
     result
+}
+
+fn asset_register(args: &[String]) -> Result<(), String> {
+    let name = normalize_asset_name(option(args, "--name").ok_or("missing --name")?)?;
+    let symbol = normalize_asset_symbol(option(args, "--symbol").ok_or("missing --symbol")?)?;
+    let decimals = option(args, "--decimals")
+        .ok_or("missing --decimals")?
+        .parse::<u8>()
+        .map_err(|_| "invalid --decimals")?;
+    let max_supply = parse_asset_amount(args, "--max-supply")?;
+    let authority = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?.address();
+    let asset_id = AssetId::derive(authority, &symbol);
+    submit_asset_action(
+        args,
+        AssetAction::Register {
+            name,
+            symbol,
+            decimals,
+            max_supply,
+        },
+    )?;
+    println!("asset_id: {asset_id}");
+    Ok(())
+}
+
+fn normalize_asset_name(name: &str) -> Result<String, String> {
+    let normalized = name.trim().to_string();
+    if normalized.is_empty()
+        || normalized.len() > xparq::extension::asset::ASSET_NAME_MAX_LEN
+        || !normalized
+            .bytes()
+            .all(|byte| byte == b' ' || byte.is_ascii_graphic())
+    {
+        return Err(format!(
+            "invalid token name; use 1-{} printable ASCII characters",
+            xparq::extension::asset::ASSET_NAME_MAX_LEN
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_asset_symbol(symbol: &str) -> Result<String, String> {
+    let normalized = symbol.to_ascii_uppercase();
+    if normalized.is_empty()
+        || normalized.len() > xparq::extension::asset::ASSET_SYMBOL_MAX_LEN
+        || !normalized
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    {
+        return Err(format!(
+            "invalid token symbol; use 1-{} ASCII letters A-Z or digits",
+            xparq::extension::asset::ASSET_SYMBOL_MAX_LEN
+        ));
+    }
+    Ok(normalized)
+}
+
+fn asset_mint(args: &[String]) -> Result<(), String> {
+    submit_asset_action(
+        args,
+        AssetAction::Mint {
+            asset_id: parse_asset_id(args)?,
+            recipient: address_option(args, "--to")?,
+            amount: parse_asset_amount(args, "--amount")?,
+        },
+    )
+}
+
+fn asset_burn(args: &[String]) -> Result<(), String> {
+    submit_asset_action(
+        args,
+        AssetAction::Burn {
+            asset_id: parse_asset_id(args)?,
+            amount: parse_asset_amount(args, "--amount")?,
+        },
+    )
+}
+
+fn asset_transfer(args: &[String]) -> Result<(), String> {
+    submit_asset_action(
+        args,
+        AssetAction::Transfer {
+            asset_id: parse_asset_id(args)?,
+            recipient: address_option(args, "--to")?,
+            amount: parse_asset_amount(args, "--amount")?,
+        },
+    )
+}
+
+fn asset_info(args: &[String]) -> Result<(), String> {
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let response: serde_json::Value =
+        http_get_json(rpc, &format!("/asset/{}", parse_asset_id(args)?))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn asset_balance(args: &[String]) -> Result<(), String> {
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let address = match option(args, "--address") {
+        Some(address) => address_from_string(address).map_err(|error| error.to_string())?,
+        None => load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?.address(),
+    };
+    let response: serde_json::Value = http_get_json(
+        rpc,
+        &format!(
+            "/asset/{}/balance/{}",
+            parse_asset_id(args)?,
+            xparq::crypto::address_to_string(&address)
+        ),
+    )?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn submit_asset_action(args: &[String], action: AssetAction) -> Result<(), String> {
+    reject_manual_fee(args)?;
+    let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let address = xparq::crypto::address_to_string(&wallet.address());
+    let nonce = http_get_json::<AssetNonceResponse>(rpc, &format!("/asset/nonce/{address}"))?.nonce;
+    let call = wallet.0.sign_asset_call(action, nonce)?;
+    let public_key_known = account_public_key_registered(rpc, &wallet);
+    let transaction = automatic_fee_transaction(|fee| {
+        let (inputs, total) = select_account_inputs(rpc, &wallet, fee)?;
+        let mut outputs = Vec::new();
+        if total > fee {
+            outputs.push(SpendOutput::new(
+                wallet.address(),
+                Amount::from_esca(total - fee),
+            ));
+        }
+        outputs.push(SpendOutput::block_miner(Amount::from_esca(fee)));
+        let fee_intent = OnChainSpendIntent::new(wallet.address(), inputs, outputs)
+            .map_err(|error| error.to_string())?;
+        let fee = wallet.sign_onchain_spend(fee_intent, public_key_known)?;
+        Ok(AuthorizedTransaction::Extension(Box::new(
+            AuthorizedExtensionTransaction {
+                call: call.clone(),
+                fee,
+            },
+        )))
+    })?;
+    submit_or_print_transaction(args, &transaction)
+}
+
+fn parse_asset_id(args: &[String]) -> Result<AssetId, String> {
+    option(args, "--asset")
+        .ok_or_else(|| "missing --asset".to_string())?
+        .parse::<AssetId>()
+        .map_err(|_| "invalid --asset id".to_string())
+}
+
+fn parse_asset_amount(args: &[String], option_name: &str) -> Result<u128, String> {
+    option(args, option_name)
+        .ok_or_else(|| format!("missing {option_name}"))?
+        .parse::<u128>()
+        .map_err(|_| format!("invalid {option_name}; use integer base units"))
 }
 
 fn interactive_menu() -> Result<(), String> {
@@ -170,7 +358,8 @@ fn interactive_menu() -> Result<(), String> {
         println!("10. Split QCash");
         println!("11. Merge QCash");
         println!("12. Block explorer");
-        println!("13. Exit");
+        println!("13. Assets");
+        println!("14. Exit");
 
         match prompt("Select")?.as_str() {
             "1" => {
@@ -206,10 +395,88 @@ fn interactive_menu() -> Result<(), String> {
             "10" => interactive_split()?,
             "11" => interactive_merge()?,
             "12" => interactive_block_explorer()?,
-            "13" | "exit" | "quit" => return Ok(()),
+            "13" => interactive_assets()?,
+            "14" | "exit" | "quit" => return Ok(()),
             choice => println!("Unknown selection `{choice}`"),
         }
     }
+}
+
+fn interactive_assets() -> Result<(), String> {
+    println!();
+    println!("XPARQ Assets");
+    println!("1. Create asset");
+    println!("2. Mint asset");
+    println!("3. Transfer asset");
+    println!("4. Burn asset");
+    println!("5. Asset info");
+    println!("6. Asset balance");
+    println!("7. Back");
+
+    match prompt("Select")?.as_str() {
+        "1" => {
+            let mut args = interactive_asset_wallet_rpc()?;
+            args.extend(["--name".into(), prompt("Token name")?]);
+            args.extend(["--symbol".into(), prompt("Token symbol")?]);
+            args.extend(["--decimals".into(), prompt_default("Decimals", "0")?]);
+            args.extend([
+                "--max-supply".into(),
+                prompt("Maximum supply in base units")?,
+            ]);
+            asset_register(&args)
+        }
+        "2" => {
+            let mut args = interactive_asset_wallet_rpc()?;
+            args.extend(["--asset".into(), prompt("Asset ID")?]);
+            args.extend(["--to".into(), prompt("Recipient address")?]);
+            args.extend(["--amount".into(), prompt("Amount in base units")?]);
+            asset_mint(&args)
+        }
+        "3" => {
+            let mut args = interactive_asset_wallet_rpc()?;
+            args.extend(["--asset".into(), prompt("Asset ID")?]);
+            args.extend(["--to".into(), prompt("Recipient address")?]);
+            args.extend(["--amount".into(), prompt("Amount in base units")?]);
+            asset_transfer(&args)
+        }
+        "4" => {
+            let mut args = interactive_asset_wallet_rpc()?;
+            args.extend(["--asset".into(), prompt("Asset ID")?]);
+            args.extend(["--amount".into(), prompt("Amount in base units")?]);
+            asset_burn(&args)
+        }
+        "5" => {
+            let args = vec![
+                "--asset".into(),
+                prompt("Asset ID")?,
+                "--rpc".into(),
+                prompt_default("Node RPC address", DEFAULT_RPC_ADDR)?,
+            ];
+            asset_info(&args)
+        }
+        "6" => {
+            let args = vec![
+                "--asset".into(),
+                prompt("Asset ID")?,
+                "--wallet".into(),
+                prompt_default("Wallet file", DEFAULT_WALLET_PATH)?,
+                "--rpc".into(),
+                prompt_default("Node RPC address", DEFAULT_RPC_ADDR)?,
+            ];
+            asset_balance(&args)
+        }
+        "7" | "back" => Ok(()),
+        choice => Err(format!("unknown asset selection `{choice}`")),
+    }
+}
+
+fn interactive_asset_wallet_rpc() -> Result<Vec<String>, String> {
+    Ok(vec![
+        "--wallet".into(),
+        prompt_default("Wallet file", DEFAULT_WALLET_PATH)?,
+        "--rpc".into(),
+        prompt_default("Node RPC address", DEFAULT_RPC_ADDR)?,
+    ])
 }
 
 fn prompt_signature_profile() -> Result<String, String> {
@@ -444,18 +711,26 @@ fn print_balance(args: &[String]) -> Result<(), String> {
     println!("address: {address}");
     println!("total: {}", format_amount(balance.total));
     println!("spendable: {}", format_amount(balance.spendable));
-    println!("locked: {}", format_amount(balance.locked));
+    println!("immature: {}", format_amount(balance.immature));
     println!("reserved: {}", format_amount(balance.reserved));
     println!("utxos: {}", account.utxos.len());
+    println!("assets: {}", account.assets.len());
+    for asset in &account.assets {
+        println!(
+            "- asset_id={} name={} symbol={} decimals={} balance={}",
+            asset.asset_id, asset.name, asset.symbol, asset.decimals, asset.balance
+        );
+    }
     let mut utxos = account.utxos.iter().collect::<Vec<_>>();
     utxos.sort_by(|left, right| left.id.cmp(&right.id));
     for utxo in utxos {
         println!(
-            "- id={} amount={} status={} spendable_height={}",
+            "- id={} amount={} status={} maturity_height={}",
             utxo.id,
             format_amount(utxo.amount),
             utxo_status(utxo, account.next_height),
-            utxo.spendable_height,
+            utxo.maturity_height
+                .map_or_else(|| "none".into(), |height| height.to_string()),
         );
     }
     Ok(())
@@ -519,11 +794,12 @@ fn print_utxo_tracker(args: &[String]) -> Result<(), String> {
     utxos.sort_by(|left, right| left.id.cmp(&right.id));
     for utxo in utxos {
         println!(
-            "- id={} amount={} status={} spendable_height={}",
+            "- id={} amount={} status={} maturity_height={}",
             utxo.id,
             format_amount(utxo.amount),
             utxo_status(utxo, account.next_height),
-            utxo.spendable_height,
+            utxo.maturity_height
+                .map_or_else(|| "none".into(), |height| height.to_string()),
         );
     }
     Ok(())
@@ -533,7 +809,7 @@ fn summarize_balance(account: &AccountResponse) -> Result<BalanceSummary, String
     let mut summary = BalanceSummary {
         total: 0,
         spendable: 0,
-        locked: 0,
+        immature: 0,
         reserved: 0,
     };
     for utxo in &account.utxos {
@@ -543,7 +819,7 @@ fn summarize_balance(account: &AccountResponse) -> Result<BalanceSummary, String
             .ok_or("wallet balance overflow")?;
         let category = match utxo_status(utxo, account.next_height) {
             "reserved" => &mut summary.reserved,
-            "locked" => &mut summary.locked,
+            "immature" => &mut summary.immature,
             _ => &mut summary.spendable,
         };
         *category = category
@@ -575,14 +851,14 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
     }
     let transaction = automatic_fee_transaction(|fee| {
         let required = amount
-            .0
+            .as_esca()
             .checked_add(fee)
             .ok_or("transaction amount plus fee overflow")?;
         let (selected, change, change_address) = if inputs.is_empty() {
             let (selected, total) = select_account_inputs(rpc, &wallet, required)?;
             (selected, total - required, wallet.address())
         } else {
-            let gross_change = explicit_change.map_or(0, |amount| amount.0);
+            let gross_change = explicit_change.map_or(0, Amount::as_esca);
             let change = gross_change
                 .checked_sub(fee)
                 .ok_or("explicit change is smaller than the automatic fee")?;
@@ -594,9 +870,9 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
         };
         let mut outputs = vec![SpendOutput::new(recipient, amount)];
         if change > 0 {
-            outputs.push(SpendOutput::new(change_address, Amount(change)));
+            outputs.push(SpendOutput::new(change_address, Amount::from_esca(change)));
         }
-        outputs.push(SpendOutput::block_miner(Amount(fee)));
+        outputs.push(SpendOutput::block_miner(Amount::from_esca(fee)));
         let intent = OnChainSpendIntent::new(wallet.address(), selected, outputs)
             .map_err(|error| error.to_string())?;
         let signed = wallet.sign_onchain_spend(intent, known)?;
@@ -615,7 +891,12 @@ fn select_account_inputs(
     let mut candidates = response
         .utxos
         .into_iter()
-        .filter(|utxo| !utxo.reserved && utxo.spendable_height <= response.next_height)
+        .filter(|utxo| {
+            !utxo.reserved
+                && utxo
+                    .maturity_height
+                    .is_none_or(|height| height <= response.next_height)
+        })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
         right
@@ -707,9 +988,20 @@ fn read_json_response<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) -> R
     let status = std::str::from_utf8(&response[..body_offset])
         .map_err(|_| "invalid HTTP response headers")?;
     if !status.starts_with("HTTP/1.1 200 ") {
+        let detail = serde_json::from_slice::<serde_json::Value>(&response[body_offset..])
+            .ok()
+            .and_then(|value| value.get("error")?.as_str().map(str::to_string))
+            .or_else(|| {
+                std::str::from_utf8(&response[body_offset..])
+                    .ok()
+                    .map(str::trim)
+                    .filter(|body| !body.is_empty())
+                    .map(str::to_string)
+            });
+        let status_line = status.lines().next().unwrap_or(status);
         return Err(format!(
-            "node RPC rejected request: {}",
-            status.lines().next().unwrap_or(status)
+            "node RPC rejected request: {status_line}{}",
+            detail.map_or_else(String::new, |detail| format!(": {detail}"))
         ));
     }
     serde_json::from_slice(&response[body_offset..])
@@ -764,7 +1056,7 @@ fn sign_withdraw(args: &[String]) -> Result<(), String> {
             let (selected, total) = select_account_inputs(rpc, &wallet, required)?;
             (selected, total - required, wallet.address())
         } else {
-            let gross_change = explicit_change.map_or(0, |amount| amount.0);
+            let gross_change = explicit_change.map_or(0, Amount::as_esca);
             let change = gross_change
                 .checked_sub(fee)
                 .ok_or("explicit change is smaller than the automatic fee")?;
@@ -776,9 +1068,9 @@ fn sign_withdraw(args: &[String]) -> Result<(), String> {
         };
         let mut public_outputs = Vec::new();
         if change > 0 {
-            public_outputs.push(SpendOutput::new(change_address, Amount(change)));
+            public_outputs.push(SpendOutput::new(change_address, Amount::from_esca(change)));
         }
-        public_outputs.push(SpendOutput::block_miner(Amount(fee)));
+        public_outputs.push(SpendOutput::block_miner(Amount::from_esca(fee)));
         let intent = WithdrawIntent::new(
             wallet.address(),
             selected,
@@ -823,20 +1115,23 @@ fn redeem_qcash(args: &[String]) -> Result<(), String> {
         let available = input
             .qcash
             .amount()
-            .0
+            .as_esca()
             .checked_sub(fee)
             .filter(|amount| *amount > 0)
             .ok_or("QCash amount is too small for the automatic fee")?;
-        let recipient_amount = requested_amount.map_or(available, |amount| amount.0);
+        let recipient_amount = requested_amount.map_or(available, Amount::as_esca);
         let change_amount = available
             .checked_sub(recipient_amount)
             .ok_or("redeem amount plus automatic fee exceeds the QCash amount")?;
-        let mut outputs = vec![SpendOutput::new(recipient, Amount(recipient_amount))];
-        outputs.push(SpendOutput::block_miner(Amount(fee)));
+        let mut outputs = vec![SpendOutput::new(
+            recipient,
+            Amount::from_esca(recipient_amount),
+        )];
+        outputs.push(SpendOutput::block_miner(Amount::from_esca(fee)));
         let qcash_outputs = change_secret
             .as_ref()
             .filter(|_| change_amount > 0)
-            .map(|secret| QCashOutput::new(Amount(change_amount), secret.public_key()))
+            .map(|secret| QCashOutput::new(Amount::from_esca(change_amount), secret.public_key()))
             .into_iter()
             .collect();
         let intent = RedeemIntent::new(vec![input.qcash], outputs, qcash_outputs)
@@ -854,14 +1149,14 @@ fn redeem_qcash(args: &[String]) -> Result<(), String> {
                 .intent
                 .qcash_outputs
                 .first()
-                .map_or(0, |output| output.amount.0),
+                .map_or(0, |output| output.amount.as_esca()),
         ),
         _ => unreachable!("redeem fee builder returned another transaction kind"),
     };
 
     if let Some(secret) = change_secret.filter(|_| change_amount > 0) {
         let id = redeem_qcash_change_output_id(commitment, 0).map_err(|error| error.to_string())?;
-        let change_file = QCashFile::new(QCash::new(id, Amount(change_amount)), secret);
+        let change_file = QCashFile::new(QCash::new(id, Amount::from_esca(change_amount)), secret);
         write_qcash_files(&cash_dir_option(args), &[change_file])?;
     }
     submit_or_print_transaction(args, &transaction)
@@ -889,7 +1184,7 @@ fn split_qcash(args: &[String]) -> Result<(), String> {
         let available = input
             .qcash
             .amount()
-            .0
+            .as_esca()
             .checked_sub(fee)
             .ok_or("split automatic fee exceeds the QCash amount")?;
         let remainder = available
@@ -897,7 +1192,7 @@ fn split_qcash(args: &[String]) -> Result<(), String> {
             .ok_or("split outputs plus automatic fee exceed the QCash amount")?;
         let mut final_amounts = amounts.clone();
         if remainder > 0 {
-            final_amounts.push(Amount(remainder));
+            final_amounts.push(Amount::from_esca(remainder));
         }
         if final_amounts.len() < 2 {
             return Err("QCash split must produce at least two outputs after fee".into());
@@ -910,7 +1205,7 @@ fn split_qcash(args: &[String]) -> Result<(), String> {
         let intent = SplitIntent::new(
             input.qcash,
             outputs,
-            Some(SpendOutput::block_miner(Amount(fee))),
+            Some(SpendOutput::block_miner(Amount::from_esca(fee))),
         )
         .map_err(|error| error.to_string())?;
         let authorized = authorize_qcash_intent(intent, std::slice::from_ref(&input), chain)?;
@@ -966,8 +1261,8 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
             .ok_or("merged QCash amount is too small for the automatic fee")?;
         let intent = MergeIntent::new(
             inputs.iter().map(|file| file.qcash).collect(),
-            QCashOutput::new(Amount(output_amount), secret.public_key()),
-            Some(SpendOutput::block_miner(Amount(fee))),
+            QCashOutput::new(Amount::from_esca(output_amount), secret.public_key()),
+            Some(SpendOutput::block_miner(Amount::from_esca(fee))),
         )
         .map_err(|error| error.to_string())?;
         let authorized = authorize_qcash_intent(intent, &inputs, chain)?;
@@ -979,7 +1274,7 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
                 .intent
                 .commitment(chain)
                 .map_err(|error| error.to_string())?,
-            transaction.intent.output.amount.0,
+            transaction.intent.output.amount.as_esca(),
         ),
         _ => unreachable!("merge fee builder returned another transaction kind"),
     };
@@ -987,7 +1282,7 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
     write_qcash_files(
         &cash_dir_option(args),
         &[QCashFile::new(
-            QCash::new(id, Amount(output_amount)),
+            QCash::new(id, Amount::from_esca(output_amount)),
             secret,
         )],
     )?;
@@ -997,7 +1292,7 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
 fn reject_manual_fee(args: &[String]) -> Result<(), String> {
     if option(args, "--miner").is_some() {
         return Err(
-            "--miner is no longer supported; wallet fee is automatic at 1 paqs/byte".into(),
+            "--miner is no longer supported; wallet fee is automatic at 1 esca/byte".into(),
         );
     }
     Ok(())
@@ -1006,7 +1301,7 @@ fn reject_manual_fee(args: &[String]) -> Result<(), String> {
 fn automatic_fee_transaction(
     mut build: impl FnMut(u64) -> Result<AuthorizedTransaction, String>,
 ) -> Result<AuthorizedTransaction, String> {
-    let mut fee = AUTOMATIC_FEE_PAQS_PER_BYTE;
+    let mut fee = AUTOMATIC_FEE_ESCA_PER_BYTE;
     for _ in 0..MAX_FEE_CONVERGENCE_ROUNDS {
         let transaction = build(fee)?;
         let size = canonical_bytes(&transaction)
@@ -1014,7 +1309,7 @@ fn automatic_fee_transaction(
             .len();
         let required = u64::try_from(size)
             .ok()
-            .and_then(|size| size.checked_mul(AUTOMATIC_FEE_PAQS_PER_BYTE))
+            .and_then(|size| size.checked_mul(AUTOMATIC_FEE_ESCA_PER_BYTE))
             .ok_or("automatic transaction fee overflow")?;
         if required == fee {
             return Ok(transaction);
@@ -1030,11 +1325,11 @@ fn cash_dir_option(args: &[String]) -> PathBuf {
 
 fn checked_amount_sum(mut amounts: impl Iterator<Item = Amount>) -> Result<u64, String> {
     amounts
-        .try_fold(Amount(0), |sum, amount| {
+        .try_fold(Amount::from_esca(0), |sum, amount| {
             sum.checked_add(amount)
                 .ok_or_else(|| "QCash amount overflow".to_string())
         })
-        .map(|amount| amount.0)
+        .map(Amount::as_esca)
 }
 
 fn fresh_qcash_secrets(
@@ -1072,13 +1367,20 @@ fn load_qcash_file(path: &Path) -> Result<QCashFile, String> {
 fn write_qcash_files(directory: &Path, files: &[QCashFile]) -> Result<(), String> {
     fs::create_dir_all(directory)
         .map_err(|error| format!("failed to create {}: {error}", directory.display()))?;
+    let mut reserved_paths = BTreeSet::new();
     let encoded = files
         .iter()
         .map(|file| {
-            let path = directory.join(canonical_qcash_file_name(file.qcash));
-            if path.exists() {
-                return Err(format!("QCash file already exists: {}", path.display()));
-            }
+            let mut sequence = 1_usize;
+            let path = loop {
+                let candidate = directory.join(qcash_file_name(file.qcash, sequence));
+                if !candidate.exists() && reserved_paths.insert(candidate.clone()) {
+                    break candidate;
+                }
+                sequence = sequence
+                    .checked_add(1)
+                    .ok_or("too many QCash files with the same amount")?;
+            };
             let bytes = file.encode().map_err(|error| error.to_string())?;
             Ok((path, bytes))
         })
@@ -1254,7 +1556,7 @@ fn parse_amount(value: &str) -> Result<Amount, String> {
     if units == 0 {
         return Err("XPQ amount must be positive".to_string());
     }
-    Ok(Amount(units))
+    Ok(Amount::from_esca(units))
 }
 
 fn format_amount(units: u64) -> String {
@@ -1266,13 +1568,33 @@ fn format_amount(units: u64) -> String {
 
 fn print_help() {
     println!(
-        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--profile mldsa44|mldsa65|mldsa87|falcon512|falcon1024]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--profile mldsa44|mldsa65|mldsa87|falcon512|falcon1024]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ --expiry HEIGHT [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet sign-withdraw --qcash XPQ... --expiry HEIGHT [--input COIN_ID...] [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--cash-dir PATH] [--wallet PATH] [--offline]\nwallet qcash-redeem --file FILE --to ADDRESS [--amount XPQ] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-split --file FILE --qcash XPQ [--qcash XPQ...] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-merge --file FILE --file FILE... [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet version\n\nOmitting --profile selects the ML-DSA-44 profile. All signature profiles are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 paqs per canonical transaction byte; manual --miner fee input is not supported. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs. A split automatically creates QCash change when requested outputs are smaller than the input after the automatic fee. QCash operations use Falcon-512 bearer authorization, and the automatic block-miner fee is deducted from QCash inputs. Keep input QCash files until the transaction is canonically confirmed.\nRunning without a command opens the interactive menu.\nWithout --input, spend and withdraw select active XPQ inputs and calculate change through node RPC."
+        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--profile PROFILE]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--profile PROFILE]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet sign-withdraw --qcash XPQ... [--input COIN_ID...] [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--cash-dir PATH] [--wallet PATH] [--offline]\nwallet qcash-redeem --file FILE --to ADDRESS [--amount XPQ] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-split --file FILE --qcash XPQ [--qcash XPQ...] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-merge --file FILE --file FILE... [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet version\n\nAll signature profiles are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 esca per canonical transaction byte; manual --miner fee input is not supported. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs. QCash operations use Falcon-512 bearer authorization. Keep input QCash files until the transaction is canonically confirmed.\nRunning without a command opens the interactive menu.\nWithout --input, spend and withdraw select active XPQ inputs and calculate change through node RPC."
+    );
+    println!(
+        "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset ID --to ADDRESS --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset ID --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset ID --to ADDRESS --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset ID [--rpc ADDRESS]\nwallet asset-balance --asset ID [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts are integer base units. Registration makes the signing wallet the mint authority. Asset state and its XPQ miner fee are committed atomically."
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xparq::qcash::canonical_qcash_file_name;
+
+    #[test]
+    fn asset_symbol_is_normalized_and_rejects_non_ascii_punctuation() {
+        assert_eq!(
+            normalize_asset_name(" Test Token "),
+            Ok("Test Token".into())
+        );
+        assert_eq!(normalize_asset_symbol("test"), Ok("TEST".into()));
+        assert!(normalize_asset_symbol("test-token").is_err());
+        assert!(normalize_asset_symbol("").is_err());
+        let args = vec!["--amount".into(), "100000000000000000000000".into()];
+        assert_eq!(
+            parse_asset_amount(&args, "--amount"),
+            Ok(100_000_000_000_000_000_000_000_u128)
+        );
+    }
 
     #[test]
     fn transaction_submission_posts_canonical_bytes() {
@@ -1338,28 +1660,29 @@ mod tests {
     }
 
     #[test]
-    fn balance_separates_spendable_locked_and_reserved_outputs() {
+    fn balance_separates_spendable_immature_and_reserved_outputs() {
         let account = AccountResponse {
             next_height: 100,
             public_key_registered: false,
             next_utxo_offset: None,
+            assets: vec![],
             utxos: vec![
                 AccountUtxo {
                     id: "spendable".into(),
                     amount: 2 * COIN,
-                    spendable_height: 100,
+                    maturity_height: None,
                     reserved: false,
                 },
                 AccountUtxo {
-                    id: "locked".into(),
+                    id: "immature".into(),
                     amount: 3 * COIN,
-                    spendable_height: 101,
+                    maturity_height: Some(101),
                     reserved: false,
                 },
                 AccountUtxo {
                     id: "reserved".into(),
                     amount: COIN,
-                    spendable_height: 0,
+                    maturity_height: None,
                     reserved: true,
                 },
             ],
@@ -1370,7 +1693,7 @@ mod tests {
             Ok(BalanceSummary {
                 total: 6 * COIN,
                 spendable: 2 * COIN,
-                locked: 3 * COIN,
+                immature: 3 * COIN,
                 reserved: COIN,
             })
         );
@@ -1381,7 +1704,7 @@ mod tests {
         );
         assert_eq!(
             utxo_status(&account.utxos[1], account.next_height),
-            "locked"
+            "immature"
         );
         assert_eq!(
             utxo_status(&account.utxos[2], account.next_height),
@@ -1390,22 +1713,58 @@ mod tests {
     }
 
     #[test]
-    fn core_qcash_file_name_contains_canonical_amount_and_full_coin_id() {
+    fn core_qcash_file_name_contains_canonical_amount() {
         let id = xparq::coin::CoinId::from_bytes([0xab; xparq::coin::CoinId::SIZE]);
-        let full_id = "ab".repeat(xparq::coin::CoinId::SIZE);
 
         assert_eq!(
-            canonical_qcash_file_name(QCash::new(id, Amount(5 * COIN))),
-            format!("5XPQ_{full_id}.QCash")
+            canonical_qcash_file_name(QCash::new(id, Amount::from_esca(5 * COIN))),
+            "5XPQ.QCash"
         );
         assert_eq!(
-            canonical_qcash_file_name(QCash::new(id, Amount(29 * COIN + 900_000))),
-            format!("29.9XPQ_{full_id}.QCash")
+            canonical_qcash_file_name(QCash::new(id, Amount::from_esca(29 * COIN + 900_000))),
+            "29.9XPQ.QCash"
         );
         assert_eq!(
-            canonical_qcash_file_name(QCash::new(id, Amount(1))),
-            format!("0.000001XPQ_{full_id}.QCash")
+            canonical_qcash_file_name(QCash::new(id, Amount::from_esca(1))),
+            "0.000001XPQ.QCash"
         );
+    }
+
+    #[test]
+    fn same_amount_qcash_files_receive_numbered_names() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "xparq-numbered-qcash-{}-{unique}",
+            std::process::id()
+        ));
+        let files = (1_u8..=3)
+            .map(|byte| {
+                QCashFile::new(
+                    QCash::new(
+                        xparq::coin::CoinId::from_bytes([byte; xparq::coin::CoinId::SIZE]),
+                        Amount::from_esca(10 * COIN),
+                    ),
+                    QCashSigningSeed::from_bytes([byte; 32]),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        write_qcash_files(&directory, &files).unwrap();
+
+        let mut names = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["10XPQ(2).QCash", "10XPQ(3).QCash", "10XPQ.QCash"]);
+        for name in names {
+            assert!(load_qcash_file(&directory.join(name)).is_ok());
+        }
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1414,20 +1773,20 @@ mod tests {
         let output_seed = QCashSigningSeed::from_bytes([0x32; 32]);
         let input = QCash::new(
             xparq::coin::CoinId::from_bytes([0x33; xparq::coin::CoinId::SIZE]),
-            Amount(COIN),
+            Amount::from_esca(COIN),
         );
         let chain = xparq::genesis::chain_context().unwrap();
         let transaction = automatic_fee_transaction(|fee| {
             let intent = SplitIntent::new(
                 input,
                 vec![
-                    QCashOutput::new(Amount(1), output_seed.public_key()),
+                    QCashOutput::new(Amount::from_esca(1), output_seed.public_key()),
                     QCashOutput::new(
-                        Amount(COIN - fee - 1),
+                        Amount::from_esca(COIN - fee - 1),
                         QCashSigningSeed::from_bytes([0x34; 32]).public_key(),
                     ),
                 ],
-                Some(SpendOutput::block_miner(Amount(fee))),
+                Some(SpendOutput::block_miner(Amount::from_esca(fee))),
             )
             .map_err(|error| error.to_string())?;
             let commitment = intent
@@ -1446,7 +1805,7 @@ mod tests {
         let size = canonical_bytes(&transaction).unwrap().len() as u64;
         let fee = match transaction {
             AuthorizedTransaction::Split(transaction) => {
-                transaction.intent.miner_output.unwrap().amount.0
+                transaction.intent.miner_output.unwrap().amount.as_esca()
             }
             _ => unreachable!(),
         };
@@ -1470,7 +1829,7 @@ mod tests {
         let input = QCashFile::new(
             QCash::new(
                 xparq::coin::CoinId::from_bytes([0x11; xparq::coin::CoinId::SIZE]),
-                Amount(5 * COIN),
+                Amount::from_esca(5 * COIN),
             ),
             QCashSigningSeed::from_bytes([0x22; 32]),
         );
@@ -1514,7 +1873,9 @@ mod tests {
             .map(|entry| entry.unwrap().path())
             .collect::<Vec<_>>();
         assert_eq!(merged_paths.len(), 1);
-        assert!(load_qcash_file(&merged_paths[0]).unwrap().qcash.amount() < Amount(5 * COIN));
+        assert!(
+            load_qcash_file(&merged_paths[0]).unwrap().qcash.amount() < Amount::from_esca(5 * COIN)
+        );
 
         let mnemonic = xparq_wallet::encode_xparq_mnemonic(&[7; 16]).unwrap();
         let recipient =
@@ -1537,7 +1898,9 @@ mod tests {
             .map(|entry| entry.unwrap().path())
             .collect::<Vec<_>>();
         assert_eq!(redeem_paths.len(), 1);
-        assert!(load_qcash_file(&redeem_paths[0]).unwrap().qcash.amount() < Amount(COIN));
+        assert!(
+            load_qcash_file(&redeem_paths[0]).unwrap().qcash.amount() < Amount::from_esca(COIN)
+        );
 
         fs::remove_dir_all(root).unwrap();
     }

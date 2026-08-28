@@ -1,11 +1,10 @@
 [package]
-name = "xparq-common"
+name = "xparq-bridge"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
-blake3.workspace = true
-borsh.workspace = true
-serde.workspace = true
+xparq-asset.workspace = true

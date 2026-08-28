@@ -371,7 +371,10 @@ mod tests {
             genesis_hash,
             DIFFICULTY_START.saturating_add(1),
             Nonce(0),
-            Some(crate::block::Emission::new(miner, xparq_coin::Amount(0))),
+            Some(crate::block::Emission::new(
+                miner,
+                xparq_coin::Amount::from_esca(0),
+            )),
             vec![],
         )
         .unwrap();

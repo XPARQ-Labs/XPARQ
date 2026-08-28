@@ -7,7 +7,7 @@ use crate::{
 
 pub const QCASH_PUBLIC_KEY_SIZE: usize = 897;
 pub const QCASH_SIGNATURE_SIZE: usize = 666;
-pub const QCASH_SIGNATURE_ALGORITHM: &str = "falcon-512-fixed-v1";
+pub const QCASH_SIGNATURE_ALGORITHM: &str = "qcash-signature";
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,

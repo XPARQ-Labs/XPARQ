@@ -1,7 +1,5 @@
 use crate::ProfilePublicKey;
 use crate::error::CryptoError;
-use bech32::primitives::decode::CheckedHrpstring;
-use bech32::{Bech32, Hrp};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
@@ -31,12 +29,13 @@ impl Address {
     pub const ZERO: Self = Self([0; ADDRESS_SIZE]);
 }
 
-pub const ADDRESS_HRP: &str = "XPQ";
-const BECH32_CHECKSUM_LEN: usize = 6;
-const BECH32_ADDRESS_LEN: usize =
-    ADDRESS_HRP.len() + 1 + (ADDRESS_SIZE * 8).div_ceil(5) + BECH32_CHECKSUM_LEN;
-const_assert_eq!(BECH32_CHECKSUM_LEN, 6);
-const_assert_eq!(BECH32_ADDRESS_LEN, 42);
+pub const ADDRESS_PREFIX: &str = "0x";
+pub const ADDRESS_CHECKSUM_SIZE: usize = 4;
+pub const ADDRESS_STRING_LEN: usize =
+    ADDRESS_PREFIX.len() + (ADDRESS_SIZE + ADDRESS_CHECKSUM_SIZE) * 2;
+const ADDRESS_CHECKSUM_DOMAIN: &[u8] = b"XPARQ address checksum v1";
+const_assert_eq!(ADDRESS_CHECKSUM_SIZE, 4);
+const_assert_eq!(ADDRESS_STRING_LEN, 50);
 
 pub fn address_from_profile_public_key(public_key: &ProfilePublicKey) -> Address {
     let mut material = Vec::with_capacity(32 + public_key.bytes.len());
@@ -54,50 +53,60 @@ fn address_from_key_material(public_key: &[u8]) -> Address {
 }
 
 pub fn address_to_string(address: &Address) -> String {
-    address_to_string_with_hrp(address, ADDRESS_HRP)
+    let checksum = address_checksum(address);
+    format!(
+        "{ADDRESS_PREFIX}{}{}",
+        hex::encode(address.0),
+        hex::encode(checksum)
+    )
 }
 
 pub fn address_from_string(address: &str) -> Result<Address, CryptoError> {
-    address_from_string_with_hrp(address, ADDRESS_HRP, BECH32_ADDRESS_LEN)
-}
-
-fn address_to_string_with_hrp(address: &Address, hrp: &str) -> String {
-    bech32::encode::<Bech32>(Hrp::parse_unchecked(hrp), &address.0)
-        .expect("fixed-size XPARQ address encoding must be valid")
-}
-
-fn address_from_string_with_hrp(
-    address: &str,
-    expected_hrp: &str,
-    expected_len: usize,
-) -> Result<Address, CryptoError> {
-    if address.len() != expected_len || address != address.to_ascii_lowercase() {
+    if address.len() != ADDRESS_STRING_LEN || address != address.to_ascii_lowercase() {
         return Err(CryptoError::InvalidAddressEncoding);
     }
-
-    let decoded = CheckedHrpstring::new::<Bech32>(address)
-        .map_err(|_| CryptoError::InvalidAddressEncoding)?;
-    if decoded.hrp() != Hrp::parse_unchecked(expected_hrp) {
-        return Err(CryptoError::InvalidAddressEncoding);
-    }
-
-    let bytes: Vec<u8> = decoded.byte_iter().collect();
-    let bytes: [u8; ADDRESS_SIZE] = bytes
+    let encoded = address
+        .strip_prefix(ADDRESS_PREFIX)
+        .ok_or(CryptoError::InvalidAddressEncoding)?;
+    let bytes = hex::decode(encoded).map_err(|_| CryptoError::InvalidAddressEncoding)?;
+    let (address_bytes, checksum_bytes) = bytes.split_at(ADDRESS_SIZE);
+    let address = Address(
+        address_bytes
+            .try_into()
+            .map_err(|_| CryptoError::InvalidAddressEncoding)?,
+    );
+    let checksum: [u8; ADDRESS_CHECKSUM_SIZE] = checksum_bytes
         .try_into()
         .map_err(|_| CryptoError::InvalidAddressEncoding)?;
+    if checksum != address_checksum(&address) {
+        return Err(CryptoError::InvalidAddressEncoding);
+    }
+    Ok(address)
+}
 
-    Ok(Address(bytes))
+fn address_checksum(address: &Address) -> [u8; ADDRESS_CHECKSUM_SIZE] {
+    let mut hasher = Sha3_256::new();
+    hasher.update(ADDRESS_CHECKSUM_DOMAIN);
+    hasher.update(address.0);
+    let digest = hasher.finalize();
+    digest[..ADDRESS_CHECKSUM_SIZE]
+        .try_into()
+        .expect("SHA3-256 digest contains a four-byte address checksum")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn every_network_address_uses_lowercase_xpq_hrp() {
+    fn canonical_address_uses_lowercase_hex_with_checksum() {
         let address = Address([7; ADDRESS_SIZE]);
         let encoded = address_to_string(&address);
-        assert!(encoded.starts_with("xpq1"));
-        assert_eq!(encoded.len(), BECH32_ADDRESS_LEN);
+        assert_eq!(
+            encoded,
+            "0x0707070707070707070707070707070707070707eecbf9c9"
+        );
+        assert!(encoded.starts_with(ADDRESS_PREFIX));
+        assert_eq!(encoded.len(), ADDRESS_STRING_LEN);
         assert_eq!(address_from_string(&encoded), Ok(address));
 
         assert_eq!(
@@ -105,9 +114,17 @@ mod tests {
             Err(CryptoError::InvalidAddressEncoding)
         );
 
-        let old_hrp = address_to_string_with_hrp(&address, "p");
+        let raw_hex_without_checksum = format!("{ADDRESS_PREFIX}{}", hex::encode(address.0));
         assert_eq!(
-            address_from_string(&old_hrp),
+            address_from_string(&raw_hex_without_checksum),
+            Err(CryptoError::InvalidAddressEncoding)
+        );
+
+        let mut corrupted = encoded.into_bytes();
+        let last = corrupted.last_mut().unwrap();
+        *last = if *last == b'0' { b'1' } else { b'0' };
+        assert_eq!(
+            address_from_string(std::str::from_utf8(&corrupted).unwrap()),
             Err(CryptoError::InvalidAddressEncoding)
         );
     }

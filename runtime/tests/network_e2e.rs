@@ -322,17 +322,24 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|utxo| utxo["spendable_height"].as_u64().unwrap() <= 52)
+        .find(|utxo| {
+            utxo["maturity_height"]
+                .as_u64()
+                .is_none_or(|height| height <= 52)
+        })
         .expect("mature miner reward is missing");
     let input_id: CoinId = input["id"].as_str().unwrap().parse().unwrap();
     let input_amount = input["amount"].as_u64().unwrap();
-    let sent = Amount(1);
+    let sent = Amount::from_esca(1);
     let intent = OnChainSpendIntent::new(
         sender.address,
         vec![input_id],
         vec![
             SpendOutput::new(recipient, sent),
-            SpendOutput::new(sender.address, Amount(input_amount - sent.0)),
+            SpendOutput::new(
+                sender.address,
+                Amount::from_esca(input_amount - sent.as_esca()),
+            ),
         ],
     )
     .unwrap();
@@ -360,7 +367,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
         account(&c_rpc, &recipient_address).is_ok_and(|account| {
             account["total"]
                 .as_u64()
-                .is_some_and(|total| total >= sent.0)
+                .is_some_and(|total| total >= sent.as_esca())
         })
     });
     let included_balance = account(&c_rpc, &recipient_address).unwrap()["total"].clone();

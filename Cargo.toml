@@ -13,6 +13,9 @@ members = [
     "xparq",
     "runtime",
     "wallet",
+    "extension/asset",
+    "extension/bridge",
+    "extension",
 ]
 exclude = [
     "depend",
@@ -35,7 +38,6 @@ axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 async-trait = "0.1"
 bip39 = "2.2"
-bech32 = { version = "0.12.0", default-features = false, features = ["alloc"], path = "depend/bech32" }
 borsh = { version = "1.5", features = ["derive"], path = "depend/traits/borsh" }
 chacha20 = { version = "0.10.1", default-features = false, features = ["rng", "zeroize"], path = "depend/sqisign/chacha20-0.10.1" }
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
@@ -75,6 +77,9 @@ xparq-transaction = { path = "transaction", default-features = false }
 xparq-blockchain = { path = "blockchain", default-features = false }
 xparq-consensus = { path = "consensus", default-features = false }
 xparq-ledger = { path = "ledger", default-features = false }
+xparq-asset = { path = "extension/asset" }
+xparq-bridge = { path = "extension/bridge" }
+xparq-extension = { path = "extension" }
 xparq = { path = "xparq", default-features = false }
 
 [patch.crates-io]

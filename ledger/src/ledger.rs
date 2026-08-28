@@ -3,19 +3,21 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_blockchain::{Chain, ChainError, Height};
 use xparq_coin::{Coin, CoinId};
+use xparq_common::{ExtensionContext, ExtensionFailure, ExtensionStateRoot};
 use xparq_consensus::{
     ApplyBlockState, CoinInputState, ConsensusError, QCashInputState, TransactionConsensusError,
     TransactionStateView, ValidatedBlock, validate_transaction,
 };
 use xparq_crypto::{Address, BlockHash, ProfilePublicKey};
+use xparq_transaction::AuthorizedTransaction;
 
-use crate::{CoinUtxo, LedgerState, SpendStateError, UtxoRollbackJournal};
+use crate::{CoinUtxo, LedgerState, SpendStateError, StateRollbackJournal, UtxoRollbackJournal};
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ledger {
     pub chain: Chain,
     pub state: LedgerState,
-    journals: BTreeMap<Height, Vec<UtxoRollbackJournal>>,
+    journals: BTreeMap<Height, Vec<StateRollbackJournal>>,
     chain_context: Option<xparq_transaction::ChainContext>,
 }
 
@@ -36,6 +38,30 @@ impl Ledger {
         &self.state
     }
 
+    pub fn extension_state_root(&self) -> Result<ExtensionStateRoot, LedgerError> {
+        self.state.extensions.state_root().map_err(extension_error)
+    }
+
+    pub fn preview_extension_state_root(
+        &self,
+        transactions: &[AuthorizedTransaction],
+        height: Height,
+    ) -> Result<ExtensionStateRoot, LedgerError> {
+        let mut extensions = self.state.extensions.clone();
+        for transaction in transactions {
+            let AuthorizedTransaction::Extension(transaction) = transaction else {
+                continue;
+            };
+            let extension = xparq_extension::production_registry()
+                .get(transaction.call.extension_id())
+                .map_err(extension_error)?;
+            extensions
+                .apply(extension, ExtensionContext { height }, &transaction.call)
+                .map_err(extension_error)?;
+        }
+        extensions.state_root().map_err(extension_error)
+    }
+
     pub fn rollback_tip(&mut self) -> Result<xparq_blockchain::Block, LedgerError> {
         let height = self.chain.tip_height().ok_or(LedgerError::EmptyChain)?;
         let hash = self.chain.tip_hash().ok_or(LedgerError::EmptyChain)?;
@@ -46,7 +72,7 @@ impl Ledger {
             .ok_or(LedgerError::MissingRollbackJournal)?;
         let mut staged_state = self.state.clone();
         for journal in journals.into_iter().rev() {
-            staged_state.rollback(journal)?;
+            staged_state.rollback_state(journal)?;
         }
         let mut staged_chain = self.chain.clone();
         let block = staged_chain.remove_tip(hash)?;
@@ -77,12 +103,12 @@ impl Ledger {
             staged_state.coins.insert(CoinUtxo {
                 coin: Coin::new(id, emission.subsidy()),
                 owner: emission.recipient(),
-                spendable_height: emission.maturity_height(),
+                maturity_height: Some(emission.maturity_height()),
             })?;
-            block_journals.push(UtxoRollbackJournal {
+            block_journals.push(StateRollbackJournal::Utxo(UtxoRollbackJournal {
                 created_coin_ids: vec![id],
                 ..UtxoRollbackJournal::default()
-            });
+            }));
         }
 
         for transaction in block.transactions() {
@@ -90,6 +116,14 @@ impl Ledger {
                 validate_transaction(transaction.clone(), chain_context, height.0, &staged_state)?;
             let journal = staged_state.apply_validated_transaction(&authorized, height, miner)?;
             block_journals.push(journal);
+        }
+
+        let extension_root = staged_state
+            .extensions
+            .state_root()
+            .map_err(extension_error)?;
+        if block.state_root().0 != *extension_root.as_bytes() {
+            return Err(LedgerError::InvalidExtensionStateRoot);
         }
 
         let mut staged_chain = self.chain.clone();
@@ -122,6 +156,7 @@ pub enum LedgerError {
     Chain(ChainError),
     EmptyChain,
     MissingRollbackJournal,
+    InvalidExtensionStateRoot,
 }
 
 impl fmt::Display for LedgerError {
@@ -133,8 +168,15 @@ impl fmt::Display for LedgerError {
             Self::Chain(error) => write!(formatter, "chain transition failed: {error}"),
             Self::EmptyChain => formatter.write_str("ledger chain is empty"),
             Self::MissingRollbackJournal => formatter.write_str("rollback journal is missing"),
+            Self::InvalidExtensionStateRoot => {
+                formatter.write_str("block extension state root does not match ledger")
+            }
         }
     }
+}
+
+fn extension_error(error: ExtensionFailure) -> LedgerError {
+    LedgerError::Spend(SpendStateError::Extension(error))
 }
 
 impl Error for LedgerError {}
@@ -168,7 +210,7 @@ impl TransactionStateView for LedgerState {
         self.coins.get(&id).map(|utxo| CoinInputState {
             amount: utxo.coin.amount,
             owner: utxo.owner,
-            spendable_height: utxo.spendable_height,
+            maturity_height: utxo.maturity_height,
         })
     }
 

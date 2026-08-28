@@ -35,7 +35,7 @@ impl Amount {
 }
 
 pub const ASSET_ID_SIZE: usize = blake3::OUT_LEN;
-const ASSET_ID_CONTEXT: &str = "XPARQ AssetId v1";
+const ASSET_ID_CONTEXT: &str = "XPARQ AssetId";
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,

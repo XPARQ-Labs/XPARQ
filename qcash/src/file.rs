@@ -11,22 +11,43 @@ const PAYLOAD_LENGTH_SIZE: usize = size_of::<u32>();
 
 /// Returns the canonical portable filename for a QCash bearer file.
 pub fn canonical_qcash_file_name(qcash: QCash) -> String {
-    let amount = qcash.amount();
-    let whole = amount.0 / xparq_coin::COIN;
-    let fractional = amount.0 % xparq_coin::COIN;
+    qcash_file_name(qcash, 1)
+}
+
+/// Returns an amount-based filename, adding `(N)` for the second and later files.
+pub fn qcash_file_name(qcash: QCash, sequence: usize) -> String {
+    assert!(sequence >= 1, "QCash filename sequence starts at one");
+    let amount = qcash.amount().as_esca();
+    let whole = amount / xparq_coin::COIN;
+    let fractional = amount % xparq_coin::COIN;
     let amount = if fractional == 0 {
         whole.to_string()
     } else {
         let fractional = format!("{fractional:06}");
         format!("{whole}.{}", fractional.trim_end_matches('0'))
     };
-    format!("{amount}XPQ_{}.QCash", qcash.id())
+    if sequence == 1 {
+        format!("{amount}XPQ.QCash")
+    } else {
+        format!("{amount}XPQ({sequence}).QCash")
+    }
 }
 
-/// Requires the local filename to match the amount and full CoinId in the file.
+/// Requires the local filename to match the amount and optional collision sequence.
 pub fn validate_qcash_file_name(file_name: &str, qcash: QCash) -> Result<(), QCashFileNameError> {
     let expected = canonical_qcash_file_name(qcash);
-    if file_name == expected {
+    let stem = expected
+        .strip_suffix(".QCash")
+        .expect("canonical QCash filename has a fixed extension");
+    let valid_sequence = file_name
+        .strip_prefix(stem)
+        .and_then(|suffix| suffix.strip_suffix(".QCash"))
+        .and_then(|suffix| suffix.strip_prefix('('))
+        .and_then(|suffix| suffix.strip_suffix(')'))
+        .filter(|sequence| !sequence.starts_with('0'))
+        .and_then(|sequence| sequence.parse::<usize>().ok())
+        .is_some_and(|sequence| sequence >= 2);
+    if file_name == expected || valid_sequence {
         Ok(())
     } else {
         Err(QCashFileNameError { expected })
@@ -48,7 +69,7 @@ impl fmt::Display for QCashFileNameError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "QCash filename does not match file contents; expected `{}`",
+            "QCash filename does not match file contents; expected `{}` or its numbered form",
             self.expected
         )
     }
@@ -163,24 +184,22 @@ mod tests {
     use xparq_coin::{Amount, COIN, CoinId};
 
     fn qcash(amount: u64) -> QCash {
-        QCash::new(CoinId::from_bytes([0xab; CoinId::SIZE]), Amount(amount))
+        QCash::new(
+            CoinId::from_bytes([0xab; CoinId::SIZE]),
+            Amount::from_esca(amount),
+        )
     }
 
     #[test]
-    fn canonical_filename_contains_amount_and_full_coin_id() {
-        let id = "ab".repeat(CoinId::SIZE);
-        assert_eq!(
-            canonical_qcash_file_name(qcash(5 * COIN)),
-            format!("5XPQ_{id}.QCash")
-        );
+    fn canonical_filename_contains_amount() {
+        assert_eq!(canonical_qcash_file_name(qcash(5 * COIN)), "5XPQ.QCash");
         assert_eq!(
             canonical_qcash_file_name(qcash(29 * COIN + 900_000)),
-            format!("29.9XPQ_{id}.QCash")
+            "29.9XPQ.QCash"
         );
-        assert_eq!(
-            canonical_qcash_file_name(qcash(1)),
-            format!("0.000001XPQ_{id}.QCash")
-        );
+        assert_eq!(canonical_qcash_file_name(qcash(1)), "0.000001XPQ.QCash");
+        assert_eq!(qcash_file_name(qcash(5 * COIN), 2), "5XPQ(2).QCash");
+        assert_eq!(qcash_file_name(qcash(5 * COIN), 3), "5XPQ(3).QCash");
     }
 
     #[test]
@@ -188,9 +207,13 @@ mod tests {
         let qcash = qcash(5 * COIN);
         let expected = canonical_qcash_file_name(qcash);
         assert_eq!(validate_qcash_file_name(&expected, qcash), Ok(()));
+        assert_eq!(validate_qcash_file_name("5XPQ(2).QCash", qcash), Ok(()));
+        assert_eq!(validate_qcash_file_name("5XPQ(27).QCash", qcash), Ok(()));
 
         let error = validate_qcash_file_name("6XPQ_wrong.QCash", qcash).unwrap_err();
         assert_eq!(error.expected(), expected);
+        assert!(validate_qcash_file_name("5XPQ(1).QCash", qcash).is_err());
+        assert!(validate_qcash_file_name("5XPQ(02).QCash", qcash).is_err());
     }
 
     #[test]
