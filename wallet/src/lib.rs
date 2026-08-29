@@ -332,6 +332,24 @@ impl ProfileWallet {
         .and_then(xparq::extension::asset::AssetCall::into_extension_call)
         .map_err(|error| format!("asset call signing failed: {error:?}"))
     }
+
+    pub fn sign_wasm_deploy_call(
+        &self,
+        name: String,
+        module: Vec<u8>,
+        nonce: u64,
+    ) -> Result<xparq::common::ExtensionCall, String> {
+        let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
+        xparq::extension::WasmDeployCall::sign(
+            chain.genesis_hash,
+            name,
+            module,
+            nonce,
+            &self.signing_seed,
+        )
+        .and_then(xparq::extension::WasmDeployCall::into_extension_call)
+        .map_err(|error| format!("WASM deploy call signing failed: {error:?}"))
+    }
 }
 
 #[cfg(test)]

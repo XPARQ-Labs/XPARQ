@@ -46,7 +46,18 @@ impl ExtensionRegistry {
         call: &ExtensionCall,
         state: &dyn ExtensionStateRead,
     ) -> Result<(), ExtensionFailure> {
-        let extension = self.get(call.extension_id())?;
+        let dynamic;
+        let extension = match self.extensions.get(&call.extension_id()) {
+            Some(extension) => extension.as_ref(),
+            None => {
+                let package = crate::deploy::wasm_deployed_package(state, call.extension_id())?
+                    .ok_or(ExtensionFailure::UnknownExtension)?;
+                dynamic = package
+                    .compile()
+                    .map_err(|_| ExtensionFailure::InvalidState)?;
+                &dynamic
+            }
+        };
         if context.height < extension.activation_height() {
             return Err(ExtensionFailure::InactiveExtension);
         }
@@ -59,7 +70,18 @@ impl ExtensionRegistry {
         call: &ExtensionCall,
         state: &mut dyn ExtensionStateWrite,
     ) -> Result<(), ExtensionFailure> {
-        let extension = self.get(call.extension_id())?;
+        let dynamic;
+        let extension = match self.extensions.get(&call.extension_id()) {
+            Some(extension) => extension.as_ref(),
+            None => {
+                let package = crate::deploy::wasm_deployed_package(state, call.extension_id())?
+                    .ok_or(ExtensionFailure::UnknownExtension)?;
+                dynamic = package
+                    .compile()
+                    .map_err(|_| ExtensionFailure::InvalidState)?;
+                &dynamic
+            }
+        };
         if context.height < extension.activation_height() {
             return Err(ExtensionFailure::InactiveExtension);
         }
@@ -120,6 +142,22 @@ mod tests {
     impl ExtensionStateRead for TestStore {
         fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ExtensionFailure> {
             Ok(self.0.get(key).cloned())
+        }
+
+        fn entries(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ExtensionFailure> {
+            Ok(self
+                .0
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect())
+        }
+
+        fn get_extension(
+            &self,
+            _extension_id: ExtensionId,
+            key: &[u8],
+        ) -> Result<Option<Vec<u8>>, ExtensionFailure> {
+            self.get(key)
         }
     }
 

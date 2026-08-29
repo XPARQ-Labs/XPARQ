@@ -12,7 +12,7 @@ use super::emission::{BLOCK_EMISSION_STEP, MAX_BLOCK_EMISSION, MIN_BLOCK_EMISSIO
 use crate::validate::{MAX_DIFFICULTY, MIN_DIFFICULTY};
 use xparq_coin::Amount;
 
-pub const WBDA_WINDOW: usize = 1024;
+pub const WBDA_WINDOW: usize = 100_000;
 pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 5 * 1024 * 1024;
 pub const WBDA_LOW_UTILIZATION_PPM: u64 = 400_000;
 pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 600_000;
@@ -39,14 +39,14 @@ pub fn average_block_weight(block_weights: &[usize]) -> Option<u64> {
 
     let total = block_weights
         .iter()
-        .try_fold(0u128, |total, weight| total.checked_add(*weight as u128))?;
-    Some((total / WBDA_WINDOW as u128) as u64)
+        .try_fold(0u64, |total, weight| total.checked_add(*weight as u64))?;
+    Some((total / WBDA_WINDOW as u64) as u64)
 }
 
 /// Utilization in parts-per-million, based on average weight over one window.
 pub fn utilization_ppm(block_weights: &[usize]) -> Option<u64> {
-    let average = average_block_weight(block_weights)? as u128;
-    let target_weight = WBDA_TARGET_BLOCK_WEIGHT as u128;
+    let average = average_block_weight(block_weights)? as u64;
+    let target_weight = WBDA_TARGET_BLOCK_WEIGHT as u64;
     if target_weight == 0 {
         return None;
     }
@@ -141,14 +141,14 @@ pub fn next_emission_from_window(
     let adjustment = adjustment_for_window(block_weights)?;
     let emission = match adjustment {
         WbdaAdjustment::Decrease => previous_emission
-            .as_esca()
+            .as_zeno()
             .saturating_sub(BLOCK_EMISSION_STEP),
-        WbdaAdjustment::Keep => previous_emission.as_esca(),
+        WbdaAdjustment::Keep => previous_emission.as_zeno(),
         WbdaAdjustment::Increase => previous_emission
-            .as_esca()
+            .as_zeno()
             .saturating_add(BLOCK_EMISSION_STEP),
     };
-    Some(Amount::from_esca(
+    Some(Amount::from_zeno(
         emission.clamp(MIN_BLOCK_EMISSION, MAX_BLOCK_EMISSION),
     ))
 }
@@ -268,38 +268,38 @@ mod tests {
 
         assert_eq!(
             next_emission_from_window(
-                Amount::from_esca(MIN_BLOCK_EMISSION),
+                Amount::from_zeno(MIN_BLOCK_EMISSION),
                 &window(MAX_BLOCK_WEIGHT / 2)
             ),
-            Some(Amount::from_esca(MIN_BLOCK_EMISSION))
+            Some(Amount::from_zeno(MIN_BLOCK_EMISSION))
         );
         assert_eq!(
             next_emission_from_window(
-                Amount::from_esca(MIN_BLOCK_EMISSION),
+                Amount::from_zeno(MIN_BLOCK_EMISSION),
                 &window(MAX_BLOCK_WEIGHT)
             ),
-            Some(Amount::from_esca(MIN_BLOCK_EMISSION))
+            Some(Amount::from_zeno(MIN_BLOCK_EMISSION))
         );
         assert_eq!(
             next_emission_from_window(
-                Amount::from_esca(MAX_BLOCK_EMISSION),
+                Amount::from_zeno(MAX_BLOCK_EMISSION),
                 &window(MAX_BLOCK_WEIGHT / 10)
             ),
-            Some(Amount::from_esca(MAX_BLOCK_EMISSION))
+            Some(Amount::from_zeno(MAX_BLOCK_EMISSION))
         );
         assert_eq!(
             next_emission_from_window(
-                Amount::from_esca(MIN_BLOCK_EMISSION),
+                Amount::from_zeno(MIN_BLOCK_EMISSION),
                 &window(MAX_BLOCK_WEIGHT)
             ),
-            Some(Amount::from_esca(MIN_BLOCK_EMISSION))
+            Some(Amount::from_zeno(MIN_BLOCK_EMISSION))
         );
     }
 
     #[test]
     fn difficulty_and_reward_move_together_every_epoch() {
         let mut difficulty = 7;
-        let mut emission = Amount::from_esca(crate::consensus::MIN_BLOCK_EMISSION);
+        let mut emission = Amount::from_zeno(crate::consensus::MIN_BLOCK_EMISSION);
 
         // Low utilization: both rise, same epoch, no confirmation wait.
         let sparse = window(MAX_BLOCK_WEIGHT / 10);
@@ -308,7 +308,7 @@ mod tests {
         assert_eq!(difficulty, 8);
         assert_eq!(
             emission,
-            Amount::from_esca(crate::consensus::MIN_BLOCK_EMISSION + BLOCK_EMISSION_STEP)
+            Amount::from_zeno(crate::consensus::MIN_BLOCK_EMISSION + BLOCK_EMISSION_STEP)
         );
 
         // Normal utilization: both hold.
@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(difficulty, 7);
         assert_eq!(
             emission,
-            Amount::from_esca(crate::consensus::MIN_BLOCK_EMISSION)
+            Amount::from_zeno(crate::consensus::MIN_BLOCK_EMISSION)
         );
     }
 

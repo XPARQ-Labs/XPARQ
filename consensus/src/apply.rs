@@ -5,9 +5,8 @@ mod wbda;
 
 pub(crate) use emission::authorize_emission;
 pub use emission::{
-    BASE_BLOCK_EMISSION, BLOCK_EMISSION_MATURITY, BLOCK_EMISSION_STEP, EmissionError,
-    MAX_BLOCK_EMISSION, MIN_BLOCK_EMISSION, ValidatedEmission, expected_emission_for_height,
-    initial_block_emission,
+    BLOCK_EMISSION_START, BLOCK_EMISSION_STEP, EmissionError, MAX_BLOCK_EMISSION,
+    MIN_BLOCK_EMISSION, ValidatedEmission, expected_emission_for_height, initial_block_emission,
 };
 pub use wbda::{
     WBDA_ALGORITHM, WBDA_ALGORITHM as DIFFICULTY_ALGORITHM, WBDA_DIFFICULTY_STEP,

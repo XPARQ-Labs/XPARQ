@@ -39,7 +39,7 @@ Signed transactions are submitted automatically to `/transaction`. Supply
 ```
 
 Without `--input`, the wallet reads paginated `/account/<address>` UTXOs,
-selects spendable inputs, and creates change. Successful submission prints the
+selects available inputs, and creates change. Successful submission prints the
 transaction ID and canonical serialized size.
 
 Partial redeem sends the requested XPQ and creates fresh QCash change. Split
@@ -53,10 +53,13 @@ Merge consumes at least two inputs.
 ./target/release/wallet qcash-redeem --file cash/FILE.QCash --to ADDRESS --amount 40 --cash-dir cash
 ```
 
-The wallet automatically adds a `BlockMiner` output paying `1 esca` per
+The wallet automatically adds a `BlockMiner` output paying `1 zeno` per
 canonical transaction byte. There is no manual fee prompt or `--miner` fee
 option. For QCash redeem, split, and merge, this fee is deducted from the
 QCash value; ordinary spend and withdraw select enough XPQ input value for it.
+The wallet also adds an exact `Burn` output when a transaction has positive net
+persistent-state growth. The state-burn rate and UTXO weights are consensus
+parameters returned by `GET /fee-policy`.
 
 ## Extension assets
 
@@ -65,7 +68,7 @@ asset ID and makes the signing wallet its mint authority. Amounts and supply
 limits accept the full unsigned 128-bit integer range.
 
 ```bash
-./target/release/wallet asset-register --name "Gold Token" --symbol GOLD --decimals 2 --max-supply 1000000
+./target/release/wallet asset-register --name "Gold Token" --symbol GOLD --decimals 2 --max-supply 1000000 --initial-mint 1000000
 ./target/release/wallet asset-mint --asset ID --to ADDRESS --amount 500
 ./target/release/wallet asset-transfer --asset ID --to ADDRESS --amount 25
 ./target/release/wallet asset-burn --asset ID --amount 10

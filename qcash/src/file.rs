@@ -17,7 +17,7 @@ pub fn canonical_qcash_file_name(qcash: QCash) -> String {
 /// Returns an amount-based filename, adding `(N)` for the second and later files.
 pub fn qcash_file_name(qcash: QCash, sequence: usize) -> String {
     assert!(sequence >= 1, "QCash filename sequence starts at one");
-    let amount = qcash.amount().as_esca();
+    let amount = qcash.amount().as_zeno();
     let whole = amount / xparq_coin::COIN;
     let fractional = amount % xparq_coin::COIN;
     let amount = if fractional == 0 {
@@ -186,7 +186,7 @@ mod tests {
     fn qcash(amount: u64) -> QCash {
         QCash::new(
             CoinId::from_bytes([0xab; CoinId::SIZE]),
-            Amount::from_esca(amount),
+            Amount::from_zeno(amount),
         )
     }
 

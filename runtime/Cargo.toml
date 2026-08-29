@@ -1,5 +1,5 @@
 [package]
-name = "xparq-runtime"
+name = "xparq-node"
 version = "0.2.16"
 edition.workspace = true
 rust-version.workspace = true
@@ -28,4 +28,4 @@ redb.workspace = true
 xparq.workspace = true
 
 [dev-dependencies]
-xparq-wallet = { package = "wallet", path = "../wallet", default-features = false }
+xparq-wallet = { path = "../wallet", default-features = false }

@@ -52,11 +52,12 @@ impl Ledger {
             let AuthorizedTransaction::Extension(transaction) = transaction else {
                 continue;
             };
-            let extension = xparq_extension::production_registry()
-                .get(transaction.call.extension_id())
-                .map_err(extension_error)?;
             extensions
-                .apply(extension, ExtensionContext { height }, &transaction.call)
+                .apply(
+                    xparq_extension::production_registry(),
+                    ExtensionContext { height },
+                    &transaction.call,
+                )
                 .map_err(extension_error)?;
         }
         extensions.state_root().map_err(extension_error)
@@ -103,7 +104,6 @@ impl Ledger {
             staged_state.coins.insert(CoinUtxo {
                 coin: Coin::new(id, emission.subsidy()),
                 owner: emission.recipient(),
-                maturity_height: Some(emission.maturity_height()),
             })?;
             block_journals.push(StateRollbackJournal::Utxo(UtxoRollbackJournal {
                 created_coin_ids: vec![id],
@@ -210,7 +210,6 @@ impl TransactionStateView for LedgerState {
         self.coins.get(&id).map(|utxo| CoinInputState {
             amount: utxo.coin.amount,
             owner: utxo.owner,
-            maturity_height: utxo.maturity_height,
         })
     }
 
@@ -223,6 +222,15 @@ impl TransactionStateView for LedgerState {
 
     fn profile_public_key(&self, address: Address) -> Option<ProfilePublicKey> {
         self.account_keys.get_profile(&address).cloned()
+    }
+
+    fn extension_created_state_weight(&self, call: &xparq_common::ExtensionCall) -> u64 {
+        if call.extension_id() != xparq_extension::asset::asset_extension_id() {
+            return 0;
+        }
+        xparq_extension::asset::AssetCall::from_extension_call(call)
+            .and_then(|call| call.registration_metadata_weight())
+            .unwrap_or(0)
     }
 }
 

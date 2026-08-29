@@ -9,12 +9,15 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use std::{collections::BTreeSet, error::Error, fmt};
 use xparq_coin::{Amount, CoinId};
 use xparq_common::ExtensionCall;
-use xparq_common::Height as LedgerHeight;
 use xparq_crypto::{Address, ProfilePublicKey, QCashPublicKey};
 use xparq_transaction::{
     AccountAuthorization, AuthorizedAccountIntent, AuthorizedQCashIntent, AuthorizedTransaction,
     ChainContext, IntentError, MergeIntent, OnChainSpendIntent, QCashIntent, RedeemIntent,
     SpendCommitment, SplitIntent, WithdrawIntent,
+};
+
+use crate::state_burn::{
+    StateBurnError, StateTransitionWeight, created_coin_output_count, validate_exact_burn,
 };
 
 pub fn validate_emission(
@@ -138,7 +141,6 @@ pub struct ValidatedExtensionTransaction {
 pub struct CoinInputState {
     pub amount: Amount,
     pub owner: Address,
-    pub maturity_height: Option<LedgerHeight>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +154,10 @@ pub trait TransactionStateView {
     fn coin(&self, id: CoinId) -> Option<CoinInputState>;
     fn qcash(&self, id: CoinId) -> Option<QCashInputState>;
     fn profile_public_key(&self, address: Address) -> Option<ProfilePublicKey>;
+
+    fn extension_created_state_weight(&self, _call: &ExtensionCall) -> u64 {
+        0
+    }
 }
 
 pub fn validate_transaction(
@@ -173,8 +179,15 @@ pub fn validate_transaction(
                     .iter()
                     .map(|output| output.amount)
                     .collect::<Vec<_>>(),
-                current_height,
                 state,
+            )?;
+            validate_state_burn(
+                &validated.intent().outputs,
+                StateTransitionWeight {
+                    consumed_coin_utxos: count(validated.intent().inputs.len())?,
+                    created_coin_utxos: created_coin_output_count(&validated.intent().outputs)?,
+                    ..StateTransitionWeight::default()
+                },
             )?;
             Ok(ValidatedTransaction::OnChainSpend(validated))
         }
@@ -188,18 +201,31 @@ pub fn validate_transaction(
                 .map(|output| output.amount)
                 .chain(intent.outputs.iter().map(|output| output.amount))
                 .collect::<Vec<_>>();
-            validate_coin_inputs(
-                &intent.inputs,
-                intent.sender,
-                &outputs,
-                current_height,
-                state,
+            validate_coin_inputs(&intent.inputs, intent.sender, &outputs, state)?;
+            validate_state_burn(
+                &intent.outputs,
+                StateTransitionWeight {
+                    consumed_coin_utxos: count(intent.inputs.len())?,
+                    created_coin_utxos: created_coin_output_count(&intent.outputs)?,
+                    created_qcash_utxos: count(intent.qcash_outputs.len())?,
+                    ..StateTransitionWeight::default()
+                },
             )?;
             Ok(ValidatedTransaction::Withdraw(validated))
         }
         AuthorizedTransaction::Redeem(transaction) => {
-            validate_bearer_authorization(*transaction, chain, state)
-                .map(ValidatedTransaction::Redeem)
+            let validated = validate_bearer_authorization(*transaction, chain, state)?;
+            let intent = validated.intent();
+            validate_state_burn(
+                &intent.outputs,
+                StateTransitionWeight {
+                    consumed_qcash_utxos: count(intent.inputs.len())?,
+                    created_qcash_utxos: count(intent.qcash_outputs.len())?,
+                    created_coin_utxos: created_coin_output_count(&intent.outputs)?,
+                    ..StateTransitionWeight::default()
+                },
+            )?;
+            Ok(ValidatedTransaction::Redeem(validated))
         }
         AuthorizedTransaction::Merge(transaction) => {
             let validated = validate_bearer_authorization(*transaction, chain, state)?;
@@ -207,6 +233,17 @@ pub fn validate_transaction(
                 validated.intent().inputs.iter().map(|input| input.id()),
                 std::iter::once(validated.intent().output.public_key),
                 state,
+            )?;
+            validate_state_burn(
+                &validated.intent().public_outputs,
+                StateTransitionWeight {
+                    consumed_qcash_utxos: count(validated.intent().inputs.len())?,
+                    created_qcash_utxos: 1,
+                    created_coin_utxos: created_coin_output_count(
+                        &validated.intent().public_outputs,
+                    )?,
+                    ..StateTransitionWeight::default()
+                },
             )?;
             Ok(ValidatedTransaction::Merge(validated))
         }
@@ -220,6 +257,17 @@ pub fn validate_transaction(
                     .iter()
                     .map(|output| output.public_key),
                 state,
+            )?;
+            validate_state_burn(
+                &validated.intent().public_outputs,
+                StateTransitionWeight {
+                    consumed_qcash_utxos: 1,
+                    created_qcash_utxos: count(validated.intent().outputs.len())?,
+                    created_coin_utxos: created_coin_output_count(
+                        &validated.intent().public_outputs,
+                    )?,
+                    ..StateTransitionWeight::default()
+                },
             )?;
             Ok(ValidatedTransaction::Split(validated))
         }
@@ -235,8 +283,17 @@ pub fn validate_transaction(
                     .iter()
                     .map(|output| output.amount)
                     .collect::<Vec<_>>(),
-                current_height,
                 state,
+            )?;
+            validate_state_burn(
+                &fee.intent().outputs,
+                StateTransitionWeight {
+                    consumed_coin_utxos: count(fee.intent().inputs.len())?,
+                    created_coin_utxos: created_coin_output_count(&fee.intent().outputs)?,
+                    extension_created_weight: state
+                        .extension_created_state_weight(&transaction.call),
+                    ..StateTransitionWeight::default()
+                },
             )?;
             Ok(ValidatedTransaction::Extension(
                 ValidatedExtensionTransaction {
@@ -246,6 +303,20 @@ pub fn validate_transaction(
             ))
         }
     }
+}
+
+fn count(value: usize) -> Result<u64, TransactionConsensusError> {
+    u64::try_from(value)
+        .map_err(|_| TransactionConsensusError::StateBurn(StateBurnError::WeightOverflow))
+}
+
+fn validate_state_burn(
+    outputs: &[xparq_transaction::SpendOutput],
+    transition: StateTransitionWeight,
+) -> Result<(), TransactionConsensusError> {
+    let required = transition.required_burn()?;
+    validate_exact_burn(outputs, required)?;
+    Ok(())
 }
 
 fn validate_account_authorization<T>(
@@ -346,11 +417,10 @@ fn validate_coin_inputs(
     inputs: &[CoinId],
     owner: Address,
     outputs: &[Amount],
-    current_height: u64,
     state: &impl TransactionStateView,
 ) -> Result<(), TransactionConsensusError> {
     ensure_unique_coin_ids(inputs.iter().copied())?;
-    let mut input_total = Amount::from_esca(0);
+    let mut input_total = Amount::from_zeno(0);
     for id in inputs {
         let input = state
             .coin(*id)
@@ -358,19 +428,13 @@ fn validate_coin_inputs(
         if input.owner != owner {
             return Err(TransactionConsensusError::OwnerMismatch);
         }
-        if input
-            .maturity_height
-            .is_some_and(|height| current_height < height.0)
-        {
-            return Err(TransactionConsensusError::ImmatureCoin);
-        }
         input_total = input_total
             .checked_add(input.amount)
             .ok_or(TransactionConsensusError::AmountOverflow)?;
     }
     let output_total = outputs
         .iter()
-        .try_fold(Amount::from_esca(0), |sum, amount| {
+        .try_fold(Amount::from_zeno(0), |sum, amount| {
             sum.checked_add(*amount)
                 .ok_or(TransactionConsensusError::AmountOverflow)
         })?;
@@ -422,11 +486,11 @@ pub enum TransactionConsensusError {
     SignatureSchemeInactive,
     UtxoNotFound,
     OwnerMismatch,
-    ImmatureCoin,
     InputAmountMismatch,
     ReusedBearerKey,
     AmountOverflow,
     ValueMismatch,
+    StateBurn(StateBurnError),
 }
 
 impl fmt::Display for TransactionConsensusError {
@@ -443,7 +507,6 @@ impl fmt::Display for TransactionConsensusError {
             Self::OwnerMismatch => {
                 formatter.write_str("transaction input belongs to another owner")
             }
-            Self::ImmatureCoin => formatter.write_str("transaction input is not yet spendable"),
             Self::InputAmountMismatch => {
                 formatter.write_str("QCash input amount does not match canonical state")
             }
@@ -452,11 +515,18 @@ impl fmt::Display for TransactionConsensusError {
             }
             Self::AmountOverflow => formatter.write_str("transaction amount overflow"),
             Self::ValueMismatch => formatter.write_str("input value does not equal output value"),
+            Self::StateBurn(error) => write!(formatter, "invalid state burn: {error}"),
         }
     }
 }
 
 impl Error for TransactionConsensusError {}
+
+impl From<StateBurnError> for TransactionConsensusError {
+    fn from(error: StateBurnError) -> Self {
+        Self::StateBurn(error)
+    }
+}
 
 #[cfg(test)]
 mod transaction_tests {
@@ -475,7 +545,7 @@ mod transaction_tests {
 
         fn qcash(&self, id: CoinId) -> Option<QCashInputState> {
             (id == self.id).then_some(QCashInputState {
-                amount: Amount::from_esca(10),
+                amount: Amount::from_zeno(2_000),
                 public_key: self.public_key,
             })
         }
@@ -515,18 +585,20 @@ mod transaction_tests {
         let id = CoinId::from_bytes([4; CoinId::SIZE]);
         let seed = xparq_qcash::QCashSigningSeed::from_bytes([5; 32]);
         let intent = SplitIntent::new(
-            xparq_qcash::QCash::new(id, Amount::from_esca(10)),
+            xparq_qcash::QCash::new(id, Amount::from_zeno(2_000)),
             vec![
                 xparq_transaction::QCashOutput::new(
-                    Amount::from_esca(4),
+                    Amount::from_zeno(500),
                     QCashPublicKey([6; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
                 ),
                 xparq_transaction::QCashOutput::new(
-                    Amount::from_esca(6),
+                    Amount::from_zeno(1_500 - crate::QCASH_UTXO_STATE_WEIGHT),
                     QCashPublicKey([7; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
                 ),
             ],
-            None,
+            vec![xparq_transaction::SpendOutput::burn(Amount::from_zeno(
+                crate::QCASH_UTXO_STATE_WEIGHT as u64,
+            ))],
         )
         .unwrap();
         let chain = ChainContext::new([8; 32]);
@@ -552,8 +624,9 @@ mod transaction_tests {
             Ok(ValidatedTransaction::Split(_))
         ));
         let mut tampered = signed;
-        tampered.intent.outputs[0].amount = Amount::from_esca(5);
-        tampered.intent.outputs[1].amount = Amount::from_esca(5);
+        tampered.intent.outputs[0].amount = Amount::from_zeno(501);
+        tampered.intent.outputs[1].amount =
+            Amount::from_zeno(1_499 - crate::QCASH_UTXO_STATE_WEIGHT);
         assert_eq!(
             validate_transaction(
                 AuthorizedTransaction::Split(Box::new(tampered)),
@@ -573,9 +646,8 @@ mod transaction_tests {
     impl TransactionStateView for FalconAccountState {
         fn coin(&self, id: CoinId) -> Option<CoinInputState> {
             (id == self.id).then_some(CoinInputState {
-                amount: Amount::from_esca(10),
+                amount: Amount::from_zeno(10),
                 owner: self.owner,
-                maturity_height: None,
             })
         }
 
@@ -602,7 +674,7 @@ mod transaction_tests {
             vec![id],
             vec![xparq_transaction::SpendOutput::new(
                 sender,
-                Amount::from_esca(10),
+                Amount::from_zeno(10),
             )],
         )
         .unwrap();
@@ -629,7 +701,7 @@ pub const MAX_DIFFICULTY: u32 = (crate::crypto::POW_HASH_SIZE * 8) as u32;
 /// Compatibility name for the height-zero difficulty. Unlike
 /// [`DIFFICULTY_START`], this value belongs to the stable genesis header.
 pub const GENESIS_DIFFICULTY: u32 = crate::block::GENESIS_BLOCK_DIFFICULTY;
-pub const DIFFICULTY_START: u32 = 5;
+pub const DIFFICULTY_START: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConsensusConfig {
@@ -854,7 +926,7 @@ pub struct HeaderValidationState {
     pub height: BlockHeight,
     pub header: Header,
     pub cumulative_work: Work,
-    pub cumulative_weight: u128,
+    pub cumulative_weight: u64,
     pub difficulty_anchor: HeaderAtHeight,
     pub recent_headers: Vec<HeaderAtHeight>,
 }
@@ -1005,8 +1077,8 @@ pub fn header_validation_state(
         cumulative_weight: validated_headers
             .iter()
             .skip(1)
-            .fold(0_u128, |total, header| {
-                total.saturating_add(u128::from(header.header.block_weight))
+            .fold(0_u64, |total, header| {
+                total.saturating_add(u64::from(header.header.block_weight))
             }),
         difficulty_anchor,
         recent_headers: validated_headers[start..].to_vec(),
@@ -1158,7 +1230,7 @@ fn advanced_header_validation_state(
         cumulative_weight: headers
             .iter()
             .fold(state.cumulative_weight, |total, header| {
-                total.saturating_add(u128::from(header.header.block_weight))
+                total.saturating_add(u64::from(header.header.block_weight))
             }),
         difficulty_anchor: state.difficulty_anchor.clone(),
         recent_headers,

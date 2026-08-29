@@ -5,9 +5,10 @@ use std::{error::Error, fmt};
 use borsh::BorshSerialize;
 use xparq_blockchain::{Block, MAX_BLOCK_WEIGHT, Nonce};
 use xparq_consensus::{
-    BLOCK_EMISSION_MATURITY, BLOCK_EMISSION_STEP, DIFFICULTY_START, MAX_BLOCK_EMISSION,
+    BLOCK_EMISSION_STEP, COIN_UTXO_STATE_WEIGHT, DIFFICULTY_START, MAX_BLOCK_EMISSION,
     MAX_DIFFICULTY, MIN_BLOCK_EMISSION, MIN_DIFFICULTY, POW_ALGORITHM, POW_ARGON2_ITERATIONS,
-    POW_ARGON2_LANES, POW_ARGON2_MEMORY_KIB, WBDA_ALGORITHM, WBDA_DIFFICULTY_STEP,
+    POW_ARGON2_LANES, POW_ARGON2_MEMORY_KIB, QCASH_UTXO_STATE_WEIGHT, STATE_BURN_ALGORITHM,
+    STATE_BURN_RATE_ZENO_PER_WEIGHT, WBDA_ALGORITHM, WBDA_DIFFICULTY_STEP,
     WBDA_HIGH_UTILIZATION_PPM, WBDA_LOW_UTILIZATION_PPM, WBDA_TARGET_BLOCK_WEIGHT, WBDA_WINDOW,
 };
 use xparq_crypto::{
@@ -29,7 +30,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 ]);
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`] changes.
-pub const CHAIN_SPEC_VERSION: u32 = 14;
+pub const CHAIN_SPEC_VERSION: u32 = 1;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -51,7 +52,10 @@ struct ChainSpecIdentity<'a> {
     min_block_emission: u64,
     max_block_emission: u64,
     block_emission_step: u64,
-    block_emission_maturity: u64,
+    state_burn_algorithm: &'a str,
+    state_burn_rate_zeno_per_weight: u64,
+    coin_utxo_state_weight: u64,
+    qcash_utxo_state_weight: u64,
     max_block_weight: u64,
     address_size: u32,
     address_encoding: &'a str,
@@ -65,6 +69,15 @@ struct ChainSpecIdentity<'a> {
     extension_protocol: &'a str,
     asset_extension_id: [u8; 32],
     asset_extension_activation_height: u64,
+    wasm_deploy_extension_id: [u8; 32],
+    wasm_deploy_activation_delay: u64,
+}
+
+#[derive(BorshSerialize)]
+struct WasmChainSpecIdentity<'a> {
+    base_chain_spec_hash: [u8; HASH_SIZE],
+    protocol: &'a str,
+    manifests: &'a [xparq_extension::WasmExtensionManifest],
 }
 
 /// Domain-separated identity of every consensus parameter that nodes must agree on.
@@ -88,7 +101,10 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         min_block_emission: MIN_BLOCK_EMISSION,
         max_block_emission: MAX_BLOCK_EMISSION,
         block_emission_step: BLOCK_EMISSION_STEP,
-        block_emission_maturity: BLOCK_EMISSION_MATURITY,
+        state_burn_algorithm: STATE_BURN_ALGORITHM,
+        state_burn_rate_zeno_per_weight: STATE_BURN_RATE_ZENO_PER_WEIGHT,
+        coin_utxo_state_weight: COIN_UTXO_STATE_WEIGHT,
+        qcash_utxo_state_weight: QCASH_UTXO_STATE_WEIGHT,
         max_block_weight: MAX_BLOCK_WEIGHT as u64,
         address_size: ADDRESS_SIZE as u32,
         address_encoding: "xparq-0x-sha3-checksum-v1",
@@ -99,11 +115,24 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         qcash_signature_algorithm: QCASH_SIGNATURE_ALGORITHM,
         qcash_public_key_size: QCASH_PUBLIC_KEY_SIZE as u32,
         qcash_signature_size: QCASH_SIGNATURE_SIZE as u32,
-        extension_protocol: "xparq-extension-asset-u128-v4",
+        extension_protocol: "xparq-extension-permissionless-wasm-v5",
         asset_extension_id: *xparq_extension::asset::asset_extension_id().as_bytes(),
         asset_extension_activation_height: xparq_extension::asset::ASSET_ACTIVATION_HEIGHT.0,
+        wasm_deploy_extension_id: *xparq_extension::wasm_deploy_extension_id().as_bytes(),
+        wasm_deploy_activation_delay: xparq_extension::WASM_DEPLOY_ACTIVATION_DELAY,
     };
     let bytes = xparq_common::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
+    let base_hash = domain_hash(HashDomain::ChainSpec, &bytes);
+    let manifests = xparq_extension::wasm_chain_spec_manifests();
+    if manifests.is_empty() {
+        return Ok(base_hash);
+    }
+    let wasm_identity = WasmChainSpecIdentity {
+        base_chain_spec_hash: base_hash.0,
+        protocol: "xparq-wasm-extension-abi-v1",
+        manifests,
+    };
+    let bytes = xparq_common::canonical_bytes(&wasm_identity).map_err(GenesisError::Encoding)?;
     Ok(domain_hash(HashDomain::ChainSpec, &bytes))
 }
 #[cfg(feature = "testnet")]

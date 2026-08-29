@@ -3,14 +3,47 @@
 //! Extensions remain outside the consensus kernel unless explicitly integrated
 //! through a separately reviewed protocol change.
 
+mod deploy;
 mod registry;
+mod wasm;
 
 use std::sync::OnceLock;
 
+pub use deploy::{
+    WASM_DEPLOY_ACTIVATION_DELAY, WasmDeployCall, WasmDeployExtension, wasm_deploy_extension_id,
+    wasm_deploy_nonce, wasm_deployed_package,
+};
 pub use registry::{ExtensionRegistry, RegistryError};
+pub use wasm::{
+    WASM_ABI_VERSION, WASM_CODE_MAX_SIZE, WASM_DEFAULT_FUEL, WASM_MEMORY_MAX_PAGES,
+    WASM_STATE_MAX_SIZE, WasmExtension, WasmExtensionError, WasmExtensionManifest,
+    WasmExtensionPackage, wasm_code_hash, wasm_extension_id,
+};
 pub use xparq_asset as asset;
 pub use xparq_bridge as bridge;
 pub use xparq_common::extension::*;
+
+static WASM_CHAIN_SPEC_MANIFESTS: OnceLock<Vec<WasmExtensionManifest>> = OnceLock::new();
+
+/// Fixes the ordered WASM allowlist before any chain-spec hash is calculated.
+pub fn configure_wasm_chain_spec(
+    mut manifests: Vec<WasmExtensionManifest>,
+) -> Result<(), RegistryError> {
+    manifests.sort_by_key(|manifest| manifest.extension_id);
+    if manifests
+        .windows(2)
+        .any(|pair| pair[0].extension_id == pair[1].extension_id)
+    {
+        return Err(RegistryError::DuplicateExtension);
+    }
+    WASM_CHAIN_SPEC_MANIFESTS
+        .set(manifests)
+        .map_err(|_| RegistryError::AlreadyInitialized)
+}
+
+pub fn wasm_chain_spec_manifests() -> &'static [WasmExtensionManifest] {
+    WASM_CHAIN_SPEC_MANIFESTS.get_or_init(Vec::new)
+}
 
 /// Registry linked into the current node build and initialized once during
 /// runtime startup before persisted blocks or mempool entries are decoded.

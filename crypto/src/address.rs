@@ -29,7 +29,7 @@ impl Address {
     pub const ZERO: Self = Self([0; ADDRESS_SIZE]);
 }
 
-pub const ADDRESS_PREFIX: &str = "0x";
+pub const ADDRESS_PREFIX: &str = "Qx";
 pub const ADDRESS_CHECKSUM_SIZE: usize = 4;
 pub const ADDRESS_STRING_LEN: usize =
     ADDRESS_PREFIX.len() + (ADDRESS_SIZE + ADDRESS_CHECKSUM_SIZE) * 2;
@@ -62,12 +62,17 @@ pub fn address_to_string(address: &Address) -> String {
 }
 
 pub fn address_from_string(address: &str) -> Result<Address, CryptoError> {
-    if address.len() != ADDRESS_STRING_LEN || address != address.to_ascii_lowercase() {
+    if address.len() != ADDRESS_STRING_LEN {
         return Err(CryptoError::InvalidAddressEncoding);
     }
     let encoded = address
         .strip_prefix(ADDRESS_PREFIX)
         .ok_or(CryptoError::InvalidAddressEncoding)?;
+
+    if encoded != encoded.to_ascii_lowercase() {
+        return Err(CryptoError::InvalidAddressEncoding);
+    }
+
     let bytes = hex::decode(encoded).map_err(|_| CryptoError::InvalidAddressEncoding)?;
     let (address_bytes, checksum_bytes) = bytes.split_at(ADDRESS_SIZE);
     let address = Address(
@@ -103,7 +108,7 @@ mod tests {
         let encoded = address_to_string(&address);
         assert_eq!(
             encoded,
-            "0x0707070707070707070707070707070707070707eecbf9c9"
+            "Qx0707070707070707070707070707070707070707eecbf9c9"
         );
         assert!(encoded.starts_with(ADDRESS_PREFIX));
         assert_eq!(encoded.len(), ADDRESS_STRING_LEN);

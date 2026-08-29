@@ -3,7 +3,7 @@
   "info": {
     "title": "XPARQ Node RPC API",
     "version": "0.2.16",
-    "description": "Read-only chain, account and explorer RPC plus canonical Borsh transaction submission. Amounts are integer esca; 1000000 esca = 1 XPQ."
+    "description": "Read-only chain, account and explorer RPC plus canonical Borsh transaction submission. Native XPQ amounts are integer zeno; 1000000 zeno = 1 XPQ."
   },
   "servers": [{ "url": "/", "description": "Current node" }],
   "tags": [
@@ -12,7 +12,8 @@
     { "name": "Accounts" },
     { "name": "Explorer" },
     { "name": "Transactions" },
-    { "name": "Assets" }
+    { "name": "Assets" },
+    { "name": "WASM Extensions" }
   ],
   "paths": {
     "/status": {
@@ -45,6 +46,13 @@
         "tags": ["Accounts"], "summary": "Get wallet account balance and paginated UTXOs", "operationId": "getAccount",
         "parameters": [{ "$ref": "#/components/parameters/Address" }, { "name": "utxo_offset", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 0 }, "description": "Offset returned by next_utxo_offset" }],
         "responses": { "200": { "description": "Wallet-oriented account state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Account" } } } }, "400": { "$ref": "#/components/responses/BadRequest" } }
+      }
+    },
+    "/balance/{address}": {
+      "get": {
+        "tags": ["Accounts"], "summary": "Get aggregate wallet balance without UTXO pagination", "operationId": "getBalance",
+        "parameters": [{ "$ref": "#/components/parameters/Address" }],
+        "responses": { "200": { "description": "Single-snapshot balance, reservation, UTXO count, and assets", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AccountBalance" } } } }, "400": { "$ref": "#/components/responses/BadRequest" } }
       }
     },
     "/explorer/address/{address}": {
@@ -82,6 +90,20 @@
         "responses": { "200": { "description": "Canonical asset balance" }, "400": { "$ref": "#/components/responses/BadRequest" } }
       }
     },
+    "/wasm/nonce/{address}": {
+      "get": {
+        "tags": ["WASM Extensions"], "summary": "Get the next permissionless WASM deploy nonce", "operationId": "getWasmDeployNonce",
+        "parameters": [{ "$ref": "#/components/parameters/Address" }],
+        "responses": { "200": { "description": "Next nonce for this WASM deploy signer" }, "400": { "$ref": "#/components/responses/BadRequest" } }
+      }
+    },
+    "/wasm/{extension_id}": {
+      "get": {
+        "tags": ["WASM Extensions"], "summary": "Get an on-chain WASM extension manifest and activation status", "operationId": "getWasmExtension",
+        "parameters": [{ "$ref": "#/components/parameters/ExtensionId" }],
+        "responses": { "200": { "description": "Immutable on-chain WASM extension metadata" }, "400": { "$ref": "#/components/responses/BadRequest" } }
+      }
+    },
     "/transaction": {
       "post": {
         "tags": ["Transactions"], "summary": "Submit a canonical Borsh transaction", "operationId": "submitTransaction",
@@ -96,6 +118,7 @@
       "Height": { "name": "height", "in": "path", "required": true, "schema": { "type": "integer", "format": "uint64", "minimum": 0 } },
       "Address": { "name": "address", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/Address" }, "description": "Checksummed XPARQ address" },
       "AssetId": { "name": "asset_id", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/Hash32" }, "description": "Canonical extension asset identifier" },
+      "ExtensionId": { "name": "extension_id", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/Hash32" }, "description": "Canonical WASM extension identifier" },
       "TransactionId": { "name": "transaction_id", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/Hash32" } }
     },
     "responses": {
@@ -104,12 +127,14 @@
     "schemas": {
       "Address": { "type": "string", "pattern": "^0x[0-9a-f]{48}$", "minLength": 50, "maxLength": 50, "description": "20-byte address followed by a 4-byte domain-separated SHA3-256 checksum" },
       "Hash32": { "type": "string", "pattern": "^[0-9a-f]{64}$", "example": "0000000000000000000000000000000000000000000000000000000000000000" },
-      "Amount": { "type": "integer", "format": "uint64", "minimum": 0, "description": "Integer esca; 1000000 esca = 1 XPQ" },
+      "Amount": { "type": "integer", "format": "uint64", "minimum": 0, "description": "Unsigned integer zeno; 1000000 zeno = 1 XPQ" },
       "Status": { "type": "object", "required": ["tip_height", "next_height", "tip_hash", "next_difficulty", "cumulative_work", "cumulative_weight"], "properties": { "tip_height": { "type": "integer", "format": "uint64" }, "next_height": { "type": "integer", "format": "uint64" }, "tip_hash": { "$ref": "#/components/schemas/Hash32" }, "next_difficulty": { "type": "integer", "format": "uint64" }, "cumulative_work": { "type": "string" }, "cumulative_weight": { "type": "string" } } },
-      "FeePolicy": { "type": "object", "required": ["minimum_fee_rate_esca_per_byte"], "properties": { "minimum_fee_rate_esca_per_byte": { "type": "integer", "format": "uint64" } } },
+      "FeePolicy": { "type": "object", "required": ["minimum_fee_rate_zeno_per_byte", "state_burn_algorithm", "state_burn_rate_zeno_per_weight", "coin_utxo_state_weight", "qcash_utxo_state_weight"], "properties": { "minimum_fee_rate_zeno_per_byte": { "type": "integer", "format": "uint64" }, "state_burn_algorithm": { "type": "string" }, "state_burn_rate_zeno_per_weight": { "type": "integer", "format": "uint64" }, "coin_utxo_state_weight": { "type": "integer", "format": "uint64" }, "qcash_utxo_state_weight": { "type": "integer", "format": "uint64" } } },
       "Block": { "type": "object", "required": ["height", "hash", "previous_hash", "difficulty", "block_weight", "nonce", "transactions", "miner", "subsidy"], "properties": { "height": { "type": "integer", "format": "uint64" }, "hash": { "$ref": "#/components/schemas/Hash32" }, "previous_hash": { "$ref": "#/components/schemas/Hash32" }, "difficulty": { "type": "integer" }, "block_weight": { "type": "integer" }, "nonce": { "type": "integer", "format": "uint64" }, "transactions": { "type": "integer" }, "miner": { "$ref": "#/components/schemas/Address" }, "subsidy": { "$ref": "#/components/schemas/Amount" } } },
-      "CoinUtxo": { "type": "object", "required": ["id", "amount", "maturity_height", "reserved"], "properties": { "id": { "type": "string", "pattern": "^XPQ:[0-9a-fA-F]{64}$", "description": "XPQ-prefixed CoinId" }, "amount": { "$ref": "#/components/schemas/Amount" }, "maturity_height": { "type": ["integer", "null"], "format": "uint64", "description": "Earliest spend height for immature block emission, otherwise null" }, "reserved": { "type": "boolean" } } },
-      "Account": { "type": "object", "required": ["address", "public_key_registered", "tip_height", "next_height", "total", "spendable", "utxos"], "properties": { "address": { "$ref": "#/components/schemas/Address" }, "public_key_registered": { "type": "boolean" }, "signature_profile": { "type": ["string", "null"], "enum": ["mldsa44", "mldsa65", "mldsa87", "falcon512", "falcon1024", null] }, "tip_height": { "type": "integer", "format": "uint64" }, "next_height": { "type": "integer", "format": "uint64" }, "total": { "$ref": "#/components/schemas/Amount" }, "spendable": { "$ref": "#/components/schemas/Amount" }, "utxos": { "type": "array", "items": { "$ref": "#/components/schemas/CoinUtxo" } }, "next_utxo_offset": { "type": ["integer", "null"], "minimum": 0 } } },
+      "CoinUtxo": { "type": "object", "required": ["id", "amount", "reserved"], "properties": { "id": { "type": "string", "pattern": "^XPQ:[0-9a-fA-F]{64}$", "description": "XPQ-prefixed CoinId" }, "amount": { "$ref": "#/components/schemas/Amount" }, "reserved": { "type": "boolean", "description": "True while referenced by a transaction in the local mempool" } } },
+      "Account": { "type": "object", "required": ["address", "public_key_registered", "tip_height", "next_height", "total", "assets", "utxos"], "properties": { "address": { "$ref": "#/components/schemas/Address" }, "public_key_registered": { "type": "boolean" }, "signature_profile": { "type": ["string", "null"], "enum": ["mldsa44", "mldsa65", "mldsa87", "falcon512", "falcon1024", null] }, "tip_height": { "type": "integer", "format": "uint64" }, "next_height": { "type": "integer", "format": "uint64" }, "total": { "$ref": "#/components/schemas/Amount" }, "assets": { "type": "array", "items": { "$ref": "#/components/schemas/AssetBalance" } }, "utxos": { "type": "array", "items": { "$ref": "#/components/schemas/CoinUtxo" } }, "next_utxo_offset": { "type": ["integer", "null"], "minimum": 0 } } },
+      "AccountBalance": { "type": "object", "required": ["address", "tip_height", "total", "available", "reserved", "utxo_count", "assets"], "properties": { "address": { "$ref": "#/components/schemas/Address" }, "tip_height": { "type": "integer", "format": "uint64" }, "total": { "$ref": "#/components/schemas/Amount" }, "available": { "$ref": "#/components/schemas/Amount" }, "reserved": { "$ref": "#/components/schemas/Amount" }, "utxo_count": { "type": "integer", "minimum": 0 }, "assets": { "type": "array", "items": { "$ref": "#/components/schemas/AssetBalance" } } } },
+      "AssetBalance": { "type": "object", "required": ["asset_id", "name", "symbol", "decimals", "balance"], "properties": { "asset_id": { "$ref": "#/components/schemas/Hash32" }, "name": { "type": "string" }, "symbol": { "type": "string" }, "decimals": { "type": "integer", "minimum": 0, "maximum": 18 }, "balance": { "type": "string", "pattern": "^[0-9]+$", "description": "Exact unsigned 128-bit balance in base units" } } },
       "Activity": { "type": "object", "required": ["height", "block_hash", "type", "direction", "amount"], "properties": { "height": { "type": "integer", "format": "uint64" }, "block_hash": { "$ref": "#/components/schemas/Hash32" }, "transaction_id": { "oneOf": [{ "$ref": "#/components/schemas/Hash32" }, { "type": "null" }] }, "type": { "type": "string" }, "direction": { "type": "string", "enum": ["in", "out", "self"] }, "amount": { "$ref": "#/components/schemas/Amount" }, "size_bytes": { "type": ["integer", "null"] } } },
       "AddressHistory": { "type": "object", "description": "Canonical address aggregation. Additional balance fields may be present.", "additionalProperties": true, "properties": { "address": { "$ref": "#/components/schemas/Address" }, "tip_height": { "type": "integer", "format": "uint64" }, "activity_count": { "type": "integer" }, "emission_count": { "type": "integer" }, "activities": { "type": "array", "items": { "$ref": "#/components/schemas/Activity" } } } },
       "Transaction": { "type": "object", "required": ["transaction_id", "type", "status", "height", "block_hash", "confirmations", "size_bytes", "transaction"], "properties": { "transaction_id": { "$ref": "#/components/schemas/Hash32" }, "type": { "type": "string", "enum": ["transfer", "qcash_withdraw", "qcash_redeem", "qcash_merge", "qcash_split", "extension"] }, "status": { "const": "confirmed" }, "height": { "type": "integer", "format": "uint64" }, "block_hash": { "$ref": "#/components/schemas/Hash32" }, "confirmations": { "type": "integer", "format": "uint64" }, "size_bytes": { "type": "integer" }, "transaction": { "type": "object", "additionalProperties": true } } }

@@ -12,6 +12,8 @@ pub enum IntentError {
     InvalidMergeShape,
     InvalidSplitShape,
     InvalidMinerOutput,
+    InvalidBurnOutput,
+    InvalidTransformOutput,
     QCashAuthorizationCountMismatch,
     AmountOverflow,
     ValueMismatch,
@@ -37,6 +39,11 @@ impl fmt::Display for IntentError {
             Self::InvalidMinerOutput => {
                 formatter.write_str("transform public output must target the block miner")
             }
+            Self::InvalidBurnOutput => {
+                formatter.write_str("intent contains multiple burn outputs")
+            }
+            Self::InvalidTransformOutput => formatter
+                .write_str("QCash transform public outputs must target the miner or burn"),
             Self::QCashAuthorizationCountMismatch => {
                 formatter.write_str("authorization count does not match QCash inputs")
             }

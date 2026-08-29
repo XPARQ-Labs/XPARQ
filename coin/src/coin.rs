@@ -4,7 +4,7 @@ use std::{fmt, str::FromStr};
 use crate::CoinIdParseError;
 
 pub const COIN_NAME: &str = "XPQ";
-pub const UNIT_NAME: &str = "esca";
+pub const UNIT_NAME: &str = "zeno";
 pub const UNIT: u64 = 1;
 pub const COIN: u64 = 1_000_000;
 pub const DECIMALS: u8 = 6;
@@ -16,28 +16,28 @@ const _: () = assert!(UNIT == 1);
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
 )]
 pub struct Amount {
-    esca: u64,
+    zeno: u64,
 }
 
 impl Amount {
-    pub const fn from_esca(esca: u64) -> Self {
-        Self { esca }
+    pub const fn from_zeno(zeno: u64) -> Self {
+        Self { zeno }
     }
 
-    pub const fn as_esca(self) -> u64 {
-        self.esca
+    pub const fn as_zeno(self) -> u64 {
+        self.zeno
     }
 
     pub const fn checked_add(self, rhs: Self) -> Option<Self> {
-        match self.esca.checked_add(rhs.esca) {
-            Some(esca) => Some(Self { esca }),
+        match self.zeno.checked_add(rhs.zeno) {
+            Some(zeno) => Some(Self { zeno }),
             None => None,
         }
     }
 
     pub const fn checked_sub(self, rhs: Self) -> Option<Self> {
-        match self.esca.checked_sub(rhs.esca) {
-            Some(esca) => Some(Self { esca }),
+        match self.zeno.checked_sub(rhs.zeno) {
+            Some(zeno) => Some(Self { zeno }),
             None => None,
         }
     }
@@ -133,7 +133,7 @@ impl Coin {
     }
 
     pub const fn is_zero(self) -> bool {
-        self.amount.as_esca() == 0
+        self.amount.as_zeno() == 0
     }
 }
 
@@ -143,29 +143,26 @@ mod tests {
 
     #[test]
     fn amount_checked_arithmetic_preserves_the_amount_type() {
-        let amount = Amount::from_esca(7);
-        assert_eq!(amount.as_esca(), 7);
+        let amount = Amount::from_zeno(7);
+        assert_eq!(amount.as_zeno(), 7);
         assert_eq!(borsh::to_vec(&amount).unwrap(), 7_u64.to_le_bytes());
         assert_eq!(
             Amount::try_from_slice(&7_u64.to_le_bytes()).unwrap(),
             amount
         );
         assert_eq!(
-            Amount::from_esca(2).checked_add(Amount::from_esca(3)),
-            Some(Amount::from_esca(5))
+            Amount::from_zeno(2).checked_add(Amount::from_zeno(3)),
+            Some(Amount::from_zeno(5))
         );
         assert_eq!(
-            Amount::from_esca(u64::MAX).checked_add(Amount::from_esca(1)),
+            Amount::from_zeno(u64::MAX).checked_add(Amount::from_zeno(1)),
             None
         );
         assert_eq!(
-            Amount::from_esca(5).checked_sub(Amount::from_esca(3)),
-            Some(Amount::from_esca(2))
+            Amount::from_zeno(5).checked_sub(Amount::from_zeno(3)),
+            Some(Amount::from_zeno(2))
         );
-        assert_eq!(
-            Amount::from_esca(0).checked_sub(Amount::from_esca(1)),
-            None
-        );
+        assert_eq!(Amount::from_zeno(0).checked_sub(Amount::from_zeno(1)), None);
     }
 
     #[test]

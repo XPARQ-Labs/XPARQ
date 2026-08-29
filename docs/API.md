@@ -1,10 +1,34 @@
 # XPARQ Node RPC API
 
+Developer tutorials for native assets and WASM extensions are available under
+[`dev-tools/`](../dev-tools/README.md).
+
+`GET /balance/{address}` returns total, available, reserved, UTXO count, and
+asset balances in one node snapshot. Wallet balance display uses this endpoint
+and therefore does not race against blocks while traversing paginated UTXOs.
+`GET /account/{address}` remains the paginated UTXO endpoint used by the tracker
+and transaction input selection.
+
 The node exposes an unauthenticated HTTP RPC intended for loopback or a trusted
 private network. Run the node and open `/docs` for the interactive API reference,
 or fetch `/openapi.json` for tooling and SDK generation.
 
-Amounts are unsigned integer **esca**. `1,000,000 esca = 1 XPQ`.
+Native amounts are integer **zeno**. `1,000,000 zeno = 1 XPQ`.
+Consensus currently encodes each native XPQ amount as an eight-byte
+little-endian `u64`; arithmetic is checked.
+
+`GET /fee-policy` exposes both the miner relay fee and the consensus state-burn
+policy. A transaction that creates more persistent state than it deletes must
+include exactly one `OutputTarget::Burn` for the required amount:
+
+`max(0, created_weight - deleted_weight) * STATE_BURN_RATE_ZENO_PER_WEIGHT`
+
+The reset-chain rate is `1 zeno` per state-weight unit. Coin and QCash UTXO
+weights, plus the algorithm identifier, are committed by the chain-spec hash.
+Burn outputs conserve transaction value during validation but are deliberately
+not inserted into the UTXO set. Native asset registration additionally charges
+the canonical serialized metadata size; normal asset balance changes do not
+create core UTXOs.
 
 Addresses use exactly 50 lowercase characters: `0x`, 40 hexadecimal characters
 for the 20-byte address, and eight hexadecimal characters for its four-byte
@@ -42,16 +66,21 @@ XPQ miner-fee spend; both transitions commit or roll back together.
 Confirmed asset transaction responses decode the canonical payload and expose
 `asset_id`, signer, nonce, and the register/mint/burn/transfer action. Account
 responses include an `assets` array with ID, name, symbol, decimals, and exact
-decimal-string balance; mint authorities see newly registered zero-balance
-assets as well.
+decimal-string balance. Registration includes a nonzero initial mint credited
+atomically to the creator address; subsequent distribution uses asset transfer.
+
+Permissionless WASM deployment also uses `POST /transaction`. Wallets obtain
+the signed deployment nonce from `GET /wasm/nonce/{address}` and can query the
+immutable manifest and automatic activation status from
+`GET /wasm/{extension_id}`.
 
 ## Compatibility
 
 Coin IDs returned by the account RPC and accepted by the wallet use the
-case-sensitive `XPQ:` prefix followed by 64 hexadecimal characters. Account
-UTXOs expose `maturity_height`: it is a height for immature block emissions and
-`null` for ordinary transaction outputs. All five signature profiles are active
-from genesis.
+case-sensitive `XPQ:` prefix followed by 64 hexadecimal characters. Coin UTXOs
+have no maturity field; block-emission outputs follow the same ownership rules
+as ordinary outputs. The RPC only marks inputs reserved by the local mempool.
+All five signature profiles are active from genesis.
 
 The interactive `/docs` page loads its renderer from a public CDN. The
 `/openapi.json` specification itself is embedded in the node binary and remains

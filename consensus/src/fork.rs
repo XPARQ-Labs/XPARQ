@@ -73,7 +73,7 @@ pub struct BlockNode {
     pub work: Work,
     pub cumulative_work: Work,
     pub weight: u64,
-    pub cumulative_weight: u128,
+    pub cumulative_weight: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,7 +150,7 @@ impl ForkChoice {
         } else {
             u64::from(block.block_weight())
         };
-        let cumulative_weight = parent_weight.saturating_add(u128::from(weight));
+        let cumulative_weight = parent_weight.saturating_add(u64::from(weight));
         let node = BlockNode {
             height: block.height(),
             parent,
@@ -342,10 +342,10 @@ pub fn block_work(difficulty: u32) -> Work {
 /// reaches the same result without trusting peer identity or arrival order.
 pub fn compare_chain_tips(
     left_work: Work,
-    left_weight: u128,
+    left_weight: u64,
     left_hash: BlockHash,
     right_work: Work,
-    right_weight: u128,
+    right_weight: u64,
     right_hash: BlockHash,
 ) -> Ordering {
     left_work
@@ -373,7 +373,7 @@ mod tests {
             Nonce(0),
             Some(crate::block::Emission::new(
                 miner,
-                xparq_coin::Amount::from_esca(0),
+                xparq_coin::Amount::from_zeno(0),
             )),
             vec![],
         )
@@ -433,7 +433,7 @@ mod tests {
                 0,
                 BlockHash([9; HASH_SIZE]),
                 longer_base_branch_work,
-                u128::MAX,
+                u64::MAX,
                 BlockHash([1; HASH_SIZE]),
             )
             .is_gt()

@@ -7,8 +7,8 @@ use std::{
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 const DATABASE_FILE: &str = "xparq.redb";
-// Version 7 stores namespaced extension state and rollback journals.
-const SCHEMA_VERSION: u32 = 10;
+// Reset-chain generation 1 stores the complete canonical ledger format.
+const SCHEMA_VERSION: u32 = 1;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("canonical_blocks");

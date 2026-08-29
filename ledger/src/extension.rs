@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_common::extension::{
     EXTENSION_STATE_KEY_MAX_SIZE, EXTENSION_STATE_MAX_ENTRIES, EXTENSION_STATE_VALUE_MAX_SIZE,
-    Extension, ExtensionCall, ExtensionCommitment, ExtensionContext, ExtensionFailure, ExtensionId,
+    ExtensionCall, ExtensionCommitment, ExtensionContext, ExtensionFailure, ExtensionId,
     ExtensionJournalEntry, ExtensionStateRead, ExtensionStateRoot, ExtensionStateWrite,
     extension_set_root,
 };
@@ -31,7 +31,9 @@ pub struct ExtensionRollbackJournal {
 impl ExtensionStateSet {
     pub fn namespace(&self, extension_id: ExtensionId) -> ExtensionNamespace<'_> {
         ExtensionNamespace {
+            extension_id,
             namespace: self.namespaces.get(&extension_id),
+            namespaces: &self.namespaces,
         }
     }
     pub fn namespace_root(&self, extension_id: ExtensionId) -> ExtensionStateRoot {
@@ -70,23 +72,30 @@ impl ExtensionStateSet {
 
     pub fn validate(
         &self,
-        extension: &dyn Extension,
+        registry: &xparq_extension::ExtensionRegistry,
         context: ExtensionContext,
         call: &ExtensionCall,
     ) -> Result<(), ExtensionFailure> {
-        validate_extension_identity(extension, context, call)?;
         let empty = Namespace::new();
         let namespace = self.namespaces.get(&call.extension_id()).unwrap_or(&empty);
-        extension.validate(context, call, &NamespaceRead { namespace })
+        registry.validate(
+            context,
+            call,
+            &NamespaceRead {
+                extension_id: call.extension_id(),
+                namespace,
+                namespaces: &self.namespaces,
+            },
+        )
     }
 
     pub fn apply(
         &mut self,
-        extension: &dyn Extension,
+        registry: &xparq_extension::ExtensionRegistry,
         context: ExtensionContext,
         call: &ExtensionCall,
     ) -> Result<ExtensionRollbackJournal, ExtensionFailure> {
-        self.validate(extension, context, call)?;
+        self.validate(registry, context, call)?;
 
         let extension_id = call.extension_id();
         let namespace_existed = self.namespaces.contains_key(&extension_id);
@@ -97,11 +106,13 @@ impl ExtensionStateSet {
             .unwrap_or_default();
         let previous_root = namespace_root(&previous);
         let mut staged = previous.clone();
-        extension.apply(
+        registry.apply(
             context,
             call,
             &mut NamespaceWrite {
+                extension_id,
                 namespace: &mut staged,
+                namespaces: &self.namespaces,
             },
         )?;
         let applied_root = namespace_root(&staged);
@@ -150,13 +161,40 @@ impl ExtensionStateSet {
 }
 
 pub struct ExtensionNamespace<'a> {
+    extension_id: ExtensionId,
     namespace: Option<&'a Namespace>,
+    namespaces: &'a BTreeMap<ExtensionId, Namespace>,
 }
 
 impl ExtensionStateRead for ExtensionNamespace<'_> {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ExtensionFailure> {
         validate_key(key)?;
         Ok(self.namespace.and_then(|state| state.get(key)).cloned())
+    }
+
+    fn entries(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ExtensionFailure> {
+        Ok(self
+            .namespace
+            .into_iter()
+            .flat_map(|namespace| namespace.iter())
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect())
+    }
+
+    fn get_extension(
+        &self,
+        extension_id: ExtensionId,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, ExtensionFailure> {
+        validate_key(key)?;
+        if extension_id == self.extension_id {
+            return self.get(key);
+        }
+        Ok(self
+            .namespaces
+            .get(&extension_id)
+            .and_then(|namespace| namespace.get(key))
+            .cloned())
     }
 }
 
@@ -170,7 +208,9 @@ impl ExtensionNamespace<'_> {
 }
 
 struct NamespaceRead<'a> {
+    extension_id: ExtensionId,
     namespace: &'a Namespace,
+    namespaces: &'a BTreeMap<ExtensionId, Namespace>,
 }
 
 impl ExtensionStateRead for NamespaceRead<'_> {
@@ -178,16 +218,66 @@ impl ExtensionStateRead for NamespaceRead<'_> {
         validate_key(key)?;
         Ok(self.namespace.get(key).cloned())
     }
+
+    fn entries(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ExtensionFailure> {
+        Ok(self
+            .namespace
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect())
+    }
+
+    fn get_extension(
+        &self,
+        extension_id: ExtensionId,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, ExtensionFailure> {
+        validate_key(key)?;
+        if extension_id == self.extension_id {
+            return self.get(key);
+        }
+        Ok(self
+            .namespaces
+            .get(&extension_id)
+            .and_then(|namespace| namespace.get(key))
+            .cloned())
+    }
 }
 
 struct NamespaceWrite<'a> {
+    extension_id: ExtensionId,
     namespace: &'a mut Namespace,
+    namespaces: &'a BTreeMap<ExtensionId, Namespace>,
 }
 
 impl ExtensionStateRead for NamespaceWrite<'_> {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ExtensionFailure> {
         validate_key(key)?;
         Ok(self.namespace.get(key).cloned())
+    }
+
+    fn entries(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ExtensionFailure> {
+        Ok(self
+            .namespace
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect())
+    }
+
+    fn get_extension(
+        &self,
+        extension_id: ExtensionId,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, ExtensionFailure> {
+        validate_key(key)?;
+        if extension_id == self.extension_id {
+            return self.get(key);
+        }
+        Ok(self
+            .namespaces
+            .get(&extension_id)
+            .and_then(|namespace| namespace.get(key))
+            .cloned())
     }
 }
 
@@ -210,20 +300,6 @@ impl ExtensionStateWrite for NamespaceWrite<'_> {
         self.namespace.remove(key);
         Ok(())
     }
-}
-
-fn validate_extension_identity(
-    extension: &dyn Extension,
-    context: ExtensionContext,
-    call: &ExtensionCall,
-) -> Result<(), ExtensionFailure> {
-    if extension.id() != call.extension_id() {
-        return Err(ExtensionFailure::UnknownExtension);
-    }
-    if context.height < extension.activation_height() {
-        return Err(ExtensionFailure::InactiveExtension);
-    }
-    Ok(())
 }
 
 fn validate_key(key: &[u8]) -> Result<(), ExtensionFailure> {
@@ -263,7 +339,7 @@ fn journal_diff(previous: &Namespace, applied: &Namespace) -> Vec<ExtensionJourn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xparq_common::Height;
+    use xparq_common::{Extension, Height};
 
     struct CounterExtension {
         id: ExtensionId,
@@ -316,10 +392,12 @@ mod tests {
         let context = ExtensionContext { height: Height(5) };
         let call = ExtensionCall::new(id, 7_u64.to_le_bytes().to_vec()).unwrap();
         let mut state = ExtensionStateSet::default();
+        let mut registry = xparq_extension::ExtensionRegistry::new();
+        registry.register(extension).unwrap();
         let initial_root = state.state_root().unwrap();
 
-        state.validate(&extension, context, &call).unwrap();
-        let journal = state.apply(&extension, context, &call).unwrap();
+        state.validate(&registry, context, &call).unwrap();
+        let journal = state.apply(&registry, context, &call).unwrap();
         assert_eq!(
             state.get(id, b"counter").unwrap(),
             Some(call.payload().to_vec())
@@ -340,10 +418,12 @@ mod tests {
         };
         let call = ExtensionCall::new(id, 9_u64.to_le_bytes().to_vec()).unwrap();
         let mut state = ExtensionStateSet::default();
+        let mut registry = xparq_extension::ExtensionRegistry::new();
+        registry.register(extension).unwrap();
         let initial_root = state.state_root().unwrap();
 
         assert_eq!(
-            state.apply(&extension, ExtensionContext { height: Height(5) }, &call),
+            state.apply(&registry, ExtensionContext { height: Height(5) }, &call),
             Err(ExtensionFailure::InvalidState)
         );
         assert_eq!(state.get(id, b"counter").unwrap(), None);

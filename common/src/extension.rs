@@ -11,9 +11,9 @@ use crate::Height;
 
 pub const EXTENSION_ID_SIZE: usize = 32;
 pub const EXTENSION_STATE_ROOT_SIZE: usize = 32;
-pub const EXTENSION_PAYLOAD_MAX_SIZE: usize = 1024 * 1024;
+pub const EXTENSION_PAYLOAD_MAX_SIZE: usize = 3 * 1024 * 1024;
 pub const EXTENSION_STATE_KEY_MAX_SIZE: usize = 256;
-pub const EXTENSION_STATE_VALUE_MAX_SIZE: usize = 1024 * 1024;
+pub const EXTENSION_STATE_VALUE_MAX_SIZE: usize = 3 * 1024 * 1024;
 pub const EXTENSION_STATE_MAX_ENTRIES: usize = 65_536;
 
 const EXTENSION_ID_CONTEXT: &str = "XPARQ Extension Id";
@@ -134,6 +134,12 @@ pub enum ExtensionFailure {
 
 pub trait ExtensionStateRead {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ExtensionFailure>;
+    fn entries(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ExtensionFailure>;
+    fn get_extension(
+        &self,
+        extension_id: ExtensionId,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, ExtensionFailure>;
 }
 
 pub trait ExtensionStateWrite: ExtensionStateRead {

@@ -9,10 +9,10 @@ use xparq::{
     ledger::Ledger,
 };
 
-pub const SNAPSHOT_INTERVAL: u64 = 4_100;
+pub const SNAPSHOT_INTERVAL: u64 = 1_000;
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"XPQSNAP1";
-const SNAPSHOT_VERSION: u32 = 9;
+const SNAPSHOT_VERSION: u32 = 1;
 const CHECKSUM_SIZE: usize = 32;
 
 #[derive(BorshSerialize, BorshDeserialize)]

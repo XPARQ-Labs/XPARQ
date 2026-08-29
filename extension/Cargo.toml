@@ -7,6 +7,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+blake3.workspace = true
+borsh.workspace = true
+wasmi.workspace = true
 xparq-common.workspace = true
+xparq-crypto.workspace = true
 xparq-asset = { path = "asset" }
 xparq-bridge = { path = "bridge" }
+
+[dev-dependencies]
+wat = "1.244.0"

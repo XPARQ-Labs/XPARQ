@@ -419,7 +419,7 @@ mod tests {
             vec![CoinId::from_bytes([0x31; crate::crypto::HASH_SIZE])],
             vec![SpendOutput::new(
                 Address([0x32; crate::crypto::ADDRESS_SIZE]),
-                Amount::from_esca(100_000),
+                Amount::from_zeno(100_000),
             )],
         )
         .unwrap();
@@ -438,7 +438,7 @@ mod tests {
             Nonce(0),
             Some(Emission::new(
                 Address([0x34; crate::crypto::ADDRESS_SIZE]),
-                Amount::from_esca(0),
+                Amount::from_zeno(0),
             )),
             vec![AuthorizedTransaction::OnChainSpend(Box::new(signed))],
         )
@@ -461,7 +461,7 @@ mod tests {
             inputs,
             vec![SpendOutput::new(
                 Address([seed as u8; crate::crypto::ADDRESS_SIZE]),
-                Amount::from_esca(1),
+                Amount::from_zeno(1),
             )],
         )
         .unwrap();
@@ -498,7 +498,7 @@ mod tests {
             PreviousHash([9; HASH_SIZE]),
             GENESIS_BLOCK_DIFFICULTY,
             Nonce(0),
-            Some(Emission::new(miner, Amount::from_esca(0))),
+            Some(Emission::new(miner, Amount::from_zeno(0))),
             transactions,
         )
         .unwrap();

@@ -33,6 +33,7 @@ impl ChainContext {
 pub enum OutputTarget {
     Address(Address),
     BlockMiner,
+    Burn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
@@ -52,6 +53,13 @@ impl SpendOutput {
     pub const fn block_miner(amount: Amount) -> Self {
         Self {
             target: OutputTarget::BlockMiner,
+            amount,
+        }
+    }
+
+    pub const fn burn(amount: Amount) -> Self {
+        Self {
+            target: OutputTarget::Burn,
             amount,
         }
     }
@@ -149,7 +157,7 @@ impl WithdrawIntent {
         if self
             .qcash_outputs
             .iter()
-            .any(|output| output.amount.as_esca() == 0)
+            .any(|output| output.amount.as_zeno() == 0)
         {
             return Err(IntentError::ZeroAmount);
         }
@@ -191,7 +199,7 @@ fn validate_public_outputs(outputs: &[SpendOutput], allow_empty: bool) -> Result
     if outputs.is_empty() && !allow_empty {
         return Err(IntentError::EmptyOutputs);
     }
-    if outputs.iter().any(|output| output.amount.as_esca() == 0) {
+    if outputs.iter().any(|output| output.amount.as_zeno() == 0) {
         return Err(IntentError::ZeroAmount);
     }
     if outputs
@@ -201,6 +209,14 @@ fn validate_public_outputs(outputs: &[SpendOutput], allow_empty: bool) -> Result
         > 1
     {
         return Err(IntentError::InvalidMinerOutput);
+    }
+    if outputs
+        .iter()
+        .filter(|output| output.target == OutputTarget::Burn)
+        .count()
+        > 1
+    {
+        return Err(IntentError::InvalidBurnOutput);
     }
     Ok(())
 }
@@ -239,11 +255,11 @@ impl RedeemIntent {
             || self
                 .outputs
                 .iter()
-                .any(|output| output.amount.as_esca() == 0)
+                .any(|output| output.amount.as_zeno() == 0)
             || self
                 .qcash_outputs
                 .iter()
-                .any(|output| output.amount.as_esca() == 0)
+                .any(|output| output.amount.as_zeno() == 0)
         {
             return Err(IntentError::ZeroAmount);
         }
@@ -292,19 +308,19 @@ impl QCashIntent for RedeemIntent {
 pub struct MergeIntent {
     pub inputs: Vec<QCash>,
     pub output: QCashOutput,
-    pub miner_output: Option<SpendOutput>,
+    pub public_outputs: Vec<SpendOutput>,
 }
 
 impl MergeIntent {
     pub fn new(
         inputs: Vec<QCash>,
         output: QCashOutput,
-        miner_output: Option<SpendOutput>,
+        public_outputs: Vec<SpendOutput>,
     ) -> Result<Self, IntentError> {
         let intent = Self {
             inputs,
             output,
-            miner_output,
+            public_outputs,
         };
         intent.validate()?;
         Ok(intent)
@@ -317,7 +333,7 @@ impl MergeIntent {
         validate_transform(
             &self.inputs,
             std::slice::from_ref(&self.output),
-            self.miner_output.as_ref(),
+            &self.public_outputs,
         )
     }
 
@@ -348,19 +364,19 @@ impl QCashIntent for MergeIntent {
 pub struct SplitIntent {
     pub input: QCash,
     pub outputs: Vec<QCashOutput>,
-    pub miner_output: Option<SpendOutput>,
+    pub public_outputs: Vec<SpendOutput>,
 }
 
 impl SplitIntent {
     pub fn new(
         input: QCash,
         outputs: Vec<QCashOutput>,
-        miner_output: Option<SpendOutput>,
+        public_outputs: Vec<SpendOutput>,
     ) -> Result<Self, IntentError> {
         let intent = Self {
             input,
             outputs,
-            miner_output,
+            public_outputs,
         };
         intent.validate()?;
         Ok(intent)
@@ -373,7 +389,7 @@ impl SplitIntent {
         validate_transform(
             std::slice::from_ref(&self.input),
             &self.outputs,
-            self.miner_output.as_ref(),
+            &self.public_outputs,
         )
     }
 
@@ -403,16 +419,22 @@ impl QCashIntent for SplitIntent {
 fn validate_transform(
     inputs: &[QCash],
     outputs: &[QCashOutput],
-    miner_output: Option<&SpendOutput>,
+    public_outputs: &[SpendOutput],
 ) -> Result<(), IntentError> {
     if inputs.iter().any(|coin| coin.is_zero())
-        || outputs.iter().any(|output| output.amount.as_esca() == 0)
-        || miner_output.is_some_and(|output| output.amount.as_esca() == 0)
+        || outputs.iter().any(|output| output.amount.as_zeno() == 0)
+        || public_outputs
+            .iter()
+            .any(|output| output.amount.as_zeno() == 0)
     {
         return Err(IntentError::ZeroAmount);
     }
-    if miner_output.is_some_and(|output| output.target != OutputTarget::BlockMiner) {
-        return Err(IntentError::InvalidMinerOutput);
+    validate_public_outputs(public_outputs, true)?;
+    if public_outputs
+        .iter()
+        .any(|output| matches!(output.target, OutputTarget::Address(_)))
+    {
+        return Err(IntentError::InvalidTransformOutput);
     }
 
     let mut coin_ids = BTreeSet::new();
@@ -429,9 +451,9 @@ fn validate_transform(
 
     let input_amount = checked_sum(inputs.iter().map(|qcash| qcash.amount()))?;
     let qcash_amount = checked_sum(outputs.iter().map(|output| output.amount))?;
-    let miner_amount = miner_output.map_or(Amount::from_esca(0), |output| output.amount);
+    let public_amount = checked_sum(public_outputs.iter().map(|output| output.amount))?;
     let output_amount = qcash_amount
-        .checked_add(miner_amount)
+        .checked_add(public_amount)
         .ok_or(IntentError::AmountOverflow)?;
     if input_amount != output_amount {
         return Err(IntentError::ValueMismatch);
@@ -441,7 +463,7 @@ fn validate_transform(
 
 fn checked_sum(mut amounts: impl Iterator<Item = Amount>) -> Result<Amount, IntentError> {
     amounts
-        .try_fold(Amount::from_esca(0), Amount::checked_add)
+        .try_fold(Amount::from_zeno(0), Amount::checked_add)
         .ok_or(IntentError::AmountOverflow)
 }
 
@@ -475,16 +497,16 @@ mod tests {
 
     #[test]
     fn split_rejects_reused_output_bearer_keys() {
-        let input = QCash::new(CoinId::from_bytes([1; COIN_ID_SIZE]), Amount::from_esca(10));
+        let input = QCash::new(CoinId::from_bytes([1; COIN_ID_SIZE]), Amount::from_zeno(10));
         let repeated = qcash_key(7);
         assert_eq!(
             SplitIntent::new(
                 input,
                 vec![
-                    QCashOutput::new(Amount::from_esca(4), repeated),
-                    QCashOutput::new(Amount::from_esca(6), repeated),
+                    QCashOutput::new(Amount::from_zeno(4), repeated),
+                    QCashOutput::new(Amount::from_zeno(6), repeated),
                 ],
-                None,
+                vec![],
             ),
             Err(IntentError::DuplicateBearerOutput)
         );
@@ -492,23 +514,23 @@ mod tests {
 
     #[test]
     fn qcash_commitment_binds_outputs() {
-        let input = QCash::new(CoinId::from_bytes([2; COIN_ID_SIZE]), Amount::from_esca(10));
+        let input = QCash::new(CoinId::from_bytes([2; COIN_ID_SIZE]), Amount::from_zeno(10));
         let first = SplitIntent::new(
             input,
             vec![
-                QCashOutput::new(Amount::from_esca(4), qcash_key(3)),
-                QCashOutput::new(Amount::from_esca(6), qcash_key(4)),
+                QCashOutput::new(Amount::from_zeno(4), qcash_key(3)),
+                QCashOutput::new(Amount::from_zeno(6), qcash_key(4)),
             ],
-            None,
+            vec![],
         )
         .unwrap();
         let second = SplitIntent::new(
             input,
             vec![
-                QCashOutput::new(Amount::from_esca(4), qcash_key(5)),
-                QCashOutput::new(Amount::from_esca(6), qcash_key(6)),
+                QCashOutput::new(Amount::from_zeno(4), qcash_key(5)),
+                QCashOutput::new(Amount::from_zeno(6), qcash_key(6)),
             ],
-            None,
+            vec![],
         )
         .unwrap();
         let chain = ChainContext::new([7; 32]);
@@ -521,16 +543,16 @@ mod tests {
     fn partial_redeem_deducts_recipient_change_and_miner_from_bearer_input() {
         let input = QCash::new(
             CoinId::from_bytes([9; COIN_ID_SIZE]),
-            Amount::from_esca(100),
+            Amount::from_zeno(100),
         );
         assert!(
             RedeemIntent::new(
                 vec![input],
                 vec![
-                    SpendOutput::new(Address::ZERO, Amount::from_esca(40)),
-                    SpendOutput::block_miner(Amount::from_esca(1)),
+                    SpendOutput::new(Address::ZERO, Amount::from_zeno(40)),
+                    SpendOutput::block_miner(Amount::from_zeno(1)),
                 ],
-                vec![QCashOutput::new(Amount::from_esca(59), qcash_key(8))],
+                vec![QCashOutput::new(Amount::from_zeno(59), qcash_key(8))],
             )
             .is_ok()
         );
@@ -538,10 +560,10 @@ mod tests {
             RedeemIntent::new(
                 vec![input],
                 vec![
-                    SpendOutput::new(Address::ZERO, Amount::from_esca(40)),
-                    SpendOutput::block_miner(Amount::from_esca(1)),
+                    SpendOutput::new(Address::ZERO, Amount::from_zeno(40)),
+                    SpendOutput::block_miner(Amount::from_zeno(1)),
                 ],
-                vec![QCashOutput::new(Amount::from_esca(60), qcash_key(8))],
+                vec![QCashOutput::new(Amount::from_zeno(60), qcash_key(8))],
             ),
             Err(IntentError::ValueMismatch)
         );

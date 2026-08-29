@@ -11,7 +11,7 @@ use serde::Deserialize;
 use xparq::extension::asset::{AssetAction, AssetId};
 use xparq::{
     codec::canonical_bytes,
-    consensus::{Amount, COIN, DECIMALS},
+    consensus::{Amount, COIN, DECIMALS, StateTransitionWeight},
     crypto::{Address, QCashPublicKey, SignatureProfile, address_from_string},
     ledger::{
         merge_qcash_output_id, redeem_qcash_change_output_id, split_qcash_output_id,
@@ -32,7 +32,7 @@ use xparq_wallet::{
 use zeroize::{Zeroize, Zeroizing};
 
 const DEFAULT_WALLET_PATH: &str = "wallet.json";
-const AUTOMATIC_FEE_ESCA_PER_BYTE: u64 = 1;
+const AUTOMATIC_FEE_ZENO_PER_BYTE: u64 = 1;
 const MAX_FEE_CONVERGENCE_ROUNDS: usize = 8;
 
 struct LoadedWallet(ProfileWallet);
@@ -71,6 +71,14 @@ struct AccountResponse {
     public_key_registered: bool,
     utxos: Vec<AccountUtxo>,
     next_utxo_offset: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct BalanceResponse {
+    total: u64,
+    available: u64,
+    reserved: u64,
+    utxo_count: usize,
     #[serde(default)]
     assets: Vec<AccountAssetBalance>,
 }
@@ -88,7 +96,6 @@ struct AccountAssetBalance {
 struct AccountUtxo {
     id: String,
     amount: u64,
-    maturity_height: Option<u64>,
     reserved: bool,
 }
 
@@ -113,24 +120,11 @@ struct AddressActivity {
     size_bytes: Option<usize>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct BalanceSummary {
-    total: u64,
-    spendable: u64,
-    immature: u64,
-    reserved: u64,
-}
-
-fn utxo_status(utxo: &AccountUtxo, next_height: u64) -> &'static str {
+fn utxo_status(utxo: &AccountUtxo) -> &'static str {
     if utxo.reserved {
         "reserved"
-    } else if utxo
-        .maturity_height
-        .is_some_and(|height| height > next_height)
-    {
-        "immature"
     } else {
-        "spendable"
+        "available"
     }
 }
 
@@ -164,6 +158,8 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         Some("asset-transfer") => asset_transfer(&args[1..]),
         Some("asset-info") => asset_info(&args[1..]),
         Some("asset-balance") => asset_balance(&args[1..]),
+        Some("wasm-deploy") => wasm_deploy(&args[1..]),
+        Some("wasm-info") => wasm_info(&args[1..]),
         Some("version") | Some("--version") | Some("-V") => {
             println!("wallet {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -186,6 +182,7 @@ fn asset_register(args: &[String]) -> Result<(), String> {
         .parse::<u8>()
         .map_err(|_| "invalid --decimals")?;
     let max_supply = parse_asset_amount(args, "--max-supply")?;
+    let initial_mint = parse_asset_amount(args, "--initial-mint")?;
     let authority = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?.address();
     let asset_id = AssetId::derive(authority, &symbol);
     submit_asset_action(
@@ -195,6 +192,7 @@ fn asset_register(args: &[String]) -> Result<(), String> {
             symbol,
             decimals,
             max_supply,
+            initial_mint,
         },
     )?;
     println!("asset_id: {asset_id}");
@@ -304,17 +302,30 @@ fn submit_asset_action(args: &[String], action: AssetAction) -> Result<(), Strin
     let address = xparq::crypto::address_to_string(&wallet.address());
     let nonce = http_get_json::<AssetNonceResponse>(rpc, &format!("/asset/nonce/{address}"))?.nonce;
     let call = wallet.0.sign_asset_call(action, nonce)?;
+    let extension_created_weight = xparq::extension::asset::AssetCall::from_extension_call(&call)
+        .and_then(|call| call.registration_metadata_weight())
+        .map_err(|error| format!("calculate asset metadata state weight: {error:?}"))?;
     let public_key_known = account_public_key_registered(rpc, &wallet);
     let transaction = automatic_fee_transaction(|fee| {
-        let (inputs, total) = select_account_inputs(rpc, &wallet, fee)?;
+        let (inputs, _total, state_burn, change) = select_account_inputs_with_state_burn(
+            rpc,
+            &wallet,
+            fee,
+            1,
+            0,
+            extension_created_weight,
+        )?;
         let mut outputs = Vec::new();
-        if total > fee {
+        if change > 0 {
             outputs.push(SpendOutput::new(
                 wallet.address(),
-                Amount::from_esca(total - fee),
+                Amount::from_zeno(change),
             ));
         }
-        outputs.push(SpendOutput::block_miner(Amount::from_esca(fee)));
+        outputs.push(SpendOutput::block_miner(Amount::from_zeno(fee)));
+        if state_burn > 0 {
+            outputs.push(SpendOutput::burn(Amount::from_zeno(state_burn)));
+        }
         let fee_intent = OnChainSpendIntent::new(wallet.address(), inputs, outputs)
             .map_err(|error| error.to_string())?;
         let fee = wallet.sign_onchain_spend(fee_intent, public_key_known)?;
@@ -326,6 +337,70 @@ fn submit_asset_action(args: &[String], action: AssetAction) -> Result<(), Strin
         )))
     })?;
     submit_or_print_transaction(args, &transaction)
+}
+
+fn wasm_deploy(args: &[String]) -> Result<(), String> {
+    reject_manual_fee(args)?;
+    let name = option(args, "--name").ok_or("missing --name")?.to_string();
+    let module_path = option(args, "--wasm").ok_or("missing --wasm")?;
+    let metadata = fs::metadata(module_path)
+        .map_err(|error| format!("read WASM module metadata `{module_path}`: {error}"))?;
+    if metadata.len() > xparq::extension::WASM_CODE_MAX_SIZE as u64 {
+        return Err("WASM module exceeds the size limit".into());
+    }
+    let module = fs::read(module_path)
+        .map_err(|error| format!("read WASM module `{module_path}`: {error}"))?;
+    let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let address = xparq::crypto::address_to_string(&wallet.address());
+    let nonce = http_get_json::<AssetNonceResponse>(rpc, &format!("/wasm/nonce/{address}"))?.nonce;
+    let call = wallet.0.sign_wasm_deploy_call(name, module, nonce)?;
+    let extension_id = xparq::extension::WasmDeployCall::from_extension_call(&call)
+        .map_err(|error| format!("decode signed WASM deploy call: {error:?}"))?
+        .extension_id();
+    let public_key_known = account_public_key_registered(rpc, &wallet);
+    let transaction = automatic_fee_transaction(|fee| {
+        let (inputs, _total, state_burn, change) =
+            select_account_inputs_with_state_burn(rpc, &wallet, fee, 1, 0, 0)?;
+        let mut outputs = Vec::new();
+        if change > 0 {
+            outputs.push(SpendOutput::new(
+                wallet.address(),
+                Amount::from_zeno(change),
+            ));
+        }
+        outputs.push(SpendOutput::block_miner(Amount::from_zeno(fee)));
+        if state_burn > 0 {
+            outputs.push(SpendOutput::burn(Amount::from_zeno(state_burn)));
+        }
+        let fee_intent = OnChainSpendIntent::new(wallet.address(), inputs, outputs)
+            .map_err(|error| error.to_string())?;
+        let fee = wallet.sign_onchain_spend(fee_intent, public_key_known)?;
+        Ok(AuthorizedTransaction::Extension(Box::new(
+            AuthorizedExtensionTransaction {
+                call: call.clone(),
+                fee,
+            },
+        )))
+    })?;
+    submit_or_print_transaction(args, &transaction)?;
+    println!("extension_id: {}", hex::encode(extension_id.as_bytes()));
+    println!(
+        "activation_delay_blocks: {}",
+        xparq::extension::WASM_DEPLOY_ACTIVATION_DELAY
+    );
+    Ok(())
+}
+
+fn wasm_info(args: &[String]) -> Result<(), String> {
+    let id = option(args, "--extension").ok_or("missing --extension")?;
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let response: serde_json::Value = http_get_json(rpc, &format!("/wasm/{id}"))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response).map_err(|error| error.to_string())?
+    );
+    Ok(())
 }
 
 fn parse_asset_id(args: &[String]) -> Result<AssetId, String> {
@@ -415,15 +490,20 @@ fn interactive_assets() -> Result<(), String> {
 
     match prompt("Select")?.as_str() {
         "1" => {
-            let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--name".into(), prompt("Token name")?]);
-            args.extend(["--symbol".into(), prompt("Token symbol")?]);
-            args.extend(["--decimals".into(), prompt_default("Decimals", "0")?]);
-            args.extend([
-                "--max-supply".into(),
-                prompt("Maximum supply in base units")?,
-            ]);
-            asset_register(&args)
+            let wallet_rpc_args = interactive_asset_wallet_rpc()?;
+            let name = prompt("Token name")?;
+            let symbol = prompt("Token symbol")?;
+            let decimals = prompt_default("Decimals", "0")?;
+            let max_supply = prompt("Maximum supply in base units")?;
+            let mint_amount = prompt("Initial mint in base units")?;
+
+            let mut register_args = wallet_rpc_args.clone();
+            register_args.extend(["--name".into(), name]);
+            register_args.extend(["--symbol".into(), symbol]);
+            register_args.extend(["--decimals".into(), decimals]);
+            register_args.extend(["--max-supply".into(), max_supply]);
+            register_args.extend(["--initial-mint".into(), mint_amount]);
+            asset_register(&register_args)
         }
         "2" => {
             let mut args = interactive_asset_wallet_rpc()?;
@@ -705,32 +785,18 @@ fn print_balance(args: &[String]) -> Result<(), String> {
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
     let address = xparq::crypto::address_to_string(&wallet_address_from_file_bytes(&bytes)?);
-    let account = fetch_account(rpc, &address)?;
-    let balance = summarize_balance(&account)?;
+    let balance: BalanceResponse = http_get_json(rpc, &format!("/balance/{address}"))?;
 
     println!("address: {address}");
     println!("total: {}", format_amount(balance.total));
-    println!("spendable: {}", format_amount(balance.spendable));
-    println!("immature: {}", format_amount(balance.immature));
+    println!("available: {}", format_amount(balance.available));
     println!("reserved: {}", format_amount(balance.reserved));
-    println!("utxos: {}", account.utxos.len());
-    println!("assets: {}", account.assets.len());
-    for asset in &account.assets {
+    println!("utxos: {}", balance.utxo_count);
+    println!("assets: {}", balance.assets.len());
+    for asset in &balance.assets {
         println!(
             "- asset_id={} name={} symbol={} decimals={} balance={}",
             asset.asset_id, asset.name, asset.symbol, asset.decimals, asset.balance
-        );
-    }
-    let mut utxos = account.utxos.iter().collect::<Vec<_>>();
-    utxos.sort_by(|left, right| left.id.cmp(&right.id));
-    for utxo in utxos {
-        println!(
-            "- id={} amount={} status={} maturity_height={}",
-            utxo.id,
-            format_amount(utxo.amount),
-            utxo_status(utxo, account.next_height),
-            utxo.maturity_height
-                .map_or_else(|| "none".into(), |height| height.to_string()),
         );
     }
     Ok(())
@@ -794,39 +860,13 @@ fn print_utxo_tracker(args: &[String]) -> Result<(), String> {
     utxos.sort_by(|left, right| left.id.cmp(&right.id));
     for utxo in utxos {
         println!(
-            "- id={} amount={} status={} maturity_height={}",
+            "- id={} amount={} status={}",
             utxo.id,
             format_amount(utxo.amount),
-            utxo_status(utxo, account.next_height),
-            utxo.maturity_height
-                .map_or_else(|| "none".into(), |height| height.to_string()),
+            utxo_status(utxo),
         );
     }
     Ok(())
-}
-
-fn summarize_balance(account: &AccountResponse) -> Result<BalanceSummary, String> {
-    let mut summary = BalanceSummary {
-        total: 0,
-        spendable: 0,
-        immature: 0,
-        reserved: 0,
-    };
-    for utxo in &account.utxos {
-        summary.total = summary
-            .total
-            .checked_add(utxo.amount)
-            .ok_or("wallet balance overflow")?;
-        let category = match utxo_status(utxo, account.next_height) {
-            "reserved" => &mut summary.reserved,
-            "immature" => &mut summary.immature,
-            _ => &mut summary.spendable,
-        };
-        *category = category
-            .checked_add(utxo.amount)
-            .ok_or("wallet balance overflow")?;
-    }
-    Ok(summary)
 }
 
 fn sign_spend(args: &[String]) -> Result<(), String> {
@@ -851,28 +891,44 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
     }
     let transaction = automatic_fee_transaction(|fee| {
         let required = amount
-            .as_esca()
+            .as_zeno()
             .checked_add(fee)
             .ok_or("transaction amount plus fee overflow")?;
-        let (selected, change, change_address) = if inputs.is_empty() {
-            let (selected, total) = select_account_inputs(rpc, &wallet, required)?;
-            (selected, total - required, wallet.address())
+        let (selected, change, state_burn, change_address) = if inputs.is_empty() {
+            let (selected, _total, state_burn, change) =
+                select_account_inputs_with_state_burn(rpc, &wallet, required, 2, 0, 0)?;
+            (selected, change, state_burn, wallet.address())
         } else {
-            let gross_change = explicit_change.map_or(0, Amount::as_esca);
+            let gross_change = explicit_change.map_or(0, Amount::as_zeno);
+            let created = 2_u64 + u64::from(gross_change > fee);
+            let state_burn = StateTransitionWeight {
+                consumed_coin_utxos: u64::try_from(inputs.len())
+                    .map_err(|_| "too many explicit inputs")?,
+                created_coin_utxos: created,
+                ..StateTransitionWeight::default()
+            }
+            .required_burn()
+            .map_err(|error| error.to_string())?
+            .as_zeno();
             let change = gross_change
                 .checked_sub(fee)
-                .ok_or("explicit change is smaller than the automatic fee")?;
+                .and_then(|change| change.checked_sub(state_burn))
+                .ok_or("explicit change is smaller than the automatic fee and state burn")?;
             (
                 inputs.clone(),
                 change,
+                state_burn,
                 change_target.unwrap_or(wallet.address()),
             )
         };
         let mut outputs = vec![SpendOutput::new(recipient, amount)];
         if change > 0 {
-            outputs.push(SpendOutput::new(change_address, Amount::from_esca(change)));
+            outputs.push(SpendOutput::new(change_address, Amount::from_zeno(change)));
         }
-        outputs.push(SpendOutput::block_miner(Amount::from_esca(fee)));
+        outputs.push(SpendOutput::block_miner(Amount::from_zeno(fee)));
+        if state_burn > 0 {
+            outputs.push(SpendOutput::burn(Amount::from_zeno(state_burn)));
+        }
         let intent = OnChainSpendIntent::new(wallet.address(), selected, outputs)
             .map_err(|error| error.to_string())?;
         let signed = wallet.sign_onchain_spend(intent, known)?;
@@ -881,22 +937,13 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
     submit_or_print_transaction(args, &transaction)
 }
 
-fn select_account_inputs(
-    rpc: &str,
-    wallet: &LoadedWallet,
-    required: u64,
-) -> Result<(Vec<xparq::coin::CoinId>, u64), String> {
+fn account_input_candidates(rpc: &str, wallet: &LoadedWallet) -> Result<Vec<AccountUtxo>, String> {
     let address = xparq::crypto::address_to_string(&wallet.address());
     let response = fetch_account(rpc, &address)?;
     let mut candidates = response
         .utxos
         .into_iter()
-        .filter(|utxo| {
-            !utxo.reserved
-                && utxo
-                    .maturity_height
-                    .is_none_or(|height| height <= response.next_height)
-        })
+        .filter(|utxo| !utxo.reserved)
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
         right
@@ -904,6 +951,18 @@ fn select_account_inputs(
             .cmp(&left.amount)
             .then_with(|| left.id.cmp(&right.id))
     });
+    Ok(candidates)
+}
+
+fn select_account_inputs_with_state_burn(
+    rpc: &str,
+    wallet: &LoadedWallet,
+    base_required: u64,
+    created_coin_without_change: u64,
+    created_qcash_utxos: u64,
+    extension_created_weight: u64,
+) -> Result<(Vec<xparq::coin::CoinId>, u64, u64, u64), String> {
+    let candidates = account_input_candidates(rpc, wallet)?;
     let mut selected = Vec::new();
     let mut total = 0_u64;
     for utxo in candidates {
@@ -914,12 +973,36 @@ fn select_account_inputs(
         total = total
             .checked_add(utxo.amount)
             .ok_or_else(|| "selected input amount overflow".to_string())?;
-        if total >= required {
-            return Ok((selected, total));
+        let consumed = u64::try_from(selected.len()).map_err(|_| "too many selected inputs")?;
+        for has_change in [false, true] {
+            let created = created_coin_without_change
+                .checked_add(u64::from(has_change))
+                .ok_or("state output count overflow")?;
+            let burn = StateTransitionWeight {
+                consumed_coin_utxos: consumed,
+                created_coin_utxos: created,
+                created_qcash_utxos,
+                extension_created_weight,
+                ..StateTransitionWeight::default()
+            }
+            .required_burn()
+            .map_err(|error| error.to_string())?
+            .as_zeno();
+            let required = base_required
+                .checked_add(burn)
+                .ok_or("required amount plus state burn overflow")?;
+            let valid = if has_change {
+                total > required
+            } else {
+                total == required
+            };
+            if valid {
+                return Ok((selected, total, burn, total - required));
+            }
         }
     }
     Err(format!(
-        "insufficient spendable balance: required {required} units, available {total} units"
+        "insufficient available balance for amount, fee, and state burn: available {total} units"
     ))
 }
 
@@ -1052,25 +1135,48 @@ fn sign_withdraw(args: &[String]) -> Result<(), String> {
         let required = qcash_total
             .checked_add(fee)
             .ok_or("withdraw amount plus fee overflow")?;
-        let (selected, change, change_address) = if inputs.is_empty() {
-            let (selected, total) = select_account_inputs(rpc, &wallet, required)?;
-            (selected, total - required, wallet.address())
+        let (selected, change, state_burn, change_address) = if inputs.is_empty() {
+            let (selected, _total, state_burn, change) = select_account_inputs_with_state_burn(
+                rpc,
+                &wallet,
+                required,
+                1,
+                u64::try_from(qcash_outputs.len()).map_err(|_| "too many QCash outputs")?,
+                0,
+            )?;
+            (selected, change, state_burn, wallet.address())
         } else {
-            let gross_change = explicit_change.map_or(0, Amount::as_esca);
+            let gross_change = explicit_change.map_or(0, Amount::as_zeno);
+            let state_burn = StateTransitionWeight {
+                consumed_coin_utxos: u64::try_from(inputs.len())
+                    .map_err(|_| "too many explicit inputs")?,
+                created_coin_utxos: 1 + u64::from(gross_change > fee),
+                created_qcash_utxos: u64::try_from(qcash_outputs.len())
+                    .map_err(|_| "too many QCash outputs")?,
+                ..StateTransitionWeight::default()
+            }
+            .required_burn()
+            .map_err(|error| error.to_string())?
+            .as_zeno();
             let change = gross_change
                 .checked_sub(fee)
-                .ok_or("explicit change is smaller than the automatic fee")?;
+                .and_then(|change| change.checked_sub(state_burn))
+                .ok_or("explicit change is smaller than the automatic fee and state burn")?;
             (
                 inputs.clone(),
                 change,
+                state_burn,
                 change_target.unwrap_or(wallet.address()),
             )
         };
         let mut public_outputs = Vec::new();
         if change > 0 {
-            public_outputs.push(SpendOutput::new(change_address, Amount::from_esca(change)));
+            public_outputs.push(SpendOutput::new(change_address, Amount::from_zeno(change)));
         }
-        public_outputs.push(SpendOutput::block_miner(Amount::from_esca(fee)));
+        public_outputs.push(SpendOutput::block_miner(Amount::from_zeno(fee)));
+        if state_burn > 0 {
+            public_outputs.push(SpendOutput::burn(Amount::from_zeno(state_burn)));
+        }
         let intent = WithdrawIntent::new(
             wallet.address(),
             selected,
@@ -1112,26 +1218,45 @@ fn redeem_qcash(args: &[String]) -> Result<(), String> {
         .transpose()?;
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
     let transaction = automatic_fee_transaction(|fee| {
-        let available = input
-            .qcash
-            .amount()
-            .as_esca()
+        let input_amount = input.qcash.amount().as_zeno();
+        let requested = requested_amount.map(Amount::as_zeno);
+        let provisional_remainder = requested
+            .and_then(|amount| input_amount.checked_sub(fee)?.checked_sub(amount))
+            .unwrap_or(0);
+        let created_qcash = u64::from(provisional_remainder > 0);
+        let state_burn = StateTransitionWeight {
+            consumed_qcash_utxos: 1,
+            created_qcash_utxos: created_qcash,
+            created_coin_utxos: 2,
+            ..StateTransitionWeight::default()
+        }
+        .required_burn()
+        .map_err(|error| error.to_string())?
+        .as_zeno();
+        let available = input_amount
             .checked_sub(fee)
+            .and_then(|amount| amount.checked_sub(state_burn))
             .filter(|amount| *amount > 0)
-            .ok_or("QCash amount is too small for the automatic fee")?;
-        let recipient_amount = requested_amount.map_or(available, Amount::as_esca);
+            .ok_or("QCash amount is too small for the automatic fee and state burn")?;
+        let recipient_amount = requested.unwrap_or(available);
         let change_amount = available
             .checked_sub(recipient_amount)
-            .ok_or("redeem amount plus automatic fee exceeds the QCash amount")?;
+            .ok_or("redeem amount plus automatic fee and state burn exceeds the QCash amount")?;
+        if u64::from(change_amount > 0) != created_qcash {
+            return Err("QCash remainder is too small to fund its state burn".into());
+        }
         let mut outputs = vec![SpendOutput::new(
             recipient,
-            Amount::from_esca(recipient_amount),
+            Amount::from_zeno(recipient_amount),
         )];
-        outputs.push(SpendOutput::block_miner(Amount::from_esca(fee)));
+        outputs.push(SpendOutput::block_miner(Amount::from_zeno(fee)));
+        if state_burn > 0 {
+            outputs.push(SpendOutput::burn(Amount::from_zeno(state_burn)));
+        }
         let qcash_outputs = change_secret
             .as_ref()
             .filter(|_| change_amount > 0)
-            .map(|secret| QCashOutput::new(Amount::from_esca(change_amount), secret.public_key()))
+            .map(|secret| QCashOutput::new(Amount::from_zeno(change_amount), secret.public_key()))
             .into_iter()
             .collect();
         let intent = RedeemIntent::new(vec![input.qcash], outputs, qcash_outputs)
@@ -1149,14 +1274,14 @@ fn redeem_qcash(args: &[String]) -> Result<(), String> {
                 .intent
                 .qcash_outputs
                 .first()
-                .map_or(0, |output| output.amount.as_esca()),
+                .map_or(0, |output| output.amount.as_zeno()),
         ),
         _ => unreachable!("redeem fee builder returned another transaction kind"),
     };
 
     if let Some(secret) = change_secret.filter(|_| change_amount > 0) {
         let id = redeem_qcash_change_output_id(commitment, 0).map_err(|error| error.to_string())?;
-        let change_file = QCashFile::new(QCash::new(id, Amount::from_esca(change_amount)), secret);
+        let change_file = QCashFile::new(QCash::new(id, Amount::from_zeno(change_amount)), secret);
         write_qcash_files(&cash_dir_option(args), &[change_file])?;
     }
     submit_or_print_transaction(args, &transaction)
@@ -1181,19 +1306,41 @@ fn split_qcash(args: &[String]) -> Result<(), String> {
     )?;
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
     let transaction = automatic_fee_transaction(|fee| {
-        let available = input
-            .qcash
-            .amount()
-            .as_esca()
-            .checked_sub(fee)
-            .ok_or("split automatic fee exceeds the QCash amount")?;
-        let remainder = available
-            .checked_sub(requested)
-            .ok_or("split outputs plus automatic fee exceed the QCash amount")?;
-        let mut final_amounts = amounts.clone();
-        if remainder > 0 {
-            final_amounts.push(Amount::from_esca(remainder));
+        let mut state_burn = 0_u64;
+        let mut resolved_amounts = None;
+        for _ in 0..4 {
+            let available = input
+                .qcash
+                .amount()
+                .as_zeno()
+                .checked_sub(fee)
+                .and_then(|amount| amount.checked_sub(state_burn))
+                .ok_or("split automatic fee and state burn exceed the QCash amount")?;
+            let remainder = available
+                .checked_sub(requested)
+                .ok_or("split outputs plus automatic fee and state burn exceed the QCash amount")?;
+            let mut final_amounts = amounts.clone();
+            if remainder > 0 {
+                final_amounts.push(Amount::from_zeno(remainder));
+            }
+            let required_burn = StateTransitionWeight {
+                consumed_qcash_utxos: 1,
+                created_qcash_utxos: u64::try_from(final_amounts.len())
+                    .map_err(|_| "too many QCash outputs")?,
+                created_coin_utxos: 1,
+                ..StateTransitionWeight::default()
+            }
+            .required_burn()
+            .map_err(|error| error.to_string())?
+            .as_zeno();
+            if required_burn == state_burn {
+                resolved_amounts = Some(final_amounts);
+                break;
+            }
+            state_burn = required_burn;
         }
+        let final_amounts =
+            resolved_amounts.ok_or("split state-burn calculation did not converge")?;
         if final_amounts.len() < 2 {
             return Err("QCash split must produce at least two outputs after fee".into());
         }
@@ -1202,12 +1349,12 @@ fn split_qcash(args: &[String]) -> Result<(), String> {
             .zip(&secrets)
             .map(|(amount, secret)| QCashOutput::new(*amount, secret.public_key()))
             .collect::<Vec<_>>();
-        let intent = SplitIntent::new(
-            input.qcash,
-            outputs,
-            Some(SpendOutput::block_miner(Amount::from_esca(fee))),
-        )
-        .map_err(|error| error.to_string())?;
+        let mut public_outputs = vec![SpendOutput::block_miner(Amount::from_zeno(fee))];
+        if state_burn > 0 {
+            public_outputs.push(SpendOutput::burn(Amount::from_zeno(state_burn)));
+        }
+        let intent = SplitIntent::new(input.qcash, outputs, public_outputs)
+            .map_err(|error| error.to_string())?;
         let authorized = authorize_qcash_intent(intent, std::slice::from_ref(&input), chain)?;
         Ok(AuthorizedTransaction::Split(Box::new(authorized)))
     })?;
@@ -1255,14 +1402,29 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
     let secret = fresh_qcash_secrets(1, forbidden)?.remove(0);
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
     let transaction = automatic_fee_transaction(|fee| {
+        let state_burn = StateTransitionWeight {
+            consumed_qcash_utxos: u64::try_from(inputs.len())
+                .map_err(|_| "too many QCash inputs")?,
+            created_qcash_utxos: 1,
+            created_coin_utxos: 1,
+            ..StateTransitionWeight::default()
+        }
+        .required_burn()
+        .map_err(|error| error.to_string())?
+        .as_zeno();
         let output_amount = total
             .checked_sub(fee)
+            .and_then(|amount| amount.checked_sub(state_burn))
             .filter(|amount| *amount > 0)
-            .ok_or("merged QCash amount is too small for the automatic fee")?;
+            .ok_or("merged QCash amount is too small for the automatic fee and state burn")?;
+        let mut public_outputs = vec![SpendOutput::block_miner(Amount::from_zeno(fee))];
+        if state_burn > 0 {
+            public_outputs.push(SpendOutput::burn(Amount::from_zeno(state_burn)));
+        }
         let intent = MergeIntent::new(
             inputs.iter().map(|file| file.qcash).collect(),
-            QCashOutput::new(Amount::from_esca(output_amount), secret.public_key()),
-            Some(SpendOutput::block_miner(Amount::from_esca(fee))),
+            QCashOutput::new(Amount::from_zeno(output_amount), secret.public_key()),
+            public_outputs,
         )
         .map_err(|error| error.to_string())?;
         let authorized = authorize_qcash_intent(intent, &inputs, chain)?;
@@ -1274,7 +1436,7 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
                 .intent
                 .commitment(chain)
                 .map_err(|error| error.to_string())?,
-            transaction.intent.output.amount.as_esca(),
+            transaction.intent.output.amount.as_zeno(),
         ),
         _ => unreachable!("merge fee builder returned another transaction kind"),
     };
@@ -1282,7 +1444,7 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
     write_qcash_files(
         &cash_dir_option(args),
         &[QCashFile::new(
-            QCash::new(id, Amount::from_esca(output_amount)),
+            QCash::new(id, Amount::from_zeno(output_amount)),
             secret,
         )],
     )?;
@@ -1292,7 +1454,7 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
 fn reject_manual_fee(args: &[String]) -> Result<(), String> {
     if option(args, "--miner").is_some() {
         return Err(
-            "--miner is no longer supported; wallet fee is automatic at 1 esca/byte".into(),
+            "--miner is no longer supported; wallet fee is automatic at 1 zeno/byte".into(),
         );
     }
     Ok(())
@@ -1301,7 +1463,7 @@ fn reject_manual_fee(args: &[String]) -> Result<(), String> {
 fn automatic_fee_transaction(
     mut build: impl FnMut(u64) -> Result<AuthorizedTransaction, String>,
 ) -> Result<AuthorizedTransaction, String> {
-    let mut fee = AUTOMATIC_FEE_ESCA_PER_BYTE;
+    let mut fee = AUTOMATIC_FEE_ZENO_PER_BYTE;
     for _ in 0..MAX_FEE_CONVERGENCE_ROUNDS {
         let transaction = build(fee)?;
         let size = canonical_bytes(&transaction)
@@ -1309,7 +1471,7 @@ fn automatic_fee_transaction(
             .len();
         let required = u64::try_from(size)
             .ok()
-            .and_then(|size| size.checked_mul(AUTOMATIC_FEE_ESCA_PER_BYTE))
+            .and_then(|size| size.checked_mul(AUTOMATIC_FEE_ZENO_PER_BYTE))
             .ok_or("automatic transaction fee overflow")?;
         if required == fee {
             return Ok(transaction);
@@ -1325,11 +1487,11 @@ fn cash_dir_option(args: &[String]) -> PathBuf {
 
 fn checked_amount_sum(mut amounts: impl Iterator<Item = Amount>) -> Result<u64, String> {
     amounts
-        .try_fold(Amount::from_esca(0), |sum, amount| {
+        .try_fold(Amount::from_zeno(0), |sum, amount| {
             sum.checked_add(amount)
                 .ok_or_else(|| "QCash amount overflow".to_string())
         })
-        .map(Amount::as_esca)
+        .map(Amount::as_zeno)
 }
 
 fn fresh_qcash_secrets(
@@ -1556,7 +1718,7 @@ fn parse_amount(value: &str) -> Result<Amount, String> {
     if units == 0 {
         return Err("XPQ amount must be positive".to_string());
     }
-    Ok(Amount::from_esca(units))
+    Ok(Amount::from_zeno(units))
 }
 
 fn format_amount(units: u64) -> String {
@@ -1568,10 +1730,13 @@ fn format_amount(units: u64) -> String {
 
 fn print_help() {
     println!(
-        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--profile PROFILE]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--profile PROFILE]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet sign-withdraw --qcash XPQ... [--input COIN_ID...] [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--cash-dir PATH] [--wallet PATH] [--offline]\nwallet qcash-redeem --file FILE --to ADDRESS [--amount XPQ] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-split --file FILE --qcash XPQ [--qcash XPQ...] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-merge --file FILE --file FILE... [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet version\n\nAll signature profiles are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 esca per canonical transaction byte; manual --miner fee input is not supported. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs. QCash operations use Falcon-512 bearer authorization. Keep input QCash files until the transaction is canonically confirmed.\nRunning without a command opens the interactive menu.\nWithout --input, spend and withdraw select active XPQ inputs and calculate change through node RPC."
+        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--profile PROFILE]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--profile PROFILE]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet sign-withdraw --qcash XPQ... [--input COIN_ID...] [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--cash-dir PATH] [--wallet PATH] [--offline]\nwallet qcash-redeem --file FILE --to ADDRESS [--amount XPQ] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-split --file FILE --qcash XPQ [--qcash XPQ...] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-merge --file FILE --file FILE... [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet version\n\nAll signature profiles are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 zeno per canonical transaction byte; manual --miner fee input is not supported. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs. QCash operations use Falcon-512 bearer authorization. Keep input QCash files until the transaction is canonically confirmed.\nRunning without a command opens the interactive menu.\nWithout --input, spend and withdraw select active XPQ inputs and calculate change through node RPC."
     );
     println!(
-        "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset ID --to ADDRESS --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset ID --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset ID --to ADDRESS --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset ID [--rpc ADDRESS]\nwallet asset-balance --asset ID [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts are integer base units. Registration makes the signing wallet the mint authority. Asset state and its XPQ miner fee are committed atomically."
+        "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply UNITS --initial-mint UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset ID --to ADDRESS --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset ID --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset ID --to ADDRESS --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset ID [--rpc ADDRESS]\nwallet asset-balance --asset ID [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts are integer base units. Registration atomically credits the initial mint to the signing creator, makes that wallet the mint authority, and pays one XPQ miner fee. Distribution to other addresses uses asset-transfer."
+    );
+    println!(
+        "\nWASM commands:\nwallet wasm-deploy --name NAME --wasm MODULE [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet wasm-info --extension ID [--rpc ADDRESS]\n\nWASM deploys are immutable and activate automatically after 100 blocks."
     );
 }
 
@@ -1660,56 +1825,34 @@ mod tests {
     }
 
     #[test]
-    fn balance_separates_spendable_immature_and_reserved_outputs() {
+    fn utxo_status_and_amount_format_are_canonical() {
         let account = AccountResponse {
             next_height: 100,
             public_key_registered: false,
             next_utxo_offset: None,
-            assets: vec![],
             utxos: vec![
                 AccountUtxo {
-                    id: "spendable".into(),
+                    id: "available-one".into(),
                     amount: 2 * COIN,
-                    maturity_height: None,
                     reserved: false,
                 },
                 AccountUtxo {
-                    id: "immature".into(),
+                    id: "available-two".into(),
                     amount: 3 * COIN,
-                    maturity_height: Some(101),
                     reserved: false,
                 },
                 AccountUtxo {
                     id: "reserved".into(),
                     amount: COIN,
-                    maturity_height: None,
                     reserved: true,
                 },
             ],
         };
 
-        assert_eq!(
-            summarize_balance(&account),
-            Ok(BalanceSummary {
-                total: 6 * COIN,
-                spendable: 2 * COIN,
-                immature: 3 * COIN,
-                reserved: COIN,
-            })
-        );
         assert_eq!(format_amount(2 * COIN + 1), "2.000001 XPQ");
-        assert_eq!(
-            utxo_status(&account.utxos[0], account.next_height),
-            "spendable"
-        );
-        assert_eq!(
-            utxo_status(&account.utxos[1], account.next_height),
-            "immature"
-        );
-        assert_eq!(
-            utxo_status(&account.utxos[2], account.next_height),
-            "reserved"
-        );
+        assert_eq!(utxo_status(&account.utxos[0]), "available");
+        assert_eq!(utxo_status(&account.utxos[1]), "available");
+        assert_eq!(utxo_status(&account.utxos[2]), "reserved");
     }
 
     #[test]
@@ -1717,15 +1860,15 @@ mod tests {
         let id = xparq::coin::CoinId::from_bytes([0xab; xparq::coin::CoinId::SIZE]);
 
         assert_eq!(
-            canonical_qcash_file_name(QCash::new(id, Amount::from_esca(5 * COIN))),
+            canonical_qcash_file_name(QCash::new(id, Amount::from_zeno(5 * COIN))),
             "5XPQ.QCash"
         );
         assert_eq!(
-            canonical_qcash_file_name(QCash::new(id, Amount::from_esca(29 * COIN + 900_000))),
+            canonical_qcash_file_name(QCash::new(id, Amount::from_zeno(29 * COIN + 900_000))),
             "29.9XPQ.QCash"
         );
         assert_eq!(
-            canonical_qcash_file_name(QCash::new(id, Amount::from_esca(1))),
+            canonical_qcash_file_name(QCash::new(id, Amount::from_zeno(1))),
             "0.000001XPQ.QCash"
         );
     }
@@ -1745,7 +1888,7 @@ mod tests {
                 QCashFile::new(
                     QCash::new(
                         xparq::coin::CoinId::from_bytes([byte; xparq::coin::CoinId::SIZE]),
-                        Amount::from_esca(10 * COIN),
+                        Amount::from_zeno(10 * COIN),
                     ),
                     QCashSigningSeed::from_bytes([byte; 32]),
                 )
@@ -1773,20 +1916,20 @@ mod tests {
         let output_seed = QCashSigningSeed::from_bytes([0x32; 32]);
         let input = QCash::new(
             xparq::coin::CoinId::from_bytes([0x33; xparq::coin::CoinId::SIZE]),
-            Amount::from_esca(COIN),
+            Amount::from_zeno(COIN),
         );
         let chain = xparq::genesis::chain_context().unwrap();
         let transaction = automatic_fee_transaction(|fee| {
             let intent = SplitIntent::new(
                 input,
                 vec![
-                    QCashOutput::new(Amount::from_esca(1), output_seed.public_key()),
+                    QCashOutput::new(Amount::from_zeno(1), output_seed.public_key()),
                     QCashOutput::new(
-                        Amount::from_esca(COIN - fee - 1),
+                        Amount::from_zeno(COIN - fee - 1),
                         QCashSigningSeed::from_bytes([0x34; 32]).public_key(),
                     ),
                 ],
-                Some(SpendOutput::block_miner(Amount::from_esca(fee))),
+                vec![SpendOutput::block_miner(Amount::from_zeno(fee))],
             )
             .map_err(|error| error.to_string())?;
             let commitment = intent
@@ -1804,9 +1947,14 @@ mod tests {
         .unwrap();
         let size = canonical_bytes(&transaction).unwrap().len() as u64;
         let fee = match transaction {
-            AuthorizedTransaction::Split(transaction) => {
-                transaction.intent.miner_output.unwrap().amount.as_esca()
-            }
+            AuthorizedTransaction::Split(transaction) => transaction
+                .intent
+                .public_outputs
+                .iter()
+                .find(|output| output.target == xparq::transaction::OutputTarget::BlockMiner)
+                .unwrap()
+                .amount
+                .as_zeno(),
             _ => unreachable!(),
         };
         assert_eq!(fee, size);
@@ -1829,7 +1977,7 @@ mod tests {
         let input = QCashFile::new(
             QCash::new(
                 xparq::coin::CoinId::from_bytes([0x11; xparq::coin::CoinId::SIZE]),
-                Amount::from_esca(5 * COIN),
+                Amount::from_zeno(5 * COIN),
             ),
             QCashSigningSeed::from_bytes([0x22; 32]),
         );
@@ -1874,7 +2022,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(merged_paths.len(), 1);
         assert!(
-            load_qcash_file(&merged_paths[0]).unwrap().qcash.amount() < Amount::from_esca(5 * COIN)
+            load_qcash_file(&merged_paths[0]).unwrap().qcash.amount() < Amount::from_zeno(5 * COIN)
         );
 
         let mnemonic = xparq_wallet::encode_xparq_mnemonic(&[7; 16]).unwrap();
@@ -1899,7 +2047,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(redeem_paths.len(), 1);
         assert!(
-            load_qcash_file(&redeem_paths[0]).unwrap().qcash.amount() < Amount::from_esca(COIN)
+            load_qcash_file(&redeem_paths[0]).unwrap().qcash.amount() < Amount::from_zeno(COIN)
         );
 
         fs::remove_dir_all(root).unwrap();

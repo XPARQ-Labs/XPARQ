@@ -41,9 +41,6 @@ impl LedgerState {
         block_miner: Address,
     ) -> Result<StateRollbackJournal, SpendStateError> {
         if let ValidatedTransaction::Extension(extension_transaction) = transaction {
-            let extension = xparq_extension::production_registry()
-                .get(extension_transaction.call.extension_id())
-                .map_err(SpendStateError::Extension)?;
             let mut fee =
                 self.apply_validated_onchain_spend(&extension_transaction.fee, block_miner)?;
             if let Some(RevealedAccountKey::Profile(public_key)) =
@@ -64,7 +61,7 @@ impl LedgerState {
                 }
             }
             let applied = self.extensions.apply(
-                extension,
+                xparq_extension::production_registry(),
                 xparq_common::ExtensionContext { height: _height },
                 &extension_transaction.call,
             );
@@ -165,11 +162,13 @@ impl LedgerState {
                 journal.consumed_coins.push(self.coins.consume(id)?);
             }
             for (index, output) in intent.outputs.iter().enumerate() {
+                let Some(owner) = resolve_target(output.target, block_miner) else {
+                    continue;
+                };
                 let id = output_id(b"onchain", commitment, index)?;
                 self.coins.insert(CoinUtxo {
                     coin: Coin::new(id, output.amount),
-                    owner: resolve_target(output.target, block_miner),
-                    maturity_height: None,
+                    owner,
                 })?;
                 journal.created_coin_ids.push(id);
             }
@@ -198,11 +197,13 @@ impl LedgerState {
                 journal.created_qcash_ids.push(id);
             }
             for (index, output) in intent.outputs.iter().enumerate() {
+                let Some(owner) = resolve_target(output.target, block_miner) else {
+                    continue;
+                };
                 let id = output_id(b"change", commitment, index)?;
                 self.coins.insert(CoinUtxo {
                     coin: Coin::new(id, output.amount),
-                    owner: resolve_target(output.target, block_miner),
-                    maturity_height: None,
+                    owner,
                 })?;
                 journal.created_coin_ids.push(id);
             }
@@ -254,9 +255,9 @@ impl LedgerState {
                 b"merge",
                 &mut journal,
             )?;
-            if let Some(output) = intent.miner_output {
+            if !intent.public_outputs.is_empty() {
                 self.create_coin_outputs(
-                    std::slice::from_ref(&output),
+                    &intent.public_outputs,
                     commitment,
                     b"merge-miner",
                     block_miner,
@@ -279,9 +280,9 @@ impl LedgerState {
         let result = (|| {
             self.consume_qcash_inputs(std::slice::from_ref(&intent.input), &mut journal)?;
             self.create_qcash_outputs(&intent.outputs, commitment, b"split", &mut journal)?;
-            if let Some(output) = intent.miner_output {
+            if !intent.public_outputs.is_empty() {
                 self.create_coin_outputs(
-                    std::slice::from_ref(&output),
+                    &intent.public_outputs,
                     commitment,
                     b"split-miner",
                     block_miner,
@@ -366,11 +367,13 @@ impl LedgerState {
         journal: &mut UtxoRollbackJournal,
     ) -> Result<(), SpendStateError> {
         for (index, output) in outputs.iter().enumerate() {
+            let Some(owner) = resolve_target(output.target, block_miner) else {
+                continue;
+            };
             let id = output_id(kind, commitment, index)?;
             self.coins.insert(CoinUtxo {
                 coin: Coin::new(id, output.amount),
-                owner: resolve_target(output.target, block_miner),
-                maturity_height: None,
+                owner,
             })?;
             journal.created_coin_ids.push(id);
         }
@@ -399,10 +402,11 @@ fn revealed_account_key(
     }
 }
 
-fn resolve_target(target: OutputTarget, block_miner: Address) -> Address {
+fn resolve_target(target: OutputTarget, block_miner: Address) -> Option<Address> {
     match target {
-        OutputTarget::Address(address) => address,
-        OutputTarget::BlockMiner => block_miner,
+        OutputTarget::Address(address) => Some(address),
+        OutputTarget::BlockMiner => Some(block_miner),
+        OutputTarget::Burn => None,
     }
 }
 
@@ -479,9 +483,8 @@ mod tests {
     fn failed_in_place_transition_restores_consumed_inputs() {
         let id = CoinId::derive(&[b"rollback regression coin"]);
         let utxo = CoinUtxo {
-            coin: Coin::new(id, xparq_coin::Amount::from_esca(7)),
+            coin: Coin::new(id, xparq_coin::Amount::from_zeno(7)),
             owner: Address::ZERO,
-            maturity_height: None,
         };
         let mut state = LedgerState::default();
         state.coins.insert(utxo).unwrap();
@@ -496,7 +499,7 @@ mod tests {
             Err(SpendStateError::OutputIndexOverflow)
         );
         assert_eq!(
-            state.coins.get(&id).map(|coin| coin.coin.amount.as_esca()),
+            state.coins.get(&id).map(|coin| coin.coin.amount.as_zeno()),
             Some(7)
         );
     }
@@ -509,23 +512,25 @@ mod tests {
         state
             .qcash
             .insert(QCashUtxo {
-                coin: Coin::new(input_id, xparq_coin::Amount::from_esca(10)),
+                coin: Coin::new(input_id, xparq_coin::Amount::from_zeno(2_000)),
                 public_key: seed.public_key(),
             })
             .unwrap();
         let intent = SplitIntent::new(
-            QCash::new(input_id, xparq_coin::Amount::from_esca(10)),
+            QCash::new(input_id, xparq_coin::Amount::from_zeno(2_000)),
             vec![
                 QCashOutput::new(
-                    xparq_coin::Amount::from_esca(4),
+                    xparq_coin::Amount::from_zeno(500),
                     xparq_crypto::QCashPublicKey([4; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
                 ),
                 QCashOutput::new(
-                    xparq_coin::Amount::from_esca(6),
+                    xparq_coin::Amount::from_zeno(1_500 - xparq_consensus::QCASH_UTXO_STATE_WEIGHT),
                     xparq_crypto::QCashPublicKey([5; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
                 ),
             ],
-            None,
+            vec![xparq_transaction::SpendOutput::burn(
+                xparq_coin::Amount::from_zeno(xparq_consensus::QCASH_UTXO_STATE_WEIGHT),
+            )],
         )
         .unwrap();
         let chain = ChainContext::new([6; 32]);

@@ -5,26 +5,24 @@ use std::{error::Error, fmt};
 use xparq_coin::{Amount, COIN};
 use xparq_crypto::{Address, Hash, HashDomain, domain_hash};
 
-pub const MIN_BLOCK_EMISSION: u64 = 1_000_000;
+pub const MIN_BLOCK_EMISSION: u64 = 500_000;
 pub const MAX_BLOCK_EMISSION: u64 = 10_000_000;
-pub const BASE_BLOCK_EMISSION: u64 = 5_000_000;
-pub const BLOCK_EMISSION_STEP: u64 = 100_000;
-pub const BLOCK_EMISSION_MATURITY: u64 = 10;
+pub const BLOCK_EMISSION_START: u64 = 5_000_000;
+pub const BLOCK_EMISSION_STEP: u64 = 500_000;
 
-const_assert!(MIN_BLOCK_EMISSION == COIN);
+const_assert!(MIN_BLOCK_EMISSION == COIN / 2);
 const_assert!(MAX_BLOCK_EMISSION == 10 * COIN);
-const_assert!(BASE_BLOCK_EMISSION == 5 * COIN);
-const_assert!(BLOCK_EMISSION_STEP == COIN / 10);
+const_assert!(BLOCK_EMISSION_START == 5 * COIN);
+const_assert!(BLOCK_EMISSION_STEP == COIN / 2);
 
 pub const fn initial_block_emission() -> Amount {
-    Amount::from_esca(BASE_BLOCK_EMISSION)
+    Amount::from_zeno(BLOCK_EMISSION_START)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ValidatedEmission {
     recipient: Address,
     subsidy: Amount,
-    maturity_height: Height,
     origin: Hash,
 }
 
@@ -35,10 +33,6 @@ impl ValidatedEmission {
 
     pub fn subsidy(self) -> Amount {
         self.subsidy
-    }
-
-    pub fn maturity_height(self) -> Height {
-        self.maturity_height
     }
 
     pub fn origin(self) -> Hash {
@@ -92,7 +86,6 @@ pub(crate) fn authorize_emission(
     if emission.subsidy != expected {
         return Err(EmissionError::InvalidSubsidy);
     }
-    let maturity_height = Height(block.height().0.saturating_add(BLOCK_EMISSION_MATURITY));
     let origin = domain_hash(
         HashDomain::XPQCoin,
         &xparq_common::canonical_bytes(&(
@@ -107,7 +100,6 @@ pub(crate) fn authorize_emission(
     Ok(ValidatedEmission {
         recipient: emission.to,
         subsidy: emission.subsidy,
-        maturity_height,
         origin,
     })
 }
@@ -123,7 +115,7 @@ pub fn expected_emission_for_height(
     mut weight_at: impl FnMut(Height) -> Option<u32>,
 ) -> Result<Amount, EmissionError> {
     if height.0 <= 1 {
-        return Ok(Amount::from_esca(BASE_BLOCK_EMISSION));
+        return Ok(Amount::from_zeno(BLOCK_EMISSION_START));
     }
 
     if !is_wbda_epoch_boundary(height.0) {
@@ -147,7 +139,7 @@ mod tests {
 
     #[test]
     fn non_boundary_emission_uses_parent_without_loading_history() {
-        let parent = Amount::from_esca(BASE_BLOCK_EMISSION + BLOCK_EMISSION_STEP);
+        let parent = Amount::from_zeno(BLOCK_EMISSION_START + BLOCK_EMISSION_STEP);
         let emission = expected_emission_for_height(Height(2), parent, |_| {
             panic!("non-boundary emission must not load history")
         })
@@ -161,7 +153,7 @@ mod tests {
         let mut loaded = Vec::new();
         let emission = expected_emission_for_height(
             boundary,
-            Amount::from_esca(BASE_BLOCK_EMISSION),
+            Amount::from_zeno(BLOCK_EMISSION_START),
             |height| {
                 loaded.push(height);
                 Some(MAX_BLOCK_EMISSION as u32)
@@ -177,7 +169,7 @@ mod tests {
         // Full utilization decreases emission by one step from the parent.
         assert_eq!(
             emission,
-            Amount::from_esca(BASE_BLOCK_EMISSION - BLOCK_EMISSION_STEP)
+            Amount::from_zeno(BLOCK_EMISSION_START - BLOCK_EMISSION_STEP)
         );
     }
 }

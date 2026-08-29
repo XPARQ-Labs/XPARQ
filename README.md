@@ -119,7 +119,7 @@ block hash, and canonical serialized transaction size in bytes. The node and
 wallet must both be rebuilt and restarted after an RPC format change.
 
 The UTXO tracker uses the paginated `/account/<address>` wallet endpoint and
-shows each CoinId as `spendable`, `immature`, or `reserved`. CoinIds use the
+shows each CoinId as `available` or `reserved`. CoinIds use the
 case-sensitive `XPQ:` prefix followed by 64 hexadecimal characters. Public
 explorer address queries remain aggregate/activity-only and do not expose UTXO
 lists.
@@ -159,8 +159,11 @@ Interactive API documentation is available from a running node at `/docs`.
 The machine-readable OpenAPI 3.1 specification is served at `/openapi.json` and
 is also tracked in [`docs/openapi.json`](docs/openapi.json). See
 [`docs/API.md`](docs/API.md) for transaction encoding and compatibility notes.
+Developers creating native assets or WASM extensions should start with the
+[`dev-tools/`](dev-tools/README.md) guide.
 
 - `/status`: canonical tip and node status
+- `/balance/<address>`: aggregate wallet balance without UTXO pagination
 - `/account/<address>`: wallet-only balance and paginated UTXO selection data
 - `/explorer/address/<address>`: aggregate balance and canonical activity
 - `/explorer/transaction/<transaction-id>`: confirmed transaction details
@@ -184,5 +187,5 @@ using it with assets of real value.
 
 Signed wallet transactions are submitted to node RPC automatically. Use
 `--offline` only when canonical transaction hex is needed. This migration uses
-P2P v6, redb schema v10, snapshot v9, and chain-spec v14; old node data and peers
+P2P v1, redb schema v1, snapshot v1, and chain-spec v1; old node data and peers
 are intentionally incompatible.

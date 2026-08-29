@@ -204,7 +204,7 @@ mod tests {
                 sender: Address::ZERO,
                 inputs: vec![xparq_coin::CoinId::from_bytes([9; 32])],
                 outputs: vec![crate::SpendOutput::block_miner(
-                    xparq_coin::Amount::from_esca(1),
+                    xparq_coin::Amount::from_zeno(1),
                 )],
             },
             authorization: AccountAuthorization::ProfileKnown {

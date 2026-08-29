@@ -171,7 +171,7 @@ mod tests {
             Nonce(marker as u64),
             Some(Emission::new(
                 Address([marker; crate::crypto::ADDRESS_SIZE]),
-                Amount::from_esca(1),
+                Amount::from_zeno(1),
             )),
             vec![],
         )

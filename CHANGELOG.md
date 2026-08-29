@@ -9,8 +9,8 @@
 - Added atomic owner-only wallet creation and automatic transaction submission
   with explicit `--offline` output.
 - Established versioned P2P, redb, snapshot, and chain-spec compatibility
-  boundaries. The current reset-chain boundary is P2P v6, redb schema v10,
-  snapshot v9, and chain-spec v14. Old databases and snapshots require a reset
+  boundaries. The reset chain starts at P2P v1, redb schema v1, snapshot v1,
+  and chain-spec v1. Old databases and snapshots require a reset
   or explicit migration; peers must be upgraded together.
 - Added wallet history, paginated UTXO tracking, QCash partial redeem/change,
   and one-amount split behavior.
@@ -32,11 +32,17 @@
 - Replaced Bech32 addresses with canonical 50-character lowercase `0x` text:
   20 address bytes followed by a four-byte, domain-separated SHA3-256 checksum.
   Legacy Bech32 and raw 20-byte hexadecimal input are no longer accepted.
-- Standardized the smallest unit name as `esca` (`1 XPQ = 1,000,000 esca`)
+- Standardized the smallest unit name as `zeno` (`1 XPQ = 1,000,000 zeno`)
   and CoinId text as the case-sensitive `XPQ:` prefix followed by 64 hex digits.
-- Restricted maturity metadata to block-emission UTXOs. RPC and wallet output now
-  expose optional `maturity_height` and use `immature` instead of the generic
-  `spendable_height`/`locked` terminology.
+- Added consensus state-growth charging through `OutputTarget::Burn` at
+  `STATE_BURN_RATE_ZENO_PER_WEIGHT`. Burn outputs conserve transaction value
+  but never enter the UTXO set; wallet builders calculate them automatically.
+- Native asset supply and balances use `u128`. Native XPQ `Amount` remains a
+  canonical eight-byte `u64`; migrating it to `u128` is a separate breaking
+  consensus change and is not claimed by this reset-chain build.
+- Removed coin maturity from consensus and storage. Block-emission outputs are
+  immediately transferable by height rules, and RPC/wallet UTXOs expose only
+  local mempool reservation status without a second available-balance field.
 - Simplified QCash filenames to their canonical amount, such as `10XPQ.QCash`.
   Same-amount files receive collision-safe numbered names such as
   `10XPQ(2).QCash`; the bearer file contents, not its filename, retain identity.
@@ -70,12 +76,27 @@
   wallet commands for register, mint, burn, transfer, metadata, and balances.
   The interactive wallet exposes the same operations through an Assets submenu.
   Asset registration stores a bounded human-readable token name separately from
-  its normalized uppercase symbol.
+  its normalized uppercase symbol. Registration atomically mints the requested
+  initial supply to the creator address in the same transaction; distribution
+  to other addresses is an explicit transfer by the creator.
   Asset supply, limits, balances, and operation amounts use canonical `u128`;
   RPC responses encode these values as decimal strings without precision loss.
   Explorer transaction projections now decode asset calls and expose the asset
   ID and action. Account balance responses and the wallet balance screen list
-  held assets plus zero-balance assets controlled by the mint authority.
+  held assets plus assets controlled by the mint authority.
+- Added deterministic WASM extension ABI v1 using an interpreter with fuel,
+  fixed memory, bounded state snapshots, canonical Borsh packages, code-hash
+  identities, and read-only validation. Nodes can load reviewed `.xpqext`
+  packages with `--extension-package` without rebuilding; the ordered manifest
+  allowlist is committed into the effective chain-spec hash so peers and stored
+  databases fail closed when their WASM packages differ. Native-only nodes keep
+  the existing chain-spec identity.
+- Added immutable permissionless WASM deployment as an atomic signed extension
+  transaction. The node validates and stores bytecode in consensus state,
+  derives its ID from name and code hash, and activates it automatically 100
+  blocks after inclusion. Dynamic execution resolves code from ledger state, so
+  replay, snapshots, state roots, and reorg rollback do not depend on process
+  memory. Wallet deploy/info commands and WASM nonce/status RPCs are included.
 - Retired old Docker, tutorial, roadmap, whitepaper, and legacy fuzzing files
   because they described the removed architecture. Current behavior lives in
   the root, runtime, and wallet READMEs.

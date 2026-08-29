@@ -80,6 +80,7 @@ pub enum AssetAction {
         symbol: String,
         decimals: u8,
         max_supply: u128,
+        initial_mint: u128,
     },
     Mint {
         asset_id: AssetId,
@@ -126,6 +127,30 @@ impl AssetCall {
             | AssetAction::Burn { asset_id, .. }
             | AssetAction::Transfer { asset_id, .. } => *asset_id,
         }
+    }
+
+    /// Canonical persistent metadata bytes created by asset registration.
+    /// Dynamic supply and balance values are deliberately excluded.
+    pub fn registration_metadata_weight(&self) -> Result<u64, ExtensionFailure> {
+        let AssetAction::Register {
+            name,
+            symbol,
+            decimals,
+            max_supply,
+            ..
+        } = &self.action
+        else {
+            return Ok(0);
+        };
+        let metadata = AssetMetadata {
+            name: name.clone(),
+            symbol: symbol.clone(),
+            decimals: *decimals,
+            max_supply: *max_supply,
+            mint_authority: self.signer,
+        };
+        let bytes = canonical_bytes(&metadata).map_err(|_| ExtensionFailure::InvalidPayload)?;
+        u64::try_from(bytes.len()).map_err(|_| ExtensionFailure::InvalidPayload)
     }
 
     pub fn sign(
@@ -297,10 +322,12 @@ fn validate_transition(
             symbol,
             decimals,
             max_supply,
+            initial_mint,
         } => {
             validate_name(name)?;
             validate_symbol(symbol)?;
-            if *decimals > 18 || *max_supply == 0 {
+            if *decimals > 18 || *max_supply == 0 || *initial_mint == 0 || initial_mint > max_supply
+            {
                 return Err(ExtensionFailure::InvalidPayload);
             }
             let id = AssetId::derive(call.signer, symbol);
@@ -365,6 +392,7 @@ fn apply_transition(
             symbol,
             decimals,
             max_supply,
+            initial_mint,
         } => {
             let id = AssetId::derive(call.signer, symbol);
             write_value(
@@ -378,7 +406,8 @@ fn apply_transition(
                     mint_authority: call.signer,
                 },
             )?;
-            write_value(state, supply_key(id), &0_u128)?;
+            write_value(state, supply_key(id), initial_mint)?;
+            write_balance(state, id, call.signer, *initial_mint)?;
         }
         AssetAction::Mint {
             asset_id,
@@ -565,6 +594,22 @@ mod tests {
         fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ExtensionFailure> {
             Ok(self.0.get(key).cloned())
         }
+
+        fn entries(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ExtensionFailure> {
+            Ok(self
+                .0
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect())
+        }
+
+        fn get_extension(
+            &self,
+            _extension_id: ExtensionId,
+            key: &[u8],
+        ) -> Result<Option<Vec<u8>>, ExtensionFailure> {
+            self.get(key)
+        }
     }
 
     impl ExtensionStateWrite for MemoryState {
@@ -604,6 +649,7 @@ mod tests {
                 symbol: "GOLD".into(),
                 decimals: 2,
                 max_supply: 1_000,
+                initial_mint: 500,
             },
             0,
         );
@@ -614,7 +660,7 @@ mod tests {
             AssetAction::Mint {
                 asset_id: id,
                 recipient: alice,
-                amount: 600,
+                amount: 100,
             },
             1,
         );
@@ -685,6 +731,7 @@ mod tests {
                         symbol: "SILVER".into(),
                         decimals: 0,
                         max_supply: 10,
+                        initial_mint: 1,
                     },
                     0,
                 ),
@@ -715,6 +762,7 @@ mod tests {
                 symbol: "A".into(),
                 decimals: 0,
                 max_supply: 1,
+                initial_mint: 1,
             })
             .unwrap()[0],
             0

@@ -66,6 +66,7 @@ tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["cors", "limit", "timeout"] }
+wasmi = { version = "1.1.0", default-features = false, features = ["std", "extra-checks", "prefer-btree-collections"] }
 zeroize = { version = "1.9.0", features = ["alloc", "derive"], path = "depend/traits/zeroize" }
 rand_10 = { package = "rand", version = "0.10.2", features = ["sys_rng"], path = "depend/sqisign/rand-0.10" }
 

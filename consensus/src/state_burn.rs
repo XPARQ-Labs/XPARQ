@@ -1,0 +1,132 @@
+use std::{error::Error, fmt};
+
+use xparq_coin::Amount;
+use xparq_crypto::{ADDRESS_SIZE, QCASH_PUBLIC_KEY_SIZE};
+use xparq_transaction::{OutputTarget, SpendOutput};
+
+pub const STATE_BURN_ALGORITHM: &str = "xparq-state-burn-v1";
+pub const STATE_BURN_RATE_ZENO_PER_WEIGHT: u64 = 1;
+
+pub const COIN_UTXO_STATE_WEIGHT: u64 =
+    (xparq_coin::COIN_ID_SIZE + core::mem::size_of::<u64>() + ADDRESS_SIZE) as u64;
+pub const QCASH_UTXO_STATE_WEIGHT: u64 =
+    (xparq_coin::COIN_ID_SIZE + core::mem::size_of::<u64>() + QCASH_PUBLIC_KEY_SIZE) as u64;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StateTransitionWeight {
+    pub consumed_coin_utxos: u64,
+    pub created_coin_utxos: u64,
+    pub consumed_qcash_utxos: u64,
+    pub created_qcash_utxos: u64,
+    pub extension_created_weight: u64,
+}
+
+impl StateTransitionWeight {
+    pub fn required_burn(self) -> Result<Amount, StateBurnError> {
+        let deleted = self
+            .consumed_coin_utxos
+            .checked_mul(COIN_UTXO_STATE_WEIGHT)
+            .and_then(|weight| {
+                self.consumed_qcash_utxos
+                    .checked_mul(QCASH_UTXO_STATE_WEIGHT)
+                    .and_then(|qcash| weight.checked_add(qcash))
+            })
+            .ok_or(StateBurnError::WeightOverflow)?;
+        let created = self
+            .created_coin_utxos
+            .checked_mul(COIN_UTXO_STATE_WEIGHT)
+            .and_then(|weight| {
+                self.created_qcash_utxos
+                    .checked_mul(QCASH_UTXO_STATE_WEIGHT)
+                    .and_then(|qcash| weight.checked_add(qcash))
+            })
+            .and_then(|weight| weight.checked_add(self.extension_created_weight))
+            .ok_or(StateBurnError::WeightOverflow)?;
+        let net = created.saturating_sub(deleted);
+        let burn = u64::from(net)
+            .checked_mul(STATE_BURN_RATE_ZENO_PER_WEIGHT)
+            .ok_or(StateBurnError::AmountOverflow)?;
+        Ok(Amount::from_zeno(burn))
+    }
+}
+
+pub fn created_coin_output_count(outputs: &[SpendOutput]) -> Result<u64, StateBurnError> {
+    u64::try_from(
+        outputs
+            .iter()
+            .filter(|output| output.target != OutputTarget::Burn)
+            .count(),
+    )
+    .map_err(|_| StateBurnError::WeightOverflow)
+}
+
+pub fn validate_exact_burn(
+    outputs: &[SpendOutput],
+    required: Amount,
+) -> Result<(), StateBurnError> {
+    let mut burns = outputs
+        .iter()
+        .filter(|output| output.target == OutputTarget::Burn);
+    let declared = burns
+        .next()
+        .map_or(Amount::from_zeno(0), |output| output.amount);
+    if burns.next().is_some() {
+        return Err(StateBurnError::MultipleBurnOutputs);
+    }
+    if declared != required {
+        return Err(StateBurnError::IncorrectBurn {
+            required: required.as_zeno(),
+            declared: declared.as_zeno(),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StateBurnError {
+    WeightOverflow,
+    AmountOverflow,
+    MultipleBurnOutputs,
+    IncorrectBurn { required: u64, declared: u64 },
+}
+
+impl fmt::Display for StateBurnError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WeightOverflow => formatter.write_str("state transition weight overflow"),
+            Self::AmountOverflow => formatter.write_str("state burn amount overflow"),
+            Self::MultipleBurnOutputs => formatter.write_str("multiple state burn outputs"),
+            Self::IncorrectBurn { required, declared } => write!(
+                formatter,
+                "incorrect state burn: required {required} zeno, declared {declared} zeno"
+            ),
+        }
+    }
+}
+
+impl Error for StateBurnError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn charges_only_positive_net_state_growth() {
+        let neutral = StateTransitionWeight {
+            consumed_coin_utxos: 1,
+            created_coin_utxos: 1,
+            ..StateTransitionWeight::default()
+        };
+        assert_eq!(neutral.required_burn(), Ok(Amount::from_zeno(0)));
+
+        let growth = StateTransitionWeight {
+            consumed_qcash_utxos: 1,
+            created_qcash_utxos: 2,
+            ..StateTransitionWeight::default()
+        };
+        assert_eq!(
+            growth.required_burn(),
+            Ok(Amount::from_zeno(u64::from(QCASH_UTXO_STATE_WEIGHT)))
+        );
+    }
+}
