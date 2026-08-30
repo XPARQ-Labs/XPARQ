@@ -32,7 +32,7 @@
 - Replaced Bech32 addresses with canonical 50-character lowercase `0x` text:
   20 address bytes followed by a four-byte, domain-separated SHA3-256 checksum.
   Legacy Bech32 and raw 20-byte hexadecimal input are no longer accepted.
-- Standardized the smallest unit name as `zeno` (`1 XPQ = 1,000,000 zeno`)
+- Standardized the smallest unit name as `zeno` (`1 XPQ = 100,000 zeno`)
   and CoinId text as the case-sensitive `XPQ:` prefix followed by 64 hex digits.
 - Added consensus state-growth charging through `OutputTarget::Burn` at
   `STATE_BURN_RATE_ZENO_PER_WEIGHT`. Every newly created state entry is charged
@@ -40,6 +40,9 @@
   but never enter the UTXO set; wallet builders calculate them automatically.
   Native asset calls count every newly persisted metadata, supply, balance, and
   nonce key plus its canonical value, rather than charging metadata alone.
+  Every non-genesis emission pays the same Coin UTXO creation burn before
+  distribution: WBDA determines gross subsidy, the miner receives the net
+  reward, and the deducted amount participates in checked burn rollback.
   Ledger state tracks checked `total_burned`, including rollback/reorg, and the
   node exposes it through `GET /status`.
 - Native asset supply and balances use `u128`. Native XPQ `Amount` remains a

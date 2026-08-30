@@ -335,6 +335,14 @@ impl LedgerState {
                 total.checked_add(output.amount)
             })
             .ok_or(SpendStateError::BurnOverflow)?;
+        self.record_protocol_burn(burned, journal)
+    }
+
+    pub(crate) fn record_protocol_burn(
+        &mut self,
+        burned: Amount,
+        journal: &mut UtxoRollbackJournal,
+    ) -> Result<(), SpendStateError> {
         self.total_burned = self
             .total_burned
             .checked_add(burned)
@@ -513,6 +521,18 @@ mod tests {
         AuthorizedQCashIntent, AuthorizedTransaction, ChainContext, QCashAuthorization,
         QCashOutput, SplitIntent,
     };
+
+    #[test]
+    fn protocol_burn_is_rolled_back_with_its_created_utxo() {
+        let mut state = LedgerState::default();
+        let mut journal = UtxoRollbackJournal::default();
+        let burned = xparq_consensus::EMISSION_UTXO_STATE_BURN;
+
+        state.record_protocol_burn(burned, &mut journal).unwrap();
+        assert_eq!(state.total_burned, burned);
+        state.rollback(journal).unwrap();
+        assert_eq!(state.total_burned, Amount::from_zeno(0));
+    }
 
     #[test]
     fn failed_in_place_transition_restores_consumed_inputs() {

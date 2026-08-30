@@ -745,13 +745,19 @@ fn explorer_address_response(
         if let Some(emission) = block.emission().filter(|emission| emission.to == address) {
             emission_count = emission_count.saturating_add(1);
             if include_emissions {
+                let miner_reward = emission
+                    .subsidy
+                    .checked_sub(xparq::consensus::EMISSION_UTXO_STATE_BURN)
+                    .ok_or("block emission is below its UTXO state burn")?;
                 activities.push(serde_json::json!({
                     "height": block.height().0,
                     "block_hash": block_hash,
                     "transaction_id": serde_json::Value::Null,
                     "type": "emission",
                     "direction": "in",
-                    "amount": emission.subsidy.as_zeno(),
+                    "amount": miner_reward.as_zeno(),
+                    "gross_subsidy": emission.subsidy.as_zeno(),
+                    "state_burn": xparq::consensus::EMISSION_UTXO_STATE_BURN.as_zeno(),
                     "size_bytes": serde_json::Value::Null,
                 }));
             }
@@ -880,28 +886,28 @@ fn transaction_response(transaction: &AuthorizedTransaction, miner: Address) -> 
     match transaction {
         AuthorizedTransaction::OnChainSpend(tx) => serde_json::json!({
             "sender": xparq::crypto::address_to_string(&tx.intent.sender),
-            "outputs": public_outputs_response(&tx.intent.outputs, miner),
+            "outputs": public_outputs_response(&tx.intent.outputs, miner, Some(tx.intent.sender)),
         }),
         AuthorizedTransaction::Withdraw(tx) => serde_json::json!({
             "sender": xparq::crypto::address_to_string(&tx.intent.sender),
-            "outputs": public_outputs_response(&tx.intent.outputs, miner),
+            "outputs": public_outputs_response(&tx.intent.outputs, miner, Some(tx.intent.sender)),
             "qcash_output_count": tx.intent.qcash_outputs.len(),
             "qcash_amount": tx.intent.qcash_outputs.iter().map(|output| output.amount.as_zeno()).sum::<u64>(),
         }),
         AuthorizedTransaction::Redeem(tx) => serde_json::json!({
-            "outputs": public_outputs_response(&tx.intent.outputs, miner),
+            "outputs": public_outputs_response(&tx.intent.outputs, miner, None),
             "qcash_input_count": tx.intent.inputs.len(),
             "qcash_output_count": tx.intent.qcash_outputs.len(),
         }),
         AuthorizedTransaction::Merge(tx) => serde_json::json!({
             "qcash_input_count": tx.intent.inputs.len(),
             "qcash_output_count": 1,
-            "public_outputs": public_outputs_response(&tx.intent.public_outputs, miner),
+            "public_outputs": public_outputs_response(&tx.intent.public_outputs, miner, None),
         }),
         AuthorizedTransaction::Split(tx) => serde_json::json!({
             "qcash_input_count": 1,
             "qcash_output_count": tx.intent.outputs.len(),
-            "public_outputs": public_outputs_response(&tx.intent.public_outputs, miner),
+            "public_outputs": public_outputs_response(&tx.intent.public_outputs, miner, None),
         }),
         AuthorizedTransaction::Extension(tx) => extension_transaction_response(tx, miner),
     }
@@ -915,7 +921,11 @@ fn extension_transaction_response(
         "extension_id": hex::encode(transaction.call.extension_id().as_bytes()),
         "payload_size": transaction.call.payload().len(),
         "fee_sender": xparq::crypto::address_to_string(&transaction.fee.intent.sender),
-        "fee_outputs": public_outputs_response(&transaction.fee.intent.outputs, miner),
+        "fee_outputs": public_outputs_response(
+            &transaction.fee.intent.outputs,
+            miner,
+            Some(transaction.fee.intent.sender),
+        ),
     });
     if transaction.call.extension_id() == xparq::extension::wasm_deploy_extension_id() {
         let Ok(call) = xparq::extension::WasmDeployCall::from_extension_call(&transaction.call)
@@ -1009,23 +1019,36 @@ fn extension_transaction_response(
     response
 }
 
-fn public_outputs_response(outputs: &[SpendOutput], miner: Address) -> Vec<serde_json::Value> {
+fn public_outputs_response(
+    outputs: &[SpendOutput],
+    miner: Address,
+    sender: Option<Address>,
+) -> Vec<serde_json::Value> {
     outputs
         .iter()
         .map(|output| {
-            let (address, kind) = match output.target {
-                OutputTarget::Address(address) => {
-                    (Some(xparq::crypto::address_to_string(&address)), "address")
-                }
-                OutputTarget::BlockMiner => {
-                    (Some(xparq::crypto::address_to_string(&miner)), "miner")
-                }
-                OutputTarget::Burn => (None, "burn"),
+            let (address, output_type, role) = match output.target {
+                OutputTarget::Address(address) => (
+                    Some(xparq::crypto::address_to_string(&address)),
+                    "address",
+                    if sender == Some(address) {
+                        "sender_return"
+                    } else {
+                        "recipient"
+                    },
+                ),
+                OutputTarget::BlockMiner => (
+                    Some(xparq::crypto::address_to_string(&miner)),
+                    "miner",
+                    "miner_fee",
+                ),
+                OutputTarget::Burn => (None, "burn", "state_burn"),
             };
             serde_json::json!({
                 "address": address,
                 "amount": output.amount.as_zeno(),
-                "kind": kind,
+                "type": output_type,
+                "role": role,
             })
         })
         .collect()
@@ -1137,6 +1160,7 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             "state_burn_rate_zeno_per_weight": xparq::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT,
             "coin_utxo_state_weight": xparq::consensus::COIN_UTXO_STATE_WEIGHT,
             "qcash_utxo_state_weight": xparq::consensus::QCASH_UTXO_STATE_WEIGHT,
+            "emission_utxo_state_burn": xparq::consensus::EMISSION_UTXO_STATE_BURN.as_zeno(),
         }),
         "/blocks/latest" => latest_blocks_response(&ledger)?,
         route if route.starts_with("/asset/nonce/") => {
@@ -1470,6 +1494,17 @@ fn latest_blocks_response(ledger: &Ledger) -> Result<serde_json::Value, String> 
 }
 
 fn block_response(block: &Block) -> Result<serde_json::Value, String> {
+    let gross_subsidy = block
+        .emission()
+        .map_or(Amount::from_zeno(0), |emission| emission.subsidy);
+    let state_burn = if block.emission().is_some() {
+        xparq::consensus::EMISSION_UTXO_STATE_BURN
+    } else {
+        Amount::from_zeno(0)
+    };
+    let miner_reward = gross_subsidy
+        .checked_sub(state_burn)
+        .ok_or("block emission is below its UTXO state burn")?;
     Ok(serde_json::json!({
         "height": block.height().0,
         "hash": hex::encode(block.hash().map_err(|error| error.to_string())?.0),
@@ -1479,9 +1514,9 @@ fn block_response(block: &Block) -> Result<serde_json::Value, String> {
         "nonce": block.header.nonce.0,
         "transactions": block.transaction_count(),
         "miner": xparq::crypto::address_to_string(&block.miner_address()),
-        "subsidy": block
-            .emission()
-            .map_or(0, |emission| emission.subsidy.as_zeno()),
+        "subsidy": gross_subsidy.as_zeno(),
+        "state_burn": state_burn.as_zeno(),
+        "miner_reward": miner_reward.as_zeno(),
     }))
 }
 

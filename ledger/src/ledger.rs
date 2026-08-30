@@ -102,13 +102,15 @@ impl Ledger {
         if let Some(emission) = validated.emission() {
             let id = CoinId::derive(&[b"XPARQ emission output v1", &emission.origin().0]);
             staged_state.coins.insert(CoinUtxo {
-                coin: Coin::new(id, emission.subsidy()),
+                coin: Coin::new(id, emission.miner_reward()),
                 owner: emission.recipient(),
             })?;
-            block_journals.push(StateRollbackJournal::Utxo(UtxoRollbackJournal {
+            let mut journal = UtxoRollbackJournal {
                 created_coin_ids: vec![id],
                 ..UtxoRollbackJournal::default()
-            }));
+            };
+            staged_state.record_protocol_burn(emission.state_burn(), &mut journal)?;
+            block_journals.push(StateRollbackJournal::Utxo(journal));
         }
 
         for transaction in block.transactions() {

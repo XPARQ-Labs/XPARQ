@@ -1,3 +1,4 @@
+use crate::EMISSION_UTXO_STATE_BURN;
 use crate::block::{Block, BlockHeight, Height};
 use crate::consensus::{WBDA_WINDOW, is_wbda_epoch_boundary, next_emission_from_window};
 use static_assertions::const_assert;
@@ -5,15 +6,15 @@ use std::{error::Error, fmt};
 use xparq_coin::{Amount, COIN};
 use xparq_crypto::{Address, Hash, HashDomain, domain_hash};
 
-pub const MIN_BLOCK_EMISSION: u64 = 500_000;
-pub const MAX_BLOCK_EMISSION: u64 = 10_000_000;
-pub const BLOCK_EMISSION_START: u64 = 5_000_000;
-pub const BLOCK_EMISSION_STEP: u64 = 500_000;
+pub const MIN_BLOCK_EMISSION: u64 = 50_000;
+pub const MAX_BLOCK_EMISSION: u64 = 1_000_000;
+pub const BLOCK_EMISSION_START: u64 = 100_000;
+pub const BLOCK_EMISSION_STEP: u64 = 10_000;
 
 const_assert!(MIN_BLOCK_EMISSION == COIN / 2);
 const_assert!(MAX_BLOCK_EMISSION == 10 * COIN);
-const_assert!(BLOCK_EMISSION_START == 5 * COIN);
-const_assert!(BLOCK_EMISSION_STEP == COIN / 2);
+const_assert!(BLOCK_EMISSION_START == 1 * COIN);
+const_assert!(BLOCK_EMISSION_STEP == COIN / 10);
 
 pub const fn initial_block_emission() -> Amount {
     Amount::from_zeno(BLOCK_EMISSION_START)
@@ -23,6 +24,8 @@ pub const fn initial_block_emission() -> Amount {
 pub struct ValidatedEmission {
     recipient: Address,
     subsidy: Amount,
+    miner_reward: Amount,
+    state_burn: Amount,
     origin: Hash,
 }
 
@@ -33,6 +36,16 @@ impl ValidatedEmission {
 
     pub fn subsidy(self) -> Amount {
         self.subsidy
+    }
+
+    /// Net amount inserted into the miner's emission UTXO.
+    pub fn miner_reward(self) -> Amount {
+        self.miner_reward
+    }
+
+    /// Consensus burn charged for creating the emission UTXO.
+    pub fn state_burn(self) -> Amount {
+        self.state_burn
     }
 
     pub fn origin(self) -> Hash {
@@ -86,6 +99,11 @@ pub(crate) fn authorize_emission(
     if emission.subsidy != expected {
         return Err(EmissionError::InvalidSubsidy);
     }
+    let state_burn = EMISSION_UTXO_STATE_BURN;
+    let miner_reward = emission
+        .subsidy
+        .checked_sub(state_burn)
+        .ok_or(EmissionError::InvalidSubsidy)?;
     let origin = domain_hash(
         HashDomain::XPQCoin,
         &xparq_common::canonical_bytes(&(
@@ -100,6 +118,8 @@ pub(crate) fn authorize_emission(
     Ok(ValidatedEmission {
         recipient: emission.to,
         subsidy: emission.subsidy,
+        miner_reward,
+        state_burn,
         origin,
     })
 }
@@ -136,6 +156,34 @@ pub fn expected_emission_for_height(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DIFFICULTY_START, block::Nonce};
+
+    #[test]
+    fn emission_utxo_receives_net_reward_after_state_burn() {
+        let genesis = Block::genesis().unwrap();
+        let block = Block::from_protocol_transactions(
+            Height(1),
+            genesis.hash().unwrap(),
+            DIFFICULTY_START,
+            Nonce(0),
+            Some(crate::block::Emission::new(
+                Address::ZERO,
+                initial_block_emission(),
+            )),
+            vec![],
+        )
+        .unwrap();
+        let emission = authorize_emission(&block, initial_block_emission(), |_| None).unwrap();
+
+        assert_eq!(emission.subsidy(), initial_block_emission());
+        assert_eq!(emission.state_burn(), EMISSION_UTXO_STATE_BURN);
+        assert_eq!(
+            emission.miner_reward(),
+            initial_block_emission()
+                .checked_sub(EMISSION_UTXO_STATE_BURN)
+                .unwrap()
+        );
+    }
 
     #[test]
     fn non_boundary_emission_uses_parent_without_loading_history() {
@@ -156,7 +204,7 @@ mod tests {
             Amount::from_zeno(BLOCK_EMISSION_START),
             |height| {
                 loaded.push(height);
-                Some(MAX_BLOCK_EMISSION as u32)
+                Some(crate::WBDA_TARGET_BLOCK_WEIGHT as u32)
             },
         )
         .unwrap();

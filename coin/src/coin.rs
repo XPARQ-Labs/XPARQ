@@ -6,10 +6,10 @@ use crate::CoinIdParseError;
 pub const COIN_NAME: &str = "XPQ";
 pub const UNIT_NAME: &str = "zeno";
 pub const UNIT: u64 = 1;
-pub const COIN: u64 = 1_000_000;
-pub const DECIMALS: u8 = 6;
+pub const COIN: u64 = 100_000;
+pub const DECIMALS: u8 = 5;
 
-const _: () = assert!(COIN == 1_000_000);
+const _: () = assert!(COIN == 100_000);
 const _: () = assert!(UNIT == 1);
 
 #[derive(

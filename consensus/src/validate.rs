@@ -691,13 +691,13 @@ mod transaction_tests {
     }
 }
 
-pub const MIN_DIFFICULTY: u32 = 5;
+pub const MIN_DIFFICULTY: u32 = 1;
 /// A 256-bit PoW output cannot represent a stricter leading-zero target.
 pub const MAX_DIFFICULTY: u32 = (crate::crypto::POW_HASH_SIZE * 8) as u32;
 /// Compatibility name for the height-zero difficulty. Unlike
 /// [`DIFFICULTY_START`], this value belongs to the stable genesis header.
 pub const GENESIS_DIFFICULTY: u32 = crate::block::GENESIS_BLOCK_DIFFICULTY;
-pub const DIFFICULTY_START: u32 = 5;
+pub const DIFFICULTY_START: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConsensusConfig {

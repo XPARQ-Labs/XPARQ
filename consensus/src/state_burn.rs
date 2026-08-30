@@ -11,6 +11,8 @@ pub const COIN_UTXO_STATE_WEIGHT: u64 =
     (xparq_coin::COIN_ID_SIZE + core::mem::size_of::<u64>() + ADDRESS_SIZE) as u64;
 pub const QCASH_UTXO_STATE_WEIGHT: u64 =
     (xparq_coin::COIN_ID_SIZE + core::mem::size_of::<u64>() + QCASH_PUBLIC_KEY_SIZE) as u64;
+pub const EMISSION_UTXO_STATE_BURN: Amount =
+    Amount::from_zeno(COIN_UTXO_STATE_WEIGHT * STATE_BURN_RATE_ZENO_PER_WEIGHT);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StateTransitionWeight {

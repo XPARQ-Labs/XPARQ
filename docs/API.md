@@ -13,7 +13,7 @@ The node exposes an unauthenticated HTTP RPC intended for loopback or a trusted
 private network. Run the node and open `/docs` for the interactive API reference,
 or fetch `/openapi.json` for tooling and SDK generation.
 
-Native amounts are integer **zeno**. `1,000,000 zeno = 1 XPQ`.
+Native amounts are integer **zeno**. `100,000 zeno = 1 XPQ`.
 Consensus currently encodes each native XPQ amount as an eight-byte
 little-endian `u64`; arithmetic is checked.
 
@@ -37,6 +37,17 @@ creation, and deleting an entry does not grant a refund.
 The canonical ledger stores a checked `total_burned` accumulator. It increases
 when a burn output is applied, decreases on rollback or reorg, persists in the
 database and snapshots, and is exposed by `GET /status` in zeno.
+Each non-genesis block emission also creates one Coin UTXO. Consensus deducts
+one `COIN_UTXO_STATE_WEIGHT` charge from the scheduled gross subsidy before the
+miner UTXO is inserted and adds that amount to `total_burned`. Block explorer
+responses distinguish the gross `subsidy`, `state_burn`, and net
+`miner_reward`.
+
+Explorer transaction outputs expose the canonical target as `type` (`address`,
+`miner`, or `burn`). The derived `role` is `recipient`, `sender_return`,
+`miner_fee`, or `state_burn`. `sender_return` means an address output returns to
+the declared transaction sender; it is an explorer interpretation and does not
+add a Change primitive to consensus.
 
 Addresses use exactly 50 lowercase characters: `0x`, 40 hexadecimal characters
 for the 20-byte address, and eight hexadecimal characters for its four-byte
