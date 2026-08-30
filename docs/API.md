@@ -21,14 +21,22 @@ little-endian `u64`; arithmetic is checked.
 policy. A transaction that creates more persistent state than it deletes must
 include exactly one `OutputTarget::Burn` for the required amount:
 
-`max(0, created_weight - deleted_weight) * STATE_BURN_RATE_ZENO_PER_WEIGHT`
+`created_weight * STATE_BURN_RATE_ZENO_PER_WEIGHT`
 
 The reset-chain rate is `1 zeno` per state-weight unit. Coin and QCash UTXO
 weights, plus the algorithm identifier, are committed by the chain-spec hash.
-Burn outputs conserve transaction value during validation but are deliberately
-not inserted into the UTXO set. Native asset registration additionally charges
-the canonical serialized metadata size; normal asset balance changes do not
-create core UTXOs.
+Consumed inputs do not receive burn credit. Burn outputs conserve transaction
+value during validation but are deliberately not inserted into the UTXO set.
+Native asset calls charge the canonical key-plus-value size of every new
+persistent extension entry. Registration creates metadata, supply, creator
+balance, and (on the creator's first asset call) nonce entries. Mint and
+transfer additionally charge a recipient balance entry only when that entry
+does not already exist; a signer's first asset call creates its nonce entry.
+Updating an existing supply, balance, or nonce entry is not charged as state
+creation, and deleting an entry does not grant a refund.
+The canonical ledger stores a checked `total_burned` accumulator. It increases
+when a burn output is applied, decreases on rollback or reorg, persists in the
+database and snapshots, and is exposed by `GET /status` in zeno.
 
 Addresses use exactly 50 lowercase characters: `0x`, 40 hexadecimal characters
 for the 20-byte address, and eight hexadecimal characters for its four-byte

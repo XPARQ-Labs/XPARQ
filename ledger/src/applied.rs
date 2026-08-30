@@ -1,7 +1,7 @@
 use std::{error::Error, fmt};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use xparq_coin::{Coin, CoinId};
+use xparq_coin::{Amount, Coin, CoinId};
 use xparq_consensus::{AuthorizationValidated, RevealedAccountKey, ValidatedTransaction};
 use xparq_crypto::Address;
 use xparq_qcash::QCash;
@@ -21,6 +21,7 @@ pub struct LedgerState {
     pub qcash: QCashUtxoSet,
     pub account_keys: AccountKeyRegistry,
     pub extensions: ExtensionStateSet,
+    pub total_burned: Amount,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -172,6 +173,7 @@ impl LedgerState {
                 })?;
                 journal.created_coin_ids.push(id);
             }
+            self.record_burn_outputs(&intent.outputs, &mut journal)?;
             Ok(())
         })();
         self.finish_transition(journal, result)
@@ -207,6 +209,7 @@ impl LedgerState {
                 })?;
                 journal.created_coin_ids.push(id);
             }
+            self.record_burn_outputs(&intent.outputs, &mut journal)?;
             Ok(())
         })();
         self.finish_transition(journal, result)
@@ -234,7 +237,8 @@ impl LedgerState {
                 b"redeem",
                 block_miner,
                 &mut journal,
-            )
+            )?;
+            self.record_burn_outputs(&intent.outputs, &mut journal)
         })();
         self.finish_transition(journal, result)
     }
@@ -264,6 +268,7 @@ impl LedgerState {
                     &mut journal,
                 )?;
             }
+            self.record_burn_outputs(&intent.public_outputs, &mut journal)?;
             Ok(())
         })();
         self.finish_transition(journal, result)
@@ -289,12 +294,17 @@ impl LedgerState {
                     &mut journal,
                 )?;
             }
+            self.record_burn_outputs(&intent.public_outputs, &mut journal)?;
             Ok(())
         })();
         self.finish_transition(journal, result)
     }
 
     pub(crate) fn rollback(&mut self, journal: UtxoRollbackJournal) -> Result<(), SpendStateError> {
+        self.total_burned = self
+            .total_burned
+            .checked_sub(journal.burned)
+            .ok_or(SpendStateError::BurnUnderflow)?;
         for id in journal.created_coin_ids {
             self.coins.consume(&id)?;
         }
@@ -310,6 +320,29 @@ impl LedgerState {
         for address in journal.registered_profile_public_keys {
             self.account_keys.remove_profile(&address)?;
         }
+        Ok(())
+    }
+
+    fn record_burn_outputs(
+        &mut self,
+        outputs: &[xparq_transaction::SpendOutput],
+        journal: &mut UtxoRollbackJournal,
+    ) -> Result<(), SpendStateError> {
+        let burned = outputs
+            .iter()
+            .filter(|output| output.target == OutputTarget::Burn)
+            .try_fold(Amount::from_zeno(0), |total, output| {
+                total.checked_add(output.amount)
+            })
+            .ok_or(SpendStateError::BurnOverflow)?;
+        self.total_burned = self
+            .total_burned
+            .checked_add(burned)
+            .ok_or(SpendStateError::BurnOverflow)?;
+        journal.burned = journal
+            .burned
+            .checked_add(burned)
+            .ok_or(SpendStateError::BurnOverflow)?;
         Ok(())
     }
 
@@ -467,6 +500,8 @@ pub fn split_miner_output_id(commitment: SpendCommitment) -> Result<CoinId, Spen
 pub enum SpendStateError {
     Utxo(UtxoError),
     OutputIndexOverflow,
+    BurnOverflow,
+    BurnUnderflow,
     Extension(xparq_common::ExtensionFailure),
 }
 
@@ -512,24 +547,26 @@ mod tests {
         state
             .qcash
             .insert(QCashUtxo {
-                coin: Coin::new(input_id, xparq_coin::Amount::from_zeno(2_000)),
+                coin: Coin::new(input_id, xparq_coin::Amount::from_zeno(3_000)),
                 public_key: seed.public_key(),
             })
             .unwrap();
         let intent = SplitIntent::new(
-            QCash::new(input_id, xparq_coin::Amount::from_zeno(2_000)),
+            QCash::new(input_id, xparq_coin::Amount::from_zeno(3_000)),
             vec![
                 QCashOutput::new(
                     xparq_coin::Amount::from_zeno(500),
                     xparq_crypto::QCashPublicKey([4; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
                 ),
                 QCashOutput::new(
-                    xparq_coin::Amount::from_zeno(1_500 - xparq_consensus::QCASH_UTXO_STATE_WEIGHT),
+                    xparq_coin::Amount::from_zeno(
+                        2_500 - 2 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT,
+                    ),
                     xparq_crypto::QCashPublicKey([5; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
                 ),
             ],
             vec![xparq_transaction::SpendOutput::burn(
-                xparq_coin::Amount::from_zeno(xparq_consensus::QCASH_UTXO_STATE_WEIGHT),
+                xparq_coin::Amount::from_zeno(2 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT),
             )],
         )
         .unwrap();
@@ -555,9 +592,14 @@ mod tests {
             .unwrap();
         assert!(state.qcash.get(&input_id).is_none());
         assert_eq!(state.qcash.len(), 2);
+        assert_eq!(
+            state.total_burned,
+            Amount::from_zeno(2 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT)
+        );
         state.rollback_state(journal).unwrap();
         assert!(state.qcash.get(&input_id).is_some());
         assert_eq!(state.qcash.len(), 1);
+        assert_eq!(state.total_burned, Amount::from_zeno(0));
     }
 }
 
@@ -566,6 +608,8 @@ impl fmt::Display for SpendStateError {
         match self {
             Self::Utxo(error) => write!(formatter, "UTXO transition failed: {error}"),
             Self::OutputIndexOverflow => formatter.write_str("transaction output index overflow"),
+            Self::BurnOverflow => formatter.write_str("total burned amount overflow"),
+            Self::BurnUnderflow => formatter.write_str("total burned amount underflow"),
             Self::Extension(error) => write!(formatter, "extension transition failed: {error:?}"),
         }
     }

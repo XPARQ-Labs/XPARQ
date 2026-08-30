@@ -138,6 +138,11 @@ struct AssetNonceResponse {
     nonce: u64,
 }
 
+#[derive(Deserialize)]
+struct AssetBalanceResponse {
+    balance: String,
+}
+
 pub fn run(mut args: Vec<String>) -> Result<(), String> {
     let result = match args.first().map(String::as_str) {
         None | Some("menu") | Some("interactive") => interactive_menu(),
@@ -302,9 +307,37 @@ fn submit_asset_action(args: &[String], action: AssetAction) -> Result<(), Strin
     let address = xparq::crypto::address_to_string(&wallet.address());
     let nonce = http_get_json::<AssetNonceResponse>(rpc, &format!("/asset/nonce/{address}"))?.nonce;
     let call = wallet.0.sign_asset_call(action, nonce)?;
-    let extension_created_weight = xparq::extension::asset::AssetCall::from_extension_call(&call)
-        .and_then(|call| call.registration_metadata_weight())
-        .map_err(|error| format!("calculate asset metadata state weight: {error:?}"))?;
+    let decoded = xparq::extension::asset::AssetCall::from_extension_call(&call)
+        .map_err(|error| format!("decode signed asset call: {error:?}"))?;
+    let recipient_balance_exists = match &decoded.action {
+        AssetAction::Mint {
+            asset_id,
+            recipient,
+            ..
+        }
+        | AssetAction::Transfer {
+            asset_id,
+            recipient,
+            ..
+        } => {
+            let response: AssetBalanceResponse = http_get_json(
+                rpc,
+                &format!(
+                    "/asset/{asset_id}/balance/{}",
+                    xparq::crypto::address_to_string(recipient)
+                ),
+            )?;
+            response
+                .balance
+                .parse::<u128>()
+                .map_err(|_| "node returned an invalid asset balance")?
+                > 0
+        }
+        AssetAction::Register { .. } | AssetAction::Burn { .. } => false,
+    };
+    let extension_created_weight = decoded
+        .created_state_weight_from_presence(nonce > 0, recipient_balance_exists)
+        .map_err(|error| format!("calculate asset state weight: {error:?}"))?;
     let public_key_known = account_public_key_registered(rpc, &wallet);
     let transaction = automatic_fee_transaction(|fee| {
         let (inputs, _total, state_burn, change) = select_account_inputs_with_state_burn(
@@ -902,8 +935,6 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
             let gross_change = explicit_change.map_or(0, Amount::as_zeno);
             let created = 2_u64 + u64::from(gross_change > fee);
             let state_burn = StateTransitionWeight {
-                consumed_coin_utxos: u64::try_from(inputs.len())
-                    .map_err(|_| "too many explicit inputs")?,
                 created_coin_utxos: created,
                 ..StateTransitionWeight::default()
             }
@@ -973,13 +1004,11 @@ fn select_account_inputs_with_state_burn(
         total = total
             .checked_add(utxo.amount)
             .ok_or_else(|| "selected input amount overflow".to_string())?;
-        let consumed = u64::try_from(selected.len()).map_err(|_| "too many selected inputs")?;
         for has_change in [false, true] {
             let created = created_coin_without_change
                 .checked_add(u64::from(has_change))
                 .ok_or("state output count overflow")?;
             let burn = StateTransitionWeight {
-                consumed_coin_utxos: consumed,
                 created_coin_utxos: created,
                 created_qcash_utxos,
                 extension_created_weight,
@@ -1148,8 +1177,6 @@ fn sign_withdraw(args: &[String]) -> Result<(), String> {
         } else {
             let gross_change = explicit_change.map_or(0, Amount::as_zeno);
             let state_burn = StateTransitionWeight {
-                consumed_coin_utxos: u64::try_from(inputs.len())
-                    .map_err(|_| "too many explicit inputs")?,
                 created_coin_utxos: 1 + u64::from(gross_change > fee),
                 created_qcash_utxos: u64::try_from(qcash_outputs.len())
                     .map_err(|_| "too many QCash outputs")?,
@@ -1225,7 +1252,6 @@ fn redeem_qcash(args: &[String]) -> Result<(), String> {
             .unwrap_or(0);
         let created_qcash = u64::from(provisional_remainder > 0);
         let state_burn = StateTransitionWeight {
-            consumed_qcash_utxos: 1,
             created_qcash_utxos: created_qcash,
             created_coin_utxos: 2,
             ..StateTransitionWeight::default()
@@ -1324,7 +1350,6 @@ fn split_qcash(args: &[String]) -> Result<(), String> {
                 final_amounts.push(Amount::from_zeno(remainder));
             }
             let required_burn = StateTransitionWeight {
-                consumed_qcash_utxos: 1,
                 created_qcash_utxos: u64::try_from(final_amounts.len())
                     .map_err(|_| "too many QCash outputs")?,
                 created_coin_utxos: 1,
@@ -1403,8 +1428,6 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
     let transaction = automatic_fee_transaction(|fee| {
         let state_burn = StateTransitionWeight {
-            consumed_qcash_utxos: u64::try_from(inputs.len())
-                .map_err(|_| "too many QCash inputs")?,
             created_qcash_utxos: 1,
             created_coin_utxos: 1,
             ..StateTransitionWeight::default()

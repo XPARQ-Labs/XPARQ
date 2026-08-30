@@ -184,7 +184,6 @@ pub fn validate_transaction(
             validate_state_burn(
                 &validated.intent().outputs,
                 StateTransitionWeight {
-                    consumed_coin_utxos: count(validated.intent().inputs.len())?,
                     created_coin_utxos: created_coin_output_count(&validated.intent().outputs)?,
                     ..StateTransitionWeight::default()
                 },
@@ -205,7 +204,6 @@ pub fn validate_transaction(
             validate_state_burn(
                 &intent.outputs,
                 StateTransitionWeight {
-                    consumed_coin_utxos: count(intent.inputs.len())?,
                     created_coin_utxos: created_coin_output_count(&intent.outputs)?,
                     created_qcash_utxos: count(intent.qcash_outputs.len())?,
                     ..StateTransitionWeight::default()
@@ -219,7 +217,6 @@ pub fn validate_transaction(
             validate_state_burn(
                 &intent.outputs,
                 StateTransitionWeight {
-                    consumed_qcash_utxos: count(intent.inputs.len())?,
                     created_qcash_utxos: count(intent.qcash_outputs.len())?,
                     created_coin_utxos: created_coin_output_count(&intent.outputs)?,
                     ..StateTransitionWeight::default()
@@ -237,7 +234,6 @@ pub fn validate_transaction(
             validate_state_burn(
                 &validated.intent().public_outputs,
                 StateTransitionWeight {
-                    consumed_qcash_utxos: count(validated.intent().inputs.len())?,
                     created_qcash_utxos: 1,
                     created_coin_utxos: created_coin_output_count(
                         &validated.intent().public_outputs,
@@ -261,7 +257,6 @@ pub fn validate_transaction(
             validate_state_burn(
                 &validated.intent().public_outputs,
                 StateTransitionWeight {
-                    consumed_qcash_utxos: 1,
                     created_qcash_utxos: count(validated.intent().outputs.len())?,
                     created_coin_utxos: created_coin_output_count(
                         &validated.intent().public_outputs,
@@ -288,7 +283,6 @@ pub fn validate_transaction(
             validate_state_burn(
                 &fee.intent().outputs,
                 StateTransitionWeight {
-                    consumed_coin_utxos: count(fee.intent().inputs.len())?,
                     created_coin_utxos: created_coin_output_count(&fee.intent().outputs)?,
                     extension_created_weight: state
                         .extension_created_state_weight(&transaction.call),
@@ -545,7 +539,7 @@ mod transaction_tests {
 
         fn qcash(&self, id: CoinId) -> Option<QCashInputState> {
             (id == self.id).then_some(QCashInputState {
-                amount: Amount::from_zeno(2_000),
+                amount: Amount::from_zeno(3_000),
                 public_key: self.public_key,
             })
         }
@@ -585,19 +579,19 @@ mod transaction_tests {
         let id = CoinId::from_bytes([4; CoinId::SIZE]);
         let seed = xparq_qcash::QCashSigningSeed::from_bytes([5; 32]);
         let intent = SplitIntent::new(
-            xparq_qcash::QCash::new(id, Amount::from_zeno(2_000)),
+            xparq_qcash::QCash::new(id, Amount::from_zeno(3_000)),
             vec![
                 xparq_transaction::QCashOutput::new(
                     Amount::from_zeno(500),
                     QCashPublicKey([6; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
                 ),
                 xparq_transaction::QCashOutput::new(
-                    Amount::from_zeno(1_500 - crate::QCASH_UTXO_STATE_WEIGHT),
+                    Amount::from_zeno(2_500 - 2 * crate::QCASH_UTXO_STATE_WEIGHT),
                     QCashPublicKey([7; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
                 ),
             ],
             vec![xparq_transaction::SpendOutput::burn(Amount::from_zeno(
-                crate::QCASH_UTXO_STATE_WEIGHT as u64,
+                2 * crate::QCASH_UTXO_STATE_WEIGHT,
             ))],
         )
         .unwrap();
@@ -626,7 +620,7 @@ mod transaction_tests {
         let mut tampered = signed;
         tampered.intent.outputs[0].amount = Amount::from_zeno(501);
         tampered.intent.outputs[1].amount =
-            Amount::from_zeno(1_499 - crate::QCASH_UTXO_STATE_WEIGHT);
+            Amount::from_zeno(2_499 - 2 * crate::QCASH_UTXO_STATE_WEIGHT);
         assert_eq!(
             validate_transaction(
                 AuthorizedTransaction::Split(Box::new(tampered)),
@@ -646,7 +640,7 @@ mod transaction_tests {
     impl TransactionStateView for FalconAccountState {
         fn coin(&self, id: CoinId) -> Option<CoinInputState> {
             (id == self.id).then_some(CoinInputState {
-                amount: Amount::from_zeno(10),
+                amount: Amount::from_zeno(10 + crate::COIN_UTXO_STATE_WEIGHT),
                 owner: self.owner,
             })
         }
@@ -672,10 +666,12 @@ mod transaction_tests {
         let intent = OnChainSpendIntent::new(
             sender,
             vec![id],
-            vec![xparq_transaction::SpendOutput::new(
-                sender,
-                Amount::from_zeno(10),
-            )],
+            vec![
+                xparq_transaction::SpendOutput::new(sender, Amount::from_zeno(10)),
+                xparq_transaction::SpendOutput::burn(Amount::from_zeno(
+                    crate::COIN_UTXO_STATE_WEIGHT,
+                )),
+            ],
         )
         .unwrap();
         let chain = ChainContext::new([28; 32]);
@@ -695,13 +691,13 @@ mod transaction_tests {
     }
 }
 
-pub const MIN_DIFFICULTY: u32 = 1;
+pub const MIN_DIFFICULTY: u32 = 5;
 /// A 256-bit PoW output cannot represent a stricter leading-zero target.
 pub const MAX_DIFFICULTY: u32 = (crate::crypto::POW_HASH_SIZE * 8) as u32;
 /// Compatibility name for the height-zero difficulty. Unlike
 /// [`DIFFICULTY_START`], this value belongs to the stable genesis header.
 pub const GENESIS_DIFFICULTY: u32 = crate::block::GENESIS_BLOCK_DIFFICULTY;
-pub const DIFFICULTY_START: u32 = 1;
+pub const DIFFICULTY_START: u32 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConsensusConfig {

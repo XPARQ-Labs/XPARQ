@@ -4,7 +4,7 @@ use xparq_coin::Amount;
 use xparq_crypto::{ADDRESS_SIZE, QCASH_PUBLIC_KEY_SIZE};
 use xparq_transaction::{OutputTarget, SpendOutput};
 
-pub const STATE_BURN_ALGORITHM: &str = "xparq-state-burn-v1";
+pub const STATE_BURN_ALGORITHM: &str = "xparq-state-creation-burn-v1";
 pub const STATE_BURN_RATE_ZENO_PER_WEIGHT: u64 = 1;
 
 pub const COIN_UTXO_STATE_WEIGHT: u64 =
@@ -14,24 +14,13 @@ pub const QCASH_UTXO_STATE_WEIGHT: u64 =
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StateTransitionWeight {
-    pub consumed_coin_utxos: u64,
     pub created_coin_utxos: u64,
-    pub consumed_qcash_utxos: u64,
     pub created_qcash_utxos: u64,
     pub extension_created_weight: u64,
 }
 
 impl StateTransitionWeight {
     pub fn required_burn(self) -> Result<Amount, StateBurnError> {
-        let deleted = self
-            .consumed_coin_utxos
-            .checked_mul(COIN_UTXO_STATE_WEIGHT)
-            .and_then(|weight| {
-                self.consumed_qcash_utxos
-                    .checked_mul(QCASH_UTXO_STATE_WEIGHT)
-                    .and_then(|qcash| weight.checked_add(qcash))
-            })
-            .ok_or(StateBurnError::WeightOverflow)?;
         let created = self
             .created_coin_utxos
             .checked_mul(COIN_UTXO_STATE_WEIGHT)
@@ -42,8 +31,7 @@ impl StateTransitionWeight {
             })
             .and_then(|weight| weight.checked_add(self.extension_created_weight))
             .ok_or(StateBurnError::WeightOverflow)?;
-        let net = created.saturating_sub(deleted);
-        let burn = u64::from(net)
+        let burn = created
             .checked_mul(STATE_BURN_RATE_ZENO_PER_WEIGHT)
             .ok_or(StateBurnError::AmountOverflow)?;
         Ok(Amount::from_zeno(burn))
@@ -111,22 +99,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn charges_only_positive_net_state_growth() {
-        let neutral = StateTransitionWeight {
-            consumed_coin_utxos: 1,
+    fn charges_every_created_state_entry_without_input_credit() {
+        let replacement = StateTransitionWeight {
             created_coin_utxos: 1,
             ..StateTransitionWeight::default()
         };
-        assert_eq!(neutral.required_burn(), Ok(Amount::from_zeno(0)));
+        assert_eq!(
+            replacement.required_burn(),
+            Ok(Amount::from_zeno(COIN_UTXO_STATE_WEIGHT))
+        );
 
-        let growth = StateTransitionWeight {
-            consumed_qcash_utxos: 1,
+        let two_outputs = StateTransitionWeight {
             created_qcash_utxos: 2,
             ..StateTransitionWeight::default()
         };
         assert_eq!(
-            growth.required_burn(),
-            Ok(Amount::from_zeno(u64::from(QCASH_UTXO_STATE_WEIGHT)))
+            two_outputs.required_burn(),
+            Ok(Amount::from_zeno(2 * QCASH_UTXO_STATE_WEIGHT))
         );
     }
 }

@@ -99,6 +99,7 @@ pub struct UtxoRollbackJournal {
     pub(crate) consumed_qcash: Vec<QCashUtxo>,
     pub(crate) created_qcash_ids: Vec<CoinId>,
     pub(crate) registered_profile_public_keys: Vec<Address>,
+    pub(crate) burned: xparq_coin::Amount,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]

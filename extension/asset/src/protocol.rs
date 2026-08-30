@@ -129,28 +129,116 @@ impl AssetCall {
         }
     }
 
-    /// Canonical persistent metadata bytes created by asset registration.
-    /// Dynamic supply and balance values are deliberately excluded.
-    pub fn registration_metadata_weight(&self) -> Result<u64, ExtensionFailure> {
-        let AssetAction::Register {
-            name,
-            symbol,
-            decimals,
-            max_supply,
-            ..
-        } = &self.action
-        else {
-            return Ok(0);
-        };
-        let metadata = AssetMetadata {
-            name: name.clone(),
-            symbol: symbol.clone(),
-            decimals: *decimals,
-            max_supply: *max_supply,
-            mint_authority: self.signer,
-        };
-        let bytes = canonical_bytes(&metadata).map_err(|_| ExtensionFailure::InvalidPayload)?;
-        u64::try_from(bytes.len()).map_err(|_| ExtensionFailure::InvalidPayload)
+    /// Canonical key plus value bytes for every persistent entry this call creates.
+    pub fn created_state_weight(
+        &self,
+        state: &dyn ExtensionStateRead,
+    ) -> Result<u64, ExtensionFailure> {
+        let mut weight = 0_u64;
+        let nonce = nonce_key(self.signer);
+        if state.get(&nonce)?.is_none() {
+            let next_nonce = self
+                .nonce
+                .checked_add(1)
+                .ok_or(ExtensionFailure::InvalidPayload)?;
+            weight = checked_entry_weight(weight, nonce, &next_nonce)?;
+        }
+        match &self.action {
+            AssetAction::Register {
+                name,
+                symbol,
+                decimals,
+                max_supply,
+                initial_mint,
+            } => {
+                let id = AssetId::derive(self.signer, symbol);
+                let metadata = AssetMetadata {
+                    name: name.clone(),
+                    symbol: symbol.clone(),
+                    decimals: *decimals,
+                    max_supply: *max_supply,
+                    mint_authority: self.signer,
+                };
+                weight = checked_absent_entry_weight(state, weight, metadata_key(id), &metadata)?;
+                weight = checked_absent_entry_weight(state, weight, supply_key(id), initial_mint)?;
+                weight = checked_absent_entry_weight(
+                    state,
+                    weight,
+                    balance_key(id, self.signer),
+                    initial_mint,
+                )?;
+            }
+            AssetAction::Mint {
+                asset_id,
+                recipient,
+                amount,
+            }
+            | AssetAction::Transfer {
+                asset_id,
+                recipient,
+                amount,
+            } => {
+                weight = checked_absent_entry_weight(
+                    state,
+                    weight,
+                    balance_key(*asset_id, *recipient),
+                    amount,
+                )?;
+            }
+            AssetAction::Burn { .. } => {}
+        }
+        Ok(weight)
+    }
+
+    /// Wallet-side equivalent using presence information obtained from RPC.
+    pub fn created_state_weight_from_presence(
+        &self,
+        nonce_exists: bool,
+        recipient_balance_exists: bool,
+    ) -> Result<u64, ExtensionFailure> {
+        let mut weight = 0_u64;
+        if !nonce_exists {
+            let next_nonce = self
+                .nonce
+                .checked_add(1)
+                .ok_or(ExtensionFailure::InvalidPayload)?;
+            weight = checked_entry_weight(weight, nonce_key(self.signer), &next_nonce)?;
+        }
+        match &self.action {
+            AssetAction::Register {
+                name,
+                symbol,
+                decimals,
+                max_supply,
+                initial_mint,
+            } => {
+                let id = AssetId::derive(self.signer, symbol);
+                let metadata = AssetMetadata {
+                    name: name.clone(),
+                    symbol: symbol.clone(),
+                    decimals: *decimals,
+                    max_supply: *max_supply,
+                    mint_authority: self.signer,
+                };
+                weight = checked_entry_weight(weight, metadata_key(id), &metadata)?;
+                weight = checked_entry_weight(weight, supply_key(id), initial_mint)?;
+                weight = checked_entry_weight(weight, balance_key(id, self.signer), initial_mint)?;
+            }
+            AssetAction::Mint {
+                asset_id,
+                recipient,
+                amount,
+            }
+            | AssetAction::Transfer {
+                asset_id,
+                recipient,
+                amount,
+            } if !recipient_balance_exists => {
+                weight = checked_entry_weight(weight, balance_key(*asset_id, *recipient), amount)?;
+            }
+            AssetAction::Mint { .. } | AssetAction::Transfer { .. } | AssetAction::Burn { .. } => {}
+        }
+        Ok(weight)
     }
 
     pub fn sign(
@@ -548,6 +636,35 @@ fn write_value<T: BorshSerialize>(
     )
 }
 
+fn checked_entry_weight<T: BorshSerialize>(
+    current: u64,
+    key: Vec<u8>,
+    value: &T,
+) -> Result<u64, ExtensionFailure> {
+    let value = canonical_bytes(value).map_err(|_| ExtensionFailure::InvalidPayload)?;
+    let entry = key
+        .len()
+        .checked_add(value.len())
+        .and_then(|weight| u64::try_from(weight).ok())
+        .ok_or(ExtensionFailure::InvalidPayload)?;
+    current
+        .checked_add(entry)
+        .ok_or(ExtensionFailure::InvalidPayload)
+}
+
+fn checked_absent_entry_weight<T: BorshSerialize>(
+    state: &dyn ExtensionStateRead,
+    current: u64,
+    key: Vec<u8>,
+    value: &T,
+) -> Result<u64, ExtensionFailure> {
+    if state.get(&key)?.is_some() {
+        Ok(current)
+    } else {
+        checked_entry_weight(current, key, value)
+    }
+}
+
 fn write_balance(
     state: &mut dyn ExtensionStateWrite,
     asset_id: AssetId,
@@ -629,6 +746,86 @@ mod tests {
             .unwrap()
             .into_extension_call()
             .unwrap()
+    }
+
+    #[test]
+    fn created_state_weight_counts_only_new_persistent_entries() {
+        let authority = ProfileSigningSeed::new(SignatureProfile::MlDsa44, [5; 32]);
+        let alice = address_from_profile_public_key(&authority.public_key());
+        let bob_seed = ProfileSigningSeed::new(SignatureProfile::Falcon512, [6; 32]);
+        let bob = address_from_profile_public_key(&bob_seed.public_key());
+        let extension = AssetExtension::new([3; 32], Height(0));
+        let context = ExtensionContext { height: Height(0) };
+        let mut state = MemoryState::default();
+        let id = AssetId::derive(alice, "WEIGHT");
+
+        let register = signed_call(
+            &authority,
+            AssetAction::Register {
+                name: "State Weight".into(),
+                symbol: "WEIGHT".into(),
+                decimals: 8,
+                max_supply: 1_000,
+                initial_mint: 500,
+            },
+            0,
+        );
+        let decoded = AssetCall::from_extension_call(&register).unwrap();
+        let metadata = AssetMetadata {
+            name: "State Weight".into(),
+            symbol: "WEIGHT".into(),
+            decimals: 8,
+            max_supply: 1_000,
+            mint_authority: alice,
+        };
+        let expected_register = checked_entry_weight(0, nonce_key(alice), &1_u64)
+            .and_then(|weight| checked_entry_weight(weight, metadata_key(id), &metadata))
+            .and_then(|weight| checked_entry_weight(weight, supply_key(id), &500_u128))
+            .and_then(|weight| checked_entry_weight(weight, balance_key(id, alice), &500_u128))
+            .unwrap();
+        assert_eq!(decoded.created_state_weight(&state), Ok(expected_register));
+        extension.apply(context, &register, &mut state).unwrap();
+        assert_eq!(decoded.created_state_weight(&state), Ok(0));
+
+        let mint_new_balance = signed_call(
+            &authority,
+            AssetAction::Mint {
+                asset_id: id,
+                recipient: bob,
+                amount: 100,
+            },
+            1,
+        );
+        let decoded = AssetCall::from_extension_call(&mint_new_balance).unwrap();
+        let expected_balance = checked_entry_weight(0, balance_key(id, bob), &100_u128).unwrap();
+        assert_eq!(decoded.created_state_weight(&state), Ok(expected_balance));
+        extension
+            .apply(context, &mint_new_balance, &mut state)
+            .unwrap();
+
+        let mint_existing_balance = signed_call(
+            &authority,
+            AssetAction::Mint {
+                asset_id: id,
+                recipient: bob,
+                amount: 1,
+            },
+            2,
+        );
+        let decoded = AssetCall::from_extension_call(&mint_existing_balance).unwrap();
+        assert_eq!(decoded.created_state_weight(&state), Ok(0));
+
+        let burn_first_bob_call = signed_call(
+            &bob_seed,
+            AssetAction::Burn {
+                asset_id: id,
+                amount: 1,
+            },
+            0,
+        );
+        let decoded = AssetCall::from_extension_call(&burn_first_bob_call).unwrap();
+        let expected_nonce = checked_entry_weight(0, nonce_key(bob), &1_u64).unwrap();
+        assert_eq!(decoded.created_state_weight(&state), Ok(expected_nonce));
     }
 
     #[test]

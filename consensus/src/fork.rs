@@ -101,7 +101,12 @@ impl ForkChoice {
             return Err(ForkChoiceError::DuplicateBlock);
         }
 
-        if !(MIN_DIFFICULTY..=MAX_DIFFICULTY).contains(&block.difficulty()) {
+        let difficulty_is_valid = if block.is_genesis() {
+            block.difficulty() == GENESIS_DIFFICULTY
+        } else {
+            (MIN_DIFFICULTY..=MAX_DIFFICULTY).contains(&block.difficulty())
+        };
+        if !difficulty_is_valid {
             return Err(ForkChoiceError::InvalidDifficulty);
         }
         if !block.is_genesis()

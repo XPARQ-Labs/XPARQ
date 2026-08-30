@@ -35,8 +35,13 @@
 - Standardized the smallest unit name as `zeno` (`1 XPQ = 1,000,000 zeno`)
   and CoinId text as the case-sensitive `XPQ:` prefix followed by 64 hex digits.
 - Added consensus state-growth charging through `OutputTarget::Burn` at
-  `STATE_BURN_RATE_ZENO_PER_WEIGHT`. Burn outputs conserve transaction value
+  `STATE_BURN_RATE_ZENO_PER_WEIGHT`. Every newly created state entry is charged
+  without credit for consumed inputs. Burn outputs conserve transaction value
   but never enter the UTXO set; wallet builders calculate them automatically.
+  Native asset calls count every newly persisted metadata, supply, balance, and
+  nonce key plus its canonical value, rather than charging metadata alone.
+  Ledger state tracks checked `total_burned`, including rollback/reorg, and the
+  node exposes it through `GET /status`.
 - Native asset supply and balances use `u128`. Native XPQ `Amount` remains a
   canonical eight-byte `u64`; migrating it to `u128` is a separate breaking
   consensus change and is not claimed by this reset-chain build.

@@ -57,9 +57,9 @@ The wallet automatically adds a `BlockMiner` output paying `1 zeno` per
 canonical transaction byte. There is no manual fee prompt or `--miner` fee
 option. For QCash redeem, split, and merge, this fee is deducted from the
 QCash value; ordinary spend and withdraw select enough XPQ input value for it.
-The wallet also adds an exact `Burn` output when a transaction has positive net
-persistent-state growth. The state-burn rate and UTXO weights are consensus
-parameters returned by `GET /fee-policy`.
+The wallet also adds an exact `Burn` output for every persistent state entry a
+transaction creates. Consumed inputs do not receive burn credit. The state-burn
+rate and UTXO weights are consensus parameters returned by `GET /fee-policy`.
 
 ## Extension assets
 

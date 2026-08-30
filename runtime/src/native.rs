@@ -1454,6 +1454,7 @@ fn status_response(ledger: &Ledger) -> Result<serde_json::Value, String> {
         "next_difficulty": next_difficulty,
         "cumulative_work": format_work(cumulative_work.to_be_limbs()),
         "cumulative_weight": cumulative_weight.to_string(),
+        "total_burned": ledger.state().total_burned.as_zeno(),
     }))
 }
 

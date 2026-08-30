@@ -13,7 +13,17 @@ const _: () = assert!(COIN == 1_000_000);
 const _: () = assert!(UNIT == 1);
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    BorshSerialize,
+    BorshDeserialize,
 )]
 pub struct Amount {
     zeno: u64,

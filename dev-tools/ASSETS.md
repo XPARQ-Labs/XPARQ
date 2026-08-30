@@ -86,7 +86,12 @@ cargo run -p wallet -- asset-burn \
 
 Mint credits the selected recipient, transfer debits the signer and credits
 the recipient, and burn destroys units owned by the signer. Each operation is
-one signed extension transaction and pays its own XPQ miner fee.
+one signed extension transaction and pays its own XPQ miner fee. It also burns
+XPQ for persistent state created by that call: registration accounts for the
+metadata, supply, creator balance, and first nonce entries; mint or transfer
+accounts for a recipient balance entry when one does not already exist; and a
+signer's first asset call accounts for its nonce entry. Existing-entry updates
+do not pay state-creation burn, and deletion does not receive a refund.
 
 ## Current asset model
 
@@ -95,4 +100,3 @@ authority, supply accounting, balances, mint, burn, and transfer. It does not
 yet support authority rotation, freezing, allowlists, royalties, token-specific
 hooks, or contract-controlled balances. Those policies belong in a future WASM
 application model rather than being added as new core primitives.
-

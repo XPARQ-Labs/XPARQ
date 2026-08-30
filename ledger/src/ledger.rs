@@ -228,8 +228,11 @@ impl TransactionStateView for LedgerState {
         if call.extension_id() != xparq_extension::asset::asset_extension_id() {
             return 0;
         }
+        let namespace = self
+            .extensions
+            .namespace(xparq_extension::asset::asset_extension_id());
         xparq_extension::asset::AssetCall::from_extension_call(call)
-            .and_then(|call| call.registration_metadata_weight())
+            .and_then(|call| call.created_state_weight(&namespace))
             .unwrap_or(0)
     }
 }
