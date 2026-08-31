@@ -1,6 +1,6 @@
 [package]
 name = "xparq-node"
-version = "0.2.16"
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
