@@ -13,10 +13,14 @@ use std::path::Path;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use wasmi::{Caller, CompilationMode, Config, Engine, ExternType, Linker, Memory, Module, Store};
-use xparq_common::Height;
 use xparq_common::extension::{
     EXTENSION_STATE_KEY_MAX_SIZE, EXTENSION_STATE_VALUE_MAX_SIZE, Extension, ExtensionCall,
     ExtensionContext, ExtensionFailure, ExtensionId, ExtensionStateRead, ExtensionStateWrite,
+};
+use xparq_common::{Height, canonical_bytes};
+use xparq_crypto::{
+    Address, ProfilePublicKey, ProfileSignature, ProfileSigningSeed,
+    address_from_profile_public_key, profile_verify,
 };
 
 pub const WASM_ABI_VERSION: u32 = 1;
@@ -26,13 +30,137 @@ pub const WASM_MEMORY_MAX_PAGES: u32 = 16;
 pub const WASM_DEFAULT_FUEL: u64 = 1_000_000;
 pub const WASM_MAX_FUEL: u64 = 10_000_000;
 pub const WASM_STATE_MAX_SIZE: usize = 16 * 1024 * 1024;
+pub const WASM_APP_CALL_ACTIVATION_HEIGHT: Height = Height(0);
 
 const WASM_CODE_HASH_CONTEXT: &str = "XPARQ WASM Extension Code v1";
 const WASM_EXTENSION_ID_CONTEXT: &str = "XPARQ WASM Extension Id v1";
 const WASM_NAME_MAX_SIZE: usize = 64;
+const WASM_APP_COMMITMENT_CONTEXT: &str = "XPARQ WASM Application Call v1";
+const WASM_APP_NONCE_PREFIX: &[u8] = b"\xffxparq:wasm-app-nonce:";
 const HOST_MISSING: i32 = -1;
 const HOST_FAILURE: i32 = -2;
 const HOST_BUFFER_TOO_SMALL: i32 = -3;
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct WasmAppCall {
+    pub payload: Vec<u8>,
+    pub signer: Address,
+    pub nonce: u64,
+    pub public_key: ProfilePublicKey,
+    pub signature: ProfileSignature,
+}
+
+#[derive(BorshSerialize)]
+struct UnsignedWasmAppCall<'a> {
+    chain_id: [u8; 32],
+    extension_id: ExtensionId,
+    payload: &'a [u8],
+    signer: Address,
+    nonce: u64,
+}
+
+impl WasmAppCall {
+    pub fn from_extension_call(call: &ExtensionCall) -> Result<Self, ExtensionFailure> {
+        Self::try_from_slice(call.payload()).map_err(|_| ExtensionFailure::InvalidPayload)
+    }
+
+    pub fn sign(
+        chain_id: [u8; 32],
+        extension_id: ExtensionId,
+        payload: Vec<u8>,
+        nonce: u64,
+        signing_seed: &ProfileSigningSeed,
+    ) -> Result<Self, ExtensionFailure> {
+        let public_key = signing_seed.public_key();
+        let signer = address_from_profile_public_key(&public_key);
+        let commitment = wasm_app_commitment(chain_id, extension_id, &payload, signer, nonce)?;
+        let signature = signing_seed.sign(&commitment);
+        Ok(Self {
+            payload,
+            signer,
+            nonce,
+            public_key,
+            signature,
+        })
+    }
+
+    pub fn into_extension_call(
+        self,
+        extension_id: ExtensionId,
+    ) -> Result<ExtensionCall, ExtensionFailure> {
+        let payload = canonical_bytes(&self).map_err(|_| ExtensionFailure::InvalidPayload)?;
+        ExtensionCall::new(extension_id, payload)
+    }
+
+    pub(crate) fn verify(
+        &self,
+        chain_id: [u8; 32],
+        extension_id: ExtensionId,
+        state: &dyn ExtensionStateRead,
+    ) -> Result<(), ExtensionFailure> {
+        if address_from_profile_public_key(&self.public_key) != self.signer
+            || self.public_key.profile != self.signature.profile
+        {
+            return Err(ExtensionFailure::InvalidPayload);
+        }
+        if self.nonce != wasm_app_nonce(state, self.signer)? {
+            return Err(ExtensionFailure::InvalidState);
+        }
+        let commitment = wasm_app_commitment(
+            chain_id,
+            extension_id,
+            &self.payload,
+            self.signer,
+            self.nonce,
+        )?;
+        if !profile_verify(&self.public_key, &commitment, &self.signature) {
+            return Err(ExtensionFailure::InvalidPayload);
+        }
+        self.nonce
+            .checked_add(1)
+            .ok_or(ExtensionFailure::InvalidState)?;
+        Ok(())
+    }
+}
+
+pub fn wasm_app_nonce(
+    state: &dyn ExtensionStateRead,
+    signer: Address,
+) -> Result<u64, ExtensionFailure> {
+    match state.get(&wasm_app_nonce_key(signer))? {
+        None => Ok(0),
+        Some(value) => u64::try_from_slice(&value).map_err(|_| ExtensionFailure::InvalidState),
+    }
+}
+
+pub(crate) fn wasm_app_nonce_key(signer: Address) -> Vec<u8> {
+    let mut key = Vec::with_capacity(WASM_APP_NONCE_PREFIX.len() + signer.0.len());
+    key.extend_from_slice(WASM_APP_NONCE_PREFIX);
+    key.extend_from_slice(&signer.0);
+    key
+}
+
+fn wasm_app_commitment(
+    chain_id: [u8; 32],
+    extension_id: ExtensionId,
+    payload: &[u8],
+    signer: Address,
+    nonce: u64,
+) -> Result<[u8; 32], ExtensionFailure> {
+    let bytes = canonical_bytes(&UnsignedWasmAppCall {
+        chain_id,
+        extension_id,
+        payload,
+        signer,
+        nonce,
+    })
+    .map_err(|_| ExtensionFailure::InvalidPayload)?;
+    Ok(blake3::derive_key(WASM_APP_COMMITMENT_CONTEXT, &bytes))
+}
+
+fn is_wasm_system_key(key: &[u8]) -> bool {
+    key.starts_with(WASM_APP_NONCE_PREFIX)
+}
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct WasmExtensionManifest {
@@ -202,6 +330,7 @@ impl WasmExtension {
                 state_bytes,
                 failure: None,
                 writable,
+                protect_system_keys: true,
             },
         );
         store
@@ -340,15 +469,22 @@ struct HostState {
     state_bytes: usize,
     failure: Option<ExtensionFailure>,
     writable: bool,
+    protect_system_keys: bool,
 }
 
 impl HostState {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ExtensionFailure> {
+        if self.protect_system_keys && is_wasm_system_key(key) {
+            return Err(ExtensionFailure::StateAccess);
+        }
         Ok(self.state.get(key).cloned())
     }
 
     fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), ExtensionFailure> {
         if !self.writable {
+            return Err(ExtensionFailure::StateAccess);
+        }
+        if self.protect_system_keys && is_wasm_system_key(&key) {
             return Err(ExtensionFailure::StateAccess);
         }
         let previous_size = self
@@ -371,6 +507,9 @@ impl HostState {
 
     fn delete(&mut self, key: &[u8]) -> Result<(), ExtensionFailure> {
         if !self.writable {
+            return Err(ExtensionFailure::StateAccess);
+        }
+        if self.protect_system_keys && is_wasm_system_key(key) {
             return Err(ExtensionFailure::StateAccess);
         }
         if let Some(value) = self.state.remove(key) {

@@ -7,7 +7,12 @@ Developer tutorials for native assets and WASM extensions are available under
 asset balances in one node snapshot. Wallet balance display uses this endpoint
 and therefore does not race against blocks while traversing paginated UTXOs.
 `GET /account/{address}` remains the paginated UTXO endpoint used by the tracker
-and transaction input selection.
+and transaction input selection. Every page includes `utxo_snapshot`, a digest
+of that address's Coin UTXOs, mempool reservations, and signature profile.
+Wallets paginate with the opaque `next_utxo_cursor`/`utxo_after` CoinId cursor
+instead of an array offset. Concurrent incoming mining rewards therefore do not
+shift page positions or force mining to stop; newly inserted IDs behind the
+cursor can safely wait for the next scan.
 
 The node exposes an unauthenticated HTTP RPC intended for loopback or a trusted
 private network. Run the node and open `/docs` for the interactive API reference,
@@ -27,6 +32,13 @@ The reset-chain rate is `1 zeno` per state-weight unit. Coin and QCash UTXO
 weights, plus the algorithm identifier, are committed by the chain-spec hash.
 Consumed inputs do not receive burn credit. Burn outputs conserve transaction
 value during validation but are deliberately not inserted into the UTXO set.
+No canonical state-creating operation is exempt: on-chain spend, QCash
+withdraw/redeem/split/merge, extension calls, WASM deployment, and block
+emission all account for every Coin, QCash, or extension-state entry they
+create. Consensus requires exactly one burn output with the exact amount when
+the required burn is nonzero; missing, underpaid, overpaid, or duplicate burn
+outputs are rejected. Transferring a QCash bearer file offline does not mutate
+canonical state and therefore is not an on-chain operation subject to burn.
 Native asset calls charge the canonical key-plus-value size of every new
 persistent extension entry. Registration creates metadata, supply, creator
 balance, and (on the creator's first asset call) nonce entries. Mint and
@@ -41,13 +53,18 @@ Each non-genesis block emission also creates one Coin UTXO. Consensus deducts
 one `COIN_UTXO_STATE_WEIGHT` charge from the scheduled gross subsidy before the
 miner UTXO is inserted and adds that amount to `total_burned`. Block explorer
 responses distinguish the gross `subsidy`, `state_burn`, and net
-`miner_reward`.
+`miner_emission`.
+
+Block responses keep `transactions` as the non-emission transaction count and
+also expose `transaction_ids` plus `transaction_details`. Each detail contains
+the transaction ID, type, canonical byte size, and decoded transaction outputs,
+including miner fee and state-burn outputs where applicable.
 
 Explorer transaction outputs expose the canonical target as `type` (`address`,
-`miner`, or `burn`). The derived `role` is `recipient`, `sender_return`,
-`miner_fee`, or `state_burn`. `sender_return` means an address output returns to
-the declared transaction sender; it is an explorer interpretation and does not
-add a Change primitive to consensus.
+`miner`, or `burn`), the integer `amount`, and `unit: "zeno"`. The derived
+`role` is `recipient`, `change`, `miner_fee`, or `state_burn`. `change` means an
+address output returns to the declared transaction sender; it is an explorer
+interpretation and does not add a Change primitive to consensus.
 
 Addresses use exactly 50 lowercase characters: `0x`, 40 hexadecimal characters
 for the 20-byte address, and eight hexadecimal characters for its four-byte
@@ -92,6 +109,16 @@ Permissionless WASM deployment also uses `POST /transaction`. Wallets obtain
 the signed deployment nonce from `GET /wasm/nonce/{address}` and can query the
 immutable manifest and automatic activation status from
 `GET /wasm/{extension_id}`.
+
+Generic signed WASM application calls are active from genesis. Their nonce is
+scoped by extension and signer and is available from
+`GET /wasm-app/nonce/{extension_id}/{address}`. `POST /extension/preview`
+accepts a canonical Borsh `ExtensionCall` and returns the next height, exact
+new persistent-state weight, and required XPQ state burn. The preview covers
+the full new key-plus-value state produced by WASM deploy or execution,
+including the first host-owned nonce entry; updating existing state is not
+charged again. The preview can become stale if another transaction changes the
+same state before inclusion, in which case the transaction must be rebuilt.
 
 ## Compatibility
 

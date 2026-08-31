@@ -6,10 +6,10 @@ use std::{error::Error, fmt};
 use xparq_coin::{Amount, COIN};
 use xparq_crypto::{Address, Hash, HashDomain, domain_hash};
 
-pub const MIN_BLOCK_EMISSION: u64 = 50_000;
-pub const MAX_BLOCK_EMISSION: u64 = 1_000_000;
-pub const BLOCK_EMISSION_START: u64 = 100_000;
-pub const BLOCK_EMISSION_STEP: u64 = 10_000;
+pub const MIN_BLOCK_EMISSION: u64 = 500_000;
+pub const MAX_BLOCK_EMISSION: u64 = 10_000_000;
+pub const BLOCK_EMISSION_START: u64 = 1_000_000;
+pub const BLOCK_EMISSION_STEP: u64 = 100_000;
 
 const_assert!(MIN_BLOCK_EMISSION == COIN / 2);
 const_assert!(MAX_BLOCK_EMISSION == 10 * COIN);
@@ -24,7 +24,7 @@ pub const fn initial_block_emission() -> Amount {
 pub struct ValidatedEmission {
     recipient: Address,
     subsidy: Amount,
-    miner_reward: Amount,
+    miner_emission: Amount,
     state_burn: Amount,
     origin: Hash,
 }
@@ -39,8 +39,8 @@ impl ValidatedEmission {
     }
 
     /// Net amount inserted into the miner's emission UTXO.
-    pub fn miner_reward(self) -> Amount {
-        self.miner_reward
+    pub fn miner_emission(self) -> Amount {
+        self.miner_emission
     }
 
     /// Consensus burn charged for creating the emission UTXO.
@@ -100,7 +100,7 @@ pub(crate) fn authorize_emission(
         return Err(EmissionError::InvalidSubsidy);
     }
     let state_burn = EMISSION_UTXO_STATE_BURN;
-    let miner_reward = emission
+    let miner_emission = emission
         .subsidy
         .checked_sub(state_burn)
         .ok_or(EmissionError::InvalidSubsidy)?;
@@ -118,7 +118,7 @@ pub(crate) fn authorize_emission(
     Ok(ValidatedEmission {
         recipient: emission.to,
         subsidy: emission.subsidy,
-        miner_reward,
+        miner_emission,
         state_burn,
         origin,
     })
@@ -178,7 +178,7 @@ mod tests {
         assert_eq!(emission.subsidy(), initial_block_emission());
         assert_eq!(emission.state_burn(), EMISSION_UTXO_STATE_BURN);
         assert_eq!(
-            emission.miner_reward(),
+            emission.miner_emission(),
             initial_block_emission()
                 .checked_sub(EMISSION_UTXO_STATE_BURN)
                 .unwrap()

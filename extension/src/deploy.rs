@@ -233,7 +233,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::ExtensionRegistry;
+    use crate::{ExtensionRegistry, WASM_APP_CALL_ACTIVATION_HEIGHT, WasmAppCall, wasm_app_nonce};
     use xparq_crypto::SignatureProfile;
 
     struct MultiState {
@@ -313,9 +313,10 @@ mod tests {
         let seed = ProfileSigningSeed::new(SignatureProfile::MlDsa44, [9; 32]);
         let deploy =
             WasmDeployCall::sign(chain_id, "permissionless.test".into(), module, 0, &seed).unwrap();
+        let signer = deploy.signer;
         let dynamic_id = deploy.extension_id();
         let deploy_call = deploy.into_extension_call().unwrap();
-        let mut registry = ExtensionRegistry::new();
+        let mut registry = ExtensionRegistry::with_chain_id(chain_id);
         registry
             .register(WasmDeployExtension::new(chain_id))
             .unwrap();
@@ -354,23 +355,39 @@ mod tests {
         );
 
         state.current = dynamic_id;
-        let call = ExtensionCall::new(dynamic_id, b"hello".to_vec()).unwrap();
+        assert_eq!(WASM_APP_CALL_ACTIVATION_HEIGHT, Height(0));
+        let app_call = WasmAppCall::sign(chain_id, dynamic_id, b"signed".to_vec(), 0, &seed)
+            .unwrap()
+            .into_extension_call(dynamic_id)
+            .unwrap();
         assert_eq!(
             registry.validate(
                 ExtensionContext {
                     height: Height(109)
                 },
-                &call,
+                &app_call,
                 &state
             ),
             Err(ExtensionFailure::InactiveExtension)
         );
+        let legacy_call = ExtensionCall::new(dynamic_id, b"legacy".to_vec()).unwrap();
+        assert_eq!(
+            registry.validate(
+                ExtensionContext {
+                    height: Height(110)
+                },
+                &legacy_call,
+                &state,
+            ),
+            Err(ExtensionFailure::InvalidPayload)
+        );
+
         registry
             .validate(
                 ExtensionContext {
                     height: Height(110),
                 },
-                &call,
+                &app_call,
                 &state,
             )
             .unwrap();
@@ -379,9 +396,20 @@ mod tests {
                 ExtensionContext {
                     height: Height(110),
                 },
-                &call,
+                &app_call,
                 &mut state,
             )
             .unwrap();
+        assert_eq!(wasm_app_nonce(&state, signer).unwrap(), 1);
+        assert_eq!(
+            registry.validate(
+                ExtensionContext {
+                    height: Height(110)
+                },
+                &app_call,
+                &state,
+            ),
+            Err(ExtensionFailure::InvalidState)
+        );
     }
 }

@@ -128,6 +128,35 @@ impl ExtensionStateSet {
         })
     }
 
+    pub fn preview_created_state_weight(
+        &self,
+        registry: &xparq_extension::ExtensionRegistry,
+        context: ExtensionContext,
+        call: &ExtensionCall,
+    ) -> Result<u64, ExtensionFailure> {
+        let before = self.namespace(call.extension_id());
+        let existing = before
+            .entries()
+            .map(|(key, _)| key.to_vec())
+            .collect::<BTreeSet<_>>();
+        let mut staged = self.clone();
+        staged.apply(registry, context, call)?;
+        staged
+            .namespace(call.extension_id())
+            .entries()
+            .filter(|(key, _)| !existing.contains(*key))
+            .try_fold(0_u64, |total, (key, value)| {
+                let entry = key
+                    .len()
+                    .checked_add(value.len())
+                    .and_then(|weight| u64::try_from(weight).ok())
+                    .ok_or(ExtensionFailure::StateEntryLimit)?;
+                total
+                    .checked_add(entry)
+                    .ok_or(ExtensionFailure::StateEntryLimit)
+            })
+    }
+
     pub fn rollback(&mut self, journal: ExtensionRollbackJournal) -> Result<(), ExtensionFailure> {
         if self.namespace_root(journal.extension_id) != journal.applied_root {
             return Err(ExtensionFailure::InvalidState);

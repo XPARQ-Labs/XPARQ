@@ -6,10 +6,10 @@ use crate::CoinIdParseError;
 pub const COIN_NAME: &str = "XPQ";
 pub const UNIT_NAME: &str = "zeno";
 pub const UNIT: u64 = 1;
-pub const COIN: u64 = 100_000;
-pub const DECIMALS: u8 = 5;
+pub const COIN: u64 = 1_000_000;
+pub const DECIMALS: u8 = 6;
 
-const _: () = assert!(COIN == 100_000);
+const _: () = assert!(COIN == 1_000_000);
 const _: () = assert!(UNIT == 1);
 
 #[derive(
@@ -56,6 +56,40 @@ impl Amount {
 pub const COIN_ID_SIZE: usize = blake3::OUT_LEN;
 pub const COIN_ID_PREFIX: &str = "XPQ:";
 const COIN_ID_CONTEXT: &str = "XPARQ Native Coin";
+const TRANSACTION_OUTPUT_DOMAIN: &[u8] = b"XPARQ transaction output v1";
+
+/// Protocol-defined origin of a transaction-created Coin or QCash identifier.
+///
+/// The byte tags are consensus compatibility values. Callers select a typed
+/// origin but cannot supply arbitrary hash fields or invent a new tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionOutputKind {
+    AccountSpendOutput,
+    WithdrawQCash,
+    WithdrawChange,
+    RedeemQCashChange,
+    RedeemCoin,
+    MergeQCash,
+    MergePublicOutput,
+    SplitQCash,
+    SplitPublicOutput,
+}
+
+impl TransactionOutputKind {
+    const fn tag(self) -> &'static [u8] {
+        match self {
+            Self::AccountSpendOutput => b"onchain",
+            Self::WithdrawQCash => b"qcash",
+            Self::WithdrawChange => b"change",
+            Self::RedeemQCashChange => b"redeem-change",
+            Self::RedeemCoin => b"redeem",
+            Self::MergeQCash => b"merge",
+            Self::MergePublicOutput => b"merge-miner",
+            Self::SplitQCash => b"split",
+            Self::SplitPublicOutput => b"split-miner",
+        }
+    }
+}
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
@@ -65,8 +99,29 @@ pub struct CoinId([u8; COIN_ID_SIZE]);
 impl CoinId {
     pub const SIZE: usize = COIN_ID_SIZE;
 
-    /// Derives an identifier from unambiguous length-delimited fields.
-    pub fn derive(fields: &[&[u8]]) -> Self {
+    /// Derives the canonical CoinId for a block-emission output.
+    pub fn from_emission_origin(origin: &[u8; COIN_ID_SIZE]) -> Self {
+        Self::derive(&[b"XPARQ emission output v1", origin])
+    }
+
+    /// Derives the canonical CoinId for a transaction-created output.
+    pub fn from_transaction_output(
+        kind: TransactionOutputKind,
+        commitment: &[u8; COIN_ID_SIZE],
+        index: u32,
+    ) -> Self {
+        Self::derive(&[
+            TRANSACTION_OUTPUT_DOMAIN,
+            kind.tag(),
+            commitment,
+            &index.to_le_bytes(),
+        ])
+    }
+
+    /// Low-level length-delimited derivation. Consensus callers must use one
+    /// of the typed constructors above so field order and domain tags cannot
+    /// be chosen independently.
+    fn derive(fields: &[&[u8]]) -> Self {
         let mut hasher = blake3::Hasher::new_derive_key(COIN_ID_CONTEXT);
         for field in fields {
             hasher.update(&(field.len() as u64).to_le_bytes());
@@ -177,9 +232,49 @@ mod tests {
 
     #[test]
     fn coin_id_text_round_trips() {
-        let id = CoinId::derive(&[b"field one", b"field two"]);
+        let id = CoinId::from_transaction_output(
+            TransactionOutputKind::AccountSpendOutput,
+            &[7; COIN_ID_SIZE],
+            3,
+        );
         assert!(id.to_string().starts_with(COIN_ID_PREFIX));
         assert_eq!(id.to_string().parse::<CoinId>(), Ok(id));
+    }
+
+    #[test]
+    fn typed_derivation_preserves_consensus_tags_and_field_order() {
+        let origin = [9; COIN_ID_SIZE];
+        assert_eq!(
+            CoinId::from_emission_origin(&origin),
+            CoinId::derive(&[b"XPARQ emission output v1", &origin])
+        );
+
+        let commitment = [4; COIN_ID_SIZE];
+        let index = 12_u32;
+        for (kind, tag) in [
+            (
+                TransactionOutputKind::AccountSpendOutput,
+                b"onchain".as_slice(),
+            ),
+            (TransactionOutputKind::WithdrawQCash, b"qcash"),
+            (TransactionOutputKind::WithdrawChange, b"change"),
+            (TransactionOutputKind::RedeemQCashChange, b"redeem-change"),
+            (TransactionOutputKind::RedeemCoin, b"redeem"),
+            (TransactionOutputKind::MergeQCash, b"merge"),
+            (TransactionOutputKind::MergePublicOutput, b"merge-miner"),
+            (TransactionOutputKind::SplitQCash, b"split"),
+            (TransactionOutputKind::SplitPublicOutput, b"split-miner"),
+        ] {
+            assert_eq!(
+                CoinId::from_transaction_output(kind, &commitment, index),
+                CoinId::derive(&[
+                    b"XPARQ transaction output v1",
+                    tag,
+                    &commitment,
+                    &index.to_le_bytes(),
+                ])
+            );
+        }
     }
 
     #[test]

@@ -79,10 +79,32 @@ The RPC endpoints are `GET /wasm/nonce/{address}` and
 `GET /wasm/{extension_id}`. Deployment uses the normal binary
 `POST /transaction` endpoint.
 
-The stock wallet does not yet provide a generic command for invoking an
-arbitrary deployed WASM payload. `wasm-deploy` and activation are implemented;
-third-party application calls still require a custom transaction builder until
-the canonical application-call envelope and `wasm-call` CLI are added.
+## Signed application calls
+
+Generic signed calls and their persistent-state burn are active from genesis.
+After the deployed module's own 100-block delay has elapsed, invoke it with
+either hexadecimal bytes or a file:
+
+```bash
+cargo run -p wallet -- wasm-call \
+  --extension EXTENSION_ID \
+  --payload-file call.bin \
+  --wallet wallet.json \
+  --rpc 127.0.0.1:6666
+```
+
+`--payload-hex HEX` can replace `--payload-file`. The wallet obtains the
+per-extension signer nonce from
+`GET /wasm-app/nonce/{extension_id}/{address}`, signs an envelope binding the
+chain ID, extension ID, raw guest payload, signer, and nonce, then obtains the
+exact current-state burn from `POST /extension/preview`. The call and its XPQ
+fee/burn spend are submitted atomically through `POST /transaction`.
+
+Raw unsigned payloads to permissionlessly deployed WASM extensions are invalid
+at every height. Guest code cannot read, overwrite, or delete the host-reserved
+nonce keys. Because created-state weight depends on canonical state, a
+conflicting state change between preview and inclusion can require the caller
+to rebuild and resubmit the transaction.
 
 ## Optional operator-configured activation
 

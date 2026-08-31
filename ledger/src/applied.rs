@@ -1,7 +1,7 @@
 use std::{error::Error, fmt};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use xparq_coin::{Amount, Coin, CoinId};
+use xparq_coin::{Amount, Coin, CoinId, TransactionOutputKind};
 use xparq_consensus::{AuthorizationValidated, RevealedAccountKey, ValidatedTransaction};
 use xparq_crypto::Address;
 use xparq_qcash::QCash;
@@ -166,7 +166,7 @@ impl LedgerState {
                 let Some(owner) = resolve_target(output.target, block_miner) else {
                     continue;
                 };
-                let id = output_id(b"onchain", commitment, index)?;
+                let id = output_id(TransactionOutputKind::AccountSpendOutput, commitment, index)?;
                 self.coins.insert(CoinUtxo {
                     coin: Coin::new(id, output.amount),
                     owner,
@@ -202,7 +202,7 @@ impl LedgerState {
                 let Some(owner) = resolve_target(output.target, block_miner) else {
                     continue;
                 };
-                let id = output_id(b"change", commitment, index)?;
+                let id = output_id(TransactionOutputKind::WithdrawChange, commitment, index)?;
                 self.coins.insert(CoinUtxo {
                     coin: Coin::new(id, output.amount),
                     owner,
@@ -228,13 +228,13 @@ impl LedgerState {
             self.create_qcash_outputs(
                 &intent.qcash_outputs,
                 commitment,
-                b"redeem-change",
+                TransactionOutputKind::RedeemQCashChange,
                 &mut journal,
             )?;
             self.create_coin_outputs(
                 &intent.outputs,
                 commitment,
-                b"redeem",
+                TransactionOutputKind::RedeemCoin,
                 block_miner,
                 &mut journal,
             )?;
@@ -256,14 +256,14 @@ impl LedgerState {
             self.create_qcash_outputs(
                 std::slice::from_ref(&intent.output),
                 commitment,
-                b"merge",
+                TransactionOutputKind::MergeQCash,
                 &mut journal,
             )?;
             if !intent.public_outputs.is_empty() {
                 self.create_coin_outputs(
                     &intent.public_outputs,
                     commitment,
-                    b"merge-miner",
+                    TransactionOutputKind::MergePublicOutput,
                     block_miner,
                     &mut journal,
                 )?;
@@ -284,12 +284,17 @@ impl LedgerState {
         let mut journal = UtxoRollbackJournal::default();
         let result = (|| {
             self.consume_qcash_inputs(std::slice::from_ref(&intent.input), &mut journal)?;
-            self.create_qcash_outputs(&intent.outputs, commitment, b"split", &mut journal)?;
+            self.create_qcash_outputs(
+                &intent.outputs,
+                commitment,
+                TransactionOutputKind::SplitQCash,
+                &mut journal,
+            )?;
             if !intent.public_outputs.is_empty() {
                 self.create_coin_outputs(
                     &intent.public_outputs,
                     commitment,
-                    b"split-miner",
+                    TransactionOutputKind::SplitPublicOutput,
                     block_miner,
                     &mut journal,
                 )?;
@@ -385,7 +390,7 @@ impl LedgerState {
         &mut self,
         outputs: &[xparq_transaction::QCashOutput],
         commitment: SpendCommitment,
-        kind: &[u8],
+        kind: TransactionOutputKind,
         journal: &mut UtxoRollbackJournal,
     ) -> Result<(), SpendStateError> {
         for (index, output) in outputs.iter().enumerate() {
@@ -403,7 +408,7 @@ impl LedgerState {
         &mut self,
         outputs: &[xparq_transaction::SpendOutput],
         commitment: SpendCommitment,
-        kind: &[u8],
+        kind: TransactionOutputKind,
         block_miner: Address,
         journal: &mut UtxoRollbackJournal,
     ) -> Result<(), SpendStateError> {
@@ -452,17 +457,16 @@ fn resolve_target(target: OutputTarget, block_miner: Address) -> Option<Address>
 }
 
 fn output_id(
-    kind: &[u8],
+    kind: TransactionOutputKind,
     commitment: SpendCommitment,
     index: usize,
 ) -> Result<CoinId, SpendStateError> {
     let index = u32::try_from(index).map_err(|_| SpendStateError::OutputIndexOverflow)?;
-    Ok(CoinId::derive(&[
-        b"XPARQ transaction output v1",
+    Ok(CoinId::from_transaction_output(
         kind,
         commitment.as_bytes(),
-        &index.to_le_bytes(),
-    ]))
+        index,
+    ))
 }
 
 /// Derives the canonical QCash coin identifier created by a withdrawal.
@@ -470,17 +474,17 @@ pub fn withdraw_qcash_output_id(
     commitment: SpendCommitment,
     index: usize,
 ) -> Result<CoinId, SpendStateError> {
-    output_id(b"qcash", commitment, index)
+    output_id(TransactionOutputKind::WithdrawQCash, commitment, index)
 }
 
 /// Derives the canonical QCash coin identifier created by a merge.
 pub fn merge_qcash_output_id(commitment: SpendCommitment) -> Result<CoinId, SpendStateError> {
-    output_id(b"merge", commitment, 0)
+    output_id(TransactionOutputKind::MergeQCash, commitment, 0)
 }
 
 /// Derives the canonical public miner-output identifier created by a merge.
 pub fn merge_miner_output_id(commitment: SpendCommitment) -> Result<CoinId, SpendStateError> {
-    output_id(b"merge-miner", commitment, 0)
+    output_id(TransactionOutputKind::MergePublicOutput, commitment, 0)
 }
 
 /// Derives a canonical QCash change identifier created by a redemption.
@@ -488,7 +492,7 @@ pub fn redeem_qcash_change_output_id(
     commitment: SpendCommitment,
     index: usize,
 ) -> Result<CoinId, SpendStateError> {
-    output_id(b"redeem-change", commitment, index)
+    output_id(TransactionOutputKind::RedeemQCashChange, commitment, index)
 }
 
 /// Derives a canonical QCash coin identifier created by a split.
@@ -496,12 +500,12 @@ pub fn split_qcash_output_id(
     commitment: SpendCommitment,
     index: usize,
 ) -> Result<CoinId, SpendStateError> {
-    output_id(b"split", commitment, index)
+    output_id(TransactionOutputKind::SplitQCash, commitment, index)
 }
 
 /// Derives the canonical public miner-output identifier created by a split.
 pub fn split_miner_output_id(commitment: SpendCommitment) -> Result<CoinId, SpendStateError> {
-    output_id(b"split-miner", commitment, 0)
+    output_id(TransactionOutputKind::SplitPublicOutput, commitment, 0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -536,7 +540,7 @@ mod tests {
 
     #[test]
     fn failed_in_place_transition_restores_consumed_inputs() {
-        let id = CoinId::derive(&[b"rollback regression coin"]);
+        let id = CoinId::from_bytes([0x51; CoinId::SIZE]);
         let utxo = CoinUtxo {
             coin: Coin::new(id, xparq_coin::Amount::from_zeno(7)),
             owner: Address::ZERO,
@@ -561,7 +565,7 @@ mod tests {
 
     #[test]
     fn signed_split_consumes_input_and_rolls_back_atomically() {
-        let input_id = CoinId::derive(&[b"signed split input"]);
+        let input_id = CoinId::from_bytes([0x52; CoinId::SIZE]);
         let seed = xparq_qcash::QCashSigningSeed::from_bytes([3; 32]);
         let mut state = LedgerState::default();
         state

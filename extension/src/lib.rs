@@ -15,9 +15,9 @@ pub use deploy::{
 };
 pub use registry::{ExtensionRegistry, RegistryError};
 pub use wasm::{
-    WASM_ABI_VERSION, WASM_CODE_MAX_SIZE, WASM_DEFAULT_FUEL, WASM_MEMORY_MAX_PAGES,
-    WASM_STATE_MAX_SIZE, WasmExtension, WasmExtensionError, WasmExtensionManifest,
-    WasmExtensionPackage, wasm_code_hash, wasm_extension_id,
+    WASM_ABI_VERSION, WASM_APP_CALL_ACTIVATION_HEIGHT, WASM_CODE_MAX_SIZE, WASM_DEFAULT_FUEL,
+    WASM_MEMORY_MAX_PAGES, WASM_STATE_MAX_SIZE, WasmAppCall, WasmExtension, WasmExtensionError,
+    WasmExtensionManifest, WasmExtensionPackage, wasm_app_nonce, wasm_code_hash, wasm_extension_id,
 };
 pub use xparq_asset as asset;
 pub use xparq_bridge as bridge;

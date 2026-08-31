@@ -63,6 +63,16 @@ impl Ledger {
         extensions.state_root().map_err(extension_error)
     }
 
+    pub fn preview_extension_created_state_weight(
+        &self,
+        call: &xparq_common::ExtensionCall,
+        height: Height,
+    ) -> Result<u64, LedgerError> {
+        self.state
+            .extension_created_state_weight_checked(call, height.0)
+            .map_err(extension_error)
+    }
+
     pub fn rollback_tip(&mut self) -> Result<xparq_blockchain::Block, LedgerError> {
         let height = self.chain.tip_height().ok_or(LedgerError::EmptyChain)?;
         let hash = self.chain.tip_hash().ok_or(LedgerError::EmptyChain)?;
@@ -100,9 +110,9 @@ impl Ledger {
         let mut staged_state = self.state.clone();
         let mut block_journals = Vec::new();
         if let Some(emission) = validated.emission() {
-            let id = CoinId::derive(&[b"XPARQ emission output v1", &emission.origin().0]);
+            let id = CoinId::from_emission_origin(&emission.origin().0);
             staged_state.coins.insert(CoinUtxo {
-                coin: Coin::new(id, emission.miner_reward()),
+                coin: Coin::new(id, emission.miner_emission()),
                 owner: emission.recipient(),
             })?;
             let mut journal = UtxoRollbackJournal {
@@ -226,16 +236,36 @@ impl TransactionStateView for LedgerState {
         self.account_keys.get_profile(&address).cloned()
     }
 
-    fn extension_created_state_weight(&self, call: &xparq_common::ExtensionCall) -> u64 {
-        if call.extension_id() != xparq_extension::asset::asset_extension_id() {
-            return 0;
-        }
-        let namespace = self
-            .extensions
-            .namespace(xparq_extension::asset::asset_extension_id());
-        xparq_extension::asset::AssetCall::from_extension_call(call)
-            .and_then(|call| call.created_state_weight(&namespace))
+    fn extension_created_state_weight(
+        &self,
+        call: &xparq_common::ExtensionCall,
+        height: u64,
+    ) -> u64 {
+        self.extension_created_state_weight_checked(call, height)
             .unwrap_or(0)
+    }
+}
+
+impl LedgerState {
+    fn extension_created_state_weight_checked(
+        &self,
+        call: &xparq_common::ExtensionCall,
+        height: u64,
+    ) -> Result<u64, ExtensionFailure> {
+        if call.extension_id() == xparq_extension::asset::asset_extension_id() {
+            let namespace = self
+                .extensions
+                .namespace(xparq_extension::asset::asset_extension_id());
+            return xparq_extension::asset::AssetCall::from_extension_call(call)
+                .and_then(|call| call.created_state_weight(&namespace));
+        }
+        self.extensions.preview_created_state_weight(
+            xparq_extension::production_registry(),
+            ExtensionContext {
+                height: xparq_common::Height(height),
+            },
+            call,
+        )
     }
 }
 

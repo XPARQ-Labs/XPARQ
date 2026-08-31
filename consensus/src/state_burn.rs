@@ -120,4 +120,51 @@ mod tests {
             Ok(Amount::from_zeno(2 * QCASH_UTXO_STATE_WEIGHT))
         );
     }
+
+    #[test]
+    fn exact_burn_cannot_be_missing_underpaid_overpaid_or_duplicated() {
+        let required = Amount::from_zeno(QCASH_UTXO_STATE_WEIGHT);
+        assert_eq!(
+            validate_exact_burn(&[], required),
+            Err(StateBurnError::IncorrectBurn {
+                required: QCASH_UTXO_STATE_WEIGHT,
+                declared: 0,
+            })
+        );
+        assert_eq!(
+            validate_exact_burn(
+                &[SpendOutput::burn(Amount::from_zeno(
+                    QCASH_UTXO_STATE_WEIGHT - 1,
+                ))],
+                required,
+            ),
+            Err(StateBurnError::IncorrectBurn {
+                required: QCASH_UTXO_STATE_WEIGHT,
+                declared: QCASH_UTXO_STATE_WEIGHT - 1,
+            })
+        );
+        assert_eq!(
+            validate_exact_burn(
+                &[SpendOutput::burn(Amount::from_zeno(
+                    QCASH_UTXO_STATE_WEIGHT + 1,
+                ))],
+                required,
+            ),
+            Err(StateBurnError::IncorrectBurn {
+                required: QCASH_UTXO_STATE_WEIGHT,
+                declared: QCASH_UTXO_STATE_WEIGHT + 1,
+            })
+        );
+        assert_eq!(
+            validate_exact_burn(
+                &[SpendOutput::burn(required), SpendOutput::burn(required),],
+                required,
+            ),
+            Err(StateBurnError::MultipleBurnOutputs)
+        );
+        assert_eq!(
+            validate_exact_burn(&[SpendOutput::burn(required)], required),
+            Ok(())
+        );
+    }
 }

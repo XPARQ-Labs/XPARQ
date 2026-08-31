@@ -12,10 +12,10 @@ Start with [ASSETS.md](ASSETS.md) to create, mint, burn, transfer, and query an
 asset. No source-code pull request or governance vote is required.
 
 Read [WASM.md](WASM.md) before developing a WASM extension. Deployment and
-automatic activation are implemented, but the public developer experience is
-not yet a complete smart-contract platform: XPARQ does not currently provide a
-guest SDK, a generic `wasm-call` wallet command, events, contract upgrades, or
-inter-extension calls.
+automatic activation are implemented, and the wallet provides generic signed
+`wasm-call` payload submission. The public developer experience is not yet a
+complete smart-contract platform: XPARQ does not currently provide a guest SDK,
+events, contract upgrades, or inter-extension calls.
 
 ## Local prerequisites
 
@@ -40,14 +40,13 @@ cargo run -p wallet -- menu
 ## What is ready today?
 
 Developers can create and distribute native assets on a running chain today.
-They can also build, inspect, deploy, and query immutable WASM modules. WASM is
-suitable for protocol experimentation and testnet development, but third-party
-application calls still require a purpose-built transaction builder until a
-generic signed call command and SDK are added.
+They can also build, inspect, deploy, query, and invoke immutable WASM modules.
+Signed calls, nonce protection, and persistent-state burn are active from
+genesis. WASM remains a low-level ABI until a guest SDK, event/indexing model,
+and application-specific payload conventions are added.
 
 The canonical protocol references remain:
 
 - [`docs/API.md`](../docs/API.md)
 - [`docs/WASM_EXTENSIONS.md`](../docs/WASM_EXTENSIONS.md)
 - [`docs/openapi.json`](../docs/openapi.json)
-

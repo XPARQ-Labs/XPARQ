@@ -265,7 +265,7 @@ fn initialize_extensions(package_paths: &[PathBuf]) -> Result<(), String> {
     .map_err(|error| format!("configure WASM chain specification: {error:?}"))?;
 
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
-    let mut registry = xparq::extension::ExtensionRegistry::new();
+    let mut registry = xparq::extension::ExtensionRegistry::with_chain_id(chain.genesis_hash);
     registry
         .register(xparq::extension::asset::AssetExtension::new(
             chain.genesis_hash,
@@ -563,7 +563,7 @@ fn print_account(path: Option<&str>, address: &str) -> Result<(), String> {
     let database = database_path(path);
     let ledger = load_or_initialize(&database)?;
     let address = parse_address(address)?;
-    let response = account_response(&ledger, &read_mempool(&database)?, address, 0)?;
+    let response = account_response(&ledger, &read_mempool(&database)?, address, 0, None)?;
     println!(
         "{}",
         serde_json::to_string_pretty(&response).map_err(|error| error.to_string())?
@@ -576,26 +576,31 @@ fn account_response(
     mempool: &[AuthorizedTransaction],
     address: Address,
     utxo_offset: usize,
+    utxo_after: Option<xparq::coin::CoinId>,
 ) -> Result<serde_json::Value, String> {
     let next_height = ledger
         .tip_height()
         .map_or(0, |height| height.0.saturating_add(1));
     let reserved = reserved_coin_inputs(mempool);
     let mut total = Amount::from_zeno(0);
-    let account_utxos = ledger
+    let mut account_utxos = ledger
         .state()
         .coins
         .iter()
         .filter(|utxo| utxo.owner == address)
         .collect::<Vec<_>>();
+    account_utxos.sort_by_key(|utxo| utxo.coin.id);
     for utxo in &account_utxos {
         total = total
             .checked_add(utxo.coin.amount)
             .ok_or("account balance overflow")?;
     }
+    let page_start = utxo_after.map_or(utxo_offset, |cursor| {
+        account_utxos.partition_point(|utxo| utxo.coin.id <= cursor)
+    });
     let utxos = account_utxos
         .iter()
-        .skip(utxo_offset)
+        .skip(page_start)
         .take(MAX_ACCOUNT_UTXOS_PER_PAGE)
         .map(|utxo| {
             let is_reserved = reserved.contains(&utxo.coin.id);
@@ -606,25 +611,50 @@ fn account_response(
             })
         })
         .collect::<Vec<_>>();
-    let next_utxo_offset = utxo_offset
+    let next_utxo_offset = page_start
         .checked_add(utxos.len())
         .filter(|offset| *offset < account_utxos.len());
+    let next_utxo_cursor = next_utxo_offset
+        .and_then(|_| account_utxos.get(page_start + utxos.len().saturating_sub(1)))
+        .map(|utxo| utxo.coin.id.to_string());
     let registered_signature_profile = ledger
         .state()
         .account_keys
         .get_profile(&address)
         .map(|key| key.profile.as_str());
+    let utxo_snapshot_entries = account_utxos
+        .iter()
+        .map(|utxo| {
+            (
+                utxo.coin.id,
+                utxo.coin.amount,
+                reserved.contains(&utxo.coin.id),
+            )
+        })
+        .collect::<Vec<_>>();
+    let utxo_snapshot_bytes = xparq::common::canonical_bytes(&(
+        address,
+        registered_signature_profile,
+        utxo_snapshot_entries,
+    ))
+    .map_err(|error| format!("encode account UTXO snapshot: {error}"))?;
+    let utxo_snapshot = xparq::crypto::domain_hash(
+        xparq::crypto::HashDomain::AccountState,
+        &utxo_snapshot_bytes,
+    );
     let assets = account_asset_balances(ledger, address)?;
     Ok(serde_json::json!({
         "address": xparq::crypto::address_to_string(&address),
         "public_key_registered": registered_signature_profile.is_some(),
         "signature_profile": registered_signature_profile,
+        "utxo_snapshot": hex::encode(utxo_snapshot.0),
         "tip_height": ledger.tip_height().map_or(0, |height| height.0),
         "next_height": next_height,
         "total": total.as_zeno(),
         "assets": assets,
         "utxos": utxos,
         "next_utxo_offset": next_utxo_offset,
+        "next_utxo_cursor": next_utxo_cursor,
     }))
 }
 
@@ -745,7 +775,7 @@ fn explorer_address_response(
         if let Some(emission) = block.emission().filter(|emission| emission.to == address) {
             emission_count = emission_count.saturating_add(1);
             if include_emissions {
-                let miner_reward = emission
+                let miner_emission = emission
                     .subsidy
                     .checked_sub(xparq::consensus::EMISSION_UTXO_STATE_BURN)
                     .ok_or("block emission is below its UTXO state burn")?;
@@ -755,7 +785,7 @@ fn explorer_address_response(
                     "transaction_id": serde_json::Value::Null,
                     "type": "emission",
                     "direction": "in",
-                    "amount": miner_reward.as_zeno(),
+                    "amount": miner_emission.as_zeno(),
                     "gross_subsidy": emission.subsidy.as_zeno(),
                     "state_burn": xparq::consensus::EMISSION_UTXO_STATE_BURN.as_zeno(),
                     "size_bytes": serde_json::Value::Null,
@@ -1032,7 +1062,7 @@ fn public_outputs_response(
                     Some(xparq::crypto::address_to_string(&address)),
                     "address",
                     if sender == Some(address) {
-                        "sender_return"
+                        "change"
                     } else {
                         "recipient"
                     },
@@ -1047,6 +1077,7 @@ fn public_outputs_response(
             serde_json::json!({
                 "address": address,
                 "amount": output.amount.as_zeno(),
+                "unit": xparq::coin::UNIT_NAME,
                 "type": output_type,
                 "role": role,
             })
@@ -1136,6 +1167,27 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             &serde_json::json!({"transaction_id": hex::encode(transaction_id)}),
         );
     }
+    if method == "POST" && route == "/extension/preview" {
+        let call: xparq::common::ExtensionCall = canonical_decode(&request.body)
+            .map_err(|error| format!("invalid extension call: {error}"))?;
+        let ledger = load_or_initialize(database)?;
+        let height = Height(ledger.tip_height().map_or(0, |tip| tip.0.saturating_add(1)));
+        let created_state_weight = ledger
+            .preview_extension_created_state_weight(&call, height)
+            .map_err(|error| error.to_string())?;
+        let state_burn = created_state_weight
+            .checked_mul(xparq::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT)
+            .ok_or("extension preview state burn overflow")?;
+        return write_http_response(
+            stream,
+            200,
+            &serde_json::json!({
+                "height": height.0,
+                "created_state_weight": created_state_weight,
+                "state_burn": state_burn,
+            }),
+        );
+    }
     if method != "GET" {
         return Err("unsupported RPC method".into());
     }
@@ -1172,6 +1224,7 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             let address = parse_address(route.trim_start_matches("/wasm/nonce/"))?;
             wasm_nonce_response(database, &ledger, address)?
         }
+        route if route.starts_with("/wasm-app/nonce/") => wasm_app_nonce_response(&ledger, route)?,
         route if route.starts_with("/wasm/") => wasm_extension_response(&ledger, route)?,
         route if route.starts_with("/balance/") => {
             let address = route.trim_start_matches("/balance/");
@@ -1199,20 +1252,34 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
                 return Err("invalid account route".into());
             }
             let mut utxo_offset = 0;
+            let mut utxo_after = None;
             if !query.is_empty() {
                 let (name, value) = query.split_once('=').ok_or("invalid account query")?;
-                if name != "utxo_offset" || value.is_empty() || value.contains('&') {
+                if value.is_empty() || value.contains('&') {
                     return Err("invalid account query".into());
                 }
-                utxo_offset = value
-                    .parse::<usize>()
-                    .map_err(|_| "invalid account UTXO offset")?;
+                match name {
+                    "utxo_offset" => {
+                        utxo_offset = value
+                            .parse::<usize>()
+                            .map_err(|_| "invalid account UTXO offset")?;
+                    }
+                    "utxo_after" => {
+                        utxo_after = Some(
+                            value
+                                .parse::<xparq::coin::CoinId>()
+                                .map_err(|_| "invalid account UTXO cursor")?,
+                        );
+                    }
+                    _ => return Err("invalid account query".into()),
+                }
             }
             account_response(
                 &ledger,
                 &read_mempool(database)?,
                 parse_address(address)?,
                 utxo_offset,
+                utxo_after,
             )?
         }
         route if route.starts_with("/explorer/address/") => {
@@ -1332,6 +1399,33 @@ fn wasm_extension_response(ledger: &Ledger, route: &str) -> Result<serde_json::V
         "code_size": package.module.len(),
         "immutable": true,
     }))
+}
+
+fn wasm_app_nonce_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
+    let value = route.trim_start_matches("/wasm-app/nonce/");
+    let (extension, address) = value
+        .split_once('/')
+        .ok_or("invalid WASM application nonce route")?;
+    let extension_id = parse_extension_id(extension)?;
+    let address = parse_address(address)?;
+    let namespace = ledger.state().extensions.namespace(extension_id);
+    let nonce = xparq::extension::wasm_app_nonce(&namespace, address)
+        .map_err(|error| format!("read WASM application nonce: {error:?}"))?;
+    Ok(serde_json::json!({
+        "extension_id": extension,
+        "address": xparq::crypto::address_to_string(&address),
+        "nonce": nonce,
+    }))
+}
+
+fn parse_extension_id(value: &str) -> Result<xparq::common::ExtensionId, String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("invalid WASM extension id".into());
+    }
+    let bytes = hex::decode(value).map_err(|_| "invalid WASM extension id")?;
+    Ok(xparq::common::ExtensionId::from_bytes(
+        bytes.try_into().map_err(|_| "invalid WASM extension id")?,
+    ))
 }
 
 fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
@@ -1502,9 +1596,29 @@ fn block_response(block: &Block) -> Result<serde_json::Value, String> {
     } else {
         Amount::from_zeno(0)
     };
-    let miner_reward = gross_subsidy
+    let miner_emission = gross_subsidy
         .checked_sub(state_burn)
         .ok_or("block emission is below its UTXO state burn")?;
+    let transaction_details = block
+        .transactions()
+        .iter()
+        .map(|transaction| {
+            Ok(serde_json::json!({
+                "transaction_id": hex::encode(
+                    transaction.id().map_err(|error| error.to_string())?
+                ),
+                "type": transaction_kind(transaction),
+                "size_bytes": canonical_bytes(transaction)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                "transaction": transaction_response(transaction, block.miner_address()),
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let transaction_ids = transaction_details
+        .iter()
+        .filter_map(|transaction| transaction.get("transaction_id").cloned())
+        .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "height": block.height().0,
         "hash": hex::encode(block.hash().map_err(|error| error.to_string())?.0),
@@ -1513,10 +1627,12 @@ fn block_response(block: &Block) -> Result<serde_json::Value, String> {
         "block_weight": block.block_weight(),
         "nonce": block.header.nonce.0,
         "transactions": block.transaction_count(),
+        "transaction_ids": transaction_ids,
+        "transaction_details": transaction_details,
         "miner": xparq::crypto::address_to_string(&block.miner_address()),
         "subsidy": gross_subsidy.as_zeno(),
         "state_burn": state_burn.as_zeno(),
-        "miner_reward": miner_reward.as_zeno(),
+        "miner_emission": miner_emission.as_zeno(),
     }))
 }
 
@@ -3563,6 +3679,10 @@ mod tests {
             "/asset/nonce/{address}",
             "/asset/{asset_id}",
             "/asset/{asset_id}/balance/{address}",
+            "/wasm/nonce/{address}",
+            "/wasm/{extension_id}",
+            "/wasm-app/nonce/{extension_id}/{address}",
+            "/extension/preview",
             "/explorer/address/{address}",
             "/explorer/transaction/{transaction_id}",
             "/transaction",

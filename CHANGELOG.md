@@ -105,6 +105,12 @@
   blocks after inclusion. Dynamic execution resolves code from ledger state, so
   replay, snapshots, state roots, and reorg rollback do not depend on process
   memory. Wallet deploy/info commands and WASM nonce/status RPCs are included.
+- Activated generic signed WASM application calls from genesis on the reset
+  chain. Calls bind the chain ID,
+  extension ID, payload, signer, and per-extension nonce. The wallet provides
+  `wasm-call`; node RPC exposes nonce and exact extension-state preview routes.
+  Starting at activation, deployment and application state burn covers every
+  newly persisted extension key and value, not only metadata.
 - Retired old Docker, tutorial, roadmap, whitepaper, and legacy fuzzing files
   because they described the removed architecture. Current behavior lives in
   the root, runtime, and wallet READMEs.

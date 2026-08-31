@@ -363,7 +363,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
         account(&c_rpc, &recipient_address).is_ok_and(|account| {
             account["total"]
                 .as_u64()
-                .is_some_and(|total| u128::from(total) >= sent.as_zeno())
+                .is_some_and(|total| u128::from(total) >= u128::from(sent.as_zeno()))
         })
     });
     let included_balance = account(&c_rpc, &recipient_address).unwrap()["total"].clone();

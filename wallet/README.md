@@ -60,6 +60,9 @@ QCash value; ordinary spend and withdraw select enough XPQ input value for it.
 The wallet also adds an exact `Burn` output for every persistent state entry a
 transaction creates. Consumed inputs do not receive burn credit. The state-burn
 rate and UTXO weights are consensus parameters returned by `GET /fee-policy`.
+The balance screen also reports the chain-wide cumulative XPQ burned supply
+from the canonical ledger's `GET /status` response. This value is a network
+metric and is separate from the selected wallet's balance.
 
 ## Extension assets
 
@@ -79,6 +82,19 @@ limits accept the full unsigned 128-bit integer range.
 Register, mint, burn, and transfer are signed with the wallet profile and use a
 per-signer nonce. The wallet selects XPQ inputs and pays the canonical-byte fee
 inside the same atomic extension transaction.
+
+## WASM extensions
+
+```bash
+./target/release/wallet wasm-deploy --name example.state --wasm module.wasm
+./target/release/wallet wasm-info --extension ID
+./target/release/wallet wasm-call --extension ID --payload-file call.bin
+```
+
+Permissionless deploys are immutable and activate 100 blocks after inclusion.
+Generic signed calls, their signer nonce, and persistent-state burn are active
+from genesis. The wallet previews all new persistent WASM state and adds its
+exact consensus burn automatically.
 
 Output bearer files are saved before submission so private signing material
 cannot be lost. Keep every input file until canonical confirmation; never

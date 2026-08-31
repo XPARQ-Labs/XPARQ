@@ -155,7 +155,7 @@ pub trait TransactionStateView {
     fn qcash(&self, id: CoinId) -> Option<QCashInputState>;
     fn profile_public_key(&self, address: Address) -> Option<ProfilePublicKey>;
 
-    fn extension_created_state_weight(&self, _call: &ExtensionCall) -> u64 {
+    fn extension_created_state_weight(&self, _call: &ExtensionCall, _height: u64) -> u64 {
         0
     }
 }
@@ -285,7 +285,7 @@ pub fn validate_transaction(
                 StateTransitionWeight {
                     created_coin_utxos: created_coin_output_count(&fee.intent().outputs)?,
                     extension_created_weight: state
-                        .extension_created_state_weight(&transaction.call),
+                        .extension_created_state_weight(&transaction.call, current_height),
                     ..StateTransitionWeight::default()
                 },
             )?;

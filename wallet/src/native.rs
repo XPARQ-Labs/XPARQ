@@ -69,8 +69,11 @@ const DEFAULT_RPC_ADDR: &str = "127.0.0.1:26666";
 struct AccountResponse {
     next_height: u64,
     public_key_registered: bool,
+    #[serde(rename = "utxo_snapshot")]
+    _utxo_snapshot: String,
     utxos: Vec<AccountUtxo>,
     next_utxo_offset: Option<usize>,
+    next_utxo_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -81,6 +84,11 @@ struct BalanceResponse {
     utxo_count: usize,
     #[serde(default)]
     assets: Vec<AccountAssetBalance>,
+}
+
+#[derive(Deserialize)]
+struct NodeBurnResponse {
+    total_burned: u64,
 }
 
 #[derive(Deserialize)]
@@ -143,6 +151,13 @@ struct AssetBalanceResponse {
     balance: String,
 }
 
+#[derive(Deserialize)]
+struct ExtensionPreviewResponse {
+    #[serde(rename = "height")]
+    _height: u64,
+    created_state_weight: u64,
+}
+
 pub fn run(mut args: Vec<String>) -> Result<(), String> {
     let result = match args.first().map(String::as_str) {
         None | Some("menu") | Some("interactive") => interactive_menu(),
@@ -164,6 +179,7 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         Some("asset-info") => asset_info(&args[1..]),
         Some("asset-balance") => asset_balance(&args[1..]),
         Some("wasm-deploy") => wasm_deploy(&args[1..]),
+        Some("wasm-call") => wasm_call(&args[1..]),
         Some("wasm-info") => wasm_info(&args[1..]),
         Some("version") | Some("--version") | Some("-V") => {
             println!("wallet {}", env!("CARGO_PKG_VERSION"));
@@ -391,10 +407,17 @@ fn wasm_deploy(args: &[String]) -> Result<(), String> {
     let extension_id = xparq::extension::WasmDeployCall::from_extension_call(&call)
         .map_err(|error| format!("decode signed WASM deploy call: {error:?}"))?
         .extension_id();
+    let extension_created_weight = preview_extension_created_weight(rpc, &call)?;
     let public_key_known = account_public_key_registered(rpc, &wallet);
     let transaction = automatic_fee_transaction(|fee| {
-        let (inputs, _total, state_burn, change) =
-            select_account_inputs_with_state_burn(rpc, &wallet, fee, 1, 0, 0)?;
+        let (inputs, _total, state_burn, change) = select_account_inputs_with_state_burn(
+            rpc,
+            &wallet,
+            fee,
+            1,
+            0,
+            extension_created_weight,
+        )?;
         let mut outputs = Vec::new();
         if change > 0 {
             outputs.push(SpendOutput::new(
@@ -423,6 +446,90 @@ fn wasm_deploy(args: &[String]) -> Result<(), String> {
         xparq::extension::WASM_DEPLOY_ACTIVATION_DELAY
     );
     Ok(())
+}
+
+fn wasm_call(args: &[String]) -> Result<(), String> {
+    reject_manual_fee(args)?;
+    let extension_id =
+        parse_extension_id(option(args, "--extension").ok_or("missing --extension")?)?;
+    let payload = match (
+        option(args, "--payload-hex"),
+        option(args, "--payload-file"),
+    ) {
+        (Some(payload), None) => hex::decode(payload).map_err(|_| "invalid --payload-hex")?,
+        (None, Some(path)) => {
+            fs::read(path).map_err(|error| format!("read WASM call payload `{path}`: {error}"))?
+        }
+        (Some(_), Some(_)) => return Err("use only one of --payload-hex or --payload-file".into()),
+        (None, None) => return Err("missing --payload-hex or --payload-file".into()),
+    };
+    let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let address = xparq::crypto::address_to_string(&wallet.address());
+    let nonce = http_get_json::<AssetNonceResponse>(
+        rpc,
+        &format!(
+            "/wasm-app/nonce/{}/{}",
+            hex::encode(extension_id.as_bytes()),
+            address
+        ),
+    )?
+    .nonce;
+    let call = wallet.0.sign_wasm_app_call(extension_id, payload, nonce)?;
+    let extension_created_weight = preview_extension_created_weight(rpc, &call)?;
+    let public_key_known = account_public_key_registered(rpc, &wallet);
+    let transaction = automatic_fee_transaction(|fee| {
+        let (inputs, _total, state_burn, change) = select_account_inputs_with_state_burn(
+            rpc,
+            &wallet,
+            fee,
+            1,
+            0,
+            extension_created_weight,
+        )?;
+        let mut outputs = Vec::new();
+        if change > 0 {
+            outputs.push(SpendOutput::new(
+                wallet.address(),
+                Amount::from_zeno(change),
+            ));
+        }
+        outputs.push(SpendOutput::block_miner(Amount::from_zeno(fee)));
+        if state_burn > 0 {
+            outputs.push(SpendOutput::burn(Amount::from_zeno(state_burn)));
+        }
+        let fee_intent = OnChainSpendIntent::new(wallet.address(), inputs, outputs)
+            .map_err(|error| error.to_string())?;
+        let fee = wallet.sign_onchain_spend(fee_intent, public_key_known)?;
+        Ok(AuthorizedTransaction::Extension(Box::new(
+            AuthorizedExtensionTransaction {
+                call: call.clone(),
+                fee,
+            },
+        )))
+    })?;
+    submit_or_print_transaction(args, &transaction)
+}
+
+fn preview_extension_created_weight(
+    rpc: &str,
+    call: &xparq::common::ExtensionCall,
+) -> Result<u64, String> {
+    let bytes = canonical_bytes(call).map_err(|error| error.to_string())?;
+    let preview = http_post_bytes::<ExtensionPreviewResponse>(rpc, "/extension/preview", &bytes)?;
+    Ok(preview.created_state_weight)
+}
+
+fn parse_extension_id(value: &str) -> Result<xparq::common::ExtensionId, String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("extension ID must be 64 hexadecimal characters".into());
+    }
+    let bytes = hex::decode(value).map_err(|_| "invalid extension ID")?;
+    Ok(xparq::common::ExtensionId::from_bytes(
+        bytes
+            .try_into()
+            .map_err(|_| "extension ID must be 32 bytes")?,
+    ))
 }
 
 fn wasm_info(args: &[String]) -> Result<(), String> {
@@ -819,12 +926,17 @@ fn print_balance(args: &[String]) -> Result<(), String> {
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
     let address = xparq::crypto::address_to_string(&wallet_address_from_file_bytes(&bytes)?);
     let balance: BalanceResponse = http_get_json(rpc, &format!("/balance/{address}"))?;
+    let burn: NodeBurnResponse = http_get_json(rpc, "/status")?;
 
     println!("address: {address}");
     println!("total: {}", format_amount(balance.total));
     println!("available: {}", format_amount(balance.available));
     println!("reserved: {}", format_amount(balance.reserved));
     println!("utxos: {}", balance.utxo_count);
+    println!(
+        "network burned supply: {}",
+        format_amount(burn.total_burned)
+    );
     println!("assets: {}", balance.assets.len());
     for asset in &balance.assets {
         println!(
@@ -1044,19 +1156,15 @@ fn account_public_key_registered(rpc: &str, wallet: &LoadedWallet) -> bool {
 
 fn fetch_account(rpc: &str, address: &str) -> Result<AccountResponse, String> {
     let mut response: AccountResponse = http_get_json(rpc, &format!("/account/{address}"))?;
-    while let Some(offset) = response.next_utxo_offset {
+    while let Some(cursor) = response.next_utxo_cursor.clone() {
         let page: AccountResponse =
-            http_get_json(rpc, &format!("/account/{address}?utxo_offset={offset}"))?;
-        if page.next_height != response.next_height
-            || page.public_key_registered != response.public_key_registered
-        {
-            return Err("account changed while reading paginated RPC response; retry".into());
-        }
+            http_get_json(rpc, &format!("/account/{address}?utxo_after={cursor}"))?;
         if page.utxos.is_empty() {
             return Err("node returned an invalid empty account page".into());
         }
         response.utxos.extend(page.utxos);
         response.next_utxo_offset = page.next_utxo_offset;
+        response.next_utxo_cursor = page.next_utxo_cursor;
     }
     Ok(response)
 }
@@ -1759,7 +1867,7 @@ fn print_help() {
         "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply UNITS --initial-mint UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset ID --to ADDRESS --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset ID --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset ID --to ADDRESS --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset ID [--rpc ADDRESS]\nwallet asset-balance --asset ID [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts are integer base units. Registration atomically credits the initial mint to the signing creator, makes that wallet the mint authority, and pays one XPQ miner fee. Distribution to other addresses uses asset-transfer."
     );
     println!(
-        "\nWASM commands:\nwallet wasm-deploy --name NAME --wasm MODULE [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet wasm-info --extension ID [--rpc ADDRESS]\n\nWASM deploys are immutable and activate automatically after 100 blocks."
+        "\nWASM commands:\nwallet wasm-deploy --name NAME --wasm MODULE [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet wasm-call --extension ID (--payload-hex HEX | --payload-file PATH) [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet wasm-info --extension ID [--rpc ADDRESS]\n\nWASM deploys are immutable and activate automatically after 100 blocks. Signed generic WASM calls and WASM persistent-state burn are active from genesis."
     );
 }
 
@@ -1852,7 +1960,9 @@ mod tests {
         let account = AccountResponse {
             next_height: 100,
             public_key_registered: false,
+            _utxo_snapshot: "test-snapshot".into(),
             next_utxo_offset: None,
+            next_utxo_cursor: None,
             utxos: vec![
                 AccountUtxo {
                     id: "available-one".into(),

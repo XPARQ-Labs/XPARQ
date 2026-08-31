@@ -15,11 +15,19 @@ pub enum RegistryError {
 #[derive(Default)]
 pub struct ExtensionRegistry {
     extensions: BTreeMap<ExtensionId, Box<dyn Extension>>,
+    chain_id: [u8; 32],
 }
 
 impl ExtensionRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_chain_id(chain_id: [u8; 32]) -> Self {
+        Self {
+            extensions: BTreeMap::new(),
+            chain_id,
+        }
     }
 
     pub fn register(&mut self, extension: impl Extension + 'static) -> Result<(), RegistryError> {
@@ -46,22 +54,25 @@ impl ExtensionRegistry {
         call: &ExtensionCall,
         state: &dyn ExtensionStateRead,
     ) -> Result<(), ExtensionFailure> {
-        let dynamic;
-        let extension = match self.extensions.get(&call.extension_id()) {
-            Some(extension) => extension.as_ref(),
-            None => {
-                let package = crate::deploy::wasm_deployed_package(state, call.extension_id())?
-                    .ok_or(ExtensionFailure::UnknownExtension)?;
-                dynamic = package
-                    .compile()
-                    .map_err(|_| ExtensionFailure::InvalidState)?;
-                &dynamic
+        if let Some(extension) = self.extensions.get(&call.extension_id()) {
+            if context.height < extension.activation_height() {
+                return Err(ExtensionFailure::InactiveExtension);
             }
-        };
+            return extension.validate(context, call, state);
+        }
+        let package = crate::deploy::wasm_deployed_package(state, call.extension_id())?
+            .ok_or(ExtensionFailure::UnknownExtension)?;
+        let dynamic = package
+            .compile()
+            .map_err(|_| ExtensionFailure::InvalidState)?;
+        let app = crate::WasmAppCall::from_extension_call(call)?;
+        app.verify(self.chain_id, call.extension_id(), state)?;
+        let guest_call = ExtensionCall::new(call.extension_id(), app.payload)?;
+        let extension = &dynamic;
         if context.height < extension.activation_height() {
             return Err(ExtensionFailure::InactiveExtension);
         }
-        extension.validate(context, call, state)
+        extension.validate(context, &guest_call, state)
     }
 
     pub fn apply(
@@ -70,22 +81,34 @@ impl ExtensionRegistry {
         call: &ExtensionCall,
         state: &mut dyn ExtensionStateWrite,
     ) -> Result<(), ExtensionFailure> {
-        let dynamic;
-        let extension = match self.extensions.get(&call.extension_id()) {
-            Some(extension) => extension.as_ref(),
-            None => {
-                let package = crate::deploy::wasm_deployed_package(state, call.extension_id())?
-                    .ok_or(ExtensionFailure::UnknownExtension)?;
-                dynamic = package
-                    .compile()
-                    .map_err(|_| ExtensionFailure::InvalidState)?;
-                &dynamic
+        if let Some(extension) = self.extensions.get(&call.extension_id()) {
+            if context.height < extension.activation_height() {
+                return Err(ExtensionFailure::InactiveExtension);
             }
-        };
+            return extension.apply(context, call, state);
+        }
+        let package = crate::deploy::wasm_deployed_package(state, call.extension_id())?
+            .ok_or(ExtensionFailure::UnknownExtension)?;
+        let dynamic = package
+            .compile()
+            .map_err(|_| ExtensionFailure::InvalidState)?;
+        let app = crate::WasmAppCall::from_extension_call(call)?;
+        app.verify(self.chain_id, call.extension_id(), state)?;
+        let guest_call = ExtensionCall::new(call.extension_id(), app.payload.clone())?;
+        let extension = &dynamic;
         if context.height < extension.activation_height() {
             return Err(ExtensionFailure::InactiveExtension);
         }
-        extension.apply(context, call, state)
+        extension.apply(context, &guest_call, state)?;
+        state.put(
+            crate::wasm::wasm_app_nonce_key(app.signer),
+            app.nonce
+                .checked_add(1)
+                .ok_or(ExtensionFailure::InvalidState)?
+                .to_le_bytes()
+                .to_vec(),
+        )?;
+        Ok(())
     }
 
     pub fn commitments(&self) -> impl Iterator<Item = ExtensionId> + '_ {

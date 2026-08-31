@@ -66,23 +66,27 @@ There is no WASI, clock, random source, floating point, filesystem, socket, or
 direct ledger access. See [`docs/WASM_EXTENSIONS.md`](../docs/WASM_EXTENSIONS.md)
 for the exact limits and host return codes.
 
-## Important current limitation: application calls
+## Invoke an application
 
-The wallet currently implements `wasm-deploy` and `wasm-info`, but it does not
-yet expose a generic `wasm-call --extension ID --payload ...` command. Therefore
-a third-party extension can be deployed and activated, but ordinary users
-cannot invoke arbitrary application payloads through the stock wallet yet.
+The canonical signed application-call envelope, nonce protection, and WASM
+persistent-state burn are active from genesis. A deployed module can be called
+after its own fixed 100-block activation delay:
 
-Completing the public developer path requires these next pieces:
+```bash
+cargo run -p wallet -- wasm-call \
+  --extension EXTENSION_ID \
+  --payload-hex 68656c6c6f \
+  --wallet wallet.json \
+  --rpc 127.0.0.1:6666
+```
 
-1. a canonical signed WASM application-call envelope with signer and nonce;
-2. a wallet/Rust SDK transaction builder and generic `wasm-call` CLI;
-3. local execution and integration-test helpers;
-4. stable payload conventions, events/indexing, and application-specific RPC;
-5. optional upgrade, pause, and migration policies defined at the protocol
-   level.
+Use `--payload-file call.bin` for binary application protocols. The envelope
+binds the chain ID, target extension ID, payload, signer, and a replay-protection
+nonce scoped to that signer and extension. The wallet queries the nonce and an
+exact created-state preview from the node, then adds the required state-burn
+output and normal miner fee.
 
-Until those exist, direct invocation requires custom Rust integration against
-the core `ExtensionCall` and `AuthorizedExtensionTransaction` types and should
-be considered internal/testnet work. Deployment alone is production-shaped;
-the complete third-party application workflow is not.
+The generic transport is now usable, but application developers still need to
+define and document their own canonical payload schema. Events/indexing,
+application-specific RPC, SDK ergonomics, and optional upgrade or pause policy
+remain higher-level developer tooling rather than part of ABI v1.
