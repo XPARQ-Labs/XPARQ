@@ -1,4 +1,5 @@
 mod error;
+mod identifier;
 mod protocol;
 
 pub use error::AssetIdParseError;

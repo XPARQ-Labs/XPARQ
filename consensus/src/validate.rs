@@ -128,7 +128,15 @@ pub enum ValidatedTransaction {
     Redeem(AuthorizationValidated<RedeemIntent>),
     Merge(AuthorizationValidated<MergeIntent>),
     Split(AuthorizationValidated<SplitIntent>),
+    Asset(ValidatedAssetTransaction),
     Extension(ValidatedExtensionTransaction),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedAssetTransaction {
+    pub chain_id: [u8; 32],
+    pub call: xparq_asset::AssetCall,
+    pub fee: AuthorizationValidated<OnChainSpendIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +162,10 @@ pub trait TransactionStateView {
     fn coin(&self, id: CoinId) -> Option<CoinInputState>;
     fn qcash(&self, id: CoinId) -> Option<QCashInputState>;
     fn profile_public_key(&self, address: Address) -> Option<ProfilePublicKey>;
+
+    fn asset_state(&self) -> Option<&xparq_asset::AssetState> {
+        None
+    }
 
     fn extension_created_state_weight(&self, _call: &ExtensionCall, _height: u64) -> u64 {
         0
@@ -265,6 +277,40 @@ pub fn validate_transaction(
                 },
             )?;
             Ok(ValidatedTransaction::Split(validated))
+        }
+        AuthorizedTransaction::Asset(transaction) => {
+            let transaction = *transaction;
+            let asset_state = state
+                .asset_state()
+                .ok_or(TransactionConsensusError::Asset(xparq_asset::AssetError::UnknownAsset))?;
+            transaction
+                .call
+                .validate(chain.genesis_hash, asset_state)
+                .map_err(TransactionConsensusError::Asset)?;
+            let fee =
+                validate_account_authorization(transaction.fee, chain, current_height, state)?;
+            validate_coin_inputs(
+                &fee.intent().inputs,
+                fee.intent().sender,
+                &fee.intent().outputs.iter().map(|output| output.amount).collect::<Vec<_>>(),
+                state,
+            )?;
+            validate_state_burn(
+                &fee.intent().outputs,
+                StateTransitionWeight {
+                    created_coin_utxos: created_coin_output_count(&fee.intent().outputs)?,
+                    extension_created_weight: transaction
+                        .call
+                        .created_state_weight(asset_state)
+                        .map_err(TransactionConsensusError::Asset)?,
+                    ..StateTransitionWeight::default()
+                },
+            )?;
+            Ok(ValidatedTransaction::Asset(ValidatedAssetTransaction {
+                chain_id: chain.genesis_hash,
+                call: transaction.call,
+                fee,
+            }))
         }
         AuthorizedTransaction::Extension(transaction) => {
             let transaction = *transaction;
@@ -484,6 +530,7 @@ pub enum TransactionConsensusError {
     ReusedBearerKey,
     AmountOverflow,
     ValueMismatch,
+    Asset(xparq_asset::AssetError),
     StateBurn(StateBurnError),
 }
 
@@ -509,6 +556,7 @@ impl fmt::Display for TransactionConsensusError {
             }
             Self::AmountOverflow => formatter.write_str("transaction amount overflow"),
             Self::ValueMismatch => formatter.write_str("input value does not equal output value"),
+            Self::Asset(error) => write!(formatter, "invalid native asset transaction: {error}"),
             Self::StateBurn(error) => write!(formatter, "invalid state burn: {error}"),
         }
     }

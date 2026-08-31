@@ -12,7 +12,6 @@ borsh.workspace = true
 wasmi.workspace = true
 xparq-common.workspace = true
 xparq-crypto.workspace = true
-xparq-asset = { path = "asset" }
 xparq-bridge = { path = "bridge" }
 
 [dev-dependencies]

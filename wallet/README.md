@@ -67,8 +67,9 @@ metric and is separate from the selected wallet's balance.
 ## Extension assets
 
 Asset amounts are integer base units. Registration derives a deterministic
-asset ID and makes the signing wallet its mint authority. Amounts and supply
-limits accept the full unsigned 128-bit integer range.
+`asset:`-prefixed ID and makes the signing wallet its mint authority. Asset IDs
+use exactly 64 lowercase hexadecimal characters after the prefix. Amounts and
+supply limits accept the full unsigned 128-bit integer range.
 
 ```bash
 ./target/release/wallet asset-register --name "Gold Token" --symbol GOLD --decimals 2 --max-supply 1000000 --initial-mint 1000000

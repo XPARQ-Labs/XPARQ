@@ -20,6 +20,7 @@ pub struct LedgerState {
     pub coins: CoinUtxoSet,
     pub qcash: QCashUtxoSet,
     pub account_keys: AccountKeyRegistry,
+    pub assets: xparq_asset::AssetState,
     pub extensions: ExtensionStateSet,
     pub total_burned: Amount,
 }
@@ -28,6 +29,10 @@ pub struct LedgerState {
 pub enum StateRollbackJournal {
     Utxo(UtxoRollbackJournal),
     Extension(ExtensionRollbackJournal),
+    AssetWithFee {
+        asset: xparq_asset::AssetRollbackJournal,
+        fee: UtxoRollbackJournal,
+    },
     ExtensionWithFee {
         extension: ExtensionRollbackJournal,
         fee: UtxoRollbackJournal,
@@ -41,6 +46,36 @@ impl LedgerState {
         _height: xparq_common::Height,
         block_miner: Address,
     ) -> Result<StateRollbackJournal, SpendStateError> {
+        if let ValidatedTransaction::Asset(asset_transaction) = transaction {
+            let mut fee = self.apply_validated_onchain_spend(&asset_transaction.fee, block_miner)?;
+            if let Some(RevealedAccountKey::Profile(public_key)) =
+                asset_transaction.fee.revealed_account_key().cloned()
+            {
+                match self.account_keys.register_profile(
+                    asset_transaction.fee.intent().sender,
+                    public_key,
+                ) {
+                    Ok(true) => fee
+                        .registered_profile_public_keys
+                        .push(asset_transaction.fee.intent().sender),
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.rollback(fee)?;
+                        return Err(error.into());
+                    }
+                }
+            }
+            return match self
+                .assets
+                .apply(asset_transaction.chain_id, &asset_transaction.call)
+            {
+                Ok(asset) => Ok(StateRollbackJournal::AssetWithFee { asset, fee }),
+                Err(error) => {
+                    self.rollback(fee)?;
+                    Err(SpendStateError::Asset(error))
+                }
+            };
+        }
         if let ValidatedTransaction::Extension(extension_transaction) = transaction {
             let mut fee =
                 self.apply_validated_onchain_spend(&extension_transaction.fee, block_miner)?;
@@ -90,6 +125,7 @@ impl LedgerState {
             ValidatedTransaction::Split(validated) => {
                 self.apply_authorized_split(validated, block_miner)
             }
+            ValidatedTransaction::Asset(_) => unreachable!("asset handled above"),
             ValidatedTransaction::Extension(_) => unreachable!("extension handled above"),
         }?;
         if let Some((address, public_key)) = revealed_account_key(transaction) {
@@ -122,6 +158,10 @@ impl LedgerState {
                 .extensions
                 .rollback(journal)
                 .map_err(SpendStateError::Extension),
+            StateRollbackJournal::AssetWithFee { asset, fee } => {
+                self.assets.rollback(asset);
+                self.rollback(fee)
+            }
             StateRollbackJournal::ExtensionWithFee { extension, fee } => {
                 self.extensions
                     .rollback(extension)
@@ -514,6 +554,7 @@ pub enum SpendStateError {
     OutputIndexOverflow,
     BurnOverflow,
     BurnUnderflow,
+    Asset(xparq_asset::AssetError),
     Extension(xparq_common::ExtensionFailure),
 }
 
@@ -634,6 +675,7 @@ impl fmt::Display for SpendStateError {
             Self::OutputIndexOverflow => formatter.write_str("transaction output index overflow"),
             Self::BurnOverflow => formatter.write_str("total burned amount overflow"),
             Self::BurnUnderflow => formatter.write_str("total burned amount underflow"),
+            Self::Asset(error) => write!(formatter, "native asset transition failed: {error}"),
             Self::Extension(error) => write!(formatter, "extension transition failed: {error:?}"),
         }
     }

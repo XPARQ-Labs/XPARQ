@@ -30,7 +30,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 ]);
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`] changes.
-pub const CHAIN_SPEC_VERSION: u32 = 1;
+pub const CHAIN_SPEC_VERSION: u32 = 2;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -67,8 +67,7 @@ struct ChainSpecIdentity<'a> {
     qcash_public_key_size: u32,
     qcash_signature_size: u32,
     extension_protocol: &'a str,
-    asset_extension_id: [u8; 32],
-    asset_extension_activation_height: u64,
+    native_asset_protocol: &'a str,
     wasm_deploy_extension_id: [u8; 32],
     wasm_deploy_activation_delay: u64,
 }
@@ -116,8 +115,7 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         qcash_public_key_size: QCASH_PUBLIC_KEY_SIZE as u32,
         qcash_signature_size: QCASH_SIGNATURE_SIZE as u32,
         extension_protocol: "xparq-extension-permissionless-wasm-v5",
-        asset_extension_id: *xparq_extension::asset::asset_extension_id().as_bytes(),
-        asset_extension_activation_height: xparq_extension::asset::ASSET_ACTIVATION_HEIGHT.0,
+        native_asset_protocol: "xparq-native-asset-v1",
         wasm_deploy_extension_id: *xparq_extension::wasm_deploy_extension_id().as_bytes(),
         wasm_deploy_activation_delay: xparq_extension::WASM_DEPLOY_ACTIVATION_DELAY,
     };

@@ -3,14 +3,15 @@ use std::{fmt, str::FromStr};
 
 use crate::AssetIdParseError;
 
-pub const ASSET_NAME: &str = "Post-Quantum Wrapped Solana";
-pub const UNIT_NAME: &str = "lamport";
-pub const ASSET_SYMBOL: &str = "qSOL";
+pub const ASSET_NAME: &str = "Post-Quantum Wrapped Bitcoin";
+pub const UNIT_NAME: &str = "satoshi";
+pub const ASSET_SYMBOL: &str = "qBTC";
 pub const UNIT: u64 = 1;
-pub const ASSET: u64 = 1_000_000_000;
-pub const DECIMALS: u8 = 9;
+pub const ASSET: u64 = 100_000_000;
+pub const DECIMALS: u8 = 8;
+pub const MAX_SUPPLY: u64 = 2_100_000_000_000_000;
 
-const _: () = assert!(ASSET == 1_000_000_000);
+const _: () = assert!(ASSET == 100_000_000);
 const _: () = assert!(UNIT == 1);
 
 #[derive(
@@ -34,8 +35,7 @@ impl Amount {
     }
 }
 
-pub const ASSET_ID_SIZE: usize = blake3::OUT_LEN;
-const ASSET_ID_CONTEXT: &str = "XPARQ AssetId";
+pub const ASSET_ID_SIZE: usize = crate::identifier::ASSET_ID_SIZE;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
@@ -47,12 +47,7 @@ impl AssetId {
 
     /// Derives an identifier from unambiguous length-delimited fields.
     pub fn derive(fields: &[&[u8]]) -> Self {
-        let mut hasher = blake3::Hasher::new_derive_key(ASSET_ID_CONTEXT);
-        for field in fields {
-            hasher.update(&(field.len() as u64).to_le_bytes());
-            hasher.update(field);
-        }
-        Self(*hasher.finalize().as_bytes())
+        Self(crate::identifier::derive(fields))
     }
 
     pub const fn from_bytes(bytes: [u8; ASSET_ID_SIZE]) -> Self {
@@ -70,10 +65,7 @@ impl AssetId {
 
 impl fmt::Display for AssetId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
+        crate::identifier::fmt(&self.0, formatter)
     }
 }
 
@@ -81,32 +73,11 @@ impl FromStr for AssetId {
     type Err = AssetIdParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() != ASSET_ID_SIZE * 2 {
-            return Err(AssetIdParseError);
-        }
-
-        let encoded = value.as_bytes();
-        let mut bytes = [0; ASSET_ID_SIZE];
-        for (index, byte) in bytes.iter_mut().enumerate() {
-            let offset = index * 2;
-            let high = hex_nibble(encoded[offset]).ok_or(AssetIdParseError)?;
-            let low = hex_nibble(encoded[offset + 1]).ok_or(AssetIdParseError)?;
-            *byte = (high << 4) | low;
-        }
-        Ok(Self(bytes))
+        crate::identifier::parse(value).map(Self)
     }
 }
 
-const fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-/// A minimal Asset primitive: an immutable identifier paired with an amount.
+/// A minimal asset primitive: an immutable identifier paired with an amount.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
 )]

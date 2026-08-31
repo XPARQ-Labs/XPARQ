@@ -8,7 +8,7 @@ use std::{
 };
 
 use serde::Deserialize;
-use xparq::extension::asset::{AssetAction, AssetId};
+use xparq::asset::{AssetAction, AssetId};
 use xparq::{
     codec::canonical_bytes,
     consensus::{Amount, COIN, DECIMALS, StateTransitionWeight},
@@ -19,7 +19,8 @@ use xparq::{
     },
     qcash::{QCash, QCashFile, QCashSigningSeed, qcash_file_name, validate_qcash_file_name},
     transaction::{
-        AuthorizedExtensionTransaction, AuthorizedQCashIntent, AuthorizedTransaction, MergeIntent,
+        AuthorizedAssetTransaction, AuthorizedExtensionTransaction, AuthorizedQCashIntent,
+        AuthorizedTransaction, MergeIntent,
         OnChainSpendIntent, QCashAuthorization, QCashIntent, QCashOutput, RedeemIntent,
         SpendOutput, SplitIntent, WithdrawIntent,
     },
@@ -223,14 +224,14 @@ fn asset_register(args: &[String]) -> Result<(), String> {
 fn normalize_asset_name(name: &str) -> Result<String, String> {
     let normalized = name.trim().to_string();
     if normalized.is_empty()
-        || normalized.len() > xparq::extension::asset::ASSET_NAME_MAX_LEN
+        || normalized.len() > xparq::asset::ASSET_NAME_MAX_LEN
         || !normalized
             .bytes()
             .all(|byte| byte == b' ' || byte.is_ascii_graphic())
     {
         return Err(format!(
             "invalid token name; use 1-{} printable ASCII characters",
-            xparq::extension::asset::ASSET_NAME_MAX_LEN
+            xparq::asset::ASSET_NAME_MAX_LEN
         ));
     }
     Ok(normalized)
@@ -239,14 +240,14 @@ fn normalize_asset_name(name: &str) -> Result<String, String> {
 fn normalize_asset_symbol(symbol: &str) -> Result<String, String> {
     let normalized = symbol.to_ascii_uppercase();
     if normalized.is_empty()
-        || normalized.len() > xparq::extension::asset::ASSET_SYMBOL_MAX_LEN
+        || normalized.len() > xparq::asset::ASSET_SYMBOL_MAX_LEN
         || !normalized
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
     {
         return Err(format!(
             "invalid token symbol; use 1-{} ASCII letters A-Z or digits",
-            xparq::extension::asset::ASSET_SYMBOL_MAX_LEN
+            xparq::asset::ASSET_SYMBOL_MAX_LEN
         ));
     }
     Ok(normalized)
@@ -323,9 +324,7 @@ fn submit_asset_action(args: &[String], action: AssetAction) -> Result<(), Strin
     let address = xparq::crypto::address_to_string(&wallet.address());
     let nonce = http_get_json::<AssetNonceResponse>(rpc, &format!("/asset/nonce/{address}"))?.nonce;
     let call = wallet.0.sign_asset_call(action, nonce)?;
-    let decoded = xparq::extension::asset::AssetCall::from_extension_call(&call)
-        .map_err(|error| format!("decode signed asset call: {error:?}"))?;
-    let recipient_balance_exists = match &decoded.action {
+    let recipient_balance_exists = match &call.action {
         AssetAction::Mint {
             asset_id,
             recipient,
@@ -351,7 +350,7 @@ fn submit_asset_action(args: &[String], action: AssetAction) -> Result<(), Strin
         }
         AssetAction::Register { .. } | AssetAction::Burn { .. } => false,
     };
-    let extension_created_weight = decoded
+    let extension_created_weight = call
         .created_state_weight_from_presence(nonce > 0, recipient_balance_exists)
         .map_err(|error| format!("calculate asset state weight: {error:?}"))?;
     let public_key_known = account_public_key_registered(rpc, &wallet);
@@ -378,8 +377,8 @@ fn submit_asset_action(args: &[String], action: AssetAction) -> Result<(), Strin
         let fee_intent = OnChainSpendIntent::new(wallet.address(), inputs, outputs)
             .map_err(|error| error.to_string())?;
         let fee = wallet.sign_onchain_spend(fee_intent, public_key_known)?;
-        Ok(AuthorizedTransaction::Extension(Box::new(
-            AuthorizedExtensionTransaction {
+        Ok(AuthorizedTransaction::Asset(Box::new(
+            AuthorizedAssetTransaction {
                 call: call.clone(),
                 fee,
             },

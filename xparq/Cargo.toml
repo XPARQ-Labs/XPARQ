@@ -45,6 +45,7 @@ xparq-common.workspace = true
 xparq-crypto.workspace = true
 xparq-coin.workspace = true
 xparq-qcash.workspace = true
+xparq-asset.workspace = true
 xparq-transaction.workspace = true
 xparq-blockchain.workspace = true
 xparq-consensus.workspace = true

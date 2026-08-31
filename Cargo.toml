@@ -13,7 +13,7 @@ members = [
     "xparq",
     "runtime",
     "wallet",
-    "extension/asset",
+    "asset",
     "extension/bridge",
     "extension",
 ]
@@ -22,7 +22,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.2.16"
+version = "1.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -78,7 +78,7 @@ xparq-transaction = { path = "transaction", default-features = false }
 xparq-blockchain = { path = "blockchain", default-features = false }
 xparq-consensus = { path = "consensus", default-features = false }
 xparq-ledger = { path = "ledger", default-features = false }
-xparq-asset = { path = "extension/asset" }
+xparq-asset = { path = "asset" }
 xparq-bridge = { path = "extension/bridge" }
 xparq-extension = { path = "extension" }
 xparq = { path = "xparq", default-features = false }

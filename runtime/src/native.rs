@@ -55,7 +55,7 @@ const API_DOCS_HTML: &[u8] = br#"<!doctype html>
 </html>
 "#;
 const P2P_MAGIC: [u8; 8] = *b"XPQP2P01";
-const P2P_PROTOCOL_VERSION: u32 = 1;
+const P2P_PROTOCOL_VERSION: u32 = 2;
 const CAPABILITY_PEER_DISCOVERY: u64 = 1 << 0;
 const CAPABILITY_RELAY: u64 = 1 << 1;
 const LOCAL_CAPABILITIES: u64 = CAPABILITY_PEER_DISCOVERY | CAPABILITY_RELAY;
@@ -266,12 +266,6 @@ fn initialize_extensions(package_paths: &[PathBuf]) -> Result<(), String> {
 
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
     let mut registry = xparq::extension::ExtensionRegistry::with_chain_id(chain.genesis_hash);
-    registry
-        .register(xparq::extension::asset::AssetExtension::new(
-            chain.genesis_hash,
-            xparq::extension::asset::ASSET_ACTIVATION_HEIGHT,
-        ))
-        .map_err(|error| format!("register asset extension: {error:?}"))?;
     registry
         .register(xparq::extension::WasmDeployExtension::new(
             chain.genesis_hash,
@@ -703,25 +697,13 @@ fn account_asset_balances(
     ledger: &Ledger,
     address: Address,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let namespace = ledger
-        .state()
-        .extensions
-        .namespace(xparq::extension::asset::asset_extension_id());
     let mut balances = std::collections::BTreeMap::new();
-    for (key, value) in namespace.entries() {
-        if let Some((asset_id, metadata)) =
-            xparq::extension::asset::decode_asset_metadata_entry(key, value)
-                .map_err(|error| format!("decode asset metadata: {error:?}"))?
-            && metadata.mint_authority == address
-        {
+    for (asset_id, metadata) in ledger.state().assets.metadata_entries() {
+        if metadata.mint_authority == address {
             balances.entry(asset_id).or_insert(0_u128);
         }
-        let Some((asset_id, owner, balance)) =
-            xparq::extension::asset::decode_asset_balance_entry(key, value)
-                .map_err(|error| format!("decode asset balance: {error:?}"))?
-        else {
-            continue;
-        };
+    }
+    for (asset_id, owner, balance) in ledger.state().assets.balances() {
         if owner != address || balance == 0 {
             continue;
         }
@@ -729,8 +711,7 @@ fn account_asset_balances(
     }
     let mut response = Vec::with_capacity(balances.len());
     for (asset_id, balance) in balances {
-        let metadata = xparq::extension::asset::asset_metadata(&namespace, asset_id)
-            .map_err(|error| format!("read asset metadata: {error:?}"))?
+        let metadata = ledger.state().assets.metadata(asset_id)
             .ok_or("asset balance references missing metadata")?;
         response.push(serde_json::json!({
             "asset_id": asset_id.to_string(),
@@ -843,6 +824,11 @@ fn address_transaction_activity(
             tx.intent.public_outputs.as_slice(),
             Amount::from_zeno(0),
         ),
+        AuthorizedTransaction::Asset(tx) => (
+            Some(tx.fee.intent.sender),
+            tx.fee.intent.outputs.as_slice(),
+            Amount::from_zeno(0),
+        ),
         AuthorizedTransaction::Extension(tx) => (
             Some(tx.fee.intent.sender),
             tx.fee.intent.outputs.as_slice(),
@@ -939,8 +925,38 @@ fn transaction_response(transaction: &AuthorizedTransaction, miner: Address) -> 
             "qcash_output_count": tx.intent.outputs.len(),
             "public_outputs": public_outputs_response(&tx.intent.public_outputs, miner, None),
         }),
+        AuthorizedTransaction::Asset(tx) => asset_transaction_response(tx, miner),
         AuthorizedTransaction::Extension(tx) => extension_transaction_response(tx, miner),
     }
+}
+
+fn asset_transaction_response(
+    transaction: &xparq::transaction::AuthorizedAssetTransaction,
+    miner: Address,
+) -> serde_json::Value {
+    let call = &transaction.call;
+    let action = match &call.action {
+        xparq::asset::AssetAction::Register { name, symbol, decimals, max_supply, initial_mint } => serde_json::json!({
+            "type": "register", "name": name, "symbol": symbol, "decimals": decimals,
+            "max_supply": max_supply.to_string(), "initial_mint": initial_mint.to_string(),
+            "recipient": xparq::crypto::address_to_string(&call.signer),
+        }),
+        xparq::asset::AssetAction::Mint { recipient, amount, .. } => serde_json::json!({
+            "type": "mint", "recipient": xparq::crypto::address_to_string(recipient), "amount": amount.to_string(),
+        }),
+        xparq::asset::AssetAction::Burn { amount, .. } => serde_json::json!({ "type": "burn", "amount": amount.to_string() }),
+        xparq::asset::AssetAction::Transfer { recipient, amount, .. } => serde_json::json!({
+            "type": "transfer", "recipient": xparq::crypto::address_to_string(recipient), "amount": amount.to_string(),
+        }),
+    };
+    serde_json::json!({
+        "asset_id": call.asset_id().to_string(),
+        "signer": xparq::crypto::address_to_string(&call.signer),
+        "nonce": call.nonce,
+        "asset_action": action,
+        "fee_sender": xparq::crypto::address_to_string(&transaction.fee.intent.sender),
+        "fee_outputs": public_outputs_response(&transaction.fee.intent.outputs, miner, Some(transaction.fee.intent.sender)),
+    })
 }
 
 fn extension_transaction_response(
@@ -990,63 +1006,7 @@ fn extension_transaction_response(
         );
         return response;
     }
-    if transaction.call.extension_id() != xparq::extension::asset::asset_extension_id() {
-        return base;
-    }
-    let Ok(call) = xparq::extension::asset::AssetCall::from_extension_call(&transaction.call)
-    else {
-        return base;
-    };
-    let mut response = base;
-    let object = response
-        .as_object_mut()
-        .expect("extension response is an object");
-    object.insert(
-        "asset_id".into(),
-        serde_json::json!(call.asset_id().to_string()),
-    );
-    object.insert(
-        "signer".into(),
-        serde_json::json!(xparq::crypto::address_to_string(&call.signer)),
-    );
-    object.insert("nonce".into(), serde_json::json!(call.nonce));
-    let action = match call.action {
-        xparq::extension::asset::AssetAction::Register {
-            name,
-            symbol,
-            decimals,
-            max_supply,
-            initial_mint,
-        } => serde_json::json!({
-            "type": "register",
-            "name": name,
-            "symbol": symbol,
-            "decimals": decimals,
-            "max_supply": max_supply.to_string(),
-            "initial_mint": initial_mint.to_string(),
-            "recipient": xparq::crypto::address_to_string(&call.signer),
-        }),
-        xparq::extension::asset::AssetAction::Mint {
-            recipient, amount, ..
-        } => serde_json::json!({
-            "type": "mint",
-            "recipient": xparq::crypto::address_to_string(&recipient),
-            "amount": amount.to_string(),
-        }),
-        xparq::extension::asset::AssetAction::Burn { amount, .. } => serde_json::json!({
-            "type": "burn",
-            "amount": amount.to_string(),
-        }),
-        xparq::extension::asset::AssetAction::Transfer {
-            recipient, amount, ..
-        } => serde_json::json!({
-            "type": "transfer",
-            "recipient": xparq::crypto::address_to_string(&recipient),
-            "amount": amount.to_string(),
-        }),
-    };
-    object.insert("asset_action".into(), action);
-    response
+    base
 }
 
 fn public_outputs_response(
@@ -1110,6 +1070,7 @@ fn transaction_kind(transaction: &AuthorizedTransaction) -> &'static str {
         AuthorizedTransaction::Redeem(_) => "qcash_redeem",
         AuthorizedTransaction::Merge(_) => "qcash_merge",
         AuthorizedTransaction::Split(_) => "qcash_split",
+        AuthorizedTransaction::Asset(_) => "asset",
         AuthorizedTransaction::Extension(_) => "extension",
     }
 }
@@ -1327,11 +1288,7 @@ fn asset_nonce_response(
             .apply_validated_transaction(&validated, height, Address::ZERO)
             .map_err(|error| format!("apply pending asset nonce: {error}"))?;
     }
-    let namespace = state
-        .extensions
-        .namespace(xparq::extension::asset::asset_extension_id());
-    let nonce = xparq::extension::asset::asset_nonce(&namespace, address)
-        .map_err(|error| format!("read asset nonce: {error:?}"))?;
+    let nonce = state.assets.nonce(address);
     Ok(serde_json::json!({
         "address": xparq::crypto::address_to_string(&address),
         "nonce": nonce,
@@ -1434,18 +1391,12 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
     let asset_id = parts
         .first()
         .ok_or("missing asset id")?
-        .parse::<xparq::extension::asset::AssetId>()
+        .parse::<xparq::asset::AssetId>()
         .map_err(|_| "invalid asset id")?;
-    let namespace = ledger
-        .state()
-        .extensions
-        .namespace(xparq::extension::asset::asset_extension_id());
     if parts.len() == 1 {
-        let metadata = xparq::extension::asset::asset_metadata(&namespace, asset_id)
-            .map_err(|error| format!("read asset metadata: {error:?}"))?
+        let metadata = ledger.state().assets.metadata(asset_id)
             .ok_or("asset was not found")?;
-        let supply = xparq::extension::asset::asset_supply(&namespace, asset_id)
-            .map_err(|error| format!("read asset supply: {error:?}"))?;
+        let supply = ledger.state().assets.supply(asset_id);
         return Ok(serde_json::json!({
             "asset_id": asset_id.to_string(),
             "name": metadata.name,
@@ -1458,8 +1409,7 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
     }
     if parts.len() == 3 && parts[1] == "balance" {
         let address = parse_address(parts[2])?;
-        let balance = xparq::extension::asset::asset_balance(&namespace, asset_id, address)
-            .map_err(|error| format!("read asset balance: {error:?}"))?;
+        let balance = ledger.state().assets.balance(asset_id, address);
         return Ok(serde_json::json!({
             "asset_id": asset_id.to_string(),
             "address": xparq::crypto::address_to_string(&address),
@@ -3143,6 +3093,7 @@ fn reserved_coin_inputs(transactions: &[AuthorizedTransaction]) -> BTreeSet<xpar
         .flat_map(|transaction| match transaction {
             AuthorizedTransaction::OnChainSpend(transaction) => transaction.intent.inputs.clone(),
             AuthorizedTransaction::Withdraw(transaction) => transaction.intent.inputs.clone(),
+            AuthorizedTransaction::Asset(transaction) => transaction.fee.intent.inputs.clone(),
             AuthorizedTransaction::Extension(transaction) => transaction.fee.intent.inputs.clone(),
             AuthorizedTransaction::Redeem(_)
             | AuthorizedTransaction::Merge(_)
@@ -3222,6 +3173,9 @@ fn transaction_miner_fee(transaction: &AuthorizedTransaction) -> Result<u64, Str
         }
         AuthorizedTransaction::Split(transaction) => {
             fee_from_outputs(&transaction.intent.public_outputs)
+        }
+        AuthorizedTransaction::Asset(transaction) => {
+            fee_from_outputs(&transaction.fee.intent.outputs)
         }
         AuthorizedTransaction::Extension(transaction) => {
             fee_from_outputs(&transaction.fee.intent.outputs)
@@ -3706,9 +3660,9 @@ mod tests {
             xparq::crypto::SignatureProfile::MlDsa44,
             [0x51; 32],
         );
-        let asset_call = xparq::extension::asset::AssetCall::sign(
+        let asset_call = xparq::asset::AssetCall::sign(
             chain.genesis_hash,
-            xparq::extension::asset::AssetAction::Register {
+            xparq::asset::AssetAction::Register {
                 name: "Test Token".into(),
                 symbol: "TEST".into(),
                 decimals: 8,
@@ -3720,8 +3674,8 @@ mod tests {
         )
         .unwrap();
         let asset_id = asset_call.asset_id().to_string();
-        let transaction = xparq::transaction::AuthorizedExtensionTransaction {
-            call: asset_call.into_extension_call().unwrap(),
+        let transaction = xparq::transaction::AuthorizedAssetTransaction {
+            call: asset_call,
             fee: xparq::transaction::AuthorizedAccountIntent {
                 intent: xparq::transaction::OnChainSpendIntent {
                     sender: Address::ZERO,
@@ -3737,7 +3691,7 @@ mod tests {
                 },
             },
         };
-        let response = extension_transaction_response(&transaction, Address::ZERO);
+        let response = asset_transaction_response(&transaction, Address::ZERO);
         assert_eq!(response["asset_id"], asset_id);
         assert_eq!(response["asset_action"]["type"], "register");
         assert_eq!(
@@ -3754,15 +3708,9 @@ mod tests {
             [0x61; 32],
         );
         let authority = xparq::crypto::address_from_profile_public_key(&seed.public_key());
-        let extension = xparq::extension::asset::AssetExtension::new(
+        let call = xparq::asset::AssetCall::sign(
             chain.genesis_hash,
-            xparq::common::Height(0),
-        );
-        let mut registry = xparq::extension::ExtensionRegistry::new();
-        registry.register(extension).unwrap();
-        let call = xparq::extension::asset::AssetCall::sign(
-            chain.genesis_hash,
-            xparq::extension::asset::AssetAction::Register {
+            xparq::asset::AssetAction::Register {
                 name: "Authority Asset".into(),
                 symbol: "AUTH".into(),
                 decimals: 0,
@@ -3772,21 +3720,9 @@ mod tests {
             0,
             &seed,
         )
-        .unwrap()
-        .into_extension_call()
         .unwrap();
         let mut ledger = Ledger::new();
-        ledger
-            .state
-            .extensions
-            .apply(
-                &registry,
-                xparq::common::ExtensionContext {
-                    height: xparq::common::Height(0),
-                },
-                &call,
-            )
-            .unwrap();
+        ledger.state.assets.apply(chain.genesis_hash, &call).unwrap();
 
         let assets = account_asset_balances(&ledger, authority).unwrap();
         assert_eq!(assets.len(), 1);

@@ -95,6 +95,12 @@ pub struct AuthorizedExtensionTransaction {
     pub fee: AuthorizedAccountIntent<OnChainSpendIntent>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct AuthorizedAssetTransaction {
+    pub call: xparq_asset::AssetCall,
+    pub fee: AuthorizedAccountIntent<OnChainSpendIntent>,
+}
+
 impl<T: QCashIntent> AuthorizedQCashIntent<T> {
     pub fn new(intent: T, authorizations: Vec<QCashAuthorization>) -> Result<Self, IntentError> {
         if intent.qcash_inputs().len() != authorizations.len() {
@@ -114,6 +120,7 @@ pub enum AuthorizedTransaction {
     Redeem(Box<AuthorizedQCashIntent<RedeemIntent>>),
     Merge(Box<AuthorizedQCashIntent<MergeIntent>>),
     Split(Box<AuthorizedQCashIntent<SplitIntent>>),
+    Asset(Box<AuthorizedAssetTransaction>),
     Extension(Box<AuthorizedExtensionTransaction>),
 }
 
@@ -130,6 +137,7 @@ impl AuthorizedTransaction {
             Self::Redeem(tx) => validate_bearer_shape(tx, &tx.intent.inputs),
             Self::Merge(tx) => validate_bearer_shape(tx, &tx.intent.inputs),
             Self::Split(tx) => validate_bearer_shape(tx, std::slice::from_ref(&tx.intent.input)),
+            Self::Asset(tx) => tx.fee.intent.validate(),
             Self::Extension(tx) => tx.fee.intent.validate(),
         }
     }

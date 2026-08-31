@@ -1223,6 +1223,7 @@ dependencies = [
 name = "xparq"
 version = "0.2.16"
 dependencies = [
+ "xparq-asset",
  "xparq-blockchain",
  "xparq-coin",
  "xparq-common",
@@ -1287,6 +1288,7 @@ version = "0.2.16"
 dependencies = [
  "borsh",
  "static_assertions",
+ "xparq-asset",
  "xparq-blockchain",
  "xparq-coin",
  "xparq-common",
@@ -1323,7 +1325,6 @@ dependencies = [
  "borsh",
  "wasmi",
  "wat",
- "xparq-asset",
  "xparq-bridge",
  "xparq-common",
  "xparq-crypto",
@@ -1334,6 +1335,7 @@ name = "xparq-genesis"
 version = "0.2.16"
 dependencies = [
  "borsh",
+ "xparq-asset",
  "xparq-blockchain",
  "xparq-common",
  "xparq-consensus",
@@ -1349,6 +1351,7 @@ version = "0.2.16"
 dependencies = [
  "blake3",
  "borsh",
+ "xparq-asset",
  "xparq-blockchain",
  "xparq-coin",
  "xparq-common",
@@ -1410,6 +1413,7 @@ version = "0.2.16"
 dependencies = [
  "blake3",
  "borsh",
+ "xparq-asset",
  "xparq-coin",
  "xparq-common",
  "xparq-crypto",

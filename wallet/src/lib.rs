@@ -319,17 +319,16 @@ impl ProfileWallet {
 
     pub fn sign_asset_call(
         &self,
-        action: xparq::extension::asset::AssetAction,
+        action: xparq::asset::AssetAction,
         nonce: u64,
-    ) -> Result<xparq::common::ExtensionCall, String> {
+    ) -> Result<xparq::asset::AssetCall, String> {
         let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
-        xparq::extension::asset::AssetCall::sign(
+        xparq::asset::AssetCall::sign(
             chain.genesis_hash,
             action,
             nonce,
             &self.signing_seed,
         )
-        .and_then(xparq::extension::asset::AssetCall::into_extension_call)
         .map_err(|error| format!("asset call signing failed: {error:?}"))
     }
 

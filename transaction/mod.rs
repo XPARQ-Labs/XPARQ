@@ -5,8 +5,9 @@ mod error;
 mod intent;
 
 pub use authorization::{
-    AccountAuthorization, AccountIntent, AuthorizedAccountIntent, AuthorizedExtensionTransaction,
-    AuthorizedQCashIntent, AuthorizedTransaction, QCashAuthorization,
+    AccountAuthorization, AccountIntent, AuthorizedAccountIntent, AuthorizedAssetTransaction,
+    AuthorizedExtensionTransaction, AuthorizedQCashIntent, AuthorizedTransaction,
+    QCashAuthorization,
 };
 pub use error::{IntentError, TransactionEncodingError};
 pub use intent::{

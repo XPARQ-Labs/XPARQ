@@ -39,7 +39,7 @@ impl Ledger {
     }
 
     pub fn extension_state_root(&self) -> Result<ExtensionStateRoot, LedgerError> {
-        self.state.extensions.state_root().map_err(extension_error)
+        self.state.application_state_root()
     }
 
     pub fn preview_extension_state_root(
@@ -47,20 +47,32 @@ impl Ledger {
         transactions: &[AuthorizedTransaction],
         height: Height,
     ) -> Result<ExtensionStateRoot, LedgerError> {
-        let mut extensions = self.state.extensions.clone();
+        let mut staged = self.state.clone();
+        let chain_id = self
+            .chain_context
+            .map(|context| context.genesis_hash)
+            .or_else(|| self.chain.block(&Height(0)).and_then(|block| block.hash().ok()).map(|hash| hash.0))
+            .unwrap_or([0; 32]);
         for transaction in transactions {
-            let AuthorizedTransaction::Extension(transaction) = transaction else {
-                continue;
-            };
-            extensions
-                .apply(
+            match transaction {
+                AuthorizedTransaction::Asset(transaction) => {
+                    staged
+                        .assets
+                        .apply(chain_id, &transaction.call)
+                        .map_err(|error| LedgerError::Spend(SpendStateError::Asset(error)))?;
+                }
+                AuthorizedTransaction::Extension(transaction) => {
+                    staged.extensions.apply(
                     xparq_extension::production_registry(),
                     ExtensionContext { height },
                     &transaction.call,
                 )
                 .map_err(extension_error)?;
+                }
+                _ => {}
+            }
         }
-        extensions.state_root().map_err(extension_error)
+        staged.application_state_root()
     }
 
     pub fn preview_extension_created_state_weight(
@@ -130,10 +142,7 @@ impl Ledger {
             block_journals.push(journal);
         }
 
-        let extension_root = staged_state
-            .extensions
-            .state_root()
-            .map_err(extension_error)?;
+        let extension_root = staged_state.application_state_root()?;
         if block.state_root().0 != *extension_root.as_bytes() {
             return Err(LedgerError::InvalidExtensionStateRoot);
         }
@@ -236,6 +245,10 @@ impl TransactionStateView for LedgerState {
         self.account_keys.get_profile(&address).cloned()
     }
 
+    fn asset_state(&self) -> Option<&xparq_asset::AssetState> {
+        Some(&self.assets)
+    }
+
     fn extension_created_state_weight(
         &self,
         call: &xparq_common::ExtensionCall,
@@ -252,13 +265,6 @@ impl LedgerState {
         call: &xparq_common::ExtensionCall,
         height: u64,
     ) -> Result<u64, ExtensionFailure> {
-        if call.extension_id() == xparq_extension::asset::asset_extension_id() {
-            let namespace = self
-                .extensions
-                .namespace(xparq_extension::asset::asset_extension_id());
-            return xparq_extension::asset::AssetCall::from_extension_call(call)
-                .and_then(|call| call.created_state_weight(&namespace));
-        }
         self.extensions.preview_created_state_weight(
             xparq_extension::production_registry(),
             ExtensionContext {
@@ -266,6 +272,26 @@ impl LedgerState {
             },
             call,
         )
+    }
+}
+
+impl LedgerState {
+    fn application_state_root(&self) -> Result<ExtensionStateRoot, LedgerError> {
+        let extension = self.extensions.state_root().map_err(extension_error)?;
+        if self.assets.is_empty() {
+            return Ok(extension);
+        }
+        let asset = self
+            .assets
+            .state_root()
+            .map_err(|error| LedgerError::Spend(SpendStateError::Asset(error)))?;
+        let mut input = [0_u8; 64];
+        input[..32].copy_from_slice(&asset);
+        input[32..].copy_from_slice(extension.as_bytes());
+        Ok(ExtensionStateRoot::from_bytes(blake3::derive_key(
+            "xparq:application-state-root:v1",
+            &input,
+        )))
     }
 }
 

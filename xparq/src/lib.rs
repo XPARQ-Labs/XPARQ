@@ -2,6 +2,10 @@ pub mod block {
     pub use xparq_blockchain::*;
 }
 
+pub mod asset {
+    pub use xparq_asset::*;
+}
+
 pub mod codec {
     pub use xparq_blockchain::{block_bytes, block_header_bytes, block_header_hash, decode_block};
     pub use xparq_common::{canonical_bytes, canonical_decode, canonical_deserialize};

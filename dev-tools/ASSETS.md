@@ -27,9 +27,11 @@ cargo run -p wallet -- asset-register \
 
 Registration and the initial mint are atomic. The signing address becomes the
 mint authority and receives the initial balance. The command prints the
-canonical 64-character `asset_id`; save that identifier for later operations.
-The asset ID is deterministically derived from the creator address and symbol,
-so the same creator cannot register the same symbol twice.
+canonical `asset:`-prefixed `asset_id` followed by 64 lowercase hexadecimal
+characters; save that identifier for later operations. The asset ID is
+deterministically derived from the creator address and symbol under the
+`xparq:asset-id:v1` domain, so the same creator cannot register the same symbol
+twice.
 
 The accepted metadata is:
 

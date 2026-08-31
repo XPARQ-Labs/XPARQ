@@ -94,7 +94,9 @@ The response contains the accepted transaction ID:
 Extension asset transactions use the same endpoint and canonical encoding. The
 node exposes `GET /asset/nonce/{address}`, `GET /asset/{asset_id}`, and
 `GET /asset/{asset_id}/balance/{address}` for builders and state queries. Asset
-amounts are integer base units defined by each asset's `decimals` metadata.
+IDs use the canonical `asset:` prefix followed by exactly 64 lowercase
+hexadecimal characters. Amounts are integer base units defined by each asset's
+`decimals` metadata.
 Asset supply, limits, and balances are `u128` and therefore appear in JSON as
 decimal strings rather than potentially lossy JSON numbers.
 Every asset mutation carries a signed nonce-protected call plus an authorized
