@@ -17,11 +17,11 @@ network.
 
 The runtime rejects incompatible state at four explicit boundaries:
 
-- P2P protocol version 2 and handshake `chain_spec_hash`;
-- redb schema version 1 and persisted `chain_spec_hash`;
-- snapshot version 1, checksum, genesis, canonical tip, and `chain_spec_hash`;
-- chain-spec version 1, committing frozen genesis plus active PoW, difficulty,
-  WBDA, emission, size, address, hash, and native asset-extension parameters.
+- P2P protocol version 3 and handshake `chain_spec_hash`;
+- redb schema version 2 and persisted `chain_spec_hash`;
+- snapshot version 2, checksum, genesis, canonical tip, and `chain_spec_hash`;
+- chain-spec version 2, committing frozen genesis plus active PoW, difficulty,
+  WBDA, emission, size, address, hash, and native Layer-1 asset parameters.
 
 There is intentionally no migration from older schemas or snapshots. Reset
 old node data before starting this build, and upgrade peers together.

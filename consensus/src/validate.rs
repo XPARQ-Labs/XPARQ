@@ -134,9 +134,8 @@ pub enum ValidatedTransaction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedAssetTransaction {
-    pub chain_id: [u8; 32],
-    pub call: xparq_asset::AssetCall,
-    pub fee: AuthorizationValidated<OnChainSpendIntent>,
+    pub call: AuthorizationValidated<xparq_asset::AssetCall>,
+    pub payment: AuthorizationValidated<OnChainSpendIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,36 +279,41 @@ pub fn validate_transaction(
         }
         AuthorizedTransaction::Asset(transaction) => {
             let transaction = *transaction;
-            let asset_state = state
-                .asset_state()
-                .ok_or(TransactionConsensusError::Asset(xparq_asset::AssetError::UnknownAsset))?;
-            transaction
-                .call
-                .validate(chain.genesis_hash, asset_state)
+            let asset_state = state.asset_state().ok_or(TransactionConsensusError::Asset(
+                xparq_asset::AssetError::UnknownAsset,
+            ))?;
+            let call =
+                validate_asset_authorization(transaction.call, chain, current_height, state)?;
+            call.intent()
+                .validate(asset_state)
                 .map_err(TransactionConsensusError::Asset)?;
-            let fee =
-                validate_account_authorization(transaction.fee, chain, current_height, state)?;
+            let payment =
+                validate_account_authorization(transaction.payment, chain, current_height, state)?;
             validate_coin_inputs(
-                &fee.intent().inputs,
-                fee.intent().sender,
-                &fee.intent().outputs.iter().map(|output| output.amount).collect::<Vec<_>>(),
+                &payment.intent().inputs,
+                payment.intent().sender,
+                &payment
+                    .intent()
+                    .outputs
+                    .iter()
+                    .map(|output| output.amount)
+                    .collect::<Vec<_>>(),
                 state,
             )?;
             validate_state_burn(
-                &fee.intent().outputs,
+                &payment.intent().outputs,
                 StateTransitionWeight {
-                    created_coin_utxos: created_coin_output_count(&fee.intent().outputs)?,
-                    extension_created_weight: transaction
-                        .call
+                    created_coin_utxos: created_coin_output_count(&payment.intent().outputs)?,
+                    extension_created_weight: call
+                        .intent()
                         .created_state_weight(asset_state)
                         .map_err(TransactionConsensusError::Asset)?,
                     ..StateTransitionWeight::default()
                 },
             )?;
             Ok(ValidatedTransaction::Asset(ValidatedAssetTransaction {
-                chain_id: chain.genesis_hash,
-                call: transaction.call,
-                fee,
+                call,
+                payment,
             }))
         }
         AuthorizedTransaction::Extension(transaction) => {
@@ -359,6 +363,37 @@ fn validate_state_burn(
     Ok(())
 }
 
+fn validate_asset_authorization(
+    authorized: AuthorizedAccountIntent<xparq_asset::AssetCall>,
+    chain: ChainContext,
+    current_height: u64,
+    state: &impl TransactionStateView,
+) -> Result<AuthorizationValidated<xparq_asset::AssetCall>, TransactionConsensusError> {
+    authorized
+        .intent
+        .validate_structure()
+        .map_err(TransactionConsensusError::Asset)?;
+    let commitment = SpendCommitment::from_bytes(
+        authorized
+            .intent
+            .commitment(chain.genesis_hash)
+            .map_err(TransactionConsensusError::Asset)?,
+    );
+    let sender = authorized.intent.signer;
+    let revealed_account_key = validate_profile_authorization(
+        sender,
+        commitment.as_bytes(),
+        authorized.authorization,
+        current_height,
+        state,
+    )?;
+    Ok(AuthorizationValidated {
+        intent: authorized.intent,
+        commitment,
+        revealed_account_key,
+    })
+}
+
 fn validate_account_authorization<T>(
     authorized: AuthorizedAccountIntent<T>,
     chain: ChainContext,
@@ -372,7 +407,28 @@ where
     let sender = xparq_transaction::AccountIntent::sender(structurally_validated.intent());
     let commitment = structurally_validated.commitment();
     let commitment_bytes = commitment.as_bytes();
-    let revealed_account_key = match authorized.authorization {
+    let revealed_account_key = validate_profile_authorization(
+        sender,
+        commitment_bytes,
+        authorized.authorization,
+        current_height,
+        state,
+    )?;
+    Ok(AuthorizationValidated {
+        intent: structurally_validated.into_intent(),
+        commitment,
+        revealed_account_key,
+    })
+}
+
+fn validate_profile_authorization(
+    sender: Address,
+    commitment_bytes: &[u8],
+    authorization: AccountAuthorization,
+    current_height: u64,
+    state: &impl TransactionStateView,
+) -> Result<Option<RevealedAccountKey>, TransactionConsensusError> {
+    let revealed_account_key = match authorization {
         AccountAuthorization::ProfileReveal {
             public_key,
             signature,
@@ -409,11 +465,7 @@ where
             None
         }
     };
-    Ok(AuthorizationValidated {
-        intent: structurally_validated.into_intent(),
-        commitment,
-        revealed_account_key,
-    })
+    Ok(revealed_account_key)
 }
 
 fn validate_bearer_authorization<T>(

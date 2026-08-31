@@ -64,7 +64,7 @@ The balance screen also reports the chain-wide cumulative XPQ burned supply
 from the canonical ledger's `GET /status` response. This value is a network
 metric and is separate from the selected wallet's balance.
 
-## Extension assets
+## Native Layer-1 assets
 
 Asset amounts are integer base units. Registration derives a deterministic
 `asset:`-prefixed ID and makes the signing wallet its mint authority. Asset IDs
@@ -82,7 +82,7 @@ supply limits accept the full unsigned 128-bit integer range.
 
 Register, mint, burn, and transfer are signed with the wallet profile and use a
 per-signer nonce. The wallet selects XPQ inputs and pays the canonical-byte fee
-inside the same atomic extension transaction.
+inside the same atomic native asset transaction.
 
 ## WASM extensions
 

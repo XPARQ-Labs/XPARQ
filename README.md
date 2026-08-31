@@ -20,7 +20,7 @@ The workspace currently targets Rust 1.90 and uses the Rust 2024 edition.
 - `xparq/`: public core facade
 - `runtime/`: `node` binary, storage, RPC, mining, and P2P
 - `wallet/`: reusable wallet library and `wallet` binary
-- `extension/asset/`: wrapped-asset primitives for Bitcoin, Ethereum, and Solana
+- `asset/`: native Layer-1 asset identifiers, authorization, state, and wrapped-asset primitives
 - `extension/bridge/`: bridge-facing network primitives outside the consensus kernel
 - `extension/`: facade and parent directory for optional extension crates
 - `depend/`: local dependency sources; excluded as a workspace member

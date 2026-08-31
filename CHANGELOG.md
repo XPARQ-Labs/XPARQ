@@ -76,10 +76,11 @@
   production registry lookup. Miners commit the deterministic post-extension
   root in `block.header.state_root`, and block application rejects a mismatched
   root before committing either ledger or chain state. The production registry
-  contains the native asset extension from genesis.
+  no longer owns the native Layer-1 asset protocol; extensions remain available
+  for developer infrastructure such as bridges and DEX applications.
 - Added signed canonical asset calls for permissionless registration, bounded
   supply, authority-only minting, owner burn/transfer, balances, and replay-safe
-  account nonces. Each asset call carries an authorized XPQ fee spend; fee and
+  account nonces. Each asset call carries an authorized XPQ payment; payment and
   asset transitions apply and roll back atomically. Added asset query RPCs and
   wallet commands for register, mint, burn, transfer, metadata, and balances.
   The interactive wallet exposes the same operations through an Assets submenu.

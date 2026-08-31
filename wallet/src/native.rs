@@ -8,7 +8,7 @@ use std::{
 };
 
 use serde::Deserialize;
-use xparq::asset::{AssetAction, AssetId};
+use xparq::asset::{AssetInstruction, AssetId};
 use xparq::{
     codec::canonical_bytes,
     consensus::{Amount, COIN, DECIMALS, StateTransitionWeight},
@@ -20,9 +20,8 @@ use xparq::{
     qcash::{QCash, QCashFile, QCashSigningSeed, qcash_file_name, validate_qcash_file_name},
     transaction::{
         AuthorizedAssetTransaction, AuthorizedExtensionTransaction, AuthorizedQCashIntent,
-        AuthorizedTransaction, MergeIntent,
-        OnChainSpendIntent, QCashAuthorization, QCashIntent, QCashOutput, RedeemIntent,
-        SpendOutput, SplitIntent, WithdrawIntent,
+        AuthorizedTransaction, MergeIntent, OnChainSpendIntent, QCashAuthorization, QCashIntent,
+        QCashOutput, RedeemIntent, SpendOutput, SplitIntent, WithdrawIntent,
     },
 };
 use xparq_wallet::{
@@ -207,9 +206,9 @@ fn asset_register(args: &[String]) -> Result<(), String> {
     let initial_mint = parse_asset_amount(args, "--initial-mint")?;
     let authority = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?.address();
     let asset_id = AssetId::derive(authority, &symbol);
-    submit_asset_action(
+    submit_asset_instruction(
         args,
-        AssetAction::Register {
+        AssetInstruction::Register {
             name,
             symbol,
             decimals,
@@ -254,9 +253,9 @@ fn normalize_asset_symbol(symbol: &str) -> Result<String, String> {
 }
 
 fn asset_mint(args: &[String]) -> Result<(), String> {
-    submit_asset_action(
+    submit_asset_instruction(
         args,
-        AssetAction::Mint {
+        AssetInstruction::Mint {
             asset_id: parse_asset_id(args)?,
             recipient: address_option(args, "--to")?,
             amount: parse_asset_amount(args, "--amount")?,
@@ -265,9 +264,9 @@ fn asset_mint(args: &[String]) -> Result<(), String> {
 }
 
 fn asset_burn(args: &[String]) -> Result<(), String> {
-    submit_asset_action(
+    submit_asset_instruction(
         args,
-        AssetAction::Burn {
+        AssetInstruction::Burn {
             asset_id: parse_asset_id(args)?,
             amount: parse_asset_amount(args, "--amount")?,
         },
@@ -275,9 +274,9 @@ fn asset_burn(args: &[String]) -> Result<(), String> {
 }
 
 fn asset_transfer(args: &[String]) -> Result<(), String> {
-    submit_asset_action(
+    submit_asset_instruction(
         args,
-        AssetAction::Transfer {
+        AssetInstruction::Transfer {
             asset_id: parse_asset_id(args)?,
             recipient: address_option(args, "--to")?,
             amount: parse_asset_amount(args, "--amount")?,
@@ -317,20 +316,21 @@ fn asset_balance(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn submit_asset_action(args: &[String], action: AssetAction) -> Result<(), String> {
+fn submit_asset_instruction(args: &[String], action: AssetInstruction) -> Result<(), String> {
     reject_manual_fee(args)?;
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let address = xparq::crypto::address_to_string(&wallet.address());
     let nonce = http_get_json::<AssetNonceResponse>(rpc, &format!("/asset/nonce/{address}"))?.nonce;
-    let call = wallet.0.sign_asset_call(action, nonce)?;
-    let recipient_balance_exists = match &call.action {
-        AssetAction::Mint {
+    let public_key_known = account_public_key_registered(rpc, &wallet);
+    let call = wallet.0.sign_asset_call(action, nonce, public_key_known)?;
+    let recipient_balance_exists = match &call.intent.instruction {
+        AssetInstruction::Mint {
             asset_id,
             recipient,
             ..
         }
-        | AssetAction::Transfer {
+        | AssetInstruction::Transfer {
             asset_id,
             recipient,
             ..
@@ -348,12 +348,12 @@ fn submit_asset_action(args: &[String], action: AssetAction) -> Result<(), Strin
                 .map_err(|_| "node returned an invalid asset balance")?
                 > 0
         }
-        AssetAction::Register { .. } | AssetAction::Burn { .. } => false,
+        AssetInstruction::Register { .. } | AssetInstruction::Burn { .. } => false,
     };
     let extension_created_weight = call
+        .intent
         .created_state_weight_from_presence(nonce > 0, recipient_balance_exists)
         .map_err(|error| format!("calculate asset state weight: {error:?}"))?;
-    let public_key_known = account_public_key_registered(rpc, &wallet);
     let transaction = automatic_fee_transaction(|fee| {
         let (inputs, _total, state_burn, change) = select_account_inputs_with_state_burn(
             rpc,
@@ -380,7 +380,7 @@ fn submit_asset_action(args: &[String], action: AssetAction) -> Result<(), Strin
         Ok(AuthorizedTransaction::Asset(Box::new(
             AuthorizedAssetTransaction {
                 call: call.clone(),
-                fee,
+                payment: fee,
             },
         )))
     })?;

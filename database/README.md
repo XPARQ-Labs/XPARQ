@@ -29,7 +29,7 @@ Total burned supply:    <XPQ burned through height 200000>
 Bootstrap miner address:<address or documented address list>
 Chain-spec hash:        <64-character chain-spec hash>
 Node version:           <release version>
-redb schema version:    1
+redb schema version:    2
 Snapshot version:       1
 Archive SHA-256:        <64-character archive checksum>
 ```

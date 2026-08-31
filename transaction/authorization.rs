@@ -97,8 +97,8 @@ pub struct AuthorizedExtensionTransaction {
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AuthorizedAssetTransaction {
-    pub call: xparq_asset::AssetCall,
-    pub fee: AuthorizedAccountIntent<OnChainSpendIntent>,
+    pub call: AuthorizedAccountIntent<xparq_asset::AssetCall>,
+    pub payment: AuthorizedAccountIntent<OnChainSpendIntent>,
 }
 
 impl<T: QCashIntent> AuthorizedQCashIntent<T> {
@@ -137,7 +137,13 @@ impl AuthorizedTransaction {
             Self::Redeem(tx) => validate_bearer_shape(tx, &tx.intent.inputs),
             Self::Merge(tx) => validate_bearer_shape(tx, &tx.intent.inputs),
             Self::Split(tx) => validate_bearer_shape(tx, std::slice::from_ref(&tx.intent.input)),
-            Self::Asset(tx) => tx.fee.intent.validate(),
+            Self::Asset(tx) => {
+                tx.call
+                    .intent
+                    .validate_structure()
+                    .map_err(|_| IntentError::InvalidAssetCall)?;
+                tx.payment.intent.validate()
+            }
             Self::Extension(tx) => tx.fee.intent.validate(),
         }
     }
@@ -201,7 +207,59 @@ mod tests {
     }
 
     #[test]
-    fn extension_transaction_tag_and_payload_round_trip_are_stable() {
+    fn native_asset_transaction_has_an_explicit_wire_tag() {
+        let seed =
+            xparq_crypto::ProfileSigningSeed::new(xparq_crypto::SignatureProfile::MlDsa44, [7; 32]);
+        let public_key = seed.public_key();
+        let signer = xparq_crypto::address_from_profile_public_key(&public_key);
+        let call = xparq_asset::AssetCall::new(
+            xparq_asset::AssetAction::Register {
+                name: "Test Asset".into(),
+                symbol: "TST".into(),
+                decimals: 8,
+                max_supply: 1_000,
+                initial_mint: 100,
+            },
+            signer,
+            0,
+        );
+        let call_signature = seed.sign(&call.commitment([3; 32]).unwrap());
+        let transaction = AuthorizedTransaction::Asset(Box::new(AuthorizedAssetTransaction {
+            call: AuthorizedAccountIntent {
+                intent: call,
+                authorization: AccountAuthorization::ProfileReveal {
+                    public_key,
+                    signature: call_signature,
+                },
+            },
+            payment: AuthorizedAccountIntent {
+                intent: OnChainSpendIntent {
+                    sender: Address::ZERO,
+                    inputs: vec![xparq_coin::CoinId::from_bytes([8; 32])],
+                    outputs: vec![crate::SpendOutput::block_miner(
+                        xparq_coin::Amount::from_zeno(1),
+                    )],
+                },
+                authorization: AccountAuthorization::ProfileKnown {
+                    profile: xparq_crypto::SignatureProfile::MlDsa44,
+                    signature: ProfileSignature {
+                        profile: xparq_crypto::SignatureProfile::MlDsa44,
+                        bytes: vec![],
+                    },
+                },
+            },
+        }));
+        let encoded = borsh::to_vec(&transaction).unwrap();
+        assert_eq!(encoded[0], 5);
+        assert_eq!(
+            AuthorizedTransaction::try_from_slice(&encoded).unwrap(),
+            transaction
+        );
+        assert_eq!(transaction.validate_structure(), Ok(()));
+    }
+
+    #[test]
+    fn extension_transaction_tag_and_payload_round_trip_are_stable_after_native_asset() {
         let call = ExtensionCall::new(
             xparq_common::ExtensionId::derive("test-extension"),
             b"canonical payload".to_vec(),
@@ -229,7 +287,8 @@ mod tests {
                 fee,
             }));
         let encoded = borsh::to_vec(&transaction).unwrap();
-        assert_eq!(encoded[0], 5);
+        // Tag 5 is reserved for the native Layer-1 Asset transaction.
+        assert_eq!(encoded[0], 6);
         assert_eq!(
             AuthorizedTransaction::try_from_slice(&encoded).unwrap(),
             transaction

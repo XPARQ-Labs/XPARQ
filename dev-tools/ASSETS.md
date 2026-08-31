@@ -1,7 +1,7 @@
 # Native asset development
 
-XPARQ assets are ledger-based fungible tokens implemented by the native asset
-extension. Creating an asset is a permissionless transaction: a developer does
+XPARQ assets are ledger-based fungible tokens implemented directly by the
+Layer-1 ledger. Creating an asset is a permissionless native transaction: a developer does
 not need to submit a GitHub pull request, deploy WASM, or ask node operators to
 rebuild their binaries.
 
@@ -88,12 +88,17 @@ cargo run -p wallet -- asset-burn \
 
 Mint credits the selected recipient, transfer debits the signer and credits
 the recipient, and burn destroys units owned by the signer. Each operation is
-one signed extension transaction and pays its own XPQ miner fee. It also burns
+one signed native asset transaction and pays its XPQ payment, including the miner
+fee. It also burns
 XPQ for persistent state created by that call: registration accounts for the
 metadata, supply, creator balance, and first nonce entries; mint or transfer
 accounts for a recipient balance entry when one does not already exist; and a
 signer's first asset call accounts for its nonce entry. Existing-entry updates
 do not pay state-creation burn, and deletion does not receive a refund.
+
+Asset metadata preserves the original `creator` address independently from the
+optional `mint_authority`. The creator never changes; `mint_authority: null`
+represents an asset for which no further minting is authorized.
 
 ## Current asset model
 

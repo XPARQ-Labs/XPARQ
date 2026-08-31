@@ -29,9 +29,9 @@ pub struct LedgerState {
 pub enum StateRollbackJournal {
     Utxo(UtxoRollbackJournal),
     Extension(ExtensionRollbackJournal),
-    AssetWithFee {
+    AssetWithPayment {
         asset: xparq_asset::AssetRollbackJournal,
-        fee: UtxoRollbackJournal,
+        payment: UtxoRollbackJournal,
     },
     ExtensionWithFee {
         extension: ExtensionRollbackJournal,
@@ -47,31 +47,46 @@ impl LedgerState {
         block_miner: Address,
     ) -> Result<StateRollbackJournal, SpendStateError> {
         if let ValidatedTransaction::Asset(asset_transaction) = transaction {
-            let mut fee = self.apply_validated_onchain_spend(&asset_transaction.fee, block_miner)?;
+            let mut payment =
+                self.apply_validated_onchain_spend(&asset_transaction.payment, block_miner)?;
             if let Some(RevealedAccountKey::Profile(public_key)) =
-                asset_transaction.fee.revealed_account_key().cloned()
+                asset_transaction.payment.revealed_account_key().cloned()
             {
-                match self.account_keys.register_profile(
-                    asset_transaction.fee.intent().sender,
-                    public_key,
-                ) {
-                    Ok(true) => fee
+                match self
+                    .account_keys
+                    .register_profile(asset_transaction.payment.intent().sender, public_key)
+                {
+                    Ok(true) => payment
                         .registered_profile_public_keys
-                        .push(asset_transaction.fee.intent().sender),
+                        .push(asset_transaction.payment.intent().sender),
                     Ok(false) => {}
                     Err(error) => {
-                        self.rollback(fee)?;
+                        self.rollback(payment)?;
                         return Err(error.into());
                     }
                 }
             }
-            return match self
-                .assets
-                .apply(asset_transaction.chain_id, &asset_transaction.call)
+            if let Some(RevealedAccountKey::Profile(public_key)) =
+                asset_transaction.call.revealed_account_key().cloned()
             {
-                Ok(asset) => Ok(StateRollbackJournal::AssetWithFee { asset, fee }),
+                match self
+                    .account_keys
+                    .register_profile(asset_transaction.call.intent().signer, public_key)
+                {
+                    Ok(true) => payment
+                        .registered_profile_public_keys
+                        .push(asset_transaction.call.intent().signer),
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.rollback(payment)?;
+                        return Err(error.into());
+                    }
+                }
+            }
+            return match self.assets.apply(asset_transaction.call.intent()) {
+                Ok(asset) => Ok(StateRollbackJournal::AssetWithPayment { asset, payment }),
                 Err(error) => {
-                    self.rollback(fee)?;
+                    self.rollback(payment)?;
                     Err(SpendStateError::Asset(error))
                 }
             };
@@ -158,9 +173,9 @@ impl LedgerState {
                 .extensions
                 .rollback(journal)
                 .map_err(SpendStateError::Extension),
-            StateRollbackJournal::AssetWithFee { asset, fee } => {
+            StateRollbackJournal::AssetWithPayment { asset, payment } => {
                 self.assets.rollback(asset);
-                self.rollback(fee)
+                self.rollback(payment)
             }
             StateRollbackJournal::ExtensionWithFee { extension, fee } => {
                 self.extensions

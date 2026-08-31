@@ -12,7 +12,7 @@ use xparq::{
 pub const SNAPSHOT_INTERVAL: u64 = 1_000;
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"XPQSNAP1";
-const SNAPSHOT_VERSION: u32 = 1;
+const SNAPSHOT_VERSION: u32 = 2;
 const CHECKSUM_SIZE: usize = 32;
 
 #[derive(BorshSerialize, BorshDeserialize)]

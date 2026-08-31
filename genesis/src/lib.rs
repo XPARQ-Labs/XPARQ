@@ -67,7 +67,7 @@ struct ChainSpecIdentity<'a> {
     qcash_public_key_size: u32,
     qcash_signature_size: u32,
     extension_protocol: &'a str,
-    native_asset_protocol: &'a str,
+    native_asset_program: &'a str,
     wasm_deploy_extension_id: [u8; 32],
     wasm_deploy_activation_delay: u64,
 }
@@ -115,7 +115,7 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         qcash_public_key_size: QCASH_PUBLIC_KEY_SIZE as u32,
         qcash_signature_size: QCASH_SIGNATURE_SIZE as u32,
         extension_protocol: "xparq-extension-permissionless-wasm-v5",
-        native_asset_protocol: "xparq-native-asset-v1",
+        native_asset_program: "xparq-native-asset-program-v1",
         wasm_deploy_extension_id: *xparq_extension::wasm_deploy_extension_id().as_bytes(),
         wasm_deploy_activation_delay: xparq_extension::WASM_DEPLOY_ACTIVATION_DELAY,
     };

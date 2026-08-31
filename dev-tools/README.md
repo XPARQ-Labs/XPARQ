@@ -5,7 +5,7 @@ repository currently exposes two different extension models:
 
 | Model | Current status | Node rebuild required? | Best suited for |
 | --- | --- | --- | --- |
-| Native asset extension | Usable end-to-end | No | Fungible assets with fixed metadata and an optional mint authority |
+| Native Layer-1 assets | Usable end-to-end | No | Fungible assets with fixed metadata and an optional mint authority |
 | WASM extension ABI v1 | Experimental | No for permissionless deployment | Deterministic application state and custom validation logic |
 
 Start with [ASSETS.md](ASSETS.md) to create, mint, burn, transfer, and query an

@@ -4,7 +4,7 @@ use crate::AssetIdParseError;
 
 pub(crate) const ASSET_ID_SIZE: usize = blake3::OUT_LEN;
 pub(crate) const ASSET_ID_PREFIX: &str = "asset:";
-const ASSET_ID_CONTEXT: &str = "xparq:asset-id:v1";
+const ASSET_ID_CONTEXT: &str = "xparq:asset-id";
 
 /// Derives an asset identifier from unambiguous length-delimited fields.
 pub(crate) fn derive(fields: &[&[u8]]) -> [u8; ASSET_ID_SIZE] {

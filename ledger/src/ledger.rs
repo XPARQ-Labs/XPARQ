@@ -48,26 +48,23 @@ impl Ledger {
         height: Height,
     ) -> Result<ExtensionStateRoot, LedgerError> {
         let mut staged = self.state.clone();
-        let chain_id = self
-            .chain_context
-            .map(|context| context.genesis_hash)
-            .or_else(|| self.chain.block(&Height(0)).and_then(|block| block.hash().ok()).map(|hash| hash.0))
-            .unwrap_or([0; 32]);
         for transaction in transactions {
             match transaction {
                 AuthorizedTransaction::Asset(transaction) => {
                     staged
                         .assets
-                        .apply(chain_id, &transaction.call)
+                        .apply(&transaction.call.intent)
                         .map_err(|error| LedgerError::Spend(SpendStateError::Asset(error)))?;
                 }
                 AuthorizedTransaction::Extension(transaction) => {
-                    staged.extensions.apply(
-                    xparq_extension::production_registry(),
-                    ExtensionContext { height },
-                    &transaction.call,
-                )
-                .map_err(extension_error)?;
+                    staged
+                        .extensions
+                        .apply(
+                            xparq_extension::production_registry(),
+                            ExtensionContext { height },
+                            &transaction.call,
+                        )
+                        .map_err(extension_error)?;
                 }
                 _ => {}
             }

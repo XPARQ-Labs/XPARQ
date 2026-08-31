@@ -1,9 +1,9 @@
 mod error;
 mod identifier;
-mod protocol;
+mod program;
 
 pub use error::AssetIdParseError;
-pub use protocol::*;
+pub use program::*;
 
 #[path = "bitcoin/bitcoin.rs"]
 pub mod bitcoin;

@@ -319,17 +319,32 @@ impl ProfileWallet {
 
     pub fn sign_asset_call(
         &self,
-        action: xparq::asset::AssetAction,
+        action: xparq::asset::AssetInstruction,
         nonce: u64,
-    ) -> Result<xparq::asset::AssetCall, String> {
+        public_key_known: bool,
+    ) -> Result<AuthorizedAccountIntent<xparq::asset::AssetCall>, String> {
         let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
-        xparq::asset::AssetCall::sign(
-            chain.genesis_hash,
-            action,
-            nonce,
-            &self.signing_seed,
-        )
-        .map_err(|error| format!("asset call signing failed: {error:?}"))
+        let call = xparq::asset::AssetCall::new(action, self.address, nonce);
+        let signature = self.signing_seed.sign(
+            &call
+                .commitment(chain.genesis_hash)
+                .map_err(|error| format!("asset call signing failed: {error:?}"))?,
+        );
+        let authorization = if public_key_known {
+            AccountAuthorization::ProfileKnown {
+                profile: self.profile(),
+                signature,
+            }
+        } else {
+            AccountAuthorization::ProfileReveal {
+                public_key: self.public_key.clone(),
+                signature,
+            }
+        };
+        Ok(AuthorizedAccountIntent {
+            intent: call,
+            authorization,
+        })
     }
 
     pub fn sign_wasm_deploy_call(

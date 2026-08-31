@@ -91,7 +91,7 @@ The response contains the accepted transaction ID:
 {"transaction_id":"<64 lowercase hexadecimal characters>"}
 ```
 
-Extension asset transactions use the same endpoint and canonical encoding. The
+Native Layer-1 asset transactions use the same endpoint and canonical encoding. The
 node exposes `GET /asset/nonce/{address}`, `GET /asset/{asset_id}`, and
 `GET /asset/{asset_id}/balance/{address}` for builders and state queries. Asset
 IDs use the canonical `asset:` prefix followed by exactly 64 lowercase
@@ -99,7 +99,10 @@ hexadecimal characters. Amounts are integer base units defined by each asset's
 `decimals` metadata.
 Asset supply, limits, and balances are `u128` and therefore appear in JSON as
 decimal strings rather than potentially lossy JSON numbers.
-Every asset mutation carries a signed nonce-protected call plus an authorized
+Metadata records the permanent `creator` separately from the optional
+`mint_authority`; a missing mint authority is returned as JSON `null`.
+Every asset mutation carries a nonce-protected call authorized through the same
+reveal-or-known account-key registry used by XPQ, plus an authorized
 XPQ miner-fee spend; both transitions commit or roll back together.
 Confirmed asset transaction responses decode the canonical payload and expose
 `asset_id`, signer, nonce, and the register/mint/burn/transfer action. Account
