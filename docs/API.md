@@ -26,10 +26,13 @@ little-endian `u64`; arithmetic is checked.
 policy. A transaction that creates more persistent state than it deletes must
 include exactly one `OutputTarget::Burn` for the required amount:
 
-`created_weight * STATE_BURN_RATE_ZENO_PER_WEIGHT`
+`created_weight * (floor(next_block_emission_XPQ) * 2)`
 
-The reset-chain rate is `1 zeno` per state-weight unit. Coin and QCash UTXO
-weights, plus the algorithm identifier, are committed by the chain-spec hash.
+The rate follows the expected emission of the block that includes the
+transaction: `1.0-1.9 XPQ = 2 zeno/weight`, `2.0-2.9 XPQ = 4`, through
+`10.0 XPQ = 20`. The next emission, active rate, multiplier, Coin and QCash
+UTXO weights, and emission-UTXO burn are exposed by `/fee-policy`; the
+consensus algorithm and parameters are committed by the chain-spec hash.
 Consumed inputs do not receive burn credit. Burn outputs conserve transaction
 value during validation but are deliberately not inserted into the UTXO set.
 No canonical state-creating operation is exempt: on-chain spend, QCash

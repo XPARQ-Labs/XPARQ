@@ -137,6 +137,11 @@ impl Ledger {
         };
         let mut staged_state = self.state.clone();
         let mut block_journals = Vec::new();
+        let current_emission = validated
+            .emission()
+            .map_or_else(xparq_consensus::initial_block_emission, |emission| {
+                emission.subsidy()
+            });
         if let Some(emission) = validated.emission() {
             let id = CoinId::from_emission_origin(&emission.origin().0);
             staged_state.coins.insert(CoinUtxo {
@@ -152,8 +157,13 @@ impl Ledger {
         }
 
         for transaction in block.transactions() {
-            let authorized =
-                validate_transaction(transaction.clone(), chain_context, height.0, &staged_state)?;
+            let authorized = validate_transaction(
+                transaction.clone(),
+                chain_context,
+                height.0,
+                current_emission,
+                &staged_state,
+            )?;
             let journal = staged_state.apply_validated_transaction(&authorized, height, miner)?;
             block_journals.push(journal);
         }

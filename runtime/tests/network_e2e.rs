@@ -20,7 +20,6 @@ use xparq::{
 use xparq_wallet::{ProfileWallet, encode_xparq_mnemonic, profile_wallet_from_xparq_mnemonic};
 
 const WAIT: Duration = Duration::from_secs(120);
-const MATURE_FIXTURE: &str = "tests/fixtures/mature";
 
 struct NodeProcess(Child);
 
@@ -194,6 +193,15 @@ fn block_gossip_crosses_three_nodes_and_survives_restart() {
     let a = root.join("a");
     let b = root.join("b");
     let c = root.join("c");
+    let mature_chain = std::env::var_os("XPARQ_E2E_MATURE_CHAIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mature"));
+    assert!(
+        mature_chain.join("xparq.redb").is_file(),
+        "missing mature E2E fixture at {}",
+        mature_chain.display()
+    );
+    copy_tree(&mature_chain, &a);
     mine(&a, 1);
 
     let a_p2p = free_address();
@@ -289,15 +297,6 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     let a = root.join("a");
     let b = root.join("b");
     let c = root.join("c");
-    let mature_chain = std::env::var_os("XPARQ_E2E_MATURE_CHAIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join(MATURE_FIXTURE));
-    assert!(
-        mature_chain.join("xparq.redb").is_file(),
-        "missing mature E2E fixture at {}",
-        mature_chain.display()
-    );
-    copy_tree(&mature_chain, &a);
 
     let a_p2p = free_address();
     let a_rpc = free_address();
@@ -327,6 +326,12 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     let input_id: CoinId = input["id"].as_str().unwrap().parse().unwrap();
     let input_amount = input["amount"].as_u64().unwrap();
     let sent = Amount::from_zeno(1);
+    let state_burn = xparq::consensus::StateTransitionWeight {
+        created_coin_utxos: 2,
+        ..xparq::consensus::StateTransitionWeight::default()
+    }
+    .required_burn(xparq::consensus::initial_block_emission())
+    .unwrap();
     let intent = OnChainSpendIntent::new(
         sender.address,
         vec![input_id],
@@ -334,8 +339,9 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
             SpendOutput::new(recipient, sent),
             SpendOutput::new(
                 sender.address,
-                Amount::from_zeno(input_amount - sent.as_zeno()),
+                Amount::from_zeno(input_amount - sent.as_zeno() - state_burn.as_zeno()),
             ),
+            SpendOutput::burn(state_burn),
         ],
     )
     .unwrap();

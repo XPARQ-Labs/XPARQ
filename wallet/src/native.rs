@@ -92,6 +92,16 @@ struct NodeBurnResponse {
 }
 
 #[derive(Deserialize)]
+struct FeePolicyResponse {
+    next_block_emission: u64,
+}
+
+fn next_block_emission(rpc: &str) -> Result<Amount, String> {
+    let policy: FeePolicyResponse = http_get_json(rpc, "/fee-policy")?;
+    Ok(Amount::from_zeno(policy.next_block_emission))
+}
+
+#[derive(Deserialize)]
 struct AccountAssetBalance {
     asset_id: String,
     name: String,
@@ -1062,7 +1072,7 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
                 created_coin_utxos: created,
                 ..StateTransitionWeight::default()
             }
-            .required_burn()
+            .required_burn(next_block_emission(rpc)?)
             .map_err(|error| error.to_string())?
             .as_zeno();
             let change = gross_change
@@ -1117,6 +1127,7 @@ fn select_account_inputs_with_state_burn(
     created_qcash_utxos: u64,
     extension_created_weight: u64,
 ) -> Result<(Vec<xparq::coin::CoinId>, u64, u64, u64), String> {
+    let emission = next_block_emission(rpc)?;
     let candidates = account_input_candidates(rpc, wallet)?;
     let mut selected = Vec::new();
     let mut total = 0_u64;
@@ -1138,7 +1149,7 @@ fn select_account_inputs_with_state_burn(
                 extension_created_weight,
                 ..StateTransitionWeight::default()
             }
-            .required_burn()
+            .required_burn(emission)
             .map_err(|error| error.to_string())?
             .as_zeno();
             let required = base_required
@@ -1302,7 +1313,7 @@ fn sign_withdraw(args: &[String]) -> Result<(), String> {
                     .map_err(|_| "too many QCash outputs")?,
                 ..StateTransitionWeight::default()
             }
-            .required_burn()
+            .required_burn(next_block_emission(rpc)?)
             .map_err(|error| error.to_string())?
             .as_zeno();
             let change = gross_change
@@ -1364,6 +1375,8 @@ fn redeem_qcash(args: &[String]) -> Result<(), String> {
         })
         .transpose()?;
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let emission = next_block_emission(rpc)?;
     let transaction = automatic_fee_transaction(|fee| {
         let input_amount = input.qcash.amount().as_zeno();
         let requested = requested_amount.map(Amount::as_zeno);
@@ -1376,7 +1389,7 @@ fn redeem_qcash(args: &[String]) -> Result<(), String> {
             created_coin_utxos: 2,
             ..StateTransitionWeight::default()
         }
-        .required_burn()
+        .required_burn(emission)
         .map_err(|error| error.to_string())?
         .as_zeno();
         let available = input_amount
@@ -1451,6 +1464,8 @@ fn split_qcash(args: &[String]) -> Result<(), String> {
         std::iter::once(input.signing_seed.public_key()),
     )?;
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let emission = next_block_emission(rpc)?;
     let transaction = automatic_fee_transaction(|fee| {
         let mut state_burn = 0_u64;
         let mut resolved_amounts = None;
@@ -1475,7 +1490,7 @@ fn split_qcash(args: &[String]) -> Result<(), String> {
                 created_coin_utxos: 1,
                 ..StateTransitionWeight::default()
             }
-            .required_burn()
+            .required_burn(emission)
             .map_err(|error| error.to_string())?
             .as_zeno();
             if required_burn == state_burn {
@@ -1546,13 +1561,15 @@ fn merge_qcash(args: &[String]) -> Result<(), String> {
     let forbidden = inputs.iter().map(|file| file.signing_seed.public_key());
     let secret = fresh_qcash_secrets(1, forbidden)?.remove(0);
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let emission = next_block_emission(rpc)?;
     let transaction = automatic_fee_transaction(|fee| {
         let state_burn = StateTransitionWeight {
             created_qcash_utxos: 1,
             created_coin_utxos: 1,
             ..StateTransitionWeight::default()
         }
-        .required_burn()
+        .required_burn(emission)
         .map_err(|error| error.to_string())?
         .as_zeno();
         let output_amount = total

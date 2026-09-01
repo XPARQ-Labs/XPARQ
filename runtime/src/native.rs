@@ -493,23 +493,7 @@ fn candidate_block(
     );
     let previous = ledger.tip_hash().ok_or("canonical genesis is missing")?;
     let difficulty = expected_next_difficulty(&ledger.chain).map_err(|error| error.to_string())?;
-    let parent_emission = if height.0 <= 1 {
-        xparq::consensus::initial_block_emission()
-    } else {
-        ledger
-            .chain
-            .block(&Height(height.0 - 1))
-            .and_then(Block::emission)
-            .map(|emission| emission.subsidy)
-            .ok_or("parent emission is missing")?
-    };
-    let subsidy = expected_emission_for_height(height, parent_emission, |height| {
-        ledger
-            .chain
-            .header(&height)
-            .map(|header| header.block_weight)
-    })
-    .map_err(|error| error.to_string())?;
+    let subsidy = expected_next_emission(ledger)?;
     let extension_root = ledger
         .preview_extension_state_root(&transactions, height)
         .map_err(|error| error.to_string())?;
@@ -524,6 +508,31 @@ fn candidate_block(
     .map_err(|error| error.to_string())?;
     block.set_state_root(StateRoot(*extension_root.as_bytes()));
     Ok(block)
+}
+
+fn expected_next_emission(ledger: &Ledger) -> Result<Amount, String> {
+    let height = Height(
+        ledger
+            .tip_height()
+            .map_or(0, |height| height.0.saturating_add(1)),
+    );
+    let parent_emission = if height.0 <= 1 {
+        xparq::consensus::initial_block_emission()
+    } else {
+        ledger
+            .chain
+            .block(&Height(height.0 - 1))
+            .and_then(Block::emission)
+            .map(|emission| emission.subsidy)
+            .ok_or("parent emission is missing")?
+    };
+    expected_emission_for_height(height, parent_emission, |height| {
+        ledger
+            .chain
+            .header(&height)
+            .map(|header| header.block_weight)
+    })
+    .map_err(|error| error.to_string())
 }
 
 fn submit_transaction(path: Option<&str>, encoded: &str) -> Result<(), String> {
@@ -761,9 +770,11 @@ fn explorer_address_response(
         if let Some(emission) = block.emission().filter(|emission| emission.to == address) {
             emission_count = emission_count.saturating_add(1);
             if include_emissions {
+                let state_burn = xparq::consensus::emission_utxo_state_burn(emission.subsidy)
+                    .map_err(|error| error.to_string())?;
                 let miner_emission = emission
                     .subsidy
-                    .checked_sub(xparq::consensus::EMISSION_UTXO_STATE_BURN)
+                    .checked_sub(state_burn)
                     .ok_or("block emission is below its UTXO state burn")?;
                 activities.push(serde_json::json!({
                     "height": block.height().0,
@@ -773,7 +784,7 @@ fn explorer_address_response(
                     "direction": "in",
                     "amount": miner_emission.as_zeno(),
                     "gross_subsidy": emission.subsidy.as_zeno(),
-                    "state_burn": xparq::consensus::EMISSION_UTXO_STATE_BURN.as_zeno(),
+                    "state_burn": state_burn.as_zeno(),
                     "size_bytes": serde_json::Value::Null,
                 }));
             }
@@ -1155,8 +1166,10 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
         let created_state_weight = ledger
             .preview_extension_created_state_weight(&call, height)
             .map_err(|error| error.to_string())?;
+        let emission = expected_next_emission(&ledger)?;
+        let rate = xparq::consensus::state_burn_rate_for_emission(emission);
         let state_burn = created_state_weight
-            .checked_mul(xparq::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT)
+            .checked_mul(rate)
             .ok_or("extension preview state burn overflow")?;
         return write_http_response(
             stream,
@@ -1164,6 +1177,8 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             &serde_json::json!({
                 "height": height.0,
                 "created_state_weight": created_state_weight,
+                "emission": emission.as_zeno(),
+                "state_burn_rate_zeno_per_weight": rate,
                 "state_burn": state_burn,
             }),
         );
@@ -1186,14 +1201,22 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
     let ledger = load_or_initialize(database)?;
     let response = match route {
         "/status" => status_response(&ledger)?,
-        "/fee-policy" => serde_json::json!({
-            "minimum_fee_rate_zeno_per_byte": MIN_RELAY_FEE_ZENO_PER_BYTE,
-            "state_burn_algorithm": xparq::consensus::STATE_BURN_ALGORITHM,
-            "state_burn_rate_zeno_per_weight": xparq::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT,
-            "coin_utxo_state_weight": xparq::consensus::COIN_UTXO_STATE_WEIGHT,
-            "qcash_utxo_state_weight": xparq::consensus::QCASH_UTXO_STATE_WEIGHT,
-            "emission_utxo_state_burn": xparq::consensus::EMISSION_UTXO_STATE_BURN.as_zeno(),
-        }),
+        "/fee-policy" => {
+            let emission = expected_next_emission(&ledger)?;
+            let rate = xparq::consensus::state_burn_rate_for_emission(emission);
+            let emission_burn = xparq::consensus::emission_utxo_state_burn(emission)
+                .map_err(|error| error.to_string())?;
+            serde_json::json!({
+                "minimum_fee_rate_zeno_per_byte": MIN_RELAY_FEE_ZENO_PER_BYTE,
+                "state_burn_algorithm": xparq::consensus::STATE_BURN_ALGORITHM,
+                "next_block_emission": emission.as_zeno(),
+                "state_burn_rate_zeno_per_weight": rate,
+                "state_burn_emission_multiplier": xparq::consensus::STATE_BURN_EMISSION_MULTIPLIER,
+                "coin_utxo_state_weight": xparq::consensus::COIN_UTXO_STATE_WEIGHT,
+                "qcash_utxo_state_weight": xparq::consensus::QCASH_UTXO_STATE_WEIGHT,
+                "emission_utxo_state_burn": emission_burn.as_zeno(),
+            })
+        }
         "/blocks/latest" => latest_blocks_response(&ledger)?,
         route if route.starts_with("/asset/nonce/") => {
             let address = parse_address(route.trim_start_matches("/asset/nonce/"))?;
@@ -1301,8 +1324,14 @@ fn asset_nonce_response(
     );
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
     for transaction in read_mempool(database)? {
-        let validated = validate_transaction(transaction, chain, height.0, &state)
-            .map_err(|error| format!("validate pending asset nonce: {error}"))?;
+        let validated = validate_transaction(
+            transaction,
+            chain,
+            height.0,
+            expected_next_emission(ledger)?,
+            &state,
+        )
+        .map_err(|error| format!("validate pending asset nonce: {error}"))?;
         state
             .apply_validated_transaction(&validated, height, Address::ZERO)
             .map_err(|error| format!("apply pending asset nonce: {error}"))?;
@@ -1327,8 +1356,14 @@ fn wasm_nonce_response(
     );
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
     for transaction in read_mempool(database)? {
-        let validated = validate_transaction(transaction, chain, height.0, &state)
-            .map_err(|error| format!("validate pending WASM deploy nonce: {error}"))?;
+        let validated = validate_transaction(
+            transaction,
+            chain,
+            height.0,
+            expected_next_emission(ledger)?,
+            &state,
+        )
+        .map_err(|error| format!("validate pending WASM deploy nonce: {error}"))?;
         state
             .apply_validated_transaction(&validated, height, Address::ZERO)
             .map_err(|error| format!("apply pending WASM deploy nonce: {error}"))?;
@@ -1579,7 +1614,8 @@ fn block_response(block: &Block) -> Result<serde_json::Value, String> {
         .emission()
         .map_or(Amount::from_zeno(0), |emission| emission.subsidy);
     let state_burn = if block.emission().is_some() {
-        xparq::consensus::EMISSION_UTXO_STATE_BURN
+        xparq::consensus::emission_utxo_state_burn(gross_subsidy)
+            .map_err(|error| error.to_string())?
     } else {
         Amount::from_zeno(0)
     };
@@ -2799,6 +2835,9 @@ fn reconcile_mempool(
     let Ok(chain) = xparq::genesis::chain_context() else {
         return Vec::new();
     };
+    let Ok(current_emission) = expected_next_emission(ledger) else {
+        return Vec::new();
+    };
     let mut state = ledger.state().clone();
     let mut retained = Vec::new();
     let mut seen = BTreeSet::new();
@@ -2821,8 +2860,13 @@ fn reconcile_mempool(
         if !meets_minimum_relay_fee(&transaction, encoded.len()) {
             continue;
         }
-        let Ok(validated) = validate_transaction(transaction.clone(), chain, height.0, &state)
-        else {
+        let Ok(validated) = validate_transaction(
+            transaction.clone(),
+            chain,
+            height.0,
+            current_emission,
+            &state,
+        ) else {
             continue;
         };
         if state
@@ -3149,6 +3193,7 @@ fn validate_mempool(ledger: &Ledger, transactions: &[AuthorizedTransaction]) -> 
             .map_or(0, |height| height.0.saturating_add(1)),
     );
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
+    let current_emission = expected_next_emission(ledger)?;
     let mut state = ledger.state().clone();
     for transaction in transactions {
         let encoded = canonical_bytes(transaction).map_err(|error| error.to_string())?;
@@ -3163,8 +3208,14 @@ fn validate_mempool(ledger: &Ledger, transactions: &[AuthorizedTransaction]) -> 
                 encoded.len()
             ));
         }
-        let validated = validate_transaction(transaction.clone(), chain, height.0, &state)
-            .map_err(|error| format!("mempool transaction is invalid: {error}"))?;
+        let validated = validate_transaction(
+            transaction.clone(),
+            chain,
+            height.0,
+            current_emission,
+            &state,
+        )
+        .map_err(|error| format!("mempool transaction is invalid: {error}"))?;
         state
             .apply_validated_transaction(&validated, height, Address::ZERO)
             .map_err(|error| format!("mempool state transition is invalid: {error}"))?;

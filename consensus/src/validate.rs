@@ -175,6 +175,7 @@ pub fn validate_transaction(
     transaction: AuthorizedTransaction,
     chain: ChainContext,
     current_height: u64,
+    current_emission: Amount,
     state: &impl TransactionStateView,
 ) -> Result<ValidatedTransaction, TransactionConsensusError> {
     match transaction {
@@ -198,6 +199,7 @@ pub fn validate_transaction(
                     created_coin_utxos: created_coin_output_count(&validated.intent().outputs)?,
                     ..StateTransitionWeight::default()
                 },
+                current_emission,
             )?;
             Ok(ValidatedTransaction::OnChainSpend(validated))
         }
@@ -219,6 +221,7 @@ pub fn validate_transaction(
                     created_qcash_utxos: count(intent.qcash_outputs.len())?,
                     ..StateTransitionWeight::default()
                 },
+                current_emission,
             )?;
             Ok(ValidatedTransaction::Withdraw(validated))
         }
@@ -232,6 +235,7 @@ pub fn validate_transaction(
                     created_coin_utxos: created_coin_output_count(&intent.outputs)?,
                     ..StateTransitionWeight::default()
                 },
+                current_emission,
             )?;
             Ok(ValidatedTransaction::Redeem(validated))
         }
@@ -251,6 +255,7 @@ pub fn validate_transaction(
                     )?,
                     ..StateTransitionWeight::default()
                 },
+                current_emission,
             )?;
             Ok(ValidatedTransaction::Merge(validated))
         }
@@ -274,6 +279,7 @@ pub fn validate_transaction(
                     )?,
                     ..StateTransitionWeight::default()
                 },
+                current_emission,
             )?;
             Ok(ValidatedTransaction::Split(validated))
         }
@@ -310,6 +316,7 @@ pub fn validate_transaction(
                         .map_err(TransactionConsensusError::Asset)?,
                     ..StateTransitionWeight::default()
                 },
+                current_emission,
             )?;
             Ok(ValidatedTransaction::Asset(ValidatedAssetTransaction {
                 call,
@@ -338,6 +345,7 @@ pub fn validate_transaction(
                         .extension_created_state_weight(&transaction.call, current_height),
                     ..StateTransitionWeight::default()
                 },
+                current_emission,
             )?;
             Ok(ValidatedTransaction::Extension(
                 ValidatedExtensionTransaction {
@@ -357,8 +365,9 @@ fn count(value: usize) -> Result<u64, TransactionConsensusError> {
 fn validate_state_burn(
     outputs: &[xparq_transaction::SpendOutput],
     transition: StateTransitionWeight,
+    emission: Amount,
 ) -> Result<(), TransactionConsensusError> {
-    let required = transition.required_burn()?;
+    let required = transition.required_burn(emission)?;
     validate_exact_burn(outputs, required)?;
     Ok(())
 }
@@ -639,7 +648,7 @@ mod transaction_tests {
 
         fn qcash(&self, id: CoinId) -> Option<QCashInputState> {
             (id == self.id).then_some(QCashInputState {
-                amount: Amount::from_zeno(3_000),
+                amount: Amount::from_zeno(30_000),
                 public_key: self.public_key,
             })
         }
@@ -679,19 +688,19 @@ mod transaction_tests {
         let id = CoinId::from_bytes([4; CoinId::SIZE]);
         let seed = xparq_qcash::QCashSigningSeed::from_bytes([5; 32]);
         let intent = SplitIntent::new(
-            xparq_qcash::QCash::new(id, Amount::from_zeno(3_000)),
+            xparq_qcash::QCash::new(id, Amount::from_zeno(30_000)),
             vec![
                 xparq_transaction::QCashOutput::new(
                     Amount::from_zeno(500),
                     QCashPublicKey([6; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
                 ),
                 xparq_transaction::QCashOutput::new(
-                    Amount::from_zeno(2_500 - 2 * crate::QCASH_UTXO_STATE_WEIGHT),
+                    Amount::from_zeno(29_500 - 20 * crate::QCASH_UTXO_STATE_WEIGHT),
                     QCashPublicKey([7; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
                 ),
             ],
             vec![xparq_transaction::SpendOutput::burn(Amount::from_zeno(
-                2 * crate::QCASH_UTXO_STATE_WEIGHT,
+                20 * crate::QCASH_UTXO_STATE_WEIGHT,
             ))],
         )
         .unwrap();
@@ -713,6 +722,7 @@ mod transaction_tests {
                 AuthorizedTransaction::Split(Box::new(signed.clone())),
                 chain,
                 60,
+                crate::initial_block_emission(),
                 &state,
             ),
             Ok(ValidatedTransaction::Split(_))
@@ -720,12 +730,13 @@ mod transaction_tests {
         let mut tampered = signed;
         tampered.intent.outputs[0].amount = Amount::from_zeno(501);
         tampered.intent.outputs[1].amount =
-            Amount::from_zeno(2_499 - 2 * crate::QCASH_UTXO_STATE_WEIGHT);
+            Amount::from_zeno(29_499 - 20 * crate::QCASH_UTXO_STATE_WEIGHT);
         assert_eq!(
             validate_transaction(
                 AuthorizedTransaction::Split(Box::new(tampered)),
                 chain,
                 60,
+                crate::initial_block_emission(),
                 &state,
             ),
             Err(TransactionConsensusError::InvalidAuthorization)
@@ -740,7 +751,7 @@ mod transaction_tests {
     impl TransactionStateView for FalconAccountState {
         fn coin(&self, id: CoinId) -> Option<CoinInputState> {
             (id == self.id).then_some(CoinInputState {
-                amount: Amount::from_zeno(10 + crate::COIN_UTXO_STATE_WEIGHT),
+                amount: Amount::from_zeno(10 + 10 * crate::COIN_UTXO_STATE_WEIGHT),
                 owner: self.owner,
             })
         }
@@ -769,7 +780,7 @@ mod transaction_tests {
             vec![
                 xparq_transaction::SpendOutput::new(sender, Amount::from_zeno(10)),
                 xparq_transaction::SpendOutput::burn(Amount::from_zeno(
-                    crate::COIN_UTXO_STATE_WEIGHT,
+                    10 * crate::COIN_UTXO_STATE_WEIGHT,
                 )),
             ],
         )
@@ -785,7 +796,13 @@ mod transaction_tests {
         }));
         let state = FalconAccountState { id, owner: sender };
         assert!(matches!(
-            validate_transaction(transaction, chain, 0, &state),
+            validate_transaction(
+                transaction,
+                chain,
+                0,
+                crate::initial_block_emission(),
+                &state,
+            ),
             Ok(ValidatedTransaction::OnChainSpend(_))
         ));
     }

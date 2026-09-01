@@ -2,9 +2,9 @@ use std::{error::Error, fmt};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_coin::{Amount, Coin, CoinId, TransactionOutputKind};
+use xparq_common::{ExtensionEffect, ExtensionId};
 use xparq_consensus::{AuthorizationValidated, RevealedAccountKey, ValidatedTransaction};
 use xparq_crypto::Address;
-use xparq_common::{ExtensionEffect, ExtensionId};
 use xparq_qcash::QCash;
 use xparq_transaction::{
     MergeIntent, OnChainSpendIntent, OutputTarget, RedeemIntent, SpendCommitment, SplitIntent,
@@ -645,7 +645,9 @@ mod tests {
     fn protocol_burn_is_rolled_back_with_its_created_utxo() {
         let mut state = LedgerState::default();
         let mut journal = UtxoRollbackJournal::default();
-        let burned = xparq_consensus::EMISSION_UTXO_STATE_BURN;
+        let burned =
+            xparq_consensus::emission_utxo_state_burn(xparq_consensus::initial_block_emission())
+                .unwrap();
 
         state.record_protocol_burn(burned, &mut journal).unwrap();
         assert_eq!(state.total_burned, burned);
@@ -686,12 +688,12 @@ mod tests {
         state
             .qcash
             .insert(QCashUtxo {
-                coin: Coin::new(input_id, xparq_coin::Amount::from_zeno(3_000)),
+                coin: Coin::new(input_id, xparq_coin::Amount::from_zeno(30_000)),
                 public_key: seed.public_key(),
             })
             .unwrap();
         let intent = SplitIntent::new(
-            QCash::new(input_id, xparq_coin::Amount::from_zeno(3_000)),
+            QCash::new(input_id, xparq_coin::Amount::from_zeno(30_000)),
             vec![
                 QCashOutput::new(
                     xparq_coin::Amount::from_zeno(500),
@@ -699,13 +701,13 @@ mod tests {
                 ),
                 QCashOutput::new(
                     xparq_coin::Amount::from_zeno(
-                        2_500 - 2 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT,
+                        29_500 - 20 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT,
                     ),
                     xparq_crypto::QCashPublicKey([5; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
                 ),
             ],
             vec![xparq_transaction::SpendOutput::burn(
-                xparq_coin::Amount::from_zeno(2 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT),
+                xparq_coin::Amount::from_zeno(20 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT),
             )],
         )
         .unwrap();
@@ -722,6 +724,7 @@ mod tests {
             AuthorizedTransaction::Split(Box::new(signed)),
             chain,
             10,
+            xparq_consensus::initial_block_emission(),
             &state,
         )
         .unwrap();
@@ -733,7 +736,7 @@ mod tests {
         assert_eq!(state.qcash.len(), 2);
         assert_eq!(
             state.total_burned,
-            Amount::from_zeno(2 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT)
+            Amount::from_zeno(20 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT)
         );
         state.rollback_state(journal).unwrap();
         assert!(state.qcash.get(&input_id).is_some());

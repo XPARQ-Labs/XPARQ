@@ -1,6 +1,6 @@
-use crate::EMISSION_UTXO_STATE_BURN;
 use crate::block::{Block, BlockHeight, Height};
 use crate::consensus::{WBDA_WINDOW, is_wbda_epoch_boundary, next_emission_from_window};
+use crate::emission_utxo_state_burn;
 use static_assertions::const_assert;
 use std::{error::Error, fmt};
 use xparq_coin::{Amount, COIN};
@@ -99,7 +99,8 @@ pub(crate) fn authorize_emission(
     if emission.subsidy != expected {
         return Err(EmissionError::InvalidSubsidy);
     }
-    let state_burn = EMISSION_UTXO_STATE_BURN;
+    let state_burn =
+        emission_utxo_state_burn(emission.subsidy).map_err(|_| EmissionError::InvalidSubsidy)?;
     let miner_emission = emission
         .subsidy
         .checked_sub(state_burn)
@@ -176,12 +177,11 @@ mod tests {
         let emission = authorize_emission(&block, initial_block_emission(), |_| None).unwrap();
 
         assert_eq!(emission.subsidy(), initial_block_emission());
-        assert_eq!(emission.state_burn(), EMISSION_UTXO_STATE_BURN);
+        let expected_burn = emission_utxo_state_burn(initial_block_emission()).unwrap();
+        assert_eq!(emission.state_burn(), expected_burn);
         assert_eq!(
             emission.miner_emission(),
-            initial_block_emission()
-                .checked_sub(EMISSION_UTXO_STATE_BURN)
-                .unwrap()
+            initial_block_emission().checked_sub(expected_burn).unwrap()
         );
     }
 
