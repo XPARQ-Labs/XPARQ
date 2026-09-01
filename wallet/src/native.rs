@@ -8,7 +8,7 @@ use std::{
 };
 
 use serde::Deserialize;
-use xparq::asset::{AssetInstruction, AssetId};
+use xparq::asset::{AssetAuthority, AssetId, AssetInstruction};
 use xparq::{
     codec::canonical_bytes,
     consensus::{Amount, COIN, DECIMALS, StateTransitionWeight},
@@ -206,6 +206,16 @@ fn asset_register(args: &[String]) -> Result<(), String> {
     let initial_mint = parse_asset_amount(args, "--initial-mint")?;
     let authority = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?.address();
     let asset_id = AssetId::derive(authority, &symbol);
+    let mint_authority = if has_flag(args, "--fixed-supply") {
+        if option(args, "--mint-program").is_some() {
+            return Err("--fixed-supply and --mint-program cannot be used together".into());
+        }
+        None
+    } else if let Some(program) = option(args, "--mint-program") {
+        Some(AssetAuthority::Program(parse_extension_id(program)?))
+    } else {
+        Some(AssetAuthority::Account(authority))
+    };
     submit_asset_instruction(
         args,
         AssetInstruction::Register {
@@ -214,6 +224,7 @@ fn asset_register(args: &[String]) -> Result<(), String> {
             decimals,
             max_supply,
             initial_mint,
+            mint_authority,
         },
     )?;
     println!("asset_id: {asset_id}");
@@ -316,14 +327,16 @@ fn asset_balance(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn submit_asset_instruction(args: &[String], action: AssetInstruction) -> Result<(), String> {
+fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> Result<(), String> {
     reject_manual_fee(args)?;
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let address = xparq::crypto::address_to_string(&wallet.address());
     let nonce = http_get_json::<AssetNonceResponse>(rpc, &format!("/asset/nonce/{address}"))?.nonce;
     let public_key_known = account_public_key_registered(rpc, &wallet);
-    let call = wallet.0.sign_asset_call(action, nonce, public_key_known)?;
+    let call = wallet
+        .0
+        .sign_asset_call(instruction, nonce, public_key_known)?;
     let recipient_balance_exists = match &call.intent.instruction {
         AssetInstruction::Mint {
             asset_id,
@@ -1863,7 +1876,7 @@ fn print_help() {
         "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--profile PROFILE]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--profile PROFILE]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet sign-withdraw --qcash XPQ... [--input COIN_ID...] [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--cash-dir PATH] [--wallet PATH] [--offline]\nwallet qcash-redeem --file FILE --to ADDRESS [--amount XPQ] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-split --file FILE --qcash XPQ [--qcash XPQ...] [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet qcash-merge --file FILE --file FILE... [--rpc ADDRESS] [--cash-dir PATH] [--offline]\nwallet version\n\nAll signature profiles are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 zeno per canonical transaction byte; manual --miner fee input is not supported. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs. QCash operations use Falcon-512 bearer authorization. Keep input QCash files until the transaction is canonically confirmed.\nRunning without a command opens the interactive menu.\nWithout --input, spend and withdraw select active XPQ inputs and calculate change through node RPC."
     );
     println!(
-        "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply UNITS --initial-mint UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset ID --to ADDRESS --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset ID --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset ID --to ADDRESS --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset ID [--rpc ADDRESS]\nwallet asset-balance --asset ID [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts are integer base units. Registration atomically credits the initial mint to the signing creator, makes that wallet the mint authority, and pays one XPQ miner fee. Distribution to other addresses uses asset-transfer."
+        "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply UNITS --initial-mint UNITS [--mint-program EXTENSION_ID | --fixed-supply] [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset ID --to ADDRESS --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset ID --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset ID --to ADDRESS --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset ID [--rpc ADDRESS]\nwallet asset-balance --asset ID [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts are integer base units. Registration atomically credits the initial mint to the signing creator and pays one XPQ miner fee. By default the creator account is the mint authority; --mint-program assigns an extension program, while --fixed-supply disables future minting. Distribution to other addresses uses asset-transfer."
     );
     println!(
         "\nWASM commands:\nwallet wasm-deploy --name NAME --wasm MODULE [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet wasm-call --extension ID (--payload-hex HEX | --payload-file PATH) [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet wasm-info --extension ID [--rpc ADDRESS]\n\nWASM deploys are immutable and activate automatically after 100 blocks. Signed generic WASM calls and WASM persistent-state burn are active from genesis."

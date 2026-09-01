@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, error::Error, fmt, str::FromStr};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use xparq_common::canonical_bytes;
+use xparq_common::{ExtensionId, canonical_bytes};
 use xparq_crypto::Address;
 
 use crate::AssetIdParseError;
@@ -50,7 +50,13 @@ pub struct AssetMetadata {
     pub decimals: u8,
     pub max_supply: u128,
     pub creator: Address,
-    pub mint_authority: Option<Address>,
+    pub mint_authority: Option<AssetAuthority>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssetAuthority {
+    Account(Address),
+    Program(ExtensionId),
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
@@ -61,6 +67,7 @@ pub enum AssetInstruction {
         decimals: u8,
         max_supply: u128,
         initial_mint: u128,
+        mint_authority: Option<AssetAuthority>,
     },
     Mint {
         asset_id: AssetId,
@@ -128,6 +135,7 @@ impl AssetCall {
                 decimals,
                 max_supply,
                 initial_mint,
+                mint_authority: _,
             } => {
                 validate_name(name)?;
                 validate_symbol(symbol)?;
@@ -191,6 +199,7 @@ impl AssetCall {
                 decimals,
                 max_supply,
                 initial_mint,
+                mint_authority,
             } => {
                 let metadata = AssetMetadata {
                     name: name.clone(),
@@ -198,7 +207,7 @@ impl AssetCall {
                     decimals: *decimals,
                     max_supply: *max_supply,
                     creator: self.signer,
-                    mint_authority: Some(self.signer),
+                    mint_authority: *mint_authority,
                 };
                 weight = checked_entry_weight(weight, 33, &metadata)?;
                 weight = checked_entry_weight(weight, 33, initial_mint)?;
@@ -271,6 +280,7 @@ impl AssetState {
                 decimals,
                 max_supply,
                 initial_mint,
+                mint_authority,
             } => {
                 let id = AssetId::derive(call.signer, symbol);
                 journal.metadata.push((id, self.metadata.get(&id).cloned()));
@@ -287,7 +297,7 @@ impl AssetState {
                         decimals: *decimals,
                         max_supply: *max_supply,
                         creator: call.signer,
-                        mint_authority: Some(call.signer),
+                        mint_authority: *mint_authority,
                     },
                 );
                 self.supplies.insert(id, *initial_mint);
@@ -347,6 +357,70 @@ impl AssetState {
         Ok(journal)
     }
 
+    /// Applies a mint requested by the currently executing extension program.
+    ///
+    /// The ledger must supply `program` from its trusted execution context;
+    /// it must never be accepted from an untrusted transaction payload.
+    pub fn apply_program_mint(
+        &mut self,
+        program: ExtensionId,
+        asset_id: AssetId,
+        recipient: Address,
+        amount: u128,
+    ) -> Result<AssetRollbackJournal, AssetError> {
+        ensure_nonzero(amount)?;
+        let metadata = self.metadata(asset_id).ok_or(AssetError::UnknownAsset)?;
+        if metadata.mint_authority != Some(AssetAuthority::Program(program)) {
+            return Err(AssetError::Unauthorized);
+        }
+        let supply = self
+            .supply(asset_id)
+            .checked_add(amount)
+            .filter(|supply| *supply <= metadata.max_supply)
+            .ok_or(AssetError::SupplyOverflow)?;
+        let balance = self
+            .balance(asset_id, recipient)
+            .checked_add(amount)
+            .ok_or(AssetError::BalanceOverflow)?;
+        let mut journal = AssetRollbackJournal::default();
+        journal
+            .supplies
+            .push((asset_id, self.supplies.get(&asset_id).copied()));
+        journal.balances.push((
+            (asset_id, recipient),
+            self.balances.get(&(asset_id, recipient)).copied(),
+        ));
+        self.supplies.insert(asset_id, supply);
+        self.balances.insert((asset_id, recipient), balance);
+        Ok(journal)
+    }
+
+    pub fn program_mint_created_state_weight(
+        &self,
+        program: ExtensionId,
+        asset_id: AssetId,
+        recipient: Address,
+        amount: u128,
+    ) -> Result<u64, AssetError> {
+        ensure_nonzero(amount)?;
+        let metadata = self.metadata(asset_id).ok_or(AssetError::UnknownAsset)?;
+        if metadata.mint_authority != Some(AssetAuthority::Program(program)) {
+            return Err(AssetError::Unauthorized);
+        }
+        self.supply(asset_id)
+            .checked_add(amount)
+            .filter(|supply| *supply <= metadata.max_supply)
+            .ok_or(AssetError::SupplyOverflow)?;
+        self.balance(asset_id, recipient)
+            .checked_add(amount)
+            .ok_or(AssetError::BalanceOverflow)?;
+        if self.balances.contains_key(&(asset_id, recipient)) {
+            Ok(0)
+        } else {
+            checked_entry_weight(0, 33 + xparq_crypto::ADDRESS_SIZE, &amount)
+        }
+    }
+
     pub fn rollback(&mut self, journal: AssetRollbackJournal) {
         restore_map(&mut self.metadata, journal.metadata);
         restore_map(&mut self.supplies, journal.supplies);
@@ -365,6 +439,7 @@ impl AssetState {
                 decimals,
                 max_supply,
                 initial_mint,
+                mint_authority: _,
             } => {
                 let _ = (name, decimals, max_supply, initial_mint);
                 if self
@@ -378,7 +453,7 @@ impl AssetState {
                 asset_id, amount, ..
             } => {
                 let metadata = self.metadata(*asset_id).ok_or(AssetError::UnknownAsset)?;
-                if metadata.mint_authority != Some(call.signer) {
+                if metadata.mint_authority != Some(AssetAuthority::Account(call.signer)) {
                     return Err(AssetError::Unauthorized);
                 }
                 if self
@@ -522,12 +597,13 @@ mod tests {
         let signer = Address([7; xparq_crypto::ADDRESS_SIZE]);
         let recipient = Address([9; xparq_crypto::ADDRESS_SIZE]);
         let register = AssetCall::new(
-            AssetProgram::Register {
+            AssetInstruction::Register {
                 name: "Gold".into(),
                 symbol: "GOLD".into(),
                 decimals: 2,
                 max_supply: 1_000,
                 initial_mint: 100,
+                mint_authority: Some(AssetAuthority::Account(signer)),
             },
             signer,
             0,
@@ -537,9 +613,12 @@ mod tests {
         state.apply(&register).unwrap();
         let metadata = state.metadata(id).unwrap();
         assert_eq!(metadata.creator, signer);
-        assert_eq!(metadata.mint_authority, Some(signer));
+        assert_eq!(
+            metadata.mint_authority,
+            Some(AssetAuthority::Account(signer))
+        );
         let transfer = AssetCall::new(
-            AssetProgram::Transfer {
+            AssetInstruction::Transfer {
                 asset_id: id,
                 recipient,
                 amount: 25,
@@ -553,5 +632,47 @@ mod tests {
         assert_eq!(state.balance(id, recipient), 0);
         assert_eq!(state.balance(id, register.signer), 100);
         assert_eq!(state.nonce(register.signer), 1);
+    }
+
+    #[test]
+    fn program_authority_can_only_mint_through_program_context() {
+        let creator = Address([7; xparq_crypto::ADDRESS_SIZE]);
+        let recipient = Address([9; xparq_crypto::ADDRESS_SIZE]);
+        let program = ExtensionId::derive("test.asset.minter");
+        let register = AssetCall::new(
+            AssetInstruction::Register {
+                name: "Program Token".into(),
+                symbol: "PRG".into(),
+                decimals: 6,
+                max_supply: 1_000,
+                initial_mint: 100,
+                mint_authority: Some(AssetAuthority::Program(program)),
+            },
+            creator,
+            0,
+        );
+        let asset_id = register.asset_id();
+        let mut state = AssetState::default();
+        state.apply(&register).unwrap();
+
+        let account_mint = AssetCall::new(
+            AssetInstruction::Mint {
+                asset_id,
+                recipient,
+                amount: 25,
+            },
+            creator,
+            1,
+        );
+        assert_eq!(state.apply(&account_mint), Err(AssetError::Unauthorized));
+
+        let journal = state
+            .apply_program_mint(program, asset_id, recipient, 25)
+            .unwrap();
+        assert_eq!(state.supply(asset_id), 125);
+        assert_eq!(state.balance(asset_id, recipient), 25);
+        state.rollback(journal);
+        assert_eq!(state.supply(asset_id), 100);
+        assert_eq!(state.balance(asset_id, recipient), 0);
     }
 }

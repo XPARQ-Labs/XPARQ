@@ -699,7 +699,9 @@ fn account_asset_balances(
 ) -> Result<Vec<serde_json::Value>, String> {
     let mut balances = std::collections::BTreeMap::new();
     for (asset_id, metadata) in ledger.state().assets.metadata_entries() {
-        if metadata.creator == address || metadata.mint_authority == Some(address) {
+        if metadata.creator == address
+            || metadata.mint_authority == Some(xparq::asset::AssetAuthority::Account(address))
+        {
             balances.entry(asset_id).or_insert(0_u128);
         }
     }
@@ -945,9 +947,11 @@ fn asset_transaction_response(
             decimals,
             max_supply,
             initial_mint,
+            mint_authority,
         } => serde_json::json!({
             "type": "register", "name": name, "symbol": symbol, "decimals": decimals,
             "max_supply": max_supply.to_string(), "initial_mint": initial_mint.to_string(),
+            "mint_authority": asset_authority_response(*mint_authority),
             "recipient": xparq::crypto::address_to_string(&call.signer),
         }),
         xparq::asset::AssetInstruction::Mint {
@@ -1423,7 +1427,7 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
             "max_supply": metadata.max_supply.to_string(),
             "supply": supply.to_string(),
             "creator": xparq::crypto::address_to_string(&metadata.creator),
-            "mint_authority": metadata.mint_authority.map(|authority| xparq::crypto::address_to_string(&authority)),
+            "mint_authority": asset_authority_response(metadata.mint_authority),
         }));
     }
     if parts.len() == 3 && parts[1] == "balance" {
@@ -1436,6 +1440,20 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
         }));
     }
     Err("invalid asset route".into())
+}
+
+fn asset_authority_response(authority: Option<xparq::asset::AssetAuthority>) -> serde_json::Value {
+    match authority {
+        Some(xparq::asset::AssetAuthority::Account(address)) => serde_json::json!({
+            "type": "account",
+            "address": xparq::crypto::address_to_string(&address),
+        }),
+        Some(xparq::asset::AssetAuthority::Program(extension_id)) => serde_json::json!({
+            "type": "program",
+            "extension_id": hex::encode(extension_id.as_bytes()),
+        }),
+        None => serde_json::Value::Null,
+    }
 }
 
 #[derive(Debug)]
@@ -3682,12 +3700,13 @@ mod tests {
         let public_key = seed.public_key();
         let signer = xparq::crypto::address_from_profile_public_key(&public_key);
         let asset_call = xparq::asset::AssetCall::new(
-            xparq::asset::AssetAction::Register {
+            xparq::asset::AssetInstruction::Register {
                 name: "Test Token".into(),
                 symbol: "TEST".into(),
                 decimals: 8,
                 max_supply: 100_000_000_000_000_000_000_000,
                 initial_mint: 1_000_000,
+                mint_authority: Some(xparq::asset::AssetAuthority::Account(signer)),
             },
             signer,
             0,
@@ -3719,9 +3738,9 @@ mod tests {
         };
         let response = asset_transaction_response(&transaction, Address::ZERO);
         assert_eq!(response["asset_id"], asset_id);
-        assert_eq!(response["asset_action"]["type"], "register");
+        assert_eq!(response["asset_instruction"]["type"], "register");
         assert_eq!(
-            response["asset_action"]["max_supply"],
+            response["asset_instruction"]["max_supply"],
             "100000000000000000000000"
         );
     }
@@ -3734,12 +3753,13 @@ mod tests {
         );
         let authority = xparq::crypto::address_from_profile_public_key(&seed.public_key());
         let call = xparq::asset::AssetCall::new(
-            xparq::asset::AssetAction::Register {
+            xparq::asset::AssetInstruction::Register {
                 name: "Authority Asset".into(),
                 symbol: "AUTH".into(),
                 decimals: 0,
                 max_supply: 10,
                 initial_mint: 4,
+                mint_authority: Some(xparq::asset::AssetAuthority::Account(authority)),
             },
             authority,
             0,

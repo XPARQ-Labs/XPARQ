@@ -15,7 +15,8 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use wasmi::{Caller, CompilationMode, Config, Engine, ExternType, Linker, Memory, Module, Store};
 use xparq_common::extension::{
     EXTENSION_STATE_KEY_MAX_SIZE, EXTENSION_STATE_VALUE_MAX_SIZE, Extension, ExtensionCall,
-    ExtensionContext, ExtensionFailure, ExtensionId, ExtensionStateRead, ExtensionStateWrite,
+    ExtensionContext, ExtensionEffect, ExtensionFailure, ExtensionId, ExtensionStateRead,
+    ExtensionStateWrite,
 };
 use xparq_common::{Height, canonical_bytes};
 use xparq_crypto::{
@@ -30,12 +31,13 @@ pub const WASM_MEMORY_MAX_PAGES: u32 = 16;
 pub const WASM_DEFAULT_FUEL: u64 = 1_000_000;
 pub const WASM_MAX_FUEL: u64 = 10_000_000;
 pub const WASM_STATE_MAX_SIZE: usize = 16 * 1024 * 1024;
+pub const WASM_EFFECT_MAX_COUNT: usize = 1_024;
 pub const WASM_APP_CALL_ACTIVATION_HEIGHT: Height = Height(0);
 
-const WASM_CODE_HASH_CONTEXT: &str = "XPARQ WASM Extension Code v1";
-const WASM_EXTENSION_ID_CONTEXT: &str = "XPARQ WASM Extension Id v1";
+const WASM_CODE_HASH_CONTEXT: &str = "XPARQ WASM Extension Code";
+const WASM_EXTENSION_ID_CONTEXT: &str = "XPARQ WASM Extension Id";
 const WASM_NAME_MAX_SIZE: usize = 64;
-const WASM_APP_COMMITMENT_CONTEXT: &str = "XPARQ WASM Application Call v1";
+const WASM_APP_COMMITMENT_CONTEXT: &str = "XPARQ WASM Application Call";
 const WASM_APP_NONCE_PREFIX: &[u8] = b"\xffxparq:wasm-app-nonce:";
 const HOST_MISSING: i32 = -1;
 const HOST_FAILURE: i32 = -2;
@@ -309,7 +311,7 @@ impl WasmExtension {
         payload: &[u8],
         state: &dyn ExtensionStateRead,
         writable: bool,
-    ) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, ExtensionFailure> {
+    ) -> Result<HostExecutionResult, ExtensionFailure> {
         let entries = state.entries()?;
         let state_bytes = entries
             .iter()
@@ -331,6 +333,7 @@ impl WasmExtension {
                 failure: None,
                 writable,
                 protect_system_keys: true,
+                effects: Vec::new(),
             },
         );
         store
@@ -366,7 +369,11 @@ impl WasmExtension {
         if result != 0 {
             return Err(ExtensionFailure::InvalidState);
         }
-        Ok(store.into_data().state)
+        let host = store.into_data();
+        Ok(HostExecutionResult {
+            state: host.state,
+            effects: host.effects,
+        })
     }
 }
 
@@ -397,14 +404,17 @@ impl Extension for WasmExtension {
     ) -> Result<(), ExtensionFailure> {
         let original: BTreeMap<_, _> = state.entries()?.into_iter().collect();
         let resulting = self.execute("xparq_apply", context, call.payload(), state, true)?;
-        let keys: BTreeSet<_> = original.keys().chain(resulting.keys()).cloned().collect();
+        let keys: BTreeSet<_> = original.keys().chain(resulting.state.keys()).cloned().collect();
         for key in keys {
-            match (original.get(&key), resulting.get(&key)) {
+            match (original.get(&key), resulting.state.get(&key)) {
                 (Some(before), Some(after)) if before == after => {}
                 (_, Some(after)) => state.put(key, after.clone())?,
                 (Some(_), None) => state.delete(&key)?,
                 (None, None) => {}
             }
+        }
+        for effect in resulting.effects {
+            state.emit(effect)?;
         }
         Ok(())
     }
@@ -470,6 +480,12 @@ struct HostState {
     failure: Option<ExtensionFailure>,
     writable: bool,
     protect_system_keys: bool,
+    effects: Vec<ExtensionEffect>,
+}
+
+struct HostExecutionResult {
+    state: BTreeMap<Vec<u8>, Vec<u8>>,
+    effects: Vec<ExtensionEffect>,
 }
 
 impl HostState {
@@ -523,6 +539,7 @@ fn define_host_functions(linker: &mut Linker<HostState>) -> Result<(), wasmi::Er
     linker.func_wrap("xparq", "state_get", host_state_get)?;
     linker.func_wrap("xparq", "state_put", host_state_put)?;
     linker.func_wrap("xparq", "state_delete", host_state_delete)?;
+    linker.func_wrap("xparq", "asset_mint", host_asset_mint)?;
     Ok(())
 }
 
@@ -625,21 +642,53 @@ fn host_state_delete(mut caller: Caller<'_, HostState>, key_ptr: i32, key_len: i
     }
 }
 
+fn host_asset_mint(
+    mut caller: Caller<'_, HostState>,
+    asset_id_ptr: i32,
+    recipient_ptr: i32,
+    amount_ptr: i32,
+) -> i32 {
+    if !caller.data().writable {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    }
+    if caller.data().effects.len() >= WASM_EFFECT_MAX_COUNT {
+        return fail(&mut caller, ExtensionFailure::StateEntryLimit);
+    }
+    let Some(asset_id) = read_guest(&caller, asset_id_ptr, 32, 32) else {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    };
+    let Some(recipient) = read_guest(&caller, recipient_ptr, 20, 20) else {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    };
+    let Some(amount) = read_guest(&caller, amount_ptr, 16, 16) else {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    };
+    caller.data_mut().effects.push(ExtensionEffect::MintAsset {
+        asset_id: asset_id.try_into().expect("fixed asset ID length"),
+        recipient: recipient.try_into().expect("fixed address length"),
+        amount: u128::from_le_bytes(amount.try_into().expect("fixed amount length")),
+    });
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[derive(Default)]
-    struct MemoryState(BTreeMap<Vec<u8>, Vec<u8>>);
+    struct MemoryState {
+        entries: BTreeMap<Vec<u8>, Vec<u8>>,
+        effects: Vec<ExtensionEffect>,
+    }
 
     impl ExtensionStateRead for MemoryState {
         fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ExtensionFailure> {
-            Ok(self.0.get(key).cloned())
+            Ok(self.entries.get(key).cloned())
         }
 
         fn entries(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ExtensionFailure> {
             Ok(self
-                .0
+                .entries
                 .iter()
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect())
@@ -656,12 +705,17 @@ mod tests {
 
     impl ExtensionStateWrite for MemoryState {
         fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), ExtensionFailure> {
-            self.0.insert(key, value);
+            self.entries.insert(key, value);
             Ok(())
         }
 
         fn delete(&mut self, key: &[u8]) -> Result<(), ExtensionFailure> {
-            self.0.remove(key);
+            self.entries.remove(key);
+            Ok(())
+        }
+
+        fn emit(&mut self, effect: ExtensionEffect) -> Result<(), ExtensionFailure> {
+            self.effects.push(effect);
             Ok(())
         }
     }
@@ -731,6 +785,39 @@ mod tests {
                 &state,
             ),
             Err(ExtensionFailure::StateAccess)
+        );
+    }
+
+    #[test]
+    fn guest_can_emit_an_asset_mint_effect_only_during_apply() {
+        let extension = compile(
+            r#"(module
+                (import "xparq" "asset_mint" (func $mint (param i32 i32 i32) (result i32)))
+                (memory (export "memory") 16 16)
+                (data (i32.const 0) "\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01")
+                (data (i32.const 32) "\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02")
+                (data (i32.const 64) "\19\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
+                (func (export "xparq_alloc") (param i32) (result i32) (i32.const 1024))
+                (func (export "xparq_validate") (param i32 i32 i64) (result i32) (i32.const 0))
+                (func (export "xparq_apply") (param i32 i32 i64) (result i32)
+                    i32.const 0 i32.const 32 i32.const 64 call $mint)
+            )"#,
+        );
+        let mut state = MemoryState::default();
+        extension
+            .apply(
+                ExtensionContext { height: Height(5) },
+                &call(&extension, b"mint"),
+                &mut state,
+            )
+            .unwrap();
+        assert_eq!(
+            state.effects,
+            vec![ExtensionEffect::MintAsset {
+                asset_id: [1; 32],
+                recipient: [2; 20],
+                amount: 25,
+            }]
         );
     }
 

@@ -57,7 +57,7 @@ impl Ledger {
                         .map_err(|error| LedgerError::Spend(SpendStateError::Asset(error)))?;
                 }
                 AuthorizedTransaction::Extension(transaction) => {
-                    staged
+                    let applied = staged
                         .extensions
                         .apply(
                             xparq_extension::production_registry(),
@@ -65,6 +65,25 @@ impl Ledger {
                             &transaction.call,
                         )
                         .map_err(extension_error)?;
+                    for effect in applied.effects {
+                        match effect {
+                            xparq_common::ExtensionEffect::MintAsset {
+                                asset_id,
+                                recipient,
+                                amount,
+                            } => staged
+                                .assets
+                                .apply_program_mint(
+                                    transaction.call.extension_id(),
+                                    xparq_asset::AssetId::from_bytes(asset_id),
+                                    Address(recipient),
+                                    amount,
+                                )
+                                .map_err(|error| {
+                                    LedgerError::Spend(SpendStateError::Asset(error))
+                                })?,
+                        };
+                    }
                 }
                 _ => {}
             }
@@ -262,13 +281,47 @@ impl LedgerState {
         call: &xparq_common::ExtensionCall,
         height: u64,
     ) -> Result<u64, ExtensionFailure> {
-        self.extensions.preview_created_state_weight(
+        let preview = self.extensions.preview_created_state_weight(
             xparq_extension::production_registry(),
             ExtensionContext {
                 height: xparq_common::Height(height),
             },
             call,
-        )
+        )?;
+        let mut total = preview.created_state_weight;
+        let mut assets = self.assets.clone();
+        for effect in preview.effects {
+            match effect {
+                xparq_common::ExtensionEffect::MintAsset {
+                    asset_id,
+                    recipient,
+                    amount,
+                } => {
+                    let asset_id = xparq_asset::AssetId::from_bytes(asset_id);
+                    let recipient = Address(recipient);
+                    let weight = assets
+                        .program_mint_created_state_weight(
+                            call.extension_id(),
+                            asset_id,
+                            recipient,
+                            amount,
+                        )
+                        .map_err(|_| ExtensionFailure::InvalidState)?;
+                    total = total
+                        .checked_add(weight)
+                        .ok_or(ExtensionFailure::StateEntryLimit)?;
+                    assets
+                        .apply_program_mint(
+                            call.extension_id(),
+                            asset_id,
+                            recipient,
+                            amount,
+                        )
+                        .map_err(|_| ExtensionFailure::InvalidState)?;
+                }
+            }
+        }
+        Ok(total)
     }
 }
 

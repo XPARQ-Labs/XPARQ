@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_common::extension::{
     EXTENSION_STATE_KEY_MAX_SIZE, EXTENSION_STATE_MAX_ENTRIES, EXTENSION_STATE_VALUE_MAX_SIZE,
-    ExtensionCall, ExtensionCommitment, ExtensionContext, ExtensionFailure, ExtensionId,
-    ExtensionJournalEntry, ExtensionStateRead, ExtensionStateRoot, ExtensionStateWrite,
+    ExtensionCall, ExtensionCommitment, ExtensionContext, ExtensionEffect, ExtensionFailure,
+    ExtensionId, ExtensionJournalEntry, ExtensionStateRead, ExtensionStateRoot, ExtensionStateWrite,
     extension_set_root,
 };
 
@@ -26,6 +26,18 @@ pub struct ExtensionRollbackJournal {
     pub previous_root: ExtensionStateRoot,
     pub applied_root: ExtensionStateRoot,
     pub entries: Vec<ExtensionJournalEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedExtensionTransition {
+    pub journal: ExtensionRollbackJournal,
+    pub effects: Vec<ExtensionEffect>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionTransitionPreview {
+    pub created_state_weight: u64,
+    pub effects: Vec<ExtensionEffect>,
 }
 
 impl ExtensionStateSet {
@@ -94,7 +106,7 @@ impl ExtensionStateSet {
         registry: &xparq_extension::ExtensionRegistry,
         context: ExtensionContext,
         call: &ExtensionCall,
-    ) -> Result<ExtensionRollbackJournal, ExtensionFailure> {
+    ) -> Result<AppliedExtensionTransition, ExtensionFailure> {
         self.validate(registry, context, call)?;
 
         let extension_id = call.extension_id();
@@ -106,6 +118,7 @@ impl ExtensionStateSet {
             .unwrap_or_default();
         let previous_root = namespace_root(&previous);
         let mut staged = previous.clone();
+        let mut effects = Vec::new();
         registry.apply(
             context,
             call,
@@ -113,18 +126,22 @@ impl ExtensionStateSet {
                 extension_id,
                 namespace: &mut staged,
                 namespaces: &self.namespaces,
+                effects: &mut effects,
             },
         )?;
         let applied_root = namespace_root(&staged);
 
         let entries = journal_diff(&previous, &staged);
         self.namespaces.insert(extension_id, staged);
-        Ok(ExtensionRollbackJournal {
-            extension_id,
-            namespace_existed,
-            previous_root,
-            applied_root,
-            entries,
+        Ok(AppliedExtensionTransition {
+            journal: ExtensionRollbackJournal {
+                extension_id,
+                namespace_existed,
+                previous_root,
+                applied_root,
+                entries,
+            },
+            effects,
         })
     }
 
@@ -133,15 +150,15 @@ impl ExtensionStateSet {
         registry: &xparq_extension::ExtensionRegistry,
         context: ExtensionContext,
         call: &ExtensionCall,
-    ) -> Result<u64, ExtensionFailure> {
+    ) -> Result<ExtensionTransitionPreview, ExtensionFailure> {
         let before = self.namespace(call.extension_id());
         let existing = before
             .entries()
             .map(|(key, _)| key.to_vec())
             .collect::<BTreeSet<_>>();
         let mut staged = self.clone();
-        staged.apply(registry, context, call)?;
-        staged
+        let applied = staged.apply(registry, context, call)?;
+        let created_state_weight = staged
             .namespace(call.extension_id())
             .entries()
             .filter(|(key, _)| !existing.contains(*key))
@@ -154,7 +171,11 @@ impl ExtensionStateSet {
                 total
                     .checked_add(entry)
                     .ok_or(ExtensionFailure::StateEntryLimit)
-            })
+            })?;
+        Ok(ExtensionTransitionPreview {
+            created_state_weight,
+            effects: applied.effects,
+        })
     }
 
     pub fn rollback(&mut self, journal: ExtensionRollbackJournal) -> Result<(), ExtensionFailure> {
@@ -277,6 +298,7 @@ struct NamespaceWrite<'a> {
     extension_id: ExtensionId,
     namespace: &'a mut Namespace,
     namespaces: &'a BTreeMap<ExtensionId, Namespace>,
+    effects: &'a mut Vec<ExtensionEffect>,
 }
 
 impl ExtensionStateRead for NamespaceWrite<'_> {
@@ -327,6 +349,11 @@ impl ExtensionStateWrite for NamespaceWrite<'_> {
     fn delete(&mut self, key: &[u8]) -> Result<(), ExtensionFailure> {
         validate_key(key)?;
         self.namespace.remove(key);
+        Ok(())
+    }
+
+    fn emit(&mut self, effect: ExtensionEffect) -> Result<(), ExtensionFailure> {
+        self.effects.push(effect);
         Ok(())
     }
 }
@@ -426,14 +453,14 @@ mod tests {
         let initial_root = state.state_root().unwrap();
 
         state.validate(&registry, context, &call).unwrap();
-        let journal = state.apply(&registry, context, &call).unwrap();
+        let applied = state.apply(&registry, context, &call).unwrap();
         assert_eq!(
             state.get(id, b"counter").unwrap(),
             Some(call.payload().to_vec())
         );
         assert_ne!(state.state_root().unwrap(), initial_root);
 
-        state.rollback(journal).unwrap();
+        state.rollback(applied.journal).unwrap();
         assert_eq!(state.get(id, b"counter").unwrap(), None);
         assert_eq!(state.state_root().unwrap(), initial_root);
     }

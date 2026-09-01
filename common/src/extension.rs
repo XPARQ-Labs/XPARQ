@@ -112,6 +112,18 @@ pub struct ExtensionJournalEntry {
     pub previous_value: Option<Vec<u8>>,
 }
 
+/// A native L1 state transition requested by an authenticated extension.
+/// The executing extension ID is supplied separately by the ledger and is
+/// never accepted from guest-controlled data.
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionEffect {
+    MintAsset {
+        asset_id: [u8; 32],
+        recipient: [u8; 20],
+        amount: u128,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExtensionContext {
     pub height: Height,
@@ -145,6 +157,9 @@ pub trait ExtensionStateRead {
 pub trait ExtensionStateWrite: ExtensionStateRead {
     fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), ExtensionFailure>;
     fn delete(&mut self, key: &[u8]) -> Result<(), ExtensionFailure>;
+    fn emit(&mut self, _effect: ExtensionEffect) -> Result<(), ExtensionFailure> {
+        Err(ExtensionFailure::InvalidState)
+    }
 }
 
 pub trait Extension: Send + Sync {

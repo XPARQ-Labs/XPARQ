@@ -213,12 +213,13 @@ mod tests {
         let public_key = seed.public_key();
         let signer = xparq_crypto::address_from_profile_public_key(&public_key);
         let call = xparq_asset::AssetCall::new(
-            xparq_asset::AssetAction::Register {
+            xparq_asset::AssetInstruction::Register {
                 name: "Test Asset".into(),
                 symbol: "TST".into(),
                 decimals: 8,
                 max_supply: 1_000,
                 initial_mint: 100,
+                mint_authority: Some(xparq_asset::AssetAuthority::Account(signer)),
             },
             signer,
             0,

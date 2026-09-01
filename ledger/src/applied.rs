@@ -4,6 +4,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_coin::{Amount, Coin, CoinId, TransactionOutputKind};
 use xparq_consensus::{AuthorizationValidated, RevealedAccountKey, ValidatedTransaction};
 use xparq_crypto::Address;
+use xparq_common::{ExtensionEffect, ExtensionId};
 use xparq_qcash::QCash;
 use xparq_transaction::{
     MergeIntent, OnChainSpendIntent, OutputTarget, RedeemIntent, SpendCommitment, SplitIntent,
@@ -35,6 +36,7 @@ pub enum StateRollbackJournal {
     },
     ExtensionWithFee {
         extension: ExtensionRollbackJournal,
+        assets: Vec<xparq_asset::AssetRollbackJournal>,
         fee: UtxoRollbackJournal,
     },
 }
@@ -117,7 +119,25 @@ impl LedgerState {
                 &extension_transaction.call,
             );
             return match applied {
-                Ok(extension) => Ok(StateRollbackJournal::ExtensionWithFee { extension, fee }),
+                Ok(applied) => {
+                    match self.apply_extension_effects(
+                        extension_transaction.call.extension_id(),
+                        applied.effects,
+                    ) {
+                        Ok(assets) => Ok(StateRollbackJournal::ExtensionWithFee {
+                            extension: applied.journal,
+                            assets,
+                            fee,
+                        }),
+                        Err(error) => {
+                                self.extensions
+                                    .rollback(applied.journal)
+                                    .map_err(SpendStateError::Extension)?;
+                                self.rollback(fee)?;
+                            Err(SpendStateError::Asset(error))
+                        }
+                    }
+                }
                 Err(error) => {
                     self.rollback(fee)?;
                     Err(SpendStateError::Extension(error))
@@ -177,7 +197,14 @@ impl LedgerState {
                 self.assets.rollback(asset);
                 self.rollback(payment)
             }
-            StateRollbackJournal::ExtensionWithFee { extension, fee } => {
+            StateRollbackJournal::ExtensionWithFee {
+                extension,
+                assets,
+                fee,
+            } => {
+                for journal in assets.into_iter().rev() {
+                    self.assets.rollback(journal);
+                }
                 self.extensions
                     .rollback(extension)
                     .map_err(SpendStateError::Extension)?;
@@ -196,6 +223,38 @@ impl LedgerState {
             validated.commitment(),
             block_miner,
         )
+    }
+
+    fn apply_extension_effects(
+        &mut self,
+        program: ExtensionId,
+        effects: Vec<ExtensionEffect>,
+    ) -> Result<Vec<xparq_asset::AssetRollbackJournal>, xparq_asset::AssetError> {
+        let mut journals = Vec::new();
+        for effect in effects {
+            let result = match effect {
+                ExtensionEffect::MintAsset {
+                    asset_id,
+                    recipient,
+                    amount,
+                } => self.assets.apply_program_mint(
+                    program,
+                    xparq_asset::AssetId::from_bytes(asset_id),
+                    Address(recipient),
+                    amount,
+                ),
+            };
+            match result {
+                Ok(journal) => journals.push(journal),
+                Err(error) => {
+                    for journal in journals.into_iter().rev() {
+                        self.assets.rollback(journal);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(journals)
     }
 
     fn apply_validated_withdraw(
@@ -680,6 +739,50 @@ mod tests {
         assert!(state.qcash.get(&input_id).is_some());
         assert_eq!(state.qcash.len(), 1);
         assert_eq!(state.total_burned, Amount::from_zeno(0));
+    }
+
+    #[test]
+    fn failed_program_mint_effect_rolls_back_prior_asset_effects() {
+        let creator = Address([7; xparq_crypto::ADDRESS_SIZE]);
+        let first_recipient = Address([8; xparq_crypto::ADDRESS_SIZE]);
+        let second_recipient = Address([9; xparq_crypto::ADDRESS_SIZE]);
+        let program = ExtensionId::derive("test.asset.minter");
+        let register = xparq_asset::AssetCall::new(
+            xparq_asset::AssetInstruction::Register {
+                name: "Program Asset".into(),
+                symbol: "PRG".into(),
+                decimals: 0,
+                max_supply: 120,
+                initial_mint: 100,
+                mint_authority: Some(xparq_asset::AssetAuthority::Program(program)),
+            },
+            creator,
+            0,
+        );
+        let asset_id = register.asset_id();
+        let mut state = LedgerState::default();
+        state.assets.apply(&register).unwrap();
+
+        let result = state.apply_extension_effects(
+            program,
+            vec![
+                ExtensionEffect::MintAsset {
+                    asset_id: *asset_id.as_bytes(),
+                    recipient: first_recipient.0,
+                    amount: 10,
+                },
+                ExtensionEffect::MintAsset {
+                    asset_id: *asset_id.as_bytes(),
+                    recipient: second_recipient.0,
+                    amount: 20,
+                },
+            ],
+        );
+
+        assert_eq!(result, Err(xparq_asset::AssetError::SupplyOverflow));
+        assert_eq!(state.assets.supply(asset_id), 100);
+        assert_eq!(state.assets.balance(asset_id, first_recipient), 0);
+        assert_eq!(state.assets.balance(asset_id, second_recipient), 0);
     }
 }
 

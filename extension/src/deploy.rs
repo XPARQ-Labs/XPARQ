@@ -12,9 +12,9 @@ use xparq_crypto::{
 
 use crate::{WasmExtensionPackage, wasm_code_hash, wasm_extension_id};
 
-pub const WASM_DEPLOY_EXTENSION_NAME: &str = "xparq.wasm.deploy.v1";
+pub const WASM_DEPLOY_EXTENSION_NAME: &str = "xparq.wasm.deploy";
 pub const WASM_DEPLOY_ACTIVATION_DELAY: u64 = 100;
-const DEPLOY_COMMITMENT_CONTEXT: &str = "XPARQ WASM Deploy Call v1";
+const DEPLOY_COMMITMENT_CONTEXT: &str = "XPARQ WASM Deploy Call";
 const PACKAGE_PREFIX: u8 = b'p';
 const NONCE_PREFIX: u8 = b'n';
 
