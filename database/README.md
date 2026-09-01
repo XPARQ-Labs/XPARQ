@@ -43,7 +43,7 @@ bootstrap mining, testing, and ecosystem distribution:
 
 ```text
 Qxffb9effba63ceec2491c3b31ca00a5c3c6242fda18d213c9
-Qxd6a98a1a699ae28b450fe9d118c9129906bdd70d5ca0fcf7
+Qx51ea9dab233f6b8464a77b40d01bb85b77fcf64ef24069b3
 ```
 
 Balances, emissions, transfers, state burns, and later distributions involving

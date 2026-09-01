@@ -6,14 +6,14 @@ use std::{error::Error, fmt};
 use xparq_coin::{Amount, COIN};
 use xparq_crypto::{Address, Hash, HashDomain, domain_hash};
 
-pub const MIN_BLOCK_EMISSION: u64 = 500_000;
+pub const MIN_BLOCK_EMISSION: u64 = 1_000_000;
 pub const MAX_BLOCK_EMISSION: u64 = 10_000_000;
-pub const BLOCK_EMISSION_START: u64 = 1_000_000;
+pub const BLOCK_EMISSION_START: u64 = 5_000_000;
 pub const BLOCK_EMISSION_STEP: u64 = 100_000;
 
-const_assert!(MIN_BLOCK_EMISSION == COIN / 2);
+const_assert!(MIN_BLOCK_EMISSION == 1 * COIN);
 const_assert!(MAX_BLOCK_EMISSION == 10 * COIN);
-const_assert!(BLOCK_EMISSION_START == 1 * COIN);
+const_assert!(BLOCK_EMISSION_START == 5 * COIN);
 const_assert!(BLOCK_EMISSION_STEP == COIN / 10);
 
 pub const fn initial_block_emission() -> Amount {
