@@ -236,7 +236,7 @@ mod tests {
             payment: AuthorizedAccountIntent {
                 intent: OnChainSpendIntent {
                     sender: Address::ZERO,
-                    inputs: vec![xparq_coin::CoinId::from_bytes([8; 32])],
+                    inputs: vec![xparq_coin::CoinHash::from_bytes([8; 32])],
                     outputs: vec![crate::SpendOutput::block_miner(
                         xparq_coin::Amount::from_zeno(1),
                     )],
@@ -262,14 +262,14 @@ mod tests {
     #[test]
     fn extension_transaction_tag_and_payload_round_trip_are_stable_after_native_asset() {
         let call = ExtensionCall::new(
-            xparq_common::ExtensionId::derive("test-extension"),
+            xparq_common::ExtensionHash::derive("test-extension"),
             b"canonical payload".to_vec(),
         )
         .unwrap();
         let fee = AuthorizedAccountIntent {
             intent: OnChainSpendIntent {
                 sender: Address::ZERO,
-                inputs: vec![xparq_coin::CoinId::from_bytes([9; 32])],
+                inputs: vec![xparq_coin::CoinHash::from_bytes([9; 32])],
                 outputs: vec![crate::SpendOutput::block_miner(
                     xparq_coin::Amount::from_zeno(1),
                 )],

@@ -8,7 +8,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, Tab
 
 const DATABASE_FILE: &str = "xparq.redb";
 // Reset-chain generation 2 stores native Layer-1 asset state.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("canonical_blocks");

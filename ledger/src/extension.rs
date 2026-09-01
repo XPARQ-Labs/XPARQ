@@ -6,8 +6,8 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_common::extension::{
     EXTENSION_STATE_KEY_MAX_SIZE, EXTENSION_STATE_MAX_ENTRIES, EXTENSION_STATE_VALUE_MAX_SIZE,
     ExtensionCall, ExtensionCommitment, ExtensionContext, ExtensionEffect, ExtensionFailure,
-    ExtensionId, ExtensionJournalEntry, ExtensionStateRead, ExtensionStateRoot, ExtensionStateWrite,
-    extension_set_root,
+    ExtensionHash, ExtensionJournalEntry, ExtensionStateRead, ExtensionStateRoot,
+    ExtensionStateWrite, extension_set_root,
 };
 
 const EXTENSION_NAMESPACE_ROOT_CONTEXT: &str = "XPARQ Extension Namespace Root";
@@ -16,12 +16,12 @@ type Namespace = BTreeMap<Vec<u8>, Vec<u8>>;
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExtensionStateSet {
-    namespaces: BTreeMap<ExtensionId, Namespace>,
+    namespaces: BTreeMap<ExtensionHash, Namespace>,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ExtensionRollbackJournal {
-    pub extension_id: ExtensionId,
+    pub extension_id: ExtensionHash,
     pub namespace_existed: bool,
     pub previous_root: ExtensionStateRoot,
     pub applied_root: ExtensionStateRoot,
@@ -41,14 +41,14 @@ pub struct ExtensionTransitionPreview {
 }
 
 impl ExtensionStateSet {
-    pub fn namespace(&self, extension_id: ExtensionId) -> ExtensionNamespace<'_> {
+    pub fn namespace(&self, extension_id: ExtensionHash) -> ExtensionNamespace<'_> {
         ExtensionNamespace {
             extension_id,
             namespace: self.namespaces.get(&extension_id),
             namespaces: &self.namespaces,
         }
     }
-    pub fn namespace_root(&self, extension_id: ExtensionId) -> ExtensionStateRoot {
+    pub fn namespace_root(&self, extension_id: ExtensionHash) -> ExtensionStateRoot {
         self.namespaces
             .get(&extension_id)
             .map_or_else(|| namespace_root(&Namespace::new()), namespace_root)
@@ -71,7 +71,7 @@ impl ExtensionStateSet {
 
     pub fn get(
         &self,
-        extension_id: ExtensionId,
+        extension_id: ExtensionHash,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, ExtensionFailure> {
         validate_key(key)?;
@@ -211,9 +211,9 @@ impl ExtensionStateSet {
 }
 
 pub struct ExtensionNamespace<'a> {
-    extension_id: ExtensionId,
+    extension_id: ExtensionHash,
     namespace: Option<&'a Namespace>,
-    namespaces: &'a BTreeMap<ExtensionId, Namespace>,
+    namespaces: &'a BTreeMap<ExtensionHash, Namespace>,
 }
 
 impl ExtensionStateRead for ExtensionNamespace<'_> {
@@ -233,7 +233,7 @@ impl ExtensionStateRead for ExtensionNamespace<'_> {
 
     fn get_extension(
         &self,
-        extension_id: ExtensionId,
+        extension_id: ExtensionHash,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, ExtensionFailure> {
         validate_key(key)?;
@@ -258,9 +258,9 @@ impl ExtensionNamespace<'_> {
 }
 
 struct NamespaceRead<'a> {
-    extension_id: ExtensionId,
+    extension_id: ExtensionHash,
     namespace: &'a Namespace,
-    namespaces: &'a BTreeMap<ExtensionId, Namespace>,
+    namespaces: &'a BTreeMap<ExtensionHash, Namespace>,
 }
 
 impl ExtensionStateRead for NamespaceRead<'_> {
@@ -279,7 +279,7 @@ impl ExtensionStateRead for NamespaceRead<'_> {
 
     fn get_extension(
         &self,
-        extension_id: ExtensionId,
+        extension_id: ExtensionHash,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, ExtensionFailure> {
         validate_key(key)?;
@@ -295,9 +295,9 @@ impl ExtensionStateRead for NamespaceRead<'_> {
 }
 
 struct NamespaceWrite<'a> {
-    extension_id: ExtensionId,
+    extension_id: ExtensionHash,
     namespace: &'a mut Namespace,
-    namespaces: &'a BTreeMap<ExtensionId, Namespace>,
+    namespaces: &'a BTreeMap<ExtensionHash, Namespace>,
     effects: &'a mut Vec<ExtensionEffect>,
 }
 
@@ -317,7 +317,7 @@ impl ExtensionStateRead for NamespaceWrite<'_> {
 
     fn get_extension(
         &self,
-        extension_id: ExtensionId,
+        extension_id: ExtensionHash,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, ExtensionFailure> {
         validate_key(key)?;
@@ -398,12 +398,12 @@ mod tests {
     use xparq_common::{Extension, Height};
 
     struct CounterExtension {
-        id: ExtensionId,
+        id: ExtensionHash,
         fail_apply: bool,
     }
 
     impl Extension for CounterExtension {
-        fn id(&self) -> ExtensionId {
+        fn id(&self) -> ExtensionHash {
             self.id
         }
 
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn validate_apply_store_and_rollback_are_deterministic() {
-        let id = ExtensionId::derive("counter");
+        let id = ExtensionHash::derive("counter");
         let extension = CounterExtension {
             id,
             fail_apply: false,
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn failed_apply_does_not_commit_staged_extension_state() {
-        let id = ExtensionId::derive("counter");
+        let id = ExtensionHash::derive("counter");
         let extension = CounterExtension {
             id,
             fail_apply: true,

@@ -1,36 +1,51 @@
 use std::{error::Error, fmt};
 
 use xparq_coin::Amount;
-use xparq_crypto::{ADDRESS_SIZE, QCASH_PUBLIC_KEY_SIZE};
+use xparq_crypto::{ADDRESS_SIZE, ProfilePublicKey, QCASH_PUBLIC_KEY_SIZE};
 use xparq_transaction::{OutputTarget, SpendOutput};
 
-pub const STATE_BURN_ALGORITHM: &str = "xparq-state-creation-burn-emission-bucket-v2";
-pub const STATE_BURN_EMISSION_MULTIPLIER: u64 = 2;
+pub const STATE_BURN_ALGORITHM: &str = "xparq-canonical-state-creation-burn-v4";
+pub const STATE_BURN_RATE_ZENO_PER_WEIGHT: u64 = 1;
+/// Canonical encoded size of an empty non-genesis block with one emission.
+pub const BLOCK_STATE_WEIGHT: u64 = 153;
 
-pub const COIN_UTXO_STATE_WEIGHT: u64 =
-    (xparq_coin::COIN_ID_SIZE + core::mem::size_of::<u64>() + ADDRESS_SIZE) as u64;
+pub const COIN_UTXO_STATE_WEIGHT: u64 = (xparq_coin::COIN_HASH_SIZE
+    + core::mem::size_of::<u64>()
+    + 1
+    + xparq_common::EXTENSION_HASH_SIZE) as u64;
 pub const QCASH_UTXO_STATE_WEIGHT: u64 =
-    (xparq_coin::COIN_ID_SIZE + core::mem::size_of::<u64>() + QCASH_PUBLIC_KEY_SIZE) as u64;
-pub const fn state_burn_rate_for_emission(emission: Amount) -> u64 {
-    (emission.as_zeno() / xparq_coin::COIN) * STATE_BURN_EMISSION_MULTIPLIER
-}
+    (xparq_coin::COIN_HASH_SIZE + core::mem::size_of::<u64>() + QCASH_PUBLIC_KEY_SIZE) as u64;
+pub const EMISSION_UTXO_STATE_BURN: Amount =
+    Amount::from_zeno(COIN_UTXO_STATE_WEIGHT * STATE_BURN_RATE_ZENO_PER_WEIGHT);
+pub const BLOCK_STATE_BURN: Amount =
+    Amount::from_zeno(BLOCK_STATE_WEIGHT * STATE_BURN_RATE_ZENO_PER_WEIGHT);
+pub const MINER_CREATED_STATE_BURN: Amount = Amount::from_zeno(
+    (BLOCK_STATE_WEIGHT + COIN_UTXO_STATE_WEIGHT) * STATE_BURN_RATE_ZENO_PER_WEIGHT,
+);
 
-pub fn emission_utxo_state_burn(emission: Amount) -> Result<Amount, StateBurnError> {
-    let burn = COIN_UTXO_STATE_WEIGHT
-        .checked_mul(state_burn_rate_for_emission(emission))
-        .ok_or(StateBurnError::AmountOverflow)?;
-    Ok(Amount::from_zeno(burn))
+pub fn profile_key_state_weight(public_key: &ProfilePublicKey) -> Result<u64, StateBurnError> {
+    let encoded_value = 1_usize
+        .checked_add(core::mem::size_of::<u32>())
+        .and_then(|weight| weight.checked_add(public_key.bytes.len()))
+        .ok_or(StateBurnError::WeightOverflow)?;
+    u64::try_from(
+        ADDRESS_SIZE
+            .checked_add(encoded_value)
+            .ok_or(StateBurnError::WeightOverflow)?,
+    )
+    .map_err(|_| StateBurnError::WeightOverflow)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StateTransitionWeight {
     pub created_coin_utxos: u64,
     pub created_qcash_utxos: u64,
+    pub created_account_key_weight: u64,
     pub extension_created_weight: u64,
 }
 
 impl StateTransitionWeight {
-    pub fn required_burn(self, emission: Amount) -> Result<Amount, StateBurnError> {
+    pub fn required_burn(self) -> Result<Amount, StateBurnError> {
         let created = self
             .created_coin_utxos
             .checked_mul(COIN_UTXO_STATE_WEIGHT)
@@ -39,10 +54,11 @@ impl StateTransitionWeight {
                     .checked_mul(QCASH_UTXO_STATE_WEIGHT)
                     .and_then(|qcash| weight.checked_add(qcash))
             })
+            .and_then(|weight| weight.checked_add(self.created_account_key_weight))
             .and_then(|weight| weight.checked_add(self.extension_created_weight))
             .ok_or(StateBurnError::WeightOverflow)?;
         let burn = created
-            .checked_mul(state_burn_rate_for_emission(emission))
+            .checked_mul(STATE_BURN_RATE_ZENO_PER_WEIGHT)
             .ok_or(StateBurnError::AmountOverflow)?;
         Ok(Amount::from_zeno(burn))
     }
@@ -110,14 +126,13 @@ mod tests {
 
     #[test]
     fn charges_every_created_state_entry_without_input_credit() {
-        let emission = Amount::from_zeno(5 * xparq_coin::COIN);
         let replacement = StateTransitionWeight {
             created_coin_utxos: 1,
             ..StateTransitionWeight::default()
         };
         assert_eq!(
-            replacement.required_burn(emission),
-            Ok(Amount::from_zeno(10 * COIN_UTXO_STATE_WEIGHT))
+            replacement.required_burn(),
+            Ok(Amount::from_zeno(COIN_UTXO_STATE_WEIGHT))
         );
 
         let two_outputs = StateTransitionWeight {
@@ -125,30 +140,28 @@ mod tests {
             ..StateTransitionWeight::default()
         };
         assert_eq!(
-            two_outputs.required_burn(emission),
-            Ok(Amount::from_zeno(20 * QCASH_UTXO_STATE_WEIGHT))
+            two_outputs.required_burn(),
+            Ok(Amount::from_zeno(2 * QCASH_UTXO_STATE_WEIGHT))
         );
     }
 
     #[test]
-    fn emission_floor_selects_two_zeno_buckets() {
-        for whole in 1..10_u64 {
-            let rate = whole * STATE_BURN_EMISSION_MULTIPLIER;
-            assert_eq!(
-                state_burn_rate_for_emission(Amount::from_zeno(whole * xparq_coin::COIN)),
-                rate
-            );
-            assert_eq!(
-                state_burn_rate_for_emission(Amount::from_zeno(
-                    whole * xparq_coin::COIN + 9 * xparq_coin::COIN / 10,
-                )),
-                rate
-            );
-        }
+    fn profile_key_weight_counts_map_key_and_encoded_value() {
+        let key = ProfilePublicKey {
+            profile: xparq_crypto::SignatureProfile::MlDsa44,
+            bytes: vec![7; 32],
+        };
         assert_eq!(
-            state_burn_rate_for_emission(Amount::from_zeno(10 * xparq_coin::COIN)),
-            20
+            profile_key_state_weight(&key),
+            Ok((ADDRESS_SIZE + 1 + 4 + 32) as u64)
         );
+    }
+
+    #[test]
+    fn miner_burn_charges_block_record_and_emission_utxo() {
+        assert_eq!(BLOCK_STATE_BURN, Amount::from_zeno(153));
+        assert_eq!(EMISSION_UTXO_STATE_BURN, Amount::from_zeno(73));
+        assert_eq!(MINER_CREATED_STATE_BURN, Amount::from_zeno(226));
     }
 
     #[test]

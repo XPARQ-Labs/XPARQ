@@ -181,11 +181,11 @@ impl fmt::Debug for QCashFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xparq_coin::{Amount, COIN, CoinId};
+    use xparq_coin::{Amount, COIN, CoinHash};
 
     fn qcash(amount: u64) -> QCash {
         QCash::new(
-            CoinId::from_bytes([0xab; CoinId::SIZE]),
+            CoinHash::from_bytes([0xab; CoinHash::SIZE]),
             Amount::from_zeno(amount),
         )
     }

@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, error::Error, fmt};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_blockchain::{Chain, ChainError, Height};
-use xparq_coin::{Coin, CoinId};
+use xparq_coin::{Coin, CoinHash};
 use xparq_common::{ExtensionContext, ExtensionFailure, ExtensionStateRoot};
 use xparq_consensus::{
     ApplyBlockState, CoinInputState, ConsensusError, QCashInputState, TransactionConsensusError,
@@ -11,7 +11,9 @@ use xparq_consensus::{
 use xparq_crypto::{Address, BlockHash, ProfilePublicKey};
 use xparq_transaction::AuthorizedTransaction;
 
-use crate::{CoinUtxo, LedgerState, SpendStateError, StateRollbackJournal, UtxoRollbackJournal};
+use crate::{
+    CoinOwner, CoinUtxo, LedgerState, SpendStateError, StateRollbackJournal, UtxoRollbackJournal,
+};
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ledger {
@@ -71,17 +73,37 @@ impl Ledger {
                                 asset_id,
                                 recipient,
                                 amount,
-                            } => staged
-                                .assets
-                                .apply_program_mint(
-                                    transaction.call.extension_id(),
-                                    xparq_asset::AssetId::from_bytes(asset_id),
-                                    Address(recipient),
-                                    amount,
-                                )
-                                .map_err(|error| {
-                                    LedgerError::Spend(SpendStateError::Asset(error))
-                                })?,
+                            } => {
+                                staged
+                                    .assets
+                                    .apply_program_mint(
+                                        transaction.call.extension_id(),
+                                        xparq_asset::AssetHash::from_bytes(asset_id),
+                                        Address(recipient),
+                                        amount,
+                                    )
+                                    .map_err(|error| {
+                                        LedgerError::Spend(SpendStateError::Asset(error))
+                                    })?;
+                            }
+                            xparq_common::ExtensionEffect::TransferAsset {
+                                asset_id,
+                                recipient,
+                                amount,
+                            } => {
+                                staged
+                                    .assets
+                                    .apply_program_transfer(
+                                        transaction.call.extension_id(),
+                                        xparq_asset::AssetHash::from_bytes(asset_id),
+                                        Address(recipient),
+                                        amount,
+                                    )
+                                    .map_err(|error| {
+                                        LedgerError::Spend(SpendStateError::Asset(error))
+                                    })?;
+                            }
+                            xparq_common::ExtensionEffect::TransferCoin { .. } => {}
                         };
                     }
                 }
@@ -137,16 +159,11 @@ impl Ledger {
         };
         let mut staged_state = self.state.clone();
         let mut block_journals = Vec::new();
-        let current_emission = validated
-            .emission()
-            .map_or_else(xparq_consensus::initial_block_emission, |emission| {
-                emission.subsidy()
-            });
         if let Some(emission) = validated.emission() {
-            let id = CoinId::from_emission_origin(&emission.origin().0);
+            let id = CoinHash::from_emission_origin(&emission.origin().0);
             staged_state.coins.insert(CoinUtxo {
                 coin: Coin::new(id, emission.miner_emission()),
-                owner: emission.recipient(),
+                owner: emission.recipient().into(),
             })?;
             let mut journal = UtxoRollbackJournal {
                 created_coin_ids: vec![id],
@@ -157,13 +174,8 @@ impl Ledger {
         }
 
         for transaction in block.transactions() {
-            let authorized = validate_transaction(
-                transaction.clone(),
-                chain_context,
-                height.0,
-                current_emission,
-                &staged_state,
-            )?;
+            let authorized =
+                validate_transaction(transaction.clone(), chain_context, height.0, &staged_state)?;
             let journal = staged_state.apply_validated_transaction(&authorized, height, miner)?;
             block_journals.push(journal);
         }
@@ -253,14 +265,17 @@ impl From<crate::UtxoError> for LedgerError {
 }
 
 impl TransactionStateView for LedgerState {
-    fn coin(&self, id: CoinId) -> Option<CoinInputState> {
+    fn coin(&self, id: CoinHash) -> Option<CoinInputState> {
         self.coins.get(&id).map(|utxo| CoinInputState {
             amount: utxo.coin.amount,
-            owner: utxo.owner,
+            owner: match utxo.owner {
+                CoinOwner::Account(address) => Some(address),
+                CoinOwner::Extension(_) => None,
+            },
         })
     }
 
-    fn qcash(&self, id: CoinId) -> Option<QCashInputState> {
+    fn qcash(&self, id: CoinHash) -> Option<QCashInputState> {
         self.qcash.get(&id).map(|utxo| QCashInputState {
             amount: utxo.coin.amount,
             public_key: utxo.public_key,
@@ -307,7 +322,7 @@ impl LedgerState {
                     recipient,
                     amount,
                 } => {
-                    let asset_id = xparq_asset::AssetId::from_bytes(asset_id);
+                    let asset_id = xparq_asset::AssetHash::from_bytes(asset_id);
                     let recipient = Address(recipient);
                     let weight = assets
                         .program_mint_created_state_weight(
@@ -321,13 +336,52 @@ impl LedgerState {
                         .checked_add(weight)
                         .ok_or(ExtensionFailure::StateEntryLimit)?;
                     assets
-                        .apply_program_mint(
+                        .apply_program_mint(call.extension_id(), asset_id, recipient, amount)
+                        .map_err(|_| ExtensionFailure::InvalidState)?;
+                }
+                xparq_common::ExtensionEffect::TransferAsset {
+                    asset_id,
+                    recipient,
+                    amount,
+                } => {
+                    let asset_id = xparq_asset::AssetHash::from_bytes(asset_id);
+                    let recipient = Address(recipient);
+                    let weight = assets
+                        .program_transfer_created_state_weight(
                             call.extension_id(),
                             asset_id,
                             recipient,
                             amount,
                         )
                         .map_err(|_| ExtensionFailure::InvalidState)?;
+                    total = total
+                        .checked_add(weight)
+                        .ok_or(ExtensionFailure::StateEntryLimit)?;
+                    assets
+                        .apply_program_transfer(call.extension_id(), asset_id, recipient, amount)
+                        .map_err(|_| ExtensionFailure::InvalidState)?;
+                }
+                xparq_common::ExtensionEffect::TransferCoin { amount, .. } => {
+                    if amount == 0 {
+                        return Err(ExtensionFailure::InvalidState);
+                    }
+                    let owner = crate::CoinOwner::Extension(call.extension_id());
+                    let mut held = 0_u64;
+                    for utxo in self.coins.owned_by(owner) {
+                        held = held
+                            .checked_add(utxo.coin.amount.as_zeno())
+                            .ok_or(ExtensionFailure::InvalidState)?;
+                        if held >= amount {
+                            break;
+                        }
+                    }
+                    if held < amount {
+                        return Err(ExtensionFailure::InvalidState);
+                    }
+                    let outputs = if held == amount { 1 } else { 2 };
+                    total = total
+                        .checked_add(outputs * xparq_consensus::COIN_UTXO_STATE_WEIGHT)
+                        .ok_or(ExtensionFailure::StateEntryLimit)?;
                 }
             }
         }

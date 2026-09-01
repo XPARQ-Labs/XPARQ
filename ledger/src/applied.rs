@@ -1,8 +1,8 @@
 use std::{error::Error, fmt};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use xparq_coin::{Amount, Coin, CoinId, TransactionOutputKind};
-use xparq_common::{ExtensionEffect, ExtensionId};
+use xparq_coin::{Amount, Coin, CoinHash, TransactionOutputKind};
+use xparq_common::{ExtensionEffect, ExtensionHash};
 use xparq_consensus::{AuthorizationValidated, RevealedAccountKey, ValidatedTransaction};
 use xparq_crypto::Address;
 use xparq_qcash::QCash;
@@ -12,8 +12,8 @@ use xparq_transaction::{
 };
 
 use crate::{
-    AccountKeyRegistry, CoinUtxo, CoinUtxoSet, ExtensionRollbackJournal, ExtensionStateSet,
-    QCashUtxo, QCashUtxoSet, UtxoError, UtxoRollbackJournal,
+    AccountKeyRegistry, CoinOwner, CoinUtxo, CoinUtxoSet, ExtensionRollbackJournal,
+    ExtensionStateSet, QCashUtxo, QCashUtxoSet, UtxoError, UtxoRollbackJournal,
 };
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Default, PartialEq, Eq)]
@@ -122,19 +122,24 @@ impl LedgerState {
                 Ok(applied) => {
                     match self.apply_extension_effects(
                         extension_transaction.call.extension_id(),
+                        extension_transaction.fee.commitment(),
                         applied.effects,
                     ) {
-                        Ok(assets) => Ok(StateRollbackJournal::ExtensionWithFee {
-                            extension: applied.journal,
-                            assets,
-                            fee,
-                        }),
+                        Ok((assets, effects)) => {
+                            fee.consumed_coins.extend(effects.consumed_coins);
+                            fee.created_coin_ids.extend(effects.created_coin_ids);
+                            Ok(StateRollbackJournal::ExtensionWithFee {
+                                extension: applied.journal,
+                                assets,
+                                fee,
+                            })
+                        }
                         Err(error) => {
-                                self.extensions
-                                    .rollback(applied.journal)
-                                    .map_err(SpendStateError::Extension)?;
-                                self.rollback(fee)?;
-                            Err(SpendStateError::Asset(error))
+                            self.extensions
+                                .rollback(applied.journal)
+                                .map_err(SpendStateError::Extension)?;
+                            self.rollback(fee)?;
+                            Err(error)
                         }
                     }
                 }
@@ -227,34 +232,125 @@ impl LedgerState {
 
     fn apply_extension_effects(
         &mut self,
-        program: ExtensionId,
+        program: ExtensionHash,
+        commitment: SpendCommitment,
         effects: Vec<ExtensionEffect>,
-    ) -> Result<Vec<xparq_asset::AssetRollbackJournal>, xparq_asset::AssetError> {
+    ) -> Result<(Vec<xparq_asset::AssetRollbackJournal>, UtxoRollbackJournal), SpendStateError>
+    {
         let mut journals = Vec::new();
-        for effect in effects {
+        let mut coins = UtxoRollbackJournal::default();
+        for (index, effect) in effects.into_iter().enumerate() {
             let result = match effect {
                 ExtensionEffect::MintAsset {
                     asset_id,
                     recipient,
                     amount,
-                } => self.assets.apply_program_mint(
-                    program,
-                    xparq_asset::AssetId::from_bytes(asset_id),
-                    Address(recipient),
+                } => self
+                    .assets
+                    .apply_program_mint(
+                        program,
+                        xparq_asset::AssetHash::from_bytes(asset_id),
+                        Address(recipient),
+                        amount,
+                    )
+                    .map(Some)
+                    .map_err(SpendStateError::Asset),
+                ExtensionEffect::TransferAsset {
+                    asset_id,
+                    recipient,
                     amount,
-                ),
+                } => self
+                    .assets
+                    .apply_program_transfer(
+                        program,
+                        xparq_asset::AssetHash::from_bytes(asset_id),
+                        Address(recipient),
+                        amount,
+                    )
+                    .map(Some)
+                    .map_err(SpendStateError::Asset),
+                ExtensionEffect::TransferCoin { recipient, amount } => self
+                    .apply_program_coin_transfer(
+                        program,
+                        Address(recipient),
+                        Amount::from_zeno(amount),
+                        commitment,
+                        index,
+                        &mut coins,
+                    )
+                    .map(|()| None),
             };
             match result {
-                Ok(journal) => journals.push(journal),
+                Ok(Some(journal)) => journals.push(journal),
+                Ok(None) => {}
                 Err(error) => {
                     for journal in journals.into_iter().rev() {
                         self.assets.rollback(journal);
                     }
+                    self.rollback(coins)?;
                     return Err(error);
                 }
             }
         }
-        Ok(journals)
+        Ok((journals, coins))
+    }
+
+    fn apply_program_coin_transfer(
+        &mut self,
+        program: ExtensionHash,
+        recipient: Address,
+        amount: Amount,
+        commitment: SpendCommitment,
+        effect_index: usize,
+        journal: &mut UtxoRollbackJournal,
+    ) -> Result<(), SpendStateError> {
+        if amount.as_zeno() == 0 {
+            return Err(SpendStateError::InvalidExtensionAmount);
+        }
+        let owner = CoinOwner::Extension(program);
+        let mut selected = Vec::new();
+        let mut total = Amount::from_zeno(0);
+        for utxo in self.coins.owned_by(owner) {
+            selected.push(utxo.coin.id);
+            total = total
+                .checked_add(utxo.coin.amount)
+                .ok_or(SpendStateError::AmountOverflow)?;
+            if total.as_zeno() >= amount.as_zeno() {
+                break;
+            }
+        }
+        if total.as_zeno() < amount.as_zeno() {
+            return Err(SpendStateError::InsufficientExtensionCoin);
+        }
+        for id in selected {
+            journal.consumed_coins.push(self.coins.consume(&id)?);
+        }
+        let output = output_id(
+            TransactionOutputKind::ExtensionCoinOutput,
+            commitment,
+            effect_index,
+        )?;
+        self.coins.insert(CoinUtxo {
+            coin: Coin::new(output, amount),
+            owner: recipient.into(),
+        })?;
+        journal.created_coin_ids.push(output);
+        let change = total
+            .checked_sub(amount)
+            .ok_or(SpendStateError::AmountOverflow)?;
+        if change.as_zeno() != 0 {
+            let change_id = output_id(
+                TransactionOutputKind::ExtensionCoinChange,
+                commitment,
+                effect_index,
+            )?;
+            self.coins.insert(CoinUtxo {
+                coin: Coin::new(change_id, change),
+                owner,
+            })?;
+            journal.created_coin_ids.push(change_id);
+        }
+        Ok(())
     }
 
     fn apply_validated_withdraw(
@@ -283,7 +379,7 @@ impl LedgerState {
                 let id = output_id(TransactionOutputKind::AccountSpendOutput, commitment, index)?;
                 self.coins.insert(CoinUtxo {
                     coin: Coin::new(id, output.amount),
-                    owner,
+                    owner: owner.into(),
                 })?;
                 journal.created_coin_ids.push(id);
             }
@@ -319,7 +415,7 @@ impl LedgerState {
                 let id = output_id(TransactionOutputKind::WithdrawChange, commitment, index)?;
                 self.coins.insert(CoinUtxo {
                     coin: Coin::new(id, output.amount),
-                    owner,
+                    owner: owner.into(),
                 })?;
                 journal.created_coin_ids.push(id);
             }
@@ -533,7 +629,7 @@ impl LedgerState {
             let id = output_id(kind, commitment, index)?;
             self.coins.insert(CoinUtxo {
                 coin: Coin::new(id, output.amount),
-                owner,
+                owner: owner.into(),
             })?;
             journal.created_coin_ids.push(id);
         }
@@ -562,11 +658,12 @@ fn revealed_account_key(
     }
 }
 
-fn resolve_target(target: OutputTarget, block_miner: Address) -> Option<Address> {
+fn resolve_target(target: OutputTarget, block_miner: Address) -> Option<CoinOwner> {
     match target {
-        OutputTarget::Address(address) => Some(address),
-        OutputTarget::BlockMiner => Some(block_miner),
+        OutputTarget::Address(address) => Some(CoinOwner::Account(address)),
+        OutputTarget::BlockMiner => Some(CoinOwner::Account(block_miner)),
         OutputTarget::Burn => None,
+        OutputTarget::Extension(extension) => Some(CoinOwner::Extension(extension)),
     }
 }
 
@@ -574,9 +671,9 @@ fn output_id(
     kind: TransactionOutputKind,
     commitment: SpendCommitment,
     index: usize,
-) -> Result<CoinId, SpendStateError> {
+) -> Result<CoinHash, SpendStateError> {
     let index = u32::try_from(index).map_err(|_| SpendStateError::OutputIndexOverflow)?;
-    Ok(CoinId::from_transaction_output(
+    Ok(CoinHash::from_transaction_output(
         kind,
         commitment.as_bytes(),
         index,
@@ -587,17 +684,17 @@ fn output_id(
 pub fn withdraw_qcash_output_id(
     commitment: SpendCommitment,
     index: usize,
-) -> Result<CoinId, SpendStateError> {
+) -> Result<CoinHash, SpendStateError> {
     output_id(TransactionOutputKind::WithdrawQCash, commitment, index)
 }
 
 /// Derives the canonical QCash coin identifier created by a merge.
-pub fn merge_qcash_output_id(commitment: SpendCommitment) -> Result<CoinId, SpendStateError> {
+pub fn merge_qcash_output_id(commitment: SpendCommitment) -> Result<CoinHash, SpendStateError> {
     output_id(TransactionOutputKind::MergeQCash, commitment, 0)
 }
 
 /// Derives the canonical public miner-output identifier created by a merge.
-pub fn merge_miner_output_id(commitment: SpendCommitment) -> Result<CoinId, SpendStateError> {
+pub fn merge_miner_output_id(commitment: SpendCommitment) -> Result<CoinHash, SpendStateError> {
     output_id(TransactionOutputKind::MergePublicOutput, commitment, 0)
 }
 
@@ -605,7 +702,7 @@ pub fn merge_miner_output_id(commitment: SpendCommitment) -> Result<CoinId, Spen
 pub fn redeem_qcash_change_output_id(
     commitment: SpendCommitment,
     index: usize,
-) -> Result<CoinId, SpendStateError> {
+) -> Result<CoinHash, SpendStateError> {
     output_id(TransactionOutputKind::RedeemQCashChange, commitment, index)
 }
 
@@ -613,12 +710,12 @@ pub fn redeem_qcash_change_output_id(
 pub fn split_qcash_output_id(
     commitment: SpendCommitment,
     index: usize,
-) -> Result<CoinId, SpendStateError> {
+) -> Result<CoinHash, SpendStateError> {
     output_id(TransactionOutputKind::SplitQCash, commitment, index)
 }
 
 /// Derives the canonical public miner-output identifier created by a split.
-pub fn split_miner_output_id(commitment: SpendCommitment) -> Result<CoinId, SpendStateError> {
+pub fn split_miner_output_id(commitment: SpendCommitment) -> Result<CoinHash, SpendStateError> {
     output_id(TransactionOutputKind::SplitPublicOutput, commitment, 0)
 }
 
@@ -630,6 +727,9 @@ pub enum SpendStateError {
     BurnUnderflow,
     Asset(xparq_asset::AssetError),
     Extension(xparq_common::ExtensionFailure),
+    InvalidExtensionAmount,
+    InsufficientExtensionCoin,
+    AmountOverflow,
 }
 
 #[cfg(test)]
@@ -645,9 +745,7 @@ mod tests {
     fn protocol_burn_is_rolled_back_with_its_created_utxo() {
         let mut state = LedgerState::default();
         let mut journal = UtxoRollbackJournal::default();
-        let burned =
-            xparq_consensus::emission_utxo_state_burn(xparq_consensus::initial_block_emission())
-                .unwrap();
+        let burned = xparq_consensus::MINER_CREATED_STATE_BURN;
 
         state.record_protocol_burn(burned, &mut journal).unwrap();
         assert_eq!(state.total_burned, burned);
@@ -657,10 +755,10 @@ mod tests {
 
     #[test]
     fn failed_in_place_transition_restores_consumed_inputs() {
-        let id = CoinId::from_bytes([0x51; CoinId::SIZE]);
+        let id = CoinHash::from_bytes([0x51; CoinHash::SIZE]);
         let utxo = CoinUtxo {
             coin: Coin::new(id, xparq_coin::Amount::from_zeno(7)),
-            owner: Address::ZERO,
+            owner: Address::ZERO.into(),
         };
         let mut state = LedgerState::default();
         state.coins.insert(utxo).unwrap();
@@ -682,7 +780,7 @@ mod tests {
 
     #[test]
     fn signed_split_consumes_input_and_rolls_back_atomically() {
-        let input_id = CoinId::from_bytes([0x52; CoinId::SIZE]);
+        let input_id = CoinHash::from_bytes([0x52; CoinHash::SIZE]);
         let seed = xparq_qcash::QCashSigningSeed::from_bytes([3; 32]);
         let mut state = LedgerState::default();
         state
@@ -701,13 +799,13 @@ mod tests {
                 ),
                 QCashOutput::new(
                     xparq_coin::Amount::from_zeno(
-                        29_500 - 20 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT,
+                        29_500 - 2 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT,
                     ),
                     xparq_crypto::QCashPublicKey([5; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
                 ),
             ],
             vec![xparq_transaction::SpendOutput::burn(
-                xparq_coin::Amount::from_zeno(20 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT),
+                xparq_coin::Amount::from_zeno(2 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT),
             )],
         )
         .unwrap();
@@ -724,7 +822,6 @@ mod tests {
             AuthorizedTransaction::Split(Box::new(signed)),
             chain,
             10,
-            xparq_consensus::initial_block_emission(),
             &state,
         )
         .unwrap();
@@ -736,7 +833,7 @@ mod tests {
         assert_eq!(state.qcash.len(), 2);
         assert_eq!(
             state.total_burned,
-            Amount::from_zeno(20 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT)
+            Amount::from_zeno(2 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT)
         );
         state.rollback_state(journal).unwrap();
         assert!(state.qcash.get(&input_id).is_some());
@@ -749,7 +846,7 @@ mod tests {
         let creator = Address([7; xparq_crypto::ADDRESS_SIZE]);
         let first_recipient = Address([8; xparq_crypto::ADDRESS_SIZE]);
         let second_recipient = Address([9; xparq_crypto::ADDRESS_SIZE]);
-        let program = ExtensionId::derive("test.asset.minter");
+        let program = ExtensionHash::derive("test.asset.minter");
         let register = xparq_asset::AssetCall::new(
             xparq_asset::AssetInstruction::Register {
                 name: "Program Asset".into(),
@@ -768,6 +865,7 @@ mod tests {
 
         let result = state.apply_extension_effects(
             program,
+            SpendCommitment::from_bytes([0x44; 32]),
             vec![
                 ExtensionEffect::MintAsset {
                     asset_id: *asset_id.as_bytes(),
@@ -782,10 +880,64 @@ mod tests {
             ],
         );
 
-        assert_eq!(result, Err(xparq_asset::AssetError::SupplyOverflow));
+        assert_eq!(
+            result,
+            Err(SpendStateError::Asset(
+                xparq_asset::AssetError::SupplyOverflow
+            ))
+        );
         assert_eq!(state.assets.supply(asset_id), 100);
         assert_eq!(state.assets.balance(asset_id, first_recipient), 0);
         assert_eq!(state.assets.balance(asset_id, second_recipient), 0);
+    }
+
+    #[test]
+    fn extension_coin_transfer_creates_account_output_and_extension_change() {
+        let program = ExtensionHash::derive("test.coin.vault");
+        let recipient = Address([0x31; xparq_crypto::ADDRESS_SIZE]);
+        let deposit_id = CoinHash::from_bytes([0x32; CoinHash::SIZE]);
+        let mut state = LedgerState::default();
+        state
+            .coins
+            .insert(CoinUtxo {
+                coin: Coin::new(deposit_id, Amount::from_zeno(25)),
+                owner: CoinOwner::Extension(program),
+            })
+            .unwrap();
+
+        let (assets, journal) = state
+            .apply_extension_effects(
+                program,
+                SpendCommitment::from_bytes([0x33; 32]),
+                vec![ExtensionEffect::TransferCoin {
+                    recipient: recipient.0,
+                    amount: 10,
+                }],
+            )
+            .unwrap();
+
+        assert!(assets.is_empty());
+        assert_eq!(
+            state
+                .coins
+                .owned_by(CoinOwner::Account(recipient))
+                .map(|utxo| utxo.coin.amount.as_zeno())
+                .sum::<u64>(),
+            10
+        );
+        assert_eq!(
+            state
+                .coins
+                .owned_by(CoinOwner::Extension(program))
+                .map(|utxo| utxo.coin.amount.as_zeno())
+                .sum::<u64>(),
+            15
+        );
+        state.rollback(journal).unwrap();
+        assert_eq!(
+            state.coins.get(&deposit_id).unwrap().coin.amount.as_zeno(),
+            25
+        );
     }
 }
 
@@ -798,6 +950,13 @@ impl fmt::Display for SpendStateError {
             Self::BurnUnderflow => formatter.write_str("total burned amount underflow"),
             Self::Asset(error) => write!(formatter, "native asset transition failed: {error}"),
             Self::Extension(error) => write!(formatter, "extension transition failed: {error:?}"),
+            Self::InvalidExtensionAmount => {
+                formatter.write_str("extension transfer amount is zero")
+            }
+            Self::InsufficientExtensionCoin => {
+                formatter.write_str("extension coin balance is insufficient")
+            }
+            Self::AmountOverflow => formatter.write_str("extension coin amount overflow"),
         }
     }
 }

@@ -15,7 +15,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use wasmi::{Caller, CompilationMode, Config, Engine, ExternType, Linker, Memory, Module, Store};
 use xparq_common::extension::{
     EXTENSION_STATE_KEY_MAX_SIZE, EXTENSION_STATE_VALUE_MAX_SIZE, Extension, ExtensionCall,
-    ExtensionContext, ExtensionEffect, ExtensionFailure, ExtensionId, ExtensionStateRead,
+    ExtensionContext, ExtensionEffect, ExtensionFailure, ExtensionHash, ExtensionStateRead,
     ExtensionStateWrite,
 };
 use xparq_common::{Height, canonical_bytes};
@@ -24,7 +24,7 @@ use xparq_crypto::{
     address_from_profile_public_key, profile_verify,
 };
 
-pub const WASM_ABI_VERSION: u32 = 1;
+pub const WASM_ABI_VERSION: u32 = 2;
 pub const WASM_CODE_MAX_SIZE: usize = 2 * 1024 * 1024;
 pub const WASM_PACKAGE_MAX_SIZE: usize = WASM_CODE_MAX_SIZE + 4096;
 pub const WASM_MEMORY_MAX_PAGES: u32 = 16;
@@ -35,7 +35,7 @@ pub const WASM_EFFECT_MAX_COUNT: usize = 1_024;
 pub const WASM_APP_CALL_ACTIVATION_HEIGHT: Height = Height(0);
 
 const WASM_CODE_HASH_CONTEXT: &str = "XPARQ WASM Extension Code";
-const WASM_EXTENSION_ID_CONTEXT: &str = "XPARQ WASM Extension Id";
+const WASM_EXTENSION_HASH_CONTEXT: &str = "XPARQ WASM Extension Id";
 const WASM_NAME_MAX_SIZE: usize = 64;
 const WASM_APP_COMMITMENT_CONTEXT: &str = "XPARQ WASM Application Call";
 const WASM_APP_NONCE_PREFIX: &[u8] = b"\xffxparq:wasm-app-nonce:";
@@ -55,7 +55,7 @@ pub struct WasmAppCall {
 #[derive(BorshSerialize)]
 struct UnsignedWasmAppCall<'a> {
     chain_id: [u8; 32],
-    extension_id: ExtensionId,
+    extension_id: ExtensionHash,
     payload: &'a [u8],
     signer: Address,
     nonce: u64,
@@ -68,7 +68,7 @@ impl WasmAppCall {
 
     pub fn sign(
         chain_id: [u8; 32],
-        extension_id: ExtensionId,
+        extension_id: ExtensionHash,
         payload: Vec<u8>,
         nonce: u64,
         signing_seed: &ProfileSigningSeed,
@@ -88,7 +88,7 @@ impl WasmAppCall {
 
     pub fn into_extension_call(
         self,
-        extension_id: ExtensionId,
+        extension_id: ExtensionHash,
     ) -> Result<ExtensionCall, ExtensionFailure> {
         let payload = canonical_bytes(&self).map_err(|_| ExtensionFailure::InvalidPayload)?;
         ExtensionCall::new(extension_id, payload)
@@ -97,7 +97,7 @@ impl WasmAppCall {
     pub(crate) fn verify(
         &self,
         chain_id: [u8; 32],
-        extension_id: ExtensionId,
+        extension_id: ExtensionHash,
         state: &dyn ExtensionStateRead,
     ) -> Result<(), ExtensionFailure> {
         if address_from_profile_public_key(&self.public_key) != self.signer
@@ -144,7 +144,7 @@ pub(crate) fn wasm_app_nonce_key(signer: Address) -> Vec<u8> {
 
 fn wasm_app_commitment(
     chain_id: [u8; 32],
-    extension_id: ExtensionId,
+    extension_id: ExtensionHash,
     payload: &[u8],
     signer: Address,
     nonce: u64,
@@ -168,7 +168,7 @@ fn is_wasm_system_key(key: &[u8]) -> bool {
 pub struct WasmExtensionManifest {
     pub abi_version: u32,
     pub name: String,
-    pub extension_id: ExtensionId,
+    pub extension_id: ExtensionHash,
     pub activation_height: Height,
     pub code_hash: [u8; 32],
     pub fuel_limit: u64,
@@ -239,7 +239,7 @@ pub enum WasmExtensionError {
     InvalidManifest,
     CodeTooLarge,
     CodeHashMismatch,
-    ExtensionIdMismatch,
+    ExtensionHashMismatch,
     InvalidModule,
     InvalidMemory,
     InvalidAbi,
@@ -254,7 +254,7 @@ impl fmt::Display for WasmExtensionError {
             Self::InvalidManifest => "invalid WASM extension manifest",
             Self::CodeTooLarge => "WASM module exceeds the size limit",
             Self::CodeHashMismatch => "WASM module hash does not match its manifest",
-            Self::ExtensionIdMismatch => "WASM extension id does not match name and code hash",
+            Self::ExtensionHashMismatch => "WASM extension id does not match name and code hash",
             Self::InvalidModule => "invalid or unsupported deterministic WASM module",
             Self::InvalidMemory => "WASM memory must have equal bounded minimum and maximum",
             Self::InvalidAbi => "WASM module does not export the XPARQ ABI v1 functions",
@@ -269,12 +269,12 @@ pub fn wasm_code_hash(module: &[u8]) -> [u8; 32] {
     blake3::derive_key(WASM_CODE_HASH_CONTEXT, module)
 }
 
-pub fn wasm_extension_id(name: &str, code_hash: [u8; 32]) -> ExtensionId {
-    let mut hasher = blake3::Hasher::new_derive_key(WASM_EXTENSION_ID_CONTEXT);
+pub fn wasm_extension_id(name: &str, code_hash: [u8; 32]) -> ExtensionHash {
+    let mut hasher = blake3::Hasher::new_derive_key(WASM_EXTENSION_HASH_CONTEXT);
     hasher.update(&(name.len() as u64).to_le_bytes());
     hasher.update(name.as_bytes());
     hasher.update(&code_hash);
-    ExtensionId::from_bytes(*hasher.finalize().as_bytes())
+    ExtensionHash::from_bytes(*hasher.finalize().as_bytes())
 }
 
 pub struct WasmExtension {
@@ -378,7 +378,7 @@ impl WasmExtension {
 }
 
 impl Extension for WasmExtension {
-    fn id(&self) -> ExtensionId {
+    fn id(&self) -> ExtensionHash {
         self.manifest.extension_id
     }
 
@@ -404,7 +404,11 @@ impl Extension for WasmExtension {
     ) -> Result<(), ExtensionFailure> {
         let original: BTreeMap<_, _> = state.entries()?.into_iter().collect();
         let resulting = self.execute("xparq_apply", context, call.payload(), state, true)?;
-        let keys: BTreeSet<_> = original.keys().chain(resulting.state.keys()).cloned().collect();
+        let keys: BTreeSet<_> = original
+            .keys()
+            .chain(resulting.state.keys())
+            .cloned()
+            .collect();
         for key in keys {
             match (original.get(&key), resulting.state.get(&key)) {
                 (Some(before), Some(after)) if before == after => {}
@@ -455,7 +459,7 @@ fn validate_manifest(
         return Err(WasmExtensionError::CodeHashMismatch);
     }
     if wasm_extension_id(&manifest.name, manifest.code_hash) != manifest.extension_id {
-        return Err(WasmExtensionError::ExtensionIdMismatch);
+        return Err(WasmExtensionError::ExtensionHashMismatch);
     }
     Ok(())
 }
@@ -540,6 +544,8 @@ fn define_host_functions(linker: &mut Linker<HostState>) -> Result<(), wasmi::Er
     linker.func_wrap("xparq", "state_put", host_state_put)?;
     linker.func_wrap("xparq", "state_delete", host_state_delete)?;
     linker.func_wrap("xparq", "asset_mint", host_asset_mint)?;
+    linker.func_wrap("xparq", "asset_transfer", host_asset_transfer)?;
+    linker.func_wrap("xparq", "coin_transfer", host_coin_transfer)?;
     Ok(())
 }
 
@@ -671,6 +677,58 @@ fn host_asset_mint(
     0
 }
 
+fn host_asset_transfer(
+    mut caller: Caller<'_, HostState>,
+    asset_id_ptr: i32,
+    recipient_ptr: i32,
+    amount_ptr: i32,
+) -> i32 {
+    if !caller.data().writable {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    }
+    if caller.data().effects.len() >= WASM_EFFECT_MAX_COUNT {
+        return fail(&mut caller, ExtensionFailure::StateEntryLimit);
+    }
+    let Some(asset_id) = read_guest(&caller, asset_id_ptr, 32, 32) else {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    };
+    let Some(recipient) = read_guest(&caller, recipient_ptr, 20, 20) else {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    };
+    let Some(amount) = read_guest(&caller, amount_ptr, 16, 16) else {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    };
+    caller
+        .data_mut()
+        .effects
+        .push(ExtensionEffect::TransferAsset {
+            asset_id: asset_id.try_into().expect("fixed asset ID length"),
+            recipient: recipient.try_into().expect("fixed address length"),
+            amount: u128::from_le_bytes(amount.try_into().expect("fixed amount length")),
+        });
+    0
+}
+
+fn host_coin_transfer(mut caller: Caller<'_, HostState>, recipient_ptr: i32, amount: i64) -> i32 {
+    if !caller.data().writable {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    }
+    if caller.data().effects.len() >= WASM_EFFECT_MAX_COUNT || amount <= 0 {
+        return fail(&mut caller, ExtensionFailure::InvalidState);
+    }
+    let Some(recipient) = read_guest(&caller, recipient_ptr, 20, 20) else {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    };
+    caller
+        .data_mut()
+        .effects
+        .push(ExtensionEffect::TransferCoin {
+            recipient: recipient.try_into().expect("fixed address length"),
+            amount: amount as u64,
+        });
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,7 +754,7 @@ mod tests {
 
         fn get_extension(
             &self,
-            _extension_id: ExtensionId,
+            _extension_id: ExtensionHash,
             key: &[u8],
         ) -> Result<Option<Vec<u8>>, ExtensionFailure> {
             self.get(key)
@@ -818,6 +876,47 @@ mod tests {
                 recipient: [2; 20],
                 amount: 25,
             }]
+        );
+    }
+
+    #[test]
+    fn guest_can_send_extension_owned_coin_and_asset() {
+        let extension = compile(
+            r#"(module
+                (import "xparq" "asset_transfer" (func $asset (param i32 i32 i32) (result i32)))
+                (import "xparq" "coin_transfer" (func $coin (param i32 i64) (result i32)))
+                (memory (export "memory") 16 16)
+                (data (i32.const 0) "\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01")
+                (data (i32.const 32) "\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02")
+                (data (i32.const 64) "\19\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
+                (func (export "xparq_alloc") (param i32) (result i32) (i32.const 1024))
+                (func (export "xparq_validate") (param i32 i32 i64) (result i32) (i32.const 0))
+                (func (export "xparq_apply") (param i32 i32 i64) (result i32)
+                    i32.const 0 i32.const 32 i32.const 64 call $asset drop
+                    i32.const 32 i64.const 9 call $coin)
+            )"#,
+        );
+        let mut state = MemoryState::default();
+        extension
+            .apply(
+                ExtensionContext { height: Height(5) },
+                &call(&extension, b"send"),
+                &mut state,
+            )
+            .unwrap();
+        assert_eq!(
+            state.effects,
+            vec![
+                ExtensionEffect::TransferAsset {
+                    asset_id: [1; 32],
+                    recipient: [2; 20],
+                    amount: 25
+                },
+                ExtensionEffect::TransferCoin {
+                    recipient: [2; 20],
+                    amount: 9
+                },
+            ]
         );
     }
 

@@ -9,31 +9,31 @@ use std::io::{Error as IoError, ErrorKind, Read};
 
 use crate::Height;
 
-pub const EXTENSION_ID_SIZE: usize = 32;
+pub const EXTENSION_HASH_SIZE: usize = 32;
 pub const EXTENSION_STATE_ROOT_SIZE: usize = 32;
 pub const EXTENSION_PAYLOAD_MAX_SIZE: usize = 3 * 1024 * 1024;
 pub const EXTENSION_STATE_KEY_MAX_SIZE: usize = 256;
 pub const EXTENSION_STATE_VALUE_MAX_SIZE: usize = 3 * 1024 * 1024;
 pub const EXTENSION_STATE_MAX_ENTRIES: usize = 65_536;
 
-const EXTENSION_ID_CONTEXT: &str = "XPARQ Extension Id";
+const EXTENSION_HASH_CONTEXT: &str = "XPARQ Extension Id";
 const EXTENSION_SET_ROOT_CONTEXT: &str = "XPARQ Extension Set Root";
 
 #[derive(
     BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
-pub struct ExtensionId([u8; EXTENSION_ID_SIZE]);
+pub struct ExtensionHash([u8; EXTENSION_HASH_SIZE]);
 
-impl ExtensionId {
+impl ExtensionHash {
     pub fn derive(name: &str) -> Self {
-        Self(blake3::derive_key(EXTENSION_ID_CONTEXT, name.as_bytes()))
+        Self(blake3::derive_key(EXTENSION_HASH_CONTEXT, name.as_bytes()))
     }
 
-    pub const fn from_bytes(bytes: [u8; EXTENSION_ID_SIZE]) -> Self {
+    pub const fn from_bytes(bytes: [u8; EXTENSION_HASH_SIZE]) -> Self {
         Self(bytes)
     }
 
-    pub const fn as_bytes(&self) -> &[u8; EXTENSION_ID_SIZE] {
+    pub const fn as_bytes(&self) -> &[u8; EXTENSION_HASH_SIZE] {
         &self.0
     }
 }
@@ -57,12 +57,12 @@ impl ExtensionStateRoot {
 
 #[derive(BorshSerialize, Clone, Debug, PartialEq, Eq)]
 pub struct ExtensionCall {
-    extension_id: ExtensionId,
+    extension_id: ExtensionHash,
     payload: Vec<u8>,
 }
 
 impl ExtensionCall {
-    pub fn new(extension_id: ExtensionId, payload: Vec<u8>) -> Result<Self, ExtensionFailure> {
+    pub fn new(extension_id: ExtensionHash, payload: Vec<u8>) -> Result<Self, ExtensionFailure> {
         if payload.len() > EXTENSION_PAYLOAD_MAX_SIZE {
             return Err(ExtensionFailure::PayloadTooLarge);
         }
@@ -72,7 +72,7 @@ impl ExtensionCall {
         })
     }
 
-    pub const fn extension_id(&self) -> ExtensionId {
+    pub const fn extension_id(&self) -> ExtensionHash {
         self.extension_id
     }
 
@@ -83,7 +83,7 @@ impl ExtensionCall {
 
 impl BorshDeserialize for ExtensionCall {
     fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let extension_id = ExtensionId::deserialize_reader(reader)?;
+        let extension_id = ExtensionHash::deserialize_reader(reader)?;
         let payload_len = u32::deserialize_reader(reader)? as usize;
         if payload_len > EXTENSION_PAYLOAD_MAX_SIZE {
             return Err(IoError::new(
@@ -102,7 +102,7 @@ impl BorshDeserialize for ExtensionCall {
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExtensionCommitment {
-    pub extension_id: ExtensionId,
+    pub extension_id: ExtensionHash,
     pub state_root: ExtensionStateRoot,
 }
 
@@ -121,6 +121,15 @@ pub enum ExtensionEffect {
         asset_id: [u8; 32],
         recipient: [u8; 20],
         amount: u128,
+    },
+    TransferAsset {
+        asset_id: [u8; 32],
+        recipient: [u8; 20],
+        amount: u128,
+    },
+    TransferCoin {
+        recipient: [u8; 20],
+        amount: u64,
     },
 }
 
@@ -149,7 +158,7 @@ pub trait ExtensionStateRead {
     fn entries(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ExtensionFailure>;
     fn get_extension(
         &self,
-        extension_id: ExtensionId,
+        extension_id: ExtensionHash,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, ExtensionFailure>;
 }
@@ -163,7 +172,7 @@ pub trait ExtensionStateWrite: ExtensionStateRead {
 }
 
 pub trait Extension: Send + Sync {
-    fn id(&self) -> ExtensionId;
+    fn id(&self) -> ExtensionHash;
     fn activation_height(&self) -> Height;
 
     fn validate(
@@ -209,11 +218,11 @@ mod tests {
     #[test]
     fn extension_set_root_is_order_independent_and_rejects_duplicates() {
         let asset = ExtensionCommitment {
-            extension_id: ExtensionId::derive("asset"),
+            extension_id: ExtensionHash::derive("asset"),
             state_root: ExtensionStateRoot::from_bytes([1; 32]),
         };
         let bridge = ExtensionCommitment {
-            extension_id: ExtensionId::derive("bridge"),
+            extension_id: ExtensionHash::derive("bridge"),
             state_root: ExtensionStateRoot::from_bytes([2; 32]),
         };
         assert_eq!(
@@ -228,7 +237,7 @@ mod tests {
 
     #[test]
     fn extension_call_decode_rejects_an_oversized_payload_before_allocation() {
-        let mut encoded = Vec::from(ExtensionId::derive("asset").as_bytes().as_slice());
+        let mut encoded = Vec::from(ExtensionHash::derive("asset").as_bytes().as_slice());
         encoded.extend_from_slice(&((EXTENSION_PAYLOAD_MAX_SIZE + 1) as u32).to_le_bytes());
         assert!(ExtensionCall::try_from_slice(&encoded).is_err());
     }

@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
 use xparq_common::extension::{
-    Extension, ExtensionCall, ExtensionContext, ExtensionFailure, ExtensionId, ExtensionStateRead,
-    ExtensionStateWrite,
+    Extension, ExtensionCall, ExtensionContext, ExtensionFailure, ExtensionHash,
+    ExtensionStateRead, ExtensionStateWrite,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,7 +14,7 @@ pub enum RegistryError {
 
 #[derive(Default)]
 pub struct ExtensionRegistry {
-    extensions: BTreeMap<ExtensionId, Box<dyn Extension>>,
+    extensions: BTreeMap<ExtensionHash, Box<dyn Extension>>,
     chain_id: [u8; 32],
 }
 
@@ -41,7 +41,7 @@ impl ExtensionRegistry {
         }
     }
 
-    pub fn get(&self, id: ExtensionId) -> Result<&dyn Extension, ExtensionFailure> {
+    pub fn get(&self, id: ExtensionHash) -> Result<&dyn Extension, ExtensionFailure> {
         self.extensions
             .get(&id)
             .map(Box::as_ref)
@@ -111,7 +111,7 @@ impl ExtensionRegistry {
         Ok(())
     }
 
-    pub fn commitments(&self) -> impl Iterator<Item = ExtensionId> + '_ {
+    pub fn commitments(&self) -> impl Iterator<Item = ExtensionHash> + '_ {
         self.extensions.keys().copied()
     }
 }
@@ -123,11 +123,11 @@ mod tests {
     use xparq_common::Height;
 
     struct TestExtension {
-        id: ExtensionId,
+        id: ExtensionHash,
     }
 
     impl Extension for TestExtension {
-        fn id(&self) -> ExtensionId {
+        fn id(&self) -> ExtensionHash {
             self.id
         }
 
@@ -177,7 +177,7 @@ mod tests {
 
         fn get_extension(
             &self,
-            _extension_id: ExtensionId,
+            _extension_id: ExtensionHash,
             key: &[u8],
         ) -> Result<Option<Vec<u8>>, ExtensionFailure> {
             self.get(key)
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn registry_enforces_identity_activation_and_validate_before_apply() {
-        let id = ExtensionId::derive("test");
+        let id = ExtensionHash::derive("test");
         let mut registry = ExtensionRegistry::new();
         registry.register(TestExtension { id }).unwrap();
         assert_eq!(
@@ -220,7 +220,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.get(b"last-call").unwrap(), Some(b"valid".to_vec()));
 
-        let unknown = ExtensionCall::new(ExtensionId::derive("unknown"), vec![]).unwrap();
+        let unknown = ExtensionCall::new(ExtensionHash::derive("unknown"), vec![]).unwrap();
         assert_eq!(
             registry.validate(ExtensionContext { height: Height(5) }, &unknown, &store),
             Err(ExtensionFailure::UnknownExtension)

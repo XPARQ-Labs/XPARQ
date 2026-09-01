@@ -23,16 +23,18 @@ Consensus currently encodes each native XPQ amount as an eight-byte
 little-endian `u64`; arithmetic is checked.
 
 `GET /fee-policy` exposes both the miner relay fee and the consensus state-burn
-policy. A transaction that creates more persistent state than it deletes must
-include exactly one `OutputTarget::Burn` for the required amount:
+policy. A transaction that creates persistent canonical state must include
+exactly one `OutputTarget::Burn` for the required amount:
 
-`created_weight * (floor(next_block_emission_XPQ) * 2)`
+`created_weight * 1 zeno`
 
-The rate follows the expected emission of the block that includes the
-transaction: `1.0-1.9 XPQ = 2 zeno/weight`, `2.0-2.9 XPQ = 4`, through
-`10.0 XPQ = 20`. The next emission, active rate, multiplier, Coin and QCash
-UTXO weights, and emission-UTXO burn are exposed by `/fee-policy`; the
-consensus algorithm and parameters are committed by the chain-spec hash.
+The consensus rate is fixed at `1 zeno` per newly created canonical-state
+weight unit. Coin UTXOs, QCash UTXOs, first-time account profile-key
+registrations, asset entries, and extension/WASM key-value entries are charged.
+Updates to existing entries and deleted state receive no charge or credit.
+The active rate, Coin and QCash UTXO weights, and emission-UTXO burn are
+exposed by `/fee-policy`; the algorithm and parameters are committed by the
+chain-spec hash.
 Consumed inputs do not receive burn credit. Burn outputs conserve transaction
 value during validation but are deliberately not inserted into the UTXO set.
 No canonical state-creating operation is exempt: on-chain spend, QCash
@@ -42,6 +44,9 @@ create. Consensus requires exactly one burn output with the exact amount when
 the required burn is nonzero; missing, underpaid, overpaid, or duplicate burn
 outputs are rejected. Transferring a QCash bearer file offline does not mutate
 canonical state and therefore is not an on-chain operation subject to burn.
+Each non-genesis block additionally creates a fixed 153-weight canonical block
+record and one 60-weight emission Coin UTXO. Their combined 213-zeno state burn
+is deducted from the gross subsidy before the miner emission UTXO is stored.
 Native asset calls charge the canonical key-plus-value size of every new
 persistent extension entry. Registration creates metadata, supply, creator
 balance, and (on the creator's first asset call) nonce entries. Mint and
@@ -127,6 +132,15 @@ the full new key-plus-value state produced by WASM deploy or execution,
 including the first host-owned nonce entry; updating existing state is not
 charged again. The preview can become stale if another transaction changes the
 same state before inclusion, in which case the transaction must be rebuilt.
+
+WASM ABI version 2 supports native-value custody. A Coin output created with
+`OutputTarget::Extension(extension_hash)` is owned by that extension, while an
+asset `TransferToExtension` credits its extension asset balance. During apply,
+the authenticated extension may emit `coin_transfer` or `asset_transfer` to
+send its own holdings to an account. The ledger supplies the executing
+`ExtensionHash`; guest payloads cannot choose the debit authority. All effects,
+extension state, fees, Coin change, and asset balances commit or roll back as
+one transition.
 
 ## Compatibility
 

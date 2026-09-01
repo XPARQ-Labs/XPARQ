@@ -2,8 +2,8 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_common::{
-    Extension, ExtensionCall, ExtensionContext, ExtensionFailure, ExtensionId, ExtensionStateRead,
-    ExtensionStateWrite, Height, canonical_bytes,
+    Extension, ExtensionCall, ExtensionContext, ExtensionFailure, ExtensionHash,
+    ExtensionStateRead, ExtensionStateWrite, Height, canonical_bytes,
 };
 use xparq_crypto::{
     Address, ProfilePublicKey, ProfileSignature, ProfileSigningSeed,
@@ -64,7 +64,7 @@ impl WasmDeployCall {
         })
     }
 
-    pub fn extension_id(&self) -> ExtensionId {
+    pub fn extension_id(&self) -> ExtensionHash {
         wasm_extension_id(&self.name, wasm_code_hash(&self.module))
     }
 
@@ -84,11 +84,11 @@ impl WasmDeployExtension {
     }
 }
 
-pub fn wasm_deploy_extension_id() -> ExtensionId {
-    ExtensionId::derive(WASM_DEPLOY_EXTENSION_NAME)
+pub fn wasm_deploy_extension_id() -> ExtensionHash {
+    ExtensionHash::derive(WASM_DEPLOY_EXTENSION_NAME)
 }
 
-pub(crate) fn package_key(extension_id: ExtensionId) -> Vec<u8> {
+pub(crate) fn package_key(extension_id: ExtensionHash) -> Vec<u8> {
     let mut key = Vec::with_capacity(33);
     key.push(PACKAGE_PREFIX);
     key.extend_from_slice(extension_id.as_bytes());
@@ -97,7 +97,7 @@ pub(crate) fn package_key(extension_id: ExtensionId) -> Vec<u8> {
 
 pub fn wasm_deployed_package(
     state: &dyn ExtensionStateRead,
-    extension_id: ExtensionId,
+    extension_id: ExtensionHash,
 ) -> Result<Option<WasmExtensionPackage>, ExtensionFailure> {
     let Some(bytes) =
         state.get_extension(wasm_deploy_extension_id(), &package_key(extension_id))?
@@ -110,7 +110,7 @@ pub fn wasm_deployed_package(
 }
 
 impl Extension for WasmDeployExtension {
-    fn id(&self) -> ExtensionId {
+    fn id(&self) -> ExtensionHash {
         wasm_deploy_extension_id()
     }
     fn activation_height(&self) -> Height {
@@ -237,14 +237,14 @@ mod tests {
     use xparq_crypto::SignatureProfile;
 
     struct MultiState {
-        current: ExtensionId,
-        namespaces: BTreeMap<ExtensionId, BTreeMap<Vec<u8>, Vec<u8>>>,
+        current: ExtensionHash,
+        namespaces: BTreeMap<ExtensionHash, BTreeMap<Vec<u8>, Vec<u8>>>,
     }
 
     impl Default for MultiState {
         fn default() -> Self {
             Self {
-                current: ExtensionId::from_bytes([0; 32]),
+                current: ExtensionHash::from_bytes([0; 32]),
                 namespaces: BTreeMap::new(),
             }
         }
@@ -271,7 +271,7 @@ mod tests {
 
         fn get_extension(
             &self,
-            id: ExtensionId,
+            id: ExtensionHash,
             key: &[u8],
         ) -> Result<Option<Vec<u8>>, ExtensionFailure> {
             Ok(self

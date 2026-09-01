@@ -5,10 +5,10 @@ use std::{error::Error, fmt};
 use borsh::BorshSerialize;
 use xparq_blockchain::{Block, MAX_BLOCK_WEIGHT, Nonce};
 use xparq_consensus::{
-    BLOCK_EMISSION_STEP, COIN_UTXO_STATE_WEIGHT, DIFFICULTY_START, MAX_BLOCK_EMISSION,
-    MAX_DIFFICULTY, MIN_BLOCK_EMISSION, MIN_DIFFICULTY, POW_ALGORITHM, POW_ARGON2_ITERATIONS,
-    POW_ARGON2_LANES, POW_ARGON2_MEMORY_KIB, QCASH_UTXO_STATE_WEIGHT, STATE_BURN_ALGORITHM,
-    STATE_BURN_EMISSION_MULTIPLIER, WBDA_ALGORITHM, WBDA_DIFFICULTY_STEP,
+    BLOCK_EMISSION_STEP, BLOCK_STATE_WEIGHT, COIN_UTXO_STATE_WEIGHT, DIFFICULTY_START,
+    MAX_BLOCK_EMISSION, MAX_DIFFICULTY, MIN_BLOCK_EMISSION, MIN_DIFFICULTY, POW_ALGORITHM,
+    POW_ARGON2_ITERATIONS, POW_ARGON2_LANES, POW_ARGON2_MEMORY_KIB, QCASH_UTXO_STATE_WEIGHT,
+    STATE_BURN_ALGORITHM, STATE_BURN_RATE_ZENO_PER_WEIGHT, WBDA_ALGORITHM, WBDA_DIFFICULTY_STEP,
     WBDA_HIGH_UTILIZATION_PPM, WBDA_LOW_UTILIZATION_PPM, WBDA_TARGET_BLOCK_WEIGHT, WBDA_WINDOW,
 };
 use xparq_crypto::{
@@ -30,7 +30,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 ]);
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`] changes.
-pub const CHAIN_SPEC_VERSION: u32 = 3;
+pub const CHAIN_SPEC_VERSION: u32 = 5;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -53,7 +53,8 @@ struct ChainSpecIdentity<'a> {
     max_block_emission: u64,
     block_emission_step: u64,
     state_burn_algorithm: &'a str,
-    state_burn_emission_multiplier: u64,
+    state_burn_rate_zeno_per_weight: u64,
+    block_state_weight: u64,
     coin_utxo_state_weight: u64,
     qcash_utxo_state_weight: u64,
     max_block_weight: u64,
@@ -101,7 +102,8 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         max_block_emission: MAX_BLOCK_EMISSION,
         block_emission_step: BLOCK_EMISSION_STEP,
         state_burn_algorithm: STATE_BURN_ALGORITHM,
-        state_burn_emission_multiplier: STATE_BURN_EMISSION_MULTIPLIER,
+        state_burn_rate_zeno_per_weight: STATE_BURN_RATE_ZENO_PER_WEIGHT,
+        block_state_weight: BLOCK_STATE_WEIGHT,
         coin_utxo_state_weight: COIN_UTXO_STATE_WEIGHT,
         qcash_utxo_state_weight: QCASH_UTXO_STATE_WEIGHT,
         max_block_weight: MAX_BLOCK_WEIGHT as u64,

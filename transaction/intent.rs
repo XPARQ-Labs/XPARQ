@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use xparq_coin::{Amount, COIN_ID_SIZE, CoinId};
-use xparq_common::canonical_bytes;
+use xparq_coin::{Amount, COIN_HASH_SIZE, CoinHash};
+use xparq_common::{ExtensionHash, canonical_bytes};
 use xparq_crypto::{ADDRESS_SIZE, Address, HASH_SIZE, QCashPublicKey};
 use xparq_qcash::QCash;
 
@@ -34,6 +34,7 @@ pub enum OutputTarget {
     Address(Address),
     BlockMiner,
     Burn,
+    Extension(ExtensionHash),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
@@ -63,6 +64,13 @@ impl SpendOutput {
             amount,
         }
     }
+
+    pub const fn extension(extension: ExtensionHash, amount: Amount) -> Self {
+        Self {
+            target: OutputTarget::Extension(extension),
+            amount,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
@@ -86,14 +94,14 @@ impl QCashOutput {
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct OnChainSpendIntent {
     pub sender: Address,
-    pub inputs: Vec<CoinId>,
+    pub inputs: Vec<CoinHash>,
     pub outputs: Vec<SpendOutput>,
 }
 
 impl OnChainSpendIntent {
     pub fn new(
         sender: Address,
-        inputs: Vec<CoinId>,
+        inputs: Vec<CoinHash>,
         outputs: Vec<SpendOutput>,
     ) -> Result<Self, IntentError> {
         let intent = Self {
@@ -127,7 +135,7 @@ impl OnChainSpendIntent {
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct WithdrawIntent {
     pub sender: Address,
-    pub inputs: Vec<CoinId>,
+    pub inputs: Vec<CoinHash>,
     pub qcash_outputs: Vec<QCashOutput>,
     pub outputs: Vec<SpendOutput>,
 }
@@ -135,7 +143,7 @@ pub struct WithdrawIntent {
 impl WithdrawIntent {
     pub fn new(
         sender: Address,
-        inputs: Vec<CoinId>,
+        inputs: Vec<CoinHash>,
         qcash_outputs: Vec<QCashOutput>,
         outputs: Vec<SpendOutput>,
     ) -> Result<Self, IntentError> {
@@ -177,7 +185,7 @@ impl WithdrawIntent {
     }
 }
 
-fn validate_input_ids(inputs: &[CoinId]) -> Result<(), IntentError> {
+fn validate_input_ids(inputs: &[CoinHash]) -> Result<(), IntentError> {
     if inputs.is_empty() {
         return Err(IntentError::EmptyInputs);
     }
@@ -484,7 +492,7 @@ impl SpendCommitment {
     }
 }
 
-const _: () = assert!(COIN_ID_SIZE == blake3::OUT_LEN);
+const _: () = assert!(COIN_HASH_SIZE == blake3::OUT_LEN);
 const _: () = assert!(ADDRESS_SIZE > 0);
 
 #[cfg(test)]
@@ -497,7 +505,10 @@ mod tests {
 
     #[test]
     fn split_rejects_reused_output_bearer_keys() {
-        let input = QCash::new(CoinId::from_bytes([1; COIN_ID_SIZE]), Amount::from_zeno(10));
+        let input = QCash::new(
+            CoinHash::from_bytes([1; COIN_HASH_SIZE]),
+            Amount::from_zeno(10),
+        );
         let repeated = qcash_key(7);
         assert_eq!(
             SplitIntent::new(
@@ -514,7 +525,10 @@ mod tests {
 
     #[test]
     fn qcash_commitment_binds_outputs() {
-        let input = QCash::new(CoinId::from_bytes([2; COIN_ID_SIZE]), Amount::from_zeno(10));
+        let input = QCash::new(
+            CoinHash::from_bytes([2; COIN_HASH_SIZE]),
+            Amount::from_zeno(10),
+        );
         let first = SplitIntent::new(
             input,
             vec![
@@ -542,7 +556,7 @@ mod tests {
     #[test]
     fn partial_redeem_deducts_recipient_change_and_miner_from_bearer_input() {
         let input = QCash::new(
-            CoinId::from_bytes([9; COIN_ID_SIZE]),
+            CoinHash::from_bytes([9; COIN_HASH_SIZE]),
             Amount::from_zeno(100),
         );
         assert!(

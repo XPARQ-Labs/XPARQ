@@ -391,7 +391,7 @@ mod tests {
         ProfileSignature, ProfileSigningSeed, SignatureProfile, address_from_profile_public_key,
     };
     use std::io::Cursor;
-    use xparq_coin::CoinId;
+    use xparq_coin::CoinHash;
     use xparq_transaction::{
         AccountAuthorization, AuthorizedAccountIntent, OnChainSpendIntent, SpendOutput,
     };
@@ -416,7 +416,7 @@ mod tests {
         let sender = address_from_profile_public_key(&public_key);
         let transaction = OnChainSpendIntent::new(
             sender,
-            vec![CoinId::from_bytes([0x31; crate::crypto::HASH_SIZE])],
+            vec![CoinHash::from_bytes([0x31; crate::crypto::HASH_SIZE])],
             vec![SpendOutput::new(
                 Address([0x32; crate::crypto::ADDRESS_SIZE]),
                 Amount::from_zeno(100_000),
@@ -453,7 +453,7 @@ mod tests {
                 let mut coin_id = [0_u8; crate::crypto::HASH_SIZE];
                 coin_id[..8].copy_from_slice(&seed.to_le_bytes());
                 coin_id[8..16].copy_from_slice(&(input_index as u64).to_le_bytes());
-                CoinId::from_bytes(coin_id)
+                CoinHash::from_bytes(coin_id)
             })
             .collect();
         let transaction = OnChainSpendIntent::new(

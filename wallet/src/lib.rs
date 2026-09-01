@@ -367,7 +367,7 @@ impl ProfileWallet {
 
     pub fn sign_wasm_app_call(
         &self,
-        extension_id: xparq::common::ExtensionId,
+        extension_id: xparq::common::ExtensionHash,
         payload: Vec<u8>,
         nonce: u64,
     ) -> Result<xparq::common::ExtensionCall, String> {

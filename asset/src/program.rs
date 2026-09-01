@@ -1,10 +1,10 @@
 use std::{collections::BTreeMap, error::Error, fmt, str::FromStr};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use xparq_common::{ExtensionId, canonical_bytes};
+use xparq_common::{ExtensionHash, canonical_bytes};
 use xparq_crypto::Address;
 
-use crate::AssetIdParseError;
+use crate::AssetHashParseError;
 
 pub const ASSET_NAME_MAX_LEN: usize = 64;
 pub const ASSET_SYMBOL_MAX_LEN: usize = 16;
@@ -13,9 +13,9 @@ const ASSET_PROGRAM_COMMITMENT_CONTEXT: &str = "XPARQ Native Asset Call";
 #[derive(
     BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
-pub struct AssetId([u8; 32]);
+pub struct AssetHash([u8; 32]);
 
-impl AssetId {
+impl AssetHash {
     pub fn derive(authority: Address, symbol: &str) -> Self {
         Self(crate::identifier::derive(&[
             &authority.0,
@@ -30,14 +30,14 @@ impl AssetId {
     }
 }
 
-impl fmt::Display for AssetId {
+impl fmt::Display for AssetHash {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         crate::identifier::fmt(&self.0, formatter)
     }
 }
 
-impl FromStr for AssetId {
-    type Err = AssetIdParseError;
+impl FromStr for AssetHash {
+    type Err = AssetHashParseError;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         crate::identifier::parse(value).map(Self)
     }
@@ -56,7 +56,7 @@ pub struct AssetMetadata {
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AssetAuthority {
     Account(Address),
-    Program(ExtensionId),
+    Program(ExtensionHash),
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
@@ -70,17 +70,22 @@ pub enum AssetInstruction {
         mint_authority: Option<AssetAuthority>,
     },
     Mint {
-        asset_id: AssetId,
+        asset_id: AssetHash,
         recipient: Address,
         amount: u128,
     },
     Burn {
-        asset_id: AssetId,
+        asset_id: AssetHash,
         amount: u128,
     },
     Transfer {
-        asset_id: AssetId,
+        asset_id: AssetHash,
         recipient: Address,
+        amount: u128,
+    },
+    TransferToExtension {
+        asset_id: AssetHash,
+        extension: ExtensionHash,
         amount: u128,
     },
 }
@@ -101,12 +106,13 @@ struct UnsignedAssetCall<'a> {
 }
 
 impl AssetCall {
-    pub fn asset_id(&self) -> AssetId {
+    pub fn asset_id(&self) -> AssetHash {
         match &self.instruction {
-            AssetInstruction::Register { symbol, .. } => AssetId::derive(self.signer, symbol),
+            AssetInstruction::Register { symbol, .. } => AssetHash::derive(self.signer, symbol),
             AssetInstruction::Mint { asset_id, .. }
             | AssetInstruction::Burn { asset_id, .. }
-            | AssetInstruction::Transfer { asset_id, .. } => *asset_id,
+            | AssetInstruction::Transfer { asset_id, .. }
+            | AssetInstruction::TransferToExtension { asset_id, .. } => *asset_id,
         }
     }
 
@@ -158,6 +164,7 @@ impl AssetCall {
                     return Err(AssetError::InvalidProgram);
                 }
             }
+            AssetInstruction::TransferToExtension { amount, .. } => ensure_nonzero(*amount)?,
         }
         self.nonce.checked_add(1).ok_or(AssetError::InvalidNonce)?;
         Ok(())
@@ -175,6 +182,13 @@ impl AssetCall {
                 recipient,
                 ..
             } => state.balances.contains_key(&(*asset_id, *recipient)),
+            AssetInstruction::TransferToExtension {
+                asset_id,
+                extension,
+                ..
+            } => state
+                .extension_balances
+                .contains_key(&(*asset_id, *extension)),
             _ => false,
         };
         self.created_state_weight_from_presence(
@@ -219,6 +233,9 @@ impl AssetCall {
             {
                 weight = checked_entry_weight(weight, 33 + xparq_crypto::ADDRESS_SIZE, amount)?;
             }
+            AssetInstruction::TransferToExtension { amount, .. } if !recipient_balance_exists => {
+                weight = checked_entry_weight(weight, 33 + 32, amount)?;
+            }
             _ => {}
         }
         Ok(weight)
@@ -227,9 +244,10 @@ impl AssetCall {
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AssetState {
-    metadata: BTreeMap<AssetId, AssetMetadata>,
-    supplies: BTreeMap<AssetId, u128>,
-    balances: BTreeMap<(AssetId, Address), u128>,
+    metadata: BTreeMap<AssetHash, AssetMetadata>,
+    supplies: BTreeMap<AssetHash, u128>,
+    balances: BTreeMap<(AssetHash, Address), u128>,
+    extension_balances: BTreeMap<(AssetHash, ExtensionHash), u128>,
     nonces: BTreeMap<Address, u64>,
 }
 
@@ -238,6 +256,7 @@ impl AssetState {
         self.metadata.is_empty()
             && self.supplies.is_empty()
             && self.balances.is_empty()
+            && self.extension_balances.is_empty()
             && self.nonces.is_empty()
     }
 
@@ -246,24 +265,30 @@ impl AssetState {
         Ok(blake3::derive_key("xparq:native-asset-state:v1", &bytes))
     }
 
-    pub fn metadata(&self, id: AssetId) -> Option<&AssetMetadata> {
+    pub fn metadata(&self, id: AssetHash) -> Option<&AssetMetadata> {
         self.metadata.get(&id)
     }
-    pub fn supply(&self, id: AssetId) -> u128 {
+    pub fn supply(&self, id: AssetHash) -> u128 {
         self.supplies.get(&id).copied().unwrap_or(0)
     }
-    pub fn balance(&self, id: AssetId, owner: Address) -> u128 {
+    pub fn balance(&self, id: AssetHash, owner: Address) -> u128 {
         self.balances.get(&(id, owner)).copied().unwrap_or(0)
+    }
+    pub fn extension_balance(&self, id: AssetHash, owner: ExtensionHash) -> u128 {
+        self.extension_balances
+            .get(&(id, owner))
+            .copied()
+            .unwrap_or(0)
     }
     pub fn nonce(&self, owner: Address) -> u64 {
         self.nonces.get(&owner).copied().unwrap_or(0)
     }
-    pub fn balances(&self) -> impl Iterator<Item = (AssetId, Address, u128)> + '_ {
+    pub fn balances(&self) -> impl Iterator<Item = (AssetHash, Address, u128)> + '_ {
         self.balances
             .iter()
             .map(|(&(id, owner), &amount)| (id, owner, amount))
     }
-    pub fn metadata_entries(&self) -> impl Iterator<Item = (AssetId, &AssetMetadata)> + '_ {
+    pub fn metadata_entries(&self) -> impl Iterator<Item = (AssetHash, &AssetMetadata)> + '_ {
         self.metadata.iter().map(|(&id, metadata)| (id, metadata))
     }
 
@@ -282,7 +307,7 @@ impl AssetState {
                 initial_mint,
                 mint_authority,
             } => {
-                let id = AssetId::derive(call.signer, symbol);
+                let id = AssetHash::derive(call.signer, symbol);
                 journal.metadata.push((id, self.metadata.get(&id).cloned()));
                 journal.supplies.push((id, self.supplies.get(&id).copied()));
                 journal.balances.push((
@@ -352,6 +377,27 @@ impl AssetState {
                 self.balances
                     .insert((*asset_id, *recipient), recipient_balance);
             }
+            AssetInstruction::TransferToExtension {
+                asset_id,
+                extension,
+                amount,
+            } => {
+                journal.balances.push((
+                    (*asset_id, call.signer),
+                    self.balances.get(&(*asset_id, call.signer)).copied(),
+                ));
+                journal.extension_balances.push((
+                    (*asset_id, *extension),
+                    self.extension_balances
+                        .get(&(*asset_id, *extension))
+                        .copied(),
+                ));
+                let sender = self.balance(*asset_id, call.signer) - amount;
+                let recipient = self.extension_balance(*asset_id, *extension) + amount;
+                set_balance(&mut self.balances, (*asset_id, call.signer), sender);
+                self.extension_balances
+                    .insert((*asset_id, *extension), recipient);
+            }
         }
         self.nonces.insert(call.signer, call.nonce + 1);
         Ok(journal)
@@ -363,8 +409,8 @@ impl AssetState {
     /// it must never be accepted from an untrusted transaction payload.
     pub fn apply_program_mint(
         &mut self,
-        program: ExtensionId,
-        asset_id: AssetId,
+        program: ExtensionHash,
+        asset_id: AssetHash,
         recipient: Address,
         amount: u128,
     ) -> Result<AssetRollbackJournal, AssetError> {
@@ -397,8 +443,8 @@ impl AssetState {
 
     pub fn program_mint_created_state_weight(
         &self,
-        program: ExtensionId,
-        asset_id: AssetId,
+        program: ExtensionHash,
+        asset_id: AssetHash,
         recipient: Address,
         amount: u128,
     ) -> Result<u64, AssetError> {
@@ -421,10 +467,70 @@ impl AssetState {
         }
     }
 
+    /// Transfers assets held by the executing extension to an account.
+    pub fn apply_program_transfer(
+        &mut self,
+        program: ExtensionHash,
+        asset_id: AssetHash,
+        recipient: Address,
+        amount: u128,
+    ) -> Result<AssetRollbackJournal, AssetError> {
+        ensure_nonzero(amount)?;
+        self.metadata(asset_id).ok_or(AssetError::UnknownAsset)?;
+        let held = self.extension_balance(asset_id, program);
+        if held < amount {
+            return Err(AssetError::InsufficientBalance);
+        }
+        let recipient_balance = self
+            .balance(asset_id, recipient)
+            .checked_add(amount)
+            .ok_or(AssetError::BalanceOverflow)?;
+        let mut journal = AssetRollbackJournal::default();
+        journal.extension_balances.push((
+            (asset_id, program),
+            self.extension_balances.get(&(asset_id, program)).copied(),
+        ));
+        journal.balances.push((
+            (asset_id, recipient),
+            self.balances.get(&(asset_id, recipient)).copied(),
+        ));
+        set_extension_balance(
+            &mut self.extension_balances,
+            (asset_id, program),
+            held - amount,
+        );
+        self.balances
+            .insert((asset_id, recipient), recipient_balance);
+        Ok(journal)
+    }
+
+    pub fn program_transfer_created_state_weight(
+        &self,
+        program: ExtensionHash,
+        asset_id: AssetHash,
+        recipient: Address,
+        amount: u128,
+    ) -> Result<u64, AssetError> {
+        ensure_nonzero(amount)?;
+        self.metadata(asset_id).ok_or(AssetError::UnknownAsset)?;
+        if self.extension_balance(asset_id, program) < amount {
+            return Err(AssetError::InsufficientBalance);
+        }
+        self.balance(asset_id, recipient)
+            .checked_add(amount)
+            .ok_or(AssetError::BalanceOverflow)?;
+        if self.balances.contains_key(&(asset_id, recipient)) {
+            Ok(0)
+        } else {
+            checked_entry_weight(0, 33 + xparq_crypto::ADDRESS_SIZE, &amount)
+        }
+    }
+
     pub fn rollback(&mut self, journal: AssetRollbackJournal) {
         restore_map(&mut self.metadata, journal.metadata);
         restore_map(&mut self.supplies, journal.supplies);
         restore_map(&mut self.balances, journal.balances);
+        restore_map(&mut self.extension_balances, journal.extension_balances);
         restore_map(&mut self.nonces, journal.nonces);
     }
 
@@ -443,7 +549,7 @@ impl AssetState {
             } => {
                 let _ = (name, decimals, max_supply, initial_mint);
                 if self
-                    .metadata(AssetId::derive(call.signer, symbol))
+                    .metadata(AssetHash::derive(call.signer, symbol))
                     .is_some()
                 {
                     return Err(AssetError::AssetAlreadyExists);
@@ -483,6 +589,19 @@ impl AssetState {
                     .checked_add(*amount)
                     .ok_or(AssetError::BalanceOverflow)?;
             }
+            AssetInstruction::TransferToExtension {
+                asset_id,
+                extension,
+                amount,
+            } => {
+                self.metadata(*asset_id).ok_or(AssetError::UnknownAsset)?;
+                if self.balance(*asset_id, call.signer) < *amount {
+                    return Err(AssetError::InsufficientBalance);
+                }
+                self.extension_balance(*asset_id, *extension)
+                    .checked_add(*amount)
+                    .ok_or(AssetError::BalanceOverflow)?;
+            }
         }
         Ok(())
     }
@@ -490,9 +609,10 @@ impl AssetState {
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AssetRollbackJournal {
-    metadata: Vec<(AssetId, Option<AssetMetadata>)>,
-    supplies: Vec<(AssetId, Option<u128>)>,
-    balances: Vec<((AssetId, Address), Option<u128>)>,
+    metadata: Vec<(AssetHash, Option<AssetMetadata>)>,
+    supplies: Vec<(AssetHash, Option<u128>)>,
+    balances: Vec<((AssetHash, Address), Option<u128>)>,
+    extension_balances: Vec<((AssetHash, ExtensionHash), Option<u128>)>,
     nonces: Vec<(Address, Option<u64>)>,
 }
 
@@ -572,7 +692,23 @@ fn checked_entry_weight<T: BorshSerialize>(
         .map_err(|_| AssetError::Encoding)?;
     current.checked_add(entry).ok_or(AssetError::Encoding)
 }
-fn set_balance(map: &mut BTreeMap<(AssetId, Address), u128>, key: (AssetId, Address), value: u128) {
+fn set_balance(
+    map: &mut BTreeMap<(AssetHash, Address), u128>,
+    key: (AssetHash, Address),
+    value: u128,
+) {
+    if value == 0 {
+        map.remove(&key);
+    } else {
+        map.insert(key, value);
+    }
+}
+
+fn set_extension_balance(
+    map: &mut BTreeMap<(AssetHash, ExtensionHash), u128>,
+    key: (AssetHash, ExtensionHash),
+    value: u128,
+) {
     if value == 0 {
         map.remove(&key);
     } else {
@@ -638,7 +774,7 @@ mod tests {
     fn program_authority_can_only_mint_through_program_context() {
         let creator = Address([7; xparq_crypto::ADDRESS_SIZE]);
         let recipient = Address([9; xparq_crypto::ADDRESS_SIZE]);
-        let program = ExtensionId::derive("test.asset.minter");
+        let program = ExtensionHash::derive("test.asset.minter");
         let register = AssetCall::new(
             AssetInstruction::Register {
                 name: "Program Token".into(),
@@ -673,6 +809,49 @@ mod tests {
         assert_eq!(state.balance(asset_id, recipient), 25);
         state.rollback(journal);
         assert_eq!(state.supply(asset_id), 100);
+        assert_eq!(state.balance(asset_id, recipient), 0);
+    }
+
+    #[test]
+    fn extension_can_receive_and_send_asset_balance() {
+        let creator = Address([0x11; xparq_crypto::ADDRESS_SIZE]);
+        let recipient = Address([0x12; xparq_crypto::ADDRESS_SIZE]);
+        let program = ExtensionHash::derive("test.asset.vault");
+        let register = AssetCall::new(
+            AssetInstruction::Register {
+                name: "Vault Token".into(),
+                symbol: "VLT".into(),
+                decimals: 0,
+                max_supply: 100,
+                initial_mint: 100,
+                mint_authority: None,
+            },
+            creator,
+            0,
+        );
+        let asset_id = register.asset_id();
+        let mut state = AssetState::default();
+        state.apply(&register).unwrap();
+        state
+            .apply(&AssetCall::new(
+                AssetInstruction::TransferToExtension {
+                    asset_id,
+                    extension: program,
+                    amount: 40,
+                },
+                creator,
+                1,
+            ))
+            .unwrap();
+        assert_eq!(state.extension_balance(asset_id, program), 40);
+
+        let journal = state
+            .apply_program_transfer(program, asset_id, recipient, 15)
+            .unwrap();
+        assert_eq!(state.extension_balance(asset_id, program), 25);
+        assert_eq!(state.balance(asset_id, recipient), 15);
+        state.rollback(journal);
+        assert_eq!(state.extension_balance(asset_id, program), 40);
         assert_eq!(state.balance(asset_id, recipient), 0);
     }
 }

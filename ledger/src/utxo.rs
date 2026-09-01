@@ -1,28 +1,43 @@
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use xparq_coin::{Coin, CoinId};
+use xparq_coin::{Coin, CoinHash};
+use xparq_common::ExtensionHash;
 use xparq_crypto::{Address, ProfilePublicKey, QCashPublicKey};
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
+)]
+pub enum CoinOwner {
+    Account(Address),
+    Extension(ExtensionHash),
+}
+
+impl From<Address> for CoinOwner {
+    fn from(value: Address) -> Self {
+        Self::Account(value)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct CoinUtxo {
     pub coin: Coin,
-    pub owner: Address,
+    pub owner: CoinOwner,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 struct StoredCoinUtxo {
     amount: xparq_coin::Amount,
-    owner: Address,
+    owner: CoinOwner,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct CoinUtxoSet {
-    utxos: BTreeMap<CoinId, StoredCoinUtxo>,
+    utxos: BTreeMap<CoinHash, StoredCoinUtxo>,
 }
 
 impl CoinUtxoSet {
-    pub fn get(&self, id: &CoinId) -> Option<CoinUtxo> {
+    pub fn get(&self, id: &CoinHash) -> Option<CoinUtxo> {
         self.utxos.get(id).map(|stored| CoinUtxo {
             coin: Coin::new(*id, stored.amount),
             owner: stored.owner,
@@ -31,7 +46,7 @@ impl CoinUtxoSet {
 
     pub fn insert(&mut self, utxo: CoinUtxo) -> Result<(), UtxoError> {
         if self.utxos.contains_key(&utxo.coin.id) {
-            return Err(UtxoError::CoinIdCollision);
+            return Err(UtxoError::CoinHashCollision);
         }
         self.utxos.insert(
             utxo.coin.id,
@@ -43,7 +58,7 @@ impl CoinUtxoSet {
         Ok(())
     }
 
-    pub fn consume(&mut self, id: &CoinId) -> Result<CoinUtxo, UtxoError> {
+    pub fn consume(&mut self, id: &CoinHash) -> Result<CoinUtxo, UtxoError> {
         self.utxos
             .remove(id)
             .map(|stored| CoinUtxo {
@@ -62,6 +77,10 @@ impl CoinUtxoSet {
             coin: Coin::new(*id, stored.amount),
             owner: stored.owner,
         })
+    }
+
+    pub fn owned_by(&self, owner: CoinOwner) -> impl Iterator<Item = CoinUtxo> + '_ {
+        self.iter().filter(move |utxo| utxo.owner == owner)
     }
 
     pub fn len(&self) -> usize {
@@ -89,15 +108,15 @@ struct StoredQCashUtxo {
 /// A UTXO set contains available outputs only. Absence means invalid input.
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct QCashUtxoSet {
-    utxos: BTreeMap<CoinId, StoredQCashUtxo>,
+    utxos: BTreeMap<CoinHash, StoredQCashUtxo>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct UtxoRollbackJournal {
     pub(crate) consumed_coins: Vec<CoinUtxo>,
-    pub(crate) created_coin_ids: Vec<CoinId>,
+    pub(crate) created_coin_ids: Vec<CoinHash>,
     pub(crate) consumed_qcash: Vec<QCashUtxo>,
-    pub(crate) created_qcash_ids: Vec<CoinId>,
+    pub(crate) created_qcash_ids: Vec<CoinHash>,
     pub(crate) registered_profile_public_keys: Vec<Address>,
     pub(crate) burned: xparq_coin::Amount,
 }
@@ -136,7 +155,7 @@ impl AccountKeyRegistry {
 }
 
 impl QCashUtxoSet {
-    pub fn get(&self, id: &CoinId) -> Option<QCashUtxo> {
+    pub fn get(&self, id: &CoinHash) -> Option<QCashUtxo> {
         self.utxos.get(id).map(|stored| QCashUtxo {
             coin: Coin::new(*id, stored.amount),
             public_key: stored.public_key,
@@ -152,7 +171,7 @@ impl QCashUtxoSet {
 
     pub fn insert(&mut self, utxo: QCashUtxo) -> Result<(), UtxoError> {
         if self.utxos.contains_key(&utxo.coin.id) {
-            return Err(UtxoError::CoinIdCollision);
+            return Err(UtxoError::CoinHashCollision);
         }
         self.utxos.insert(
             utxo.coin.id,
@@ -165,7 +184,7 @@ impl QCashUtxoSet {
     }
 
     /// Consumes an available output. A second spend fails because the entry is gone.
-    pub fn consume(&mut self, id: &CoinId) -> Result<QCashUtxo, UtxoError> {
+    pub fn consume(&mut self, id: &CoinHash) -> Result<QCashUtxo, UtxoError> {
         self.utxos
             .remove(id)
             .map(|stored| QCashUtxo {
@@ -192,7 +211,7 @@ impl QCashUtxoSet {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UtxoError {
     UtxoNotFound,
-    CoinIdCollision,
+    CoinHashCollision,
     PublicKeyNotFound,
     PublicKeyConflict,
 }
@@ -201,7 +220,7 @@ impl fmt::Display for UtxoError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UtxoNotFound => formatter.write_str("UTXO was not found"),
-            Self::CoinIdCollision => formatter.write_str("UTXO coin ID already exists"),
+            Self::CoinHashCollision => formatter.write_str("UTXO coin ID already exists"),
             Self::PublicKeyNotFound => formatter.write_str("account public key was not found"),
             Self::PublicKeyConflict => {
                 formatter.write_str("account address is registered to another public key")
@@ -218,16 +237,16 @@ mod tests {
 
     #[test]
     fn canonical_utxo_storage_does_not_duplicate_coin_id() {
-        let id = CoinId::from_bytes([1; CoinId::SIZE]);
+        let id = CoinHash::from_bytes([1; CoinHash::SIZE]);
         let mut coins = CoinUtxoSet::default();
         coins
             .insert(CoinUtxo {
                 coin: Coin::new(id, xparq_coin::Amount::from_zeno(2)),
-                owner: Address([3; xparq_crypto::ADDRESS_SIZE]),
+                owner: Address([3; xparq_crypto::ADDRESS_SIZE]).into(),
             })
             .unwrap();
         let coin_bytes = xparq_common::canonical_bytes(&coins).unwrap();
-        assert_eq!(coin_bytes.len(), 4 + 32 + 8 + 20);
+        assert_eq!(coin_bytes.len(), 4 + 32 + 8 + 1 + 20);
         assert_eq!(
             coins.get(&id).unwrap().coin,
             Coin::new(id, xparq_coin::Amount::from_zeno(2))

@@ -1,16 +1,16 @@
 use borsh::{BorshDeserialize, BorshSerialize};
-use xparq_coin::{Amount, Coin, CoinId};
+use xparq_coin::{Amount, Coin, CoinHash};
 
 /// Public descriptor of one QCash bearer coin; no signing seed is included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
 pub struct QCash(pub Coin);
 
 impl QCash {
-    pub const fn new(id: CoinId, amount: Amount) -> Self {
+    pub const fn new(id: CoinHash, amount: Amount) -> Self {
         Self(Coin::new(id, amount))
     }
 
-    pub const fn id(self) -> CoinId {
+    pub const fn id(self) -> CoinHash {
         self.0.id
     }
 

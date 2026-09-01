@@ -7,4 +7,4 @@ mod coin;
 mod error;
 
 pub use coin::*;
-pub use error::CoinIdParseError;
+pub use error::CoinHashParseError;

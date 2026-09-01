@@ -579,7 +579,7 @@ fn account_response(
     mempool: &[AuthorizedTransaction],
     address: Address,
     utxo_offset: usize,
-    utxo_after: Option<xparq::coin::CoinId>,
+    utxo_after: Option<xparq::coin::CoinHash>,
 ) -> Result<serde_json::Value, String> {
     let next_height = ledger
         .tip_height()
@@ -590,7 +590,7 @@ fn account_response(
         .state()
         .coins
         .iter()
-        .filter(|utxo| utxo.owner == address)
+        .filter(|utxo| utxo.owner == xparq::ledger::CoinOwner::Account(address))
         .collect::<Vec<_>>();
     account_utxos.sort_by_key(|utxo| utxo.coin.id);
     for utxo in &account_utxos {
@@ -674,7 +674,7 @@ fn balance_response(
         .state()
         .coins
         .iter()
-        .filter(|utxo| utxo.owner == address)
+        .filter(|utxo| utxo.owner == xparq::ledger::CoinOwner::Account(address))
     {
         total = total
             .checked_add(utxo.coin.amount)
@@ -751,7 +751,7 @@ fn explorer_address_response(
         .state()
         .coins
         .iter()
-        .filter(|utxo| utxo.owner == address)
+        .filter(|utxo| utxo.owner == xparq::ledger::CoinOwner::Account(address))
     {
         total = total
             .checked_add(utxo.coin.amount)
@@ -770,12 +770,11 @@ fn explorer_address_response(
         if let Some(emission) = block.emission().filter(|emission| emission.to == address) {
             emission_count = emission_count.saturating_add(1);
             if include_emissions {
-                let state_burn = xparq::consensus::emission_utxo_state_burn(emission.subsidy)
-                    .map_err(|error| error.to_string())?;
+                let state_burn = xparq::consensus::MINER_CREATED_STATE_BURN;
                 let miner_emission = emission
                     .subsidy
                     .checked_sub(state_burn)
-                    .ok_or("block emission is below its UTXO state burn")?;
+                    .ok_or("block emission is below its created-state burn")?;
                 activities.push(serde_json::json!({
                     "height": block.height().0,
                     "block_hash": block_hash,
@@ -978,6 +977,13 @@ fn asset_transaction_response(
         } => serde_json::json!({
             "type": "transfer", "recipient": xparq::crypto::address_to_string(recipient), "amount": amount.to_string(),
         }),
+        xparq::asset::AssetInstruction::TransferToExtension {
+            extension, amount, ..
+        } => serde_json::json!({
+            "type": "transfer_to_extension",
+            "extension_id": hex::encode(extension.as_bytes()),
+            "amount": amount.to_string(),
+        }),
     };
     serde_json::json!({
         "asset_id": call.asset_id().to_string(),
@@ -1063,6 +1069,11 @@ fn public_outputs_response(
                     "miner_fee",
                 ),
                 OutputTarget::Burn => (None, "burn", "state_burn"),
+                OutputTarget::Extension(extension) => (
+                    Some(hex::encode(extension.as_bytes())),
+                    "extension",
+                    "extension_deposit",
+                ),
             };
             serde_json::json!({
                 "address": address,
@@ -1080,6 +1091,7 @@ fn output_recipient(output: &SpendOutput, miner: Address) -> Option<Address> {
         OutputTarget::Address(address) => Some(address),
         OutputTarget::BlockMiner => Some(miner),
         OutputTarget::Burn => None,
+        OutputTarget::Extension(_) => None,
     }
 }
 
@@ -1166,10 +1178,8 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
         let created_state_weight = ledger
             .preview_extension_created_state_weight(&call, height)
             .map_err(|error| error.to_string())?;
-        let emission = expected_next_emission(&ledger)?;
-        let rate = xparq::consensus::state_burn_rate_for_emission(emission);
         let state_burn = created_state_weight
-            .checked_mul(rate)
+            .checked_mul(xparq::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT)
             .ok_or("extension preview state burn overflow")?;
         return write_http_response(
             stream,
@@ -1177,8 +1187,7 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             &serde_json::json!({
                 "height": height.0,
                 "created_state_weight": created_state_weight,
-                "emission": emission.as_zeno(),
-                "state_burn_rate_zeno_per_weight": rate,
+                "state_burn_rate_zeno_per_weight": xparq::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT,
                 "state_burn": state_burn,
             }),
         );
@@ -1203,18 +1212,17 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
         "/status" => status_response(&ledger)?,
         "/fee-policy" => {
             let emission = expected_next_emission(&ledger)?;
-            let rate = xparq::consensus::state_burn_rate_for_emission(emission);
-            let emission_burn = xparq::consensus::emission_utxo_state_burn(emission)
-                .map_err(|error| error.to_string())?;
             serde_json::json!({
                 "minimum_fee_rate_zeno_per_byte": MIN_RELAY_FEE_ZENO_PER_BYTE,
                 "state_burn_algorithm": xparq::consensus::STATE_BURN_ALGORITHM,
                 "next_block_emission": emission.as_zeno(),
-                "state_burn_rate_zeno_per_weight": rate,
-                "state_burn_emission_multiplier": xparq::consensus::STATE_BURN_EMISSION_MULTIPLIER,
+                "state_burn_rate_zeno_per_weight": xparq::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT,
+                "block_state_weight": xparq::consensus::BLOCK_STATE_WEIGHT,
                 "coin_utxo_state_weight": xparq::consensus::COIN_UTXO_STATE_WEIGHT,
                 "qcash_utxo_state_weight": xparq::consensus::QCASH_UTXO_STATE_WEIGHT,
-                "emission_utxo_state_burn": emission_burn.as_zeno(),
+                "block_state_burn": xparq::consensus::BLOCK_STATE_BURN.as_zeno(),
+                "emission_utxo_state_burn": xparq::consensus::EMISSION_UTXO_STATE_BURN.as_zeno(),
+                "miner_created_state_burn": xparq::consensus::MINER_CREATED_STATE_BURN.as_zeno(),
             })
         }
         "/blocks/latest" => latest_blocks_response(&ledger)?,
@@ -1270,7 +1278,7 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
                     "utxo_after" => {
                         utxo_after = Some(
                             value
-                                .parse::<xparq::coin::CoinId>()
+                                .parse::<xparq::coin::CoinHash>()
                                 .map_err(|_| "invalid account UTXO cursor")?,
                         );
                     }
@@ -1324,14 +1332,8 @@ fn asset_nonce_response(
     );
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
     for transaction in read_mempool(database)? {
-        let validated = validate_transaction(
-            transaction,
-            chain,
-            height.0,
-            expected_next_emission(ledger)?,
-            &state,
-        )
-        .map_err(|error| format!("validate pending asset nonce: {error}"))?;
+        let validated = validate_transaction(transaction, chain, height.0, &state)
+            .map_err(|error| format!("validate pending asset nonce: {error}"))?;
         state
             .apply_validated_transaction(&validated, height, Address::ZERO)
             .map_err(|error| format!("apply pending asset nonce: {error}"))?;
@@ -1356,14 +1358,8 @@ fn wasm_nonce_response(
     );
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
     for transaction in read_mempool(database)? {
-        let validated = validate_transaction(
-            transaction,
-            chain,
-            height.0,
-            expected_next_emission(ledger)?,
-            &state,
-        )
-        .map_err(|error| format!("validate pending WASM deploy nonce: {error}"))?;
+        let validated = validate_transaction(transaction, chain, height.0, &state)
+            .map_err(|error| format!("validate pending WASM deploy nonce: {error}"))?;
         state
             .apply_validated_transaction(&validated, height, Address::ZERO)
             .map_err(|error| format!("apply pending WASM deploy nonce: {error}"))?;
@@ -1385,7 +1381,7 @@ fn wasm_extension_response(ledger: &Ledger, route: &str) -> Result<serde_json::V
         return Err("invalid WASM extension id".into());
     }
     let decoded = hex::decode(text).map_err(|_| "invalid WASM extension id")?;
-    let extension_id = xparq::extension::ExtensionId::from_bytes(
+    let extension_id = xparq::extension::ExtensionHash::from_bytes(
         decoded
             .try_into()
             .map_err(|_| "invalid WASM extension id")?,
@@ -1429,12 +1425,12 @@ fn wasm_app_nonce_response(ledger: &Ledger, route: &str) -> Result<serde_json::V
     }))
 }
 
-fn parse_extension_id(value: &str) -> Result<xparq::common::ExtensionId, String> {
+fn parse_extension_id(value: &str) -> Result<xparq::common::ExtensionHash, String> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("invalid WASM extension id".into());
     }
     let bytes = hex::decode(value).map_err(|_| "invalid WASM extension id")?;
-    Ok(xparq::common::ExtensionId::from_bytes(
+    Ok(xparq::common::ExtensionHash::from_bytes(
         bytes.try_into().map_err(|_| "invalid WASM extension id")?,
     ))
 }
@@ -1445,7 +1441,7 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
     let asset_id = parts
         .first()
         .ok_or("missing asset id")?
-        .parse::<xparq::asset::AssetId>()
+        .parse::<xparq::asset::AssetHash>()
         .map_err(|_| "invalid asset id")?;
     if parts.len() == 1 {
         let metadata = ledger
@@ -1471,6 +1467,15 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
         return Ok(serde_json::json!({
             "asset_id": asset_id.to_string(),
             "address": xparq::crypto::address_to_string(&address),
+            "balance": balance.to_string(),
+        }));
+    }
+    if parts.len() == 4 && parts[1] == "balance" && parts[2] == "extension" {
+        let extension = parse_extension_id(parts[3])?;
+        let balance = ledger.state().assets.extension_balance(asset_id, extension);
+        return Ok(serde_json::json!({
+            "asset_id": asset_id.to_string(),
+            "extension_id": hex::encode(extension.as_bytes()),
             "balance": balance.to_string(),
         }));
     }
@@ -1614,14 +1619,13 @@ fn block_response(block: &Block) -> Result<serde_json::Value, String> {
         .emission()
         .map_or(Amount::from_zeno(0), |emission| emission.subsidy);
     let state_burn = if block.emission().is_some() {
-        xparq::consensus::emission_utxo_state_burn(gross_subsidy)
-            .map_err(|error| error.to_string())?
+        xparq::consensus::MINER_CREATED_STATE_BURN
     } else {
         Amount::from_zeno(0)
     };
     let miner_emission = gross_subsidy
         .checked_sub(state_burn)
-        .ok_or("block emission is below its UTXO state burn")?;
+        .ok_or("block emission is below its created-state burn")?;
     let transaction_details = block
         .transactions()
         .iter()
@@ -2835,9 +2839,6 @@ fn reconcile_mempool(
     let Ok(chain) = xparq::genesis::chain_context() else {
         return Vec::new();
     };
-    let Ok(current_emission) = expected_next_emission(ledger) else {
-        return Vec::new();
-    };
     let mut state = ledger.state().clone();
     let mut retained = Vec::new();
     let mut seen = BTreeSet::new();
@@ -2860,13 +2861,8 @@ fn reconcile_mempool(
         if !meets_minimum_relay_fee(&transaction, encoded.len()) {
             continue;
         }
-        let Ok(validated) = validate_transaction(
-            transaction.clone(),
-            chain,
-            height.0,
-            current_emission,
-            &state,
-        ) else {
+        let Ok(validated) = validate_transaction(transaction.clone(), chain, height.0, &state)
+        else {
             continue;
         };
         if state
@@ -3168,7 +3164,7 @@ fn format_work(limbs: [u64; 8]) -> String {
         .collect()
 }
 
-fn reserved_coin_inputs(transactions: &[AuthorizedTransaction]) -> BTreeSet<xparq::coin::CoinId> {
+fn reserved_coin_inputs(transactions: &[AuthorizedTransaction]) -> BTreeSet<xparq::coin::CoinHash> {
     transactions
         .iter()
         .flat_map(|transaction| match transaction {
@@ -3193,7 +3189,6 @@ fn validate_mempool(ledger: &Ledger, transactions: &[AuthorizedTransaction]) -> 
             .map_or(0, |height| height.0.saturating_add(1)),
     );
     let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
-    let current_emission = expected_next_emission(ledger)?;
     let mut state = ledger.state().clone();
     for transaction in transactions {
         let encoded = canonical_bytes(transaction).map_err(|error| error.to_string())?;
@@ -3208,14 +3203,8 @@ fn validate_mempool(ledger: &Ledger, transactions: &[AuthorizedTransaction]) -> 
                 encoded.len()
             ));
         }
-        let validated = validate_transaction(
-            transaction.clone(),
-            chain,
-            height.0,
-            current_emission,
-            &state,
-        )
-        .map_err(|error| format!("mempool transaction is invalid: {error}"))?;
+        let validated = validate_transaction(transaction.clone(), chain, height.0, &state)
+            .map_err(|error| format!("mempool transaction is invalid: {error}"))?;
         state
             .apply_validated_transaction(&validated, height, Address::ZERO)
             .map_err(|error| format!("mempool state transition is invalid: {error}"))?;
@@ -3827,7 +3816,7 @@ mod tests {
     fn policy_split_transaction(fee: u64) -> AuthorizedTransaction {
         let input_seed = xparq::qcash::QCashSigningSeed::from_bytes([0x41; 32]);
         let input = xparq::qcash::QCash::new(
-            xparq::coin::CoinId::from_bytes([0x42; xparq::coin::CoinId::SIZE]),
+            xparq::coin::CoinHash::from_bytes([0x42; xparq::coin::CoinHash::SIZE]),
             Amount::from_zeno(1_000_000),
         );
         let intent = xparq::transaction::SplitIntent::new(
@@ -3890,7 +3879,7 @@ mod tests {
         let miner = Address([5; 20]);
         let intent = xparq::transaction::OnChainSpendIntent::new(
             sender.address,
-            vec![xparq::coin::CoinId::from_bytes([6; 32])],
+            vec![xparq::coin::CoinHash::from_bytes([6; 32])],
             vec![
                 SpendOutput::new(recipient, Amount::from_zeno(10)),
                 SpendOutput::new(sender.address, Amount::from_zeno(5)),
