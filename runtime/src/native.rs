@@ -55,7 +55,7 @@ const API_DOCS_HTML: &[u8] = br#"<!doctype html>
 </html>
 "#;
 const P2P_MAGIC: [u8; 8] = *b"XPQP2P01";
-const P2P_PROTOCOL_VERSION: u32 = 3;
+const P2P_PROTOCOL_VERSION: u32 = 1;
 const CAPABILITY_PEER_DISCOVERY: u64 = 1 << 0;
 const CAPABILITY_RELAY: u64 = 1 << 1;
 const LOCAL_CAPABILITIES: u64 = CAPABILITY_PEER_DISCOVERY | CAPABILITY_RELAY;

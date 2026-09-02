@@ -33,13 +33,13 @@ pub const ADDRESS_PREFIX: &str = "Qx";
 pub const ADDRESS_CHECKSUM_SIZE: usize = 4;
 pub const ADDRESS_STRING_LEN: usize =
     ADDRESS_PREFIX.len() + (ADDRESS_SIZE + ADDRESS_CHECKSUM_SIZE) * 2;
-const ADDRESS_CHECKSUM_DOMAIN: &[u8] = b"XPARQ address checksum v1";
+const ADDRESS_CHECKSUM_DOMAIN: &[u8] = b"XPARQ address checksum";
 const_assert_eq!(ADDRESS_CHECKSUM_SIZE, 4);
 const_assert_eq!(ADDRESS_STRING_LEN, 50);
 
 pub fn address_from_profile_public_key(public_key: &ProfilePublicKey) -> Address {
     let mut material = Vec::with_capacity(32 + public_key.bytes.len());
-    material.extend_from_slice(b"XPARQ signature profile address v1");
+    material.extend_from_slice(b"XPARQ signature profile address");
     material.push(public_key.profile as u8);
     material.extend_from_slice(&public_key.bytes);
     address_from_key_material(&material)

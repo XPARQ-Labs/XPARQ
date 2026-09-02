@@ -75,7 +75,7 @@ Enable mining by supplying a canonical checksummed `0x` payout address:
   --data data/node-1 \
   --p2p 0.0.0.0:6677 \
   --rpc 127.0.0.1:6666 \
-  --miner 0xADDRESS_WITH_CHECKSUM
+  --miner QxADDRESS_WITH_CHECKSUM
 ```
 
 Connect another local node with `--peer` and different ports/data directory:

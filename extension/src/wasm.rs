@@ -24,7 +24,7 @@ use xparq_crypto::{
     address_from_profile_public_key, profile_verify,
 };
 
-pub const WASM_ABI_VERSION: u32 = 2;
+pub const WASM_ABI_VERSION: u32 = 1;
 pub const WASM_CODE_MAX_SIZE: usize = 2 * 1024 * 1024;
 pub const WASM_PACKAGE_MAX_SIZE: usize = WASM_CODE_MAX_SIZE + 4096;
 pub const WASM_MEMORY_MAX_PAGES: u32 = 16;

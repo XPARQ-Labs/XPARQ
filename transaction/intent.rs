@@ -8,11 +8,11 @@ use xparq_qcash::QCash;
 
 use crate::IntentError;
 
-const REDEEM_COMMITMENT_CONTEXT: &str = "XPARQ QCash RedeemIntent v1";
-const MERGE_COMMITMENT_CONTEXT: &str = "XPARQ QCash MergeIntent v1";
-const SPLIT_COMMITMENT_CONTEXT: &str = "XPARQ QCash SplitIntent v1";
-const ONCHAIN_SPEND_COMMITMENT_CONTEXT: &str = "XPARQ OnChain SpendIntent v1";
-const WITHDRAW_COMMITMENT_CONTEXT: &str = "XPARQ QCash WithdrawIntent v1";
+const REDEEM_COMMITMENT_CONTEXT: &str = "XPARQ QCash RedeemIntent";
+const MERGE_COMMITMENT_CONTEXT: &str = "XPARQ QCash MergeIntent";
+const SPLIT_COMMITMENT_CONTEXT: &str = "XPARQ QCash SplitIntent";
+const ONCHAIN_SPEND_COMMITMENT_CONTEXT: &str = "XPARQ OnChain SpendIntent";
+const WITHDRAW_COMMITMENT_CONTEXT: &str = "XPARQ QCash WithdrawIntent";
 
 /// Genesis identity supplied by consensus, not serialized inside transactions.
 ///

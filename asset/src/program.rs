@@ -8,7 +8,7 @@ use crate::AssetHashParseError;
 
 pub const ASSET_NAME_MAX_LEN: usize = 64;
 pub const ASSET_SYMBOL_MAX_LEN: usize = 16;
-const ASSET_PROGRAM_COMMITMENT_CONTEXT: &str = "XPARQ Native Asset Call";
+const ASSET_PROGRAM_COMMITMENT_CONTEXT: &str = "XPARQ Native Asset Program";
 
 #[derive(
     BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,

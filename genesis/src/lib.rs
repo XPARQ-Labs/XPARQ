@@ -30,7 +30,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 ]);
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`] changes.
-pub const CHAIN_SPEC_VERSION: u32 = 5;
+pub const CHAIN_SPEC_VERSION: u32 = 1;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -129,7 +129,7 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
     }
     let wasm_identity = WasmChainSpecIdentity {
         base_chain_spec_hash: base_hash.0,
-        protocol: "xparq-wasm-extension-abi-v1",
+        protocol: "xparq-wasm-extension-abi",
         manifests,
     };
     let bytes = xparq_common::canonical_bytes(&wasm_identity).map_err(GenesisError::Encoding)?;

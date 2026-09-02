@@ -26,16 +26,18 @@ little-endian `u64`; arithmetic is checked.
 policy. A transaction that creates persistent canonical state must include
 exactly one `OutputTarget::Burn` for the required amount:
 
-`created_weight * 1 zeno`
+`(canonical_transaction_size + created_state_weight) * 1 zeno`
 
-The consensus rate is fixed at `1 zeno` per newly created canonical-state
-weight unit. Coin UTXOs, QCash UTXOs, first-time account profile-key
+The consensus rate is fixed at `1 zeno` per newly created canonical byte or
+state-weight unit. The complete authorized transaction encoding is charged as
+permanent canonical history. Coin UTXOs, QCash UTXOs, first-time account profile-key
 registrations, asset entries, and extension/WASM key-value entries are charged.
 Updates to existing entries and deleted state receive no charge or credit.
 The active rate, Coin and QCash UTXO weights, and emission-UTXO burn are
 exposed by `/fee-policy`; the algorithm and parameters are committed by the
 chain-spec hash.
-Consumed inputs do not receive burn credit. Burn outputs conserve transaction
+The miner relay fee is node/miner policy and is separate from this mandatory
+protocol burn. Consumed inputs do not receive burn credit. Burn outputs conserve transaction
 value during validation but are deliberately not inserted into the UTXO set.
 No canonical state-creating operation is exempt: on-chain spend, QCash
 withdraw/redeem/split/merge, extension calls, WASM deployment, and block

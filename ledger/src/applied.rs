@@ -790,34 +790,43 @@ mod tests {
                 public_key: seed.public_key(),
             })
             .unwrap();
-        let intent = SplitIntent::new(
-            QCash::new(input_id, xparq_coin::Amount::from_zeno(30_000)),
-            vec![
-                QCashOutput::new(
-                    xparq_coin::Amount::from_zeno(500),
-                    xparq_crypto::QCashPublicKey([4; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
-                ),
-                QCashOutput::new(
-                    xparq_coin::Amount::from_zeno(
-                        29_500 - 2 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT,
-                    ),
-                    xparq_crypto::QCashPublicKey([5; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
-                ),
-            ],
-            vec![xparq_transaction::SpendOutput::burn(
-                xparq_coin::Amount::from_zeno(2 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT),
-            )],
-        )
-        .unwrap();
         let chain = ChainContext::new([6; 32]);
-        let commitment = intent.commitment(chain).unwrap();
-        let signed = AuthorizedQCashIntent::new(
-            intent,
-            vec![QCashAuthorization {
-                signature: seed.sign(commitment.as_bytes()),
-            }],
-        )
-        .unwrap();
+        let ledger_burn = 2 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT;
+        let mut burn = ledger_burn;
+        let signed = loop {
+            let intent = SplitIntent::new(
+                QCash::new(input_id, xparq_coin::Amount::from_zeno(30_000)),
+                vec![
+                    QCashOutput::new(
+                        xparq_coin::Amount::from_zeno(500),
+                        xparq_crypto::QCashPublicKey([4; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
+                    ),
+                    QCashOutput::new(
+                        xparq_coin::Amount::from_zeno(29_500 - burn),
+                        xparq_crypto::QCashPublicKey([5; xparq_crypto::QCASH_PUBLIC_KEY_SIZE]),
+                    ),
+                ],
+                vec![xparq_transaction::SpendOutput::burn(
+                    xparq_coin::Amount::from_zeno(burn),
+                )],
+            )
+            .unwrap();
+            let commitment = intent.commitment(chain).unwrap();
+            let signed = AuthorizedQCashIntent::new(
+                intent,
+                vec![QCashAuthorization {
+                    signature: seed.sign(commitment.as_bytes()),
+                }],
+            )
+            .unwrap();
+            let transaction = AuthorizedTransaction::Split(Box::new(signed.clone()));
+            let required = ledger_burn
+                + xparq_common::canonical_bytes(&transaction).unwrap().len() as u64;
+            if required == burn {
+                break signed;
+            }
+            burn = required;
+        };
         let validated = validate_transaction(
             AuthorizedTransaction::Split(Box::new(signed)),
             chain,
@@ -833,7 +842,7 @@ mod tests {
         assert_eq!(state.qcash.len(), 2);
         assert_eq!(
             state.total_burned,
-            Amount::from_zeno(2 * xparq_consensus::QCASH_UTXO_STATE_WEIGHT)
+            Amount::from_zeno(burn)
         );
         state.rollback_state(journal).unwrap();
         assert!(state.qcash.get(&input_id).is_some());

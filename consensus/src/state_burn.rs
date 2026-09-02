@@ -4,7 +4,7 @@ use xparq_coin::Amount;
 use xparq_crypto::{ADDRESS_SIZE, ProfilePublicKey, QCASH_PUBLIC_KEY_SIZE};
 use xparq_transaction::{OutputTarget, SpendOutput};
 
-pub const STATE_BURN_ALGORITHM: &str = "xparq-canonical-state-creation-burn-v4";
+pub const STATE_BURN_ALGORITHM: &str = "xparq-canonical-state-creation-burn";
 pub const STATE_BURN_RATE_ZENO_PER_WEIGHT: u64 = 1;
 /// Canonical encoded size of an empty non-genesis block with one emission.
 pub const BLOCK_STATE_WEIGHT: u64 = 153;
@@ -61,6 +61,20 @@ impl StateTransitionWeight {
             .checked_mul(STATE_BURN_RATE_ZENO_PER_WEIGHT)
             .ok_or(StateBurnError::AmountOverflow)?;
         Ok(Amount::from_zeno(burn))
+    }
+
+    pub fn required_burn_with_archival(
+        self,
+        canonical_transaction_weight: u64,
+    ) -> Result<Amount, StateBurnError> {
+        let state = self.required_burn()?.as_zeno();
+        let archival = canonical_transaction_weight
+            .checked_mul(STATE_BURN_RATE_ZENO_PER_WEIGHT)
+            .ok_or(StateBurnError::AmountOverflow)?;
+        state
+            .checked_add(archival)
+            .map(Amount::from_zeno)
+            .ok_or(StateBurnError::AmountOverflow)
     }
 }
 
@@ -142,6 +156,18 @@ mod tests {
         assert_eq!(
             two_outputs.required_burn(),
             Ok(Amount::from_zeno(2 * QCASH_UTXO_STATE_WEIGHT))
+        );
+    }
+
+    #[test]
+    fn charges_canonical_transaction_history_in_addition_to_ledger_state() {
+        let transition = StateTransitionWeight {
+            created_coin_utxos: 1,
+            ..StateTransitionWeight::default()
+        };
+        assert_eq!(
+            transition.required_burn_with_archival(906),
+            Ok(Amount::from_zeno(COIN_UTXO_STATE_WEIGHT + 906))
         );
     }
 
