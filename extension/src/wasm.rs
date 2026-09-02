@@ -257,7 +257,7 @@ impl fmt::Display for WasmExtensionError {
             Self::ExtensionHashMismatch => "WASM extension id does not match name and code hash",
             Self::InvalidModule => "invalid or unsupported deterministic WASM module",
             Self::InvalidMemory => "WASM memory must have equal bounded minimum and maximum",
-            Self::InvalidAbi => "WASM module does not export the XPARQ ABI v1 functions",
+            Self::InvalidAbi => "WASM module does not export the XPARQ ABI functions",
         };
         formatter.write_str(message)
     }

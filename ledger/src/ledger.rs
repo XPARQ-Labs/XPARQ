@@ -403,7 +403,7 @@ impl LedgerState {
         input[..32].copy_from_slice(&asset);
         input[32..].copy_from_slice(extension.as_bytes());
         Ok(ExtensionStateRoot::from_bytes(blake3::derive_key(
-            "xparq:application-state-root:v1",
+            "xparq:application-state-root",
             &input,
         )))
     }

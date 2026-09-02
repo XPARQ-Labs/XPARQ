@@ -125,7 +125,7 @@ pub fn profile_wallet_from_xparq_mnemonic(
     profile: SignatureProfile,
 ) -> Result<ProfileWallet, String> {
     let entropy = decode_xparq_mnemonic(phrase)?;
-    let mut tag = Vec::from(b"XPARQ_WALLET_SIGNATURE_PROFILE_V1".as_slice());
+    let mut tag = Vec::from(b"XPARQ_WALLET_SIGNATURE_PROFILE".as_slice());
     tag.push(profile as u8);
     let seed = tagged_wallet_hash(&tag, &entropy);
     let signing_seed = ProfileSigningSeed::new(profile, seed);

@@ -262,7 +262,7 @@ impl AssetState {
 
     pub fn state_root(&self) -> Result<[u8; 32], AssetError> {
         let bytes = canonical_bytes(self).map_err(|_| AssetError::Encoding)?;
-        Ok(blake3::derive_key("xparq:native-asset-state:v1", &bytes))
+        Ok(blake3::derive_key("xparq:native-asset-state", &bytes))
     }
 
     pub fn metadata(&self, id: AssetHash) -> Option<&AssetMetadata> {

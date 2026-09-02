@@ -19,7 +19,7 @@ use xparq_crypto::{
 use xparq_ledger::{Ledger, LedgerError};
 use xparq_transaction::ChainContext;
 
-const FORK_CHOICE_ALGORITHM: &str = "cumulative-work/cumulative-weight/hash-v1";
+const FORK_CHOICE_ALGORITHM: &str = "cumulative-work/cumulative-weight/hash";
 
 #[cfg(feature = "mainnet")]
 pub const GENESIS_NONCE: u64 = 4;
@@ -108,7 +108,7 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         qcash_utxo_state_weight: QCASH_UTXO_STATE_WEIGHT,
         max_block_weight: MAX_BLOCK_WEIGHT as u64,
         address_size: ADDRESS_SIZE as u32,
-        address_encoding: "xparq-0x-sha3-checksum-v1",
+        address_encoding: "xparq-0x-sha3-checksum",
         hash_size: HASH_SIZE as u32,
         fork_choice_algorithm: FORK_CHOICE_ALGORITHM,
         falcon_512_activation_height: FALCON_512_ACTIVATION_HEIGHT,
@@ -116,8 +116,8 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         qcash_signature_algorithm: QCASH_SIGNATURE_ALGORITHM,
         qcash_public_key_size: QCASH_PUBLIC_KEY_SIZE as u32,
         qcash_signature_size: QCASH_SIGNATURE_SIZE as u32,
-        extension_protocol: "xparq-extension-permissionless-wasm-v5",
-        native_asset_program: "xparq-native-asset-program-v1",
+        extension_protocol: "xparq-extension-permissionless-wasm",
+        native_asset_program: "xparq-native-asset-program",
         wasm_deploy_extension_id: *xparq_extension::wasm_deploy_extension_id().as_bytes(),
         wasm_deploy_activation_delay: xparq_extension::WASM_DEPLOY_ACTIVATION_DELAY,
     };

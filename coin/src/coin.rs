@@ -56,7 +56,7 @@ impl Amount {
 pub const COIN_HASH_SIZE: usize = blake3::OUT_LEN;
 pub const COIN_HASH_PREFIX: &str = "XPQ:";
 const COIN_HASH_CONTEXT: &str = "XPARQ Native Coin";
-const TRANSACTION_OUTPUT_DOMAIN: &[u8] = b"XPARQ transaction output v1";
+const TRANSACTION_OUTPUT_DOMAIN: &[u8] = b"XPARQ transaction output";
 
 /// Protocol-defined origin of a transaction-created Coin or QCash HASHentifier.
 ///
@@ -105,7 +105,7 @@ impl CoinHash {
 
     /// Derives the canonical CoinHash for a block-emission output.
     pub fn from_emission_origin(origin: &[u8; COIN_HASH_SIZE]) -> Self {
-        Self::derive(&[b"XPARQ emission output v1", origin])
+        Self::derive(&[b"XPARQ emission output", origin])
     }
 
     /// Derives the canonical CoinHASH for a transaction-created output.
@@ -252,7 +252,7 @@ mod tests {
         let origin = [9; COIN_HASH_SIZE];
         assert_eq!(
             CoinHash::from_emission_origin(&origin),
-            CoinHash::derive(&[b"XPARQ emission output v1", &origin])
+            CoinHash::derive(&[b"XPARQ emission output", &origin])
         );
 
         let commitment = [4; COIN_HASH_SIZE];
@@ -274,7 +274,7 @@ mod tests {
             assert_eq!(
                 CoinHash::from_transaction_output(kind, &commitment, index),
                 CoinHash::derive(&[
-                    b"XPARQ transaction output v1",
+                    b"XPARQ transaction output",
                     tag,
                     &commitment,
                     &index.to_le_bytes(),
