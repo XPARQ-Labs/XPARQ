@@ -46,8 +46,18 @@ impl Unit {
         }
     }
 
+    pub const fn saturating_add(self, rhs: Self) -> Self {
+        Self(self.0.saturating_add(rhs.0))
+    }
+
     pub const fn is_zero(self) -> bool {
         self.0 == 0
+    }
+}
+
+impl fmt::Display for Unit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
     }
 }
 

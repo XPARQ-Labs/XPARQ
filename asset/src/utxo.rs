@@ -36,7 +36,7 @@ impl AssetShareHash {
 }
 
 pub fn ensure_nonzero_asset_amount(value: Unit) -> Result<(), AssetError> {
-    if value == 0 {
+    if value == Unit::ZERO {
         Err(AssetError::InvalidProgram)
     } else {
         Ok(())
@@ -104,14 +104,6 @@ impl AssetShare {
     pub const fn is_zero(self) -> bool {
         self.amount.is_zero()
     }
-}
-
-/// One concrete asset UTXO/object used by the current ledger.
-#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AssetUtxo {
-    pub asset_id: AssetHash,
-    pub owner: Authority<Address>,
-    pub amount: Unit,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]

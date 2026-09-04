@@ -161,7 +161,7 @@ mod tests {
     use super::*;
     use crate::block::{Emission, Height, Nonce};
     use crate::crypto::Address;
-    use xparq_coin::Amount;
+    use xparq_coin::Zeno;
 
     fn child(parent: &Block, marker: u8) -> Block {
         Block::from_protocol_transactions(
@@ -171,7 +171,7 @@ mod tests {
             Nonce(marker as u64),
             Some(Emission::new(
                 Address([marker; crate::crypto::ADDRESS_SIZE]),
-                Amount::from_zeno(1),
+                Zeno::from_zeno(1),
             )),
             vec![],
         )

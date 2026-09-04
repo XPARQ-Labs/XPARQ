@@ -18,7 +18,7 @@ The node exposes an unauthenticated HTTP RPC intended for loopback or a trusted
 private network. Run the node and open `/docs` for the interactive API reference,
 or fetch `/openapi.json` for tooling and SDK generation.
 
-Native amounts are integer **zeno**. `100,000 zeno = 1 XPQ`.
+Native amounts are integer **zeno**. `1,000,000 zeno = 1 XPQ`.
 Consensus currently encodes each native XPQ amount as an eight-byte
 little-endian `u64`; arithmetic is checked.
 
@@ -26,28 +26,28 @@ little-endian `u64`; arithmetic is checked.
 policy. A transaction that creates persistent canonical state must include
 exactly one `OutputTarget::Burn` for the required amount:
 
-`(canonical_transaction_size + created_state_weight) * 1 zeno`
+`(canonical_transaction_size + positive_net_state_growth_weight) * 1 zeno`
 
-The consensus rate is fixed at `1 zeno` per newly created canonical byte or
-state-weight unit. The complete authorized transaction encoding is charged as
-permanent canonical history. Coin UTXOs, QCash UTXOs, first-time account profile-key
-registrations, asset entries, and extension/WASM key-value entries are charged.
-Updates to existing entries and deleted state receive no charge or credit.
-The active rate, Coin and QCash UTXO weights, and emission-UTXO burn are
+The consensus rate is fixed at `1 zeno` per canonical transaction byte or
+state-weight unit. The complete authorized transaction encoding is permanent
+canonical history. Positive net Coin UTXO growth, first-time account profile
+keys, asset entries, and extension/WASM key-value entries are also charged.
+Consumed Coin UTXOs offset Coin outputs only in the state-growth component;
+they do not erase archival transaction bytes and cannot produce a refund.
+Updates to existing non-Coin entries and deleted state receive no credit. The
+active rate, Coin UTXO weight, archival block size, and miner protocol burns are
 exposed by `/fee-policy`; the algorithm and parameters are committed by the
 chain-spec hash.
 The miner relay fee is node/miner policy and is separate from this mandatory
 protocol burn. Consumed inputs do not receive burn credit. Burn outputs conserve transaction
 value during validation but are deliberately not inserted into the UTXO set.
-No canonical state-creating operation is exempt: on-chain spend, QCash
-withdraw/redeem/split/merge, extension calls, WASM deployment, and block
-emission all account for every Coin, QCash, or extension-state entry they
-create. Consensus requires exactly one burn output with the exact amount when
+No canonical state-creating operation is exempt: Coin and asset transactions,
+extension calls, WASM deployment, and block emission account for the history
+and positive state growth they create. Consensus requires exactly one burn
+output with the exact amount when
 the required burn is nonzero; missing, underpaid, overpaid, or duplicate burn
-outputs are rejected. Transferring a QCash bearer file offline does not mutate
-canonical state and therefore is not an on-chain operation subject to burn.
-Each non-genesis block additionally creates a fixed 153-weight canonical block
-record and one 60-weight emission Coin UTXO. Their combined 213-zeno state burn
+outputs are rejected. Each non-genesis block additionally creates a fixed
+canonical archival record and one emission Coin UTXO. Their combined protocol burn
 is deducted from the gross subsidy before the miner emission UTXO is stored.
 Native asset calls charge the canonical key-plus-value size of every new
 persistent extension entry. Registration creates metadata, supply, creator
@@ -59,11 +59,8 @@ creation, and deleting an entry does not grant a refund.
 The canonical ledger stores a checked `total_burned` accumulator. It increases
 when a burn output is applied, decreases on rollback or reorg, persists in the
 database and snapshots, and is exposed by `GET /status` in zeno.
-Each non-genesis block emission also creates one Coin UTXO. Consensus deducts
-one `COIN_UTXO_STATE_WEIGHT` charge from the scheduled gross subsidy before the
-miner UTXO is inserted and adds that amount to `total_burned`. Block explorer
-responses distinguish the gross `subsidy`, `state_burn`, and net
-`miner_emission`.
+Block explorer responses distinguish the gross `subsidy`, `state_burn`, and
+net `miner_emission`.
 
 Block responses keep `transactions` as the non-emission transaction count and
 also expose `transaction_ids` plus `transaction_details`. Each detail contains
@@ -76,10 +73,10 @@ Explorer transaction outputs expose the canonical target as `type` (`address`,
 address output returns to the declared transaction sender; it is an explorer
 interpretation and does not add a Change primitive to consensus.
 
-Addresses use exactly 50 lowercase characters: `0x`, 40 hexadecimal characters
-for the 20-byte address, and eight hexadecimal characters for its four-byte
-domain-separated SHA3-256 checksum. Bech32 and raw hexadecimal addresses without
-the checksum are rejected.
+Addresses use exactly 50 characters: the case-sensitive `Qx` prefix, 40
+lowercase hexadecimal characters for the 20-byte address, and eight hexadecimal
+characters for its four-byte domain-separated SHA3-256 checksum. Bech32 and raw
+hexadecimal addresses without the checksum are rejected.
 
 ## Transaction submission
 

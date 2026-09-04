@@ -21,7 +21,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use xparq::{
     block::{Block, Emission, Height, Nonce},
     codec::{block_bytes, decode_block},
-    coin::Amount,
+    coin::Zeno,
     common::{Authority, canonical_bytes, canonical_decode},
     consensus::{
         ReorgPlan, Work, apply_block, compare_chain_tips, expected_emission_for_height,
@@ -494,9 +494,6 @@ fn candidate_block(
     let previous = ledger.tip_hash().ok_or("canonical genesis is missing")?;
     let difficulty = expected_next_difficulty(&ledger.chain).map_err(|error| error.to_string())?;
     let subsidy = expected_next_emission(ledger)?;
-    let extension_root = ledger
-        .preview_extension_state_root(&transactions, height)
-        .map_err(|error| error.to_string())?;
     let mut block = Block::from_protocol_transactions(
         height,
         previous,
@@ -506,11 +503,14 @@ fn candidate_block(
         transactions,
     )
     .map_err(|error| error.to_string())?;
+    let extension_root = ledger
+        .preview_block_state_root(&block)
+        .map_err(|error| error.to_string())?;
     block.set_state_root(StateRoot(*extension_root.as_bytes()));
     Ok(block)
 }
 
-fn expected_next_emission(ledger: &Ledger) -> Result<Amount, String> {
+fn expected_next_emission(ledger: &Ledger) -> Result<Zeno, String> {
     let height = Height(
         ledger
             .tip_height()
@@ -585,7 +585,7 @@ fn account_response(
         .tip_height()
         .map_or(0, |height| height.0.saturating_add(1));
     let reserved = reserved_coin_inputs(mempool);
-    let mut total = Amount::from_zeno(0);
+    let mut total = Zeno::from_zeno(0);
     let mut account_utxos = ledger
         .state()
         .assets
@@ -668,8 +668,8 @@ fn balance_response(
     address: Address,
 ) -> Result<serde_json::Value, String> {
     let reserved_ids = reserved_coin_inputs(mempool);
-    let mut total = Amount::from_zeno(0);
-    let mut reserved = Amount::from_zeno(0);
+    let mut total = Zeno::from_zeno(0);
+    let mut reserved = Zeno::from_zeno(0);
     let mut utxo_count = 0_usize;
     for utxo in ledger
         .state()
@@ -717,12 +717,12 @@ fn account_asset_balances(
         }
     }
     for (_, utxo) in ledger.state().assets.utxos() {
-        if utxo.owner != Authority::Address(address) || utxo.amount == 0 {
+        if utxo.owner != Authority::Address(address) || utxo.amount.is_zero() {
             continue;
         }
-        let balance = balances.entry(utxo.asset_id).or_insert(0_u128);
+        let balance = balances.entry(utxo.parent).or_insert(0_u128);
         *balance = balance
-            .checked_add(utxo.amount)
+            .checked_add(utxo.amount.as_units())
             .ok_or("asset balance overflow")?;
     }
     let mut response = Vec::with_capacity(balances.len());
@@ -732,15 +732,37 @@ fn account_asset_balances(
             .assets
             .metadata(asset_id)
             .ok_or("asset balance references missing metadata")?;
+        let shares = account_asset_shares(ledger, asset_id, address);
         response.push(serde_json::json!({
             "asset_id": asset_id.to_string(),
             "name": metadata.name,
             "symbol": metadata.symbol,
             "decimals": metadata.decimals,
             "balance": balance.to_string(),
+            "shares": shares,
         }));
     }
     Ok(response)
+}
+
+fn account_asset_shares(
+    ledger: &Ledger,
+    asset_id: xparq::asset::AssetHash,
+    address: Address,
+) -> Vec<serde_json::Value> {
+    ledger
+        .state()
+        .assets
+        .utxos()
+        .filter(|(_, share)| {
+            share.parent == asset_id && share.owner == Authority::Address(address)
+        })
+        .map(|(share_id, share)| serde_json::json!({
+            "share_id": share_id.to_string(),
+            "amount": share.amount.to_string(),
+            "owner": asset_owner_response(share.owner),
+        }))
+        .collect()
 }
 
 fn explorer_address_response(
@@ -750,8 +772,8 @@ fn explorer_address_response(
     include_emissions: bool,
 ) -> Result<serde_json::Value, String> {
     let reserved_ids = reserved_coin_inputs(mempool);
-    let mut total = Amount::from_zeno(0);
-    let mut reserved = Amount::from_zeno(0);
+    let mut total = Zeno::from_zeno(0);
+    let mut reserved = Zeno::from_zeno(0);
     for utxo in ledger
         .state()
         .assets
@@ -789,7 +811,7 @@ fn explorer_address_response(
                     "direction": "in",
                     "amount": miner_emission.as_zeno(),
                     "gross_subsidy": emission.subsidy.as_zeno(),
-                    "state_burn": state_burn.as_zeno(),
+                    "protocol_burn": protocol_burn.as_zeno(),
                     "size_bytes": serde_json::Value::Null,
                 }));
             }
@@ -825,17 +847,17 @@ fn address_transaction_activity(
         AuthorizedTransaction::Coin(tx) => (
             Some(tx.intent.sender),
             tx.intent.outputs.as_slice(),
-            Amount::from_zeno(0),
+            Zeno::from_zeno(0),
         ),
         AuthorizedTransaction::Asset(tx) => (
             Some(tx.payment.intent.sender),
             tx.payment.intent.outputs.as_slice(),
-            Amount::from_zeno(0),
+            Zeno::from_zeno(0),
         ),
         AuthorizedTransaction::Extension(tx) => (
             Some(tx.fee.intent.sender),
             tx.fee.intent.outputs.as_slice(),
-            Amount::from_zeno(0),
+            Zeno::from_zeno(0),
         ),
     };
     let received = checked_output_sum(
@@ -1073,10 +1095,10 @@ fn output_recipient(output: &SpendOutput, miner: Address) -> Option<Address> {
     }
 }
 
-fn checked_output_sum(amounts: impl IntoIterator<Item = Amount>) -> Result<Amount, String> {
+fn checked_output_sum(amounts: impl IntoIterator<Item = Zeno>) -> Result<Zeno, String> {
     amounts
         .into_iter()
-        .try_fold(Amount::from_zeno(0), |total, amount| {
+        .try_fold(Zeno::from_zeno(0), |total, amount| {
             total
                 .checked_add(amount)
                 .ok_or_else(|| "explorer amount overflow".to_string())
@@ -1441,6 +1463,7 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
             "asset_id": asset_id.to_string(),
             "address": xparq::crypto::address_to_string(&address),
             "balance": balance.to_string(),
+            "shares": account_asset_shares(ledger, asset_id, address),
         }));
     }
     if parts.len() == 4 && parts[1] == "balance" && parts[2] == "extension" {
@@ -1590,11 +1613,11 @@ fn latest_blocks_response(ledger: &Ledger) -> Result<serde_json::Value, String> 
 fn block_response(block: &Block) -> Result<serde_json::Value, String> {
     let gross_subsidy = block
         .emission()
-        .map_or(Amount::from_zeno(0), |emission| emission.subsidy);
+        .map_or(Zeno::from_zeno(0), |emission| emission.subsidy);
     let state_burn = if block.emission().is_some() {
         xparq::consensus::MINER_PROTOCOL_BURN
     } else {
-        Amount::from_zeno(0)
+        Zeno::from_zeno(0)
     };
     let miner_emission = gross_subsidy
         .checked_sub(state_burn)
@@ -3700,8 +3723,8 @@ mod tests {
                 name: "Test Token".into(),
                 symbol: "TEST".into(),
                 decimals: 8,
-                max_supply: 100_000_000_000_000_000_000_000,
-                initial_mint: 1_000_000,
+                max_supply: xparq::asset::Unit::from_units(100_000_000_000_000_000_000_000),
+                initial_mint: xparq::asset::Unit::from_units(1_000_000),
                 mint_authority: Some(Authority::Address(signer)),
             },
             signer,
@@ -3753,8 +3776,8 @@ mod tests {
                 name: "Authority Asset".into(),
                 symbol: "AUTH".into(),
                 decimals: 0,
-                max_supply: 10,
-                initial_mint: 4,
+                max_supply: xparq::asset::Unit::from_units(10),
+                initial_mint: xparq::asset::Unit::from_units(4),
                 mint_authority: Some(Authority::Address(authority)),
             },
             authority,
@@ -3767,6 +3790,14 @@ mod tests {
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0]["symbol"], "AUTH");
         assert_eq!(assets[0]["balance"], "4");
+        assert_eq!(assets[0]["shares"].as_array().unwrap().len(), 1);
+        assert_eq!(assets[0]["shares"][0]["amount"], "4");
+        assert!(
+            assets[0]["shares"][0]["share_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("share:")
+        );
     }
 
     #[test]
@@ -3792,8 +3823,8 @@ mod tests {
             sender.address,
             vec![xparq::coin::CoinHash::from_bytes([6; 32])],
             vec![
-                SpendOutput::new(recipient, Amount::from_zeno(10)),
-                SpendOutput::new(sender.address, Amount::from_zeno(5)),
+                SpendOutput::new(recipient, Zeno::from_zeno(10)),
+                SpendOutput::new(sender.address, Zeno::from_zeno(5)),
             ],
         )
         .unwrap();
@@ -3806,7 +3837,7 @@ mod tests {
             genesis.hash().unwrap(),
             1,
             Nonce(0),
-            Some(Emission::new(miner, Amount::from_zeno(1))),
+            Some(Emission::new(miner, Zeno::from_zeno(1))),
             vec![transaction.clone()],
         )
         .unwrap();

@@ -378,7 +378,7 @@ mod tests {
             Nonce(0),
             Some(crate::block::Emission::new(
                 miner,
-                xparq_coin::Amount::from_zeno(0),
+                xparq_coin::Zeno::from_zeno(0),
             )),
             vec![],
         )

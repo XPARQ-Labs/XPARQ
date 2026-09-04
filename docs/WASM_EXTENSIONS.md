@@ -43,8 +43,8 @@ Compile the extension to a raw WebAssembly module whose memory declaration is
 exactly `16 16`, then create the canonical package:
 
 ```bash
-cargo run -p xparq-runtime -- extension-package module.wasm module.xpqext example.dex 1000
-cargo run -p xparq-runtime -- extension-check module.xpqext
+cargo run -p xparq-node -- extension-package module.wasm module.xpqext example.dex 1000
+cargo run -p xparq-node -- extension-check module.xpqext
 ```
 
 Package creation refuses to overwrite an existing output file. The package
@@ -56,7 +56,7 @@ from the extension name and domain-separated code hash.
 Any wallet can deploy an immutable module and pay its size-based XPQ fee:
 
 ```bash
-cargo run -p wallet -- wasm-deploy \
+cargo run -p xparq-wallet -- wasm-deploy \
   --name example.dex \
   --wasm module.wasm \
   --wallet wallet.json \
@@ -72,7 +72,7 @@ must use new bytecode and therefore a new ID.
 Query its activation status with:
 
 ```bash
-cargo run -p wallet -- wasm-info --extension EXTENSION_ID --rpc 127.0.0.1:6666
+cargo run -p xparq-wallet -- wasm-info --extension EXTENSION_ID --rpc 127.0.0.1:6666
 ```
 
 The RPC endpoints are `GET /wasm/nonce/{address}` and
@@ -86,7 +86,7 @@ After the deployed module's own 100-block delay has elapsed, invoke it with
 either hexadecimal bytes or a file:
 
 ```bash
-cargo run -p wallet -- wasm-call \
+cargo run -p xparq-wallet -- wasm-call \
   --extension EXTENSION_ID \
   --payload-file call.bin \
   --wallet wallet.json \
@@ -112,7 +112,7 @@ Every validating node for that chain must start with the same ordered package
 set:
 
 ```bash
-cargo run -p xparq-runtime -- run \
+cargo run -p xparq-node -- run \
   --extension-package module.xpqext \
   --data ./data/wasm-chain
 ```

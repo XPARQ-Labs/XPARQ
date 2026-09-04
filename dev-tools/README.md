@@ -27,14 +27,14 @@ events, contract upgrades, or inter-extension calls.
 Build the node and wallet from the repository root:
 
 ```bash
-cargo build -p xparq-runtime -p wallet
+cargo build -p xparq-node -p xparq-wallet
 ```
 
 Run the node and open the interactive wallet in separate terminals:
 
 ```bash
-cargo run -p xparq-runtime -- run --data ./data/xparq
-cargo run -p wallet -- menu
+cargo run -p xparq-node -- run --data ./data/xparq
+cargo run -p xparq-wallet -- menu
 ```
 
 ## What is ready today?

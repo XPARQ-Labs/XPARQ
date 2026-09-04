@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, error::Error, fmt};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_asset::{
-    AssetError, AssetHash, AssetMetadata, AssetShareHash, AssetTransferOutput, AssetUtxo,
+    AssetError, AssetHash, AssetMetadata, AssetShare, AssetShareHash, AssetTransferOutput, Unit,
     asset_domain_hash, checked_asset_entry_weight, ensure_nonzero_asset_amount,
     ensure_unique_asset_inputs,
 };
@@ -24,7 +24,7 @@ pub struct CoinOutput {
 }
 
 pub type UtxoId = Input<CoinHash, AssetShareHash>;
-pub type Utxo = Output<CoinOutput, AssetUtxo>;
+pub type Utxo = Output<CoinOutput, AssetShare>;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct UtxoSet {
@@ -95,14 +95,14 @@ impl UtxoSet {
         self.entries.is_empty()
     }
 
-    pub fn asset(&self, id: AssetShareHash) -> Option<&AssetUtxo> {
+    pub fn asset(&self, id: AssetShareHash) -> Option<&AssetShare> {
         match self.entries.get(&UtxoId::Asset(id)) {
             Some(Utxo::Asset(utxo)) => Some(utxo),
             _ => None,
         }
     }
 
-    pub fn assets(&self) -> impl Iterator<Item = (AssetShareHash, &AssetUtxo)> + '_ {
+    pub fn assets(&self) -> impl Iterator<Item = (AssetShareHash, &AssetShare)> + '_ {
         self.entries
             .iter()
             .filter_map(|(id, output)| match (id, output) {
@@ -111,14 +111,14 @@ impl UtxoSet {
             })
     }
 
-    fn insert_asset(&mut self, id: AssetShareHash, utxo: AssetUtxo) -> Option<AssetUtxo> {
+    fn insert_asset(&mut self, id: AssetShareHash, utxo: AssetShare) -> Option<AssetShare> {
         match self.entries.insert(UtxoId::Asset(id), Utxo::Asset(utxo)) {
             Some(Utxo::Asset(previous)) => Some(previous),
             _ => None,
         }
     }
 
-    fn remove_asset(&mut self, id: AssetShareHash) -> Option<AssetUtxo> {
+    fn remove_asset(&mut self, id: AssetShareHash) -> Option<AssetShare> {
         match self.entries.remove(&UtxoId::Asset(id)) {
             Some(Utxo::Asset(utxo)) => Some(utxo),
             _ => None,
@@ -231,19 +231,19 @@ impl AssetState {
         self.utxos
             .assets()
             .map(|(_, utxo)| utxo)
-            .filter(|utxo| utxo.asset_id == asset_id && utxo.owner == Authority::Extension(program))
-            .fold(0_u128, |total, utxo| total.saturating_add(utxo.amount))
+            .filter(|utxo| utxo.parent == asset_id && utxo.owner == Authority::Extension(program))
+            .fold(Unit::ZERO, |total, utxo| total.saturating_add(utxo.amount))
     }
 
     pub fn supply(&self, id: AssetHash) -> Unit {
-        self.supplies.get(&id).copied().unwrap_or(0)
+        self.supplies.get(&id).copied().unwrap_or(Unit::ZERO)
     }
 
-    pub fn utxo(&self, id: AssetShareHash) -> Option<&AssetUtxo> {
+    pub fn utxo(&self, id: AssetShareHash) -> Option<&AssetShare> {
         self.utxos.asset(id)
     }
 
-    pub fn utxos(&self) -> impl Iterator<Item = (AssetShareHash, &AssetUtxo)> + '_ {
+    pub fn utxos(&self) -> impl Iterator<Item = (AssetShareHash, &AssetShare)> + '_ {
         self.utxos.assets()
     }
 
@@ -251,8 +251,8 @@ impl AssetState {
         self.utxos
             .assets()
             .map(|(_, utxo)| utxo)
-            .filter(|utxo| utxo.asset_id == asset_id && utxo.owner == Authority::Address(owner))
-            .fold(0_u128, |total, utxo| total.saturating_add(utxo.amount))
+            .filter(|utxo| utxo.parent == asset_id && utxo.owner == Authority::Address(owner))
+            .fold(Unit::ZERO, |total, utxo| total.saturating_add(utxo.amount))
     }
 
     pub fn program_transfer_plan(
@@ -267,7 +267,7 @@ impl AssetState {
         let mut inputs = Vec::new();
         let mut total = Unit::ZERO;
         for (id, utxo) in self.utxos.assets() {
-            if utxo.asset_id == asset_id && utxo.owner == program_owner {
+            if utxo.parent == asset_id && utxo.owner == program_owner {
                 inputs.push(id);
                 total = total
                     .checked_add(utxo.amount)
@@ -287,7 +287,9 @@ impl AssetState {
         if total > amount {
             outputs.push(AssetTransferOutput {
                 recipient: program_owner,
-                amount: total - amount,
+                amount: total
+                    .checked_sub(amount)
+                    .ok_or(AssetError::BalanceOverflow)?,
             });
         }
         Ok((inputs, outputs))
@@ -356,8 +358,8 @@ impl AssetState {
 
                 self.utxos.insert_asset(
                     object_id,
-                    AssetUtxo {
-                        asset_id,
+                    AssetShare {
+                        parent: asset_id,
                         owner,
                         amount: *initial_mint,
                     },
@@ -388,8 +390,8 @@ impl AssetState {
 
                 self.utxos.insert_asset(
                     object_id,
-                    AssetUtxo {
-                        asset_id: *asset_id,
+                    AssetShare {
+                        parent: *asset_id,
                         owner: *recipient,
                         amount: *amount,
                     },
@@ -453,8 +455,8 @@ impl AssetState {
 
                     self.utxos.insert_asset(
                         object_id,
-                        AssetUtxo {
-                            asset_id: *asset_id,
+                        AssetShare {
+                            parent: *asset_id,
                             owner: output.recipient,
                             amount: output.amount,
                         },
@@ -520,8 +522,8 @@ impl AssetState {
 
         self.utxos.insert_asset(
             object_id,
-            AssetUtxo {
-                asset_id,
+            AssetShare {
+                parent: asset_id,
                 owner: recipient,
                 amount,
             },
@@ -550,8 +552,8 @@ impl AssetState {
             .filter(|supply| *supply <= metadata.max_supply)
             .ok_or(AssetError::SupplyOverflow)?;
 
-        let object = AssetUtxo {
-            asset_id,
+        let object = AssetShare {
+            parent: asset_id,
             owner: recipient,
             amount,
         };
@@ -613,8 +615,8 @@ impl AssetState {
 
             self.utxos.insert_asset(
                 object_id,
-                AssetUtxo {
-                    asset_id,
+                AssetShare {
+                    parent: asset_id,
                     owner: output.recipient,
                     amount: output.amount,
                 },
@@ -644,8 +646,8 @@ impl AssetState {
         let mut weight = 0;
 
         for output in outputs {
-            let object = AssetUtxo {
-                asset_id,
+            let object = AssetShare {
+                parent: asset_id,
                 owner: output.recipient,
                 amount: output.amount,
             };
@@ -752,7 +754,7 @@ impl AssetState {
         for input in inputs {
             let utxo = self.utxo(*input).ok_or(AssetError::UnknownObject)?;
 
-            if utxo.asset_id != asset_id {
+            if utxo.parent != asset_id {
                 return Err(AssetError::AssetMismatch);
             }
 
@@ -775,7 +777,7 @@ pub struct AssetRollbackJournal {
 
     supplies: Vec<(AssetHash, Option<Unit>)>,
 
-    utxos: Vec<(AssetShareHash, Option<AssetUtxo>)>,
+    utxos: Vec<(AssetShareHash, Option<AssetShare>)>,
 
     nonces: Vec<(Address, Option<u64>)>,
 }
@@ -849,7 +851,7 @@ fn outputs_total(outputs: &[AssetTransferOutput]) -> Result<Unit, AssetError> {
         return Err(AssetError::InvalidProgram);
     }
 
-    let mut total = 0_u128;
+    let mut total = Unit::ZERO;
 
     for output in outputs {
         ensure_nonzero_asset_amount(output.amount)?;
@@ -910,16 +912,16 @@ mod tests {
             .unwrap();
         utxos.insert_asset(
             share_id,
-            AssetUtxo {
-                asset_id,
+            AssetShare {
+                parent: asset_id,
                 owner,
-                amount: 7,
+                amount: Unit::from_units(7),
             },
         );
 
         assert_eq!(utxos.len(), 2);
         assert_eq!(utxos.get(&coin_id).unwrap().coin.amount.as_zeno(), 5);
-        assert_eq!(utxos.asset(share_id).unwrap().amount, 7);
+        assert_eq!(utxos.asset(share_id).unwrap().amount, Unit::from_units(7));
     }
 
     #[test]

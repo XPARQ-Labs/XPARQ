@@ -15,7 +15,7 @@ For a token named `Example Token`, symbol `EXT`, 8 decimals, a maximum supply
 of 100 million display tokens, and an initial mint of 1 million display tokens:
 
 ```bash
-cargo run -p wallet -- asset-register \
+cargo run -p xparq-wallet -- asset-register \
   --name "Example Token" \
   --symbol EXT \
   --decimals 8 \
@@ -44,11 +44,11 @@ The accepted metadata is:
 ## Query state
 
 ```bash
-cargo run -p wallet -- asset-info \
+cargo run -p xparq-wallet -- asset-info \
   --asset ASSET_ID \
   --rpc 127.0.0.1:6666
 
-cargo run -p wallet -- asset-balance \
+cargo run -p xparq-wallet -- asset-balance \
   --asset ASSET_ID \
   --wallet wallet.json \
   --rpc 127.0.0.1:6666
@@ -73,15 +73,15 @@ Only the original mint authority may mint. Supply can never exceed
 `max_supply`.
 
 ```bash
-cargo run -p wallet -- asset-mint \
+cargo run -p xparq-wallet -- asset-mint \
   --asset ASSET_ID --to 0xRECIPIENT --amount 500000000 \
   --wallet wallet.json --rpc 127.0.0.1:6666
 
-cargo run -p wallet -- asset-transfer \
+cargo run -p xparq-wallet -- asset-transfer \
   --asset ASSET_ID --to 0xRECIPIENT --amount 250000000 \
   --wallet wallet.json --rpc 127.0.0.1:6666
 
-cargo run -p wallet -- asset-burn \
+cargo run -p xparq-wallet -- asset-burn \
   --asset ASSET_ID --amount 100000000 \
   --wallet wallet.json --rpc 127.0.0.1:6666
 ```

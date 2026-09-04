@@ -10,7 +10,7 @@ use crate::block::MAX_BLOCK_WEIGHT;
 
 use super::emission::{BLOCK_EMISSION_STEP, MAX_BLOCK_EMISSION, MIN_BLOCK_EMISSION};
 use crate::validate::{MAX_DIFFICULTY, MIN_DIFFICULTY};
-use xparq_coin::Amount;
+use xparq_coin::Zeno;
 
 pub const WBDA_WINDOW: usize = 100_000;
 pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 5 * 1024 * 1024;
@@ -135,9 +135,9 @@ pub fn expected_difficulty_for_height<E>(
 /// Sparse epochs increase emission, normal epochs keep it, and dense epochs
 /// decrease it. The result is bounded by the monetary-policy limits.
 pub fn next_emission_from_window(
-    previous_emission: Amount,
+    previous_emission: Zeno,
     block_weights: &[usize],
-) -> Option<Amount> {
+) -> Option<Zeno> {
     let adjustment = adjustment_for_window(block_weights)?;
     let emission = match adjustment {
         WbdaAdjustment::Decrease => previous_emission
@@ -148,7 +148,7 @@ pub fn next_emission_from_window(
             .as_zeno()
             .saturating_add(BLOCK_EMISSION_STEP),
     };
-    Some(Amount::from_zeno(
+    Some(Zeno::from_zeno(
         emission.clamp(MIN_BLOCK_EMISSION, MAX_BLOCK_EMISSION),
     ))
 }
@@ -268,38 +268,38 @@ mod tests {
 
         assert_eq!(
             next_emission_from_window(
-                Amount::from_zeno(MIN_BLOCK_EMISSION),
+                Zeno::from_zeno(MIN_BLOCK_EMISSION),
                 &window(MAX_BLOCK_WEIGHT / 2)
             ),
-            Some(Amount::from_zeno(MIN_BLOCK_EMISSION))
+            Some(Zeno::from_zeno(MIN_BLOCK_EMISSION))
         );
         assert_eq!(
             next_emission_from_window(
-                Amount::from_zeno(MIN_BLOCK_EMISSION),
+                Zeno::from_zeno(MIN_BLOCK_EMISSION),
                 &window(MAX_BLOCK_WEIGHT)
             ),
-            Some(Amount::from_zeno(MIN_BLOCK_EMISSION))
+            Some(Zeno::from_zeno(MIN_BLOCK_EMISSION))
         );
         assert_eq!(
             next_emission_from_window(
-                Amount::from_zeno(MAX_BLOCK_EMISSION),
+                Zeno::from_zeno(MAX_BLOCK_EMISSION),
                 &window(MAX_BLOCK_WEIGHT / 10)
             ),
-            Some(Amount::from_zeno(MAX_BLOCK_EMISSION))
+            Some(Zeno::from_zeno(MAX_BLOCK_EMISSION))
         );
         assert_eq!(
             next_emission_from_window(
-                Amount::from_zeno(MIN_BLOCK_EMISSION),
+                Zeno::from_zeno(MIN_BLOCK_EMISSION),
                 &window(MAX_BLOCK_WEIGHT)
             ),
-            Some(Amount::from_zeno(MIN_BLOCK_EMISSION))
+            Some(Zeno::from_zeno(MIN_BLOCK_EMISSION))
         );
     }
 
     #[test]
     fn difficulty_and_reward_move_together_every_epoch() {
         let mut difficulty = 7;
-        let mut emission = Amount::from_zeno(crate::consensus::MIN_BLOCK_EMISSION);
+        let mut emission = Zeno::from_zeno(crate::consensus::MIN_BLOCK_EMISSION);
 
         // Low utilization: both rise, same epoch, no confirmation wait.
         let sparse = window(MAX_BLOCK_WEIGHT / 10);
@@ -308,7 +308,7 @@ mod tests {
         assert_eq!(difficulty, 8);
         assert_eq!(
             emission,
-            Amount::from_zeno(crate::consensus::MIN_BLOCK_EMISSION + BLOCK_EMISSION_STEP)
+            Zeno::from_zeno(crate::consensus::MIN_BLOCK_EMISSION + BLOCK_EMISSION_STEP)
         );
 
         // Normal utilization: both hold.
@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(difficulty, 7);
         assert_eq!(
             emission,
-            Amount::from_zeno(crate::consensus::MIN_BLOCK_EMISSION)
+            Zeno::from_zeno(crate::consensus::MIN_BLOCK_EMISSION)
         );
     }
 

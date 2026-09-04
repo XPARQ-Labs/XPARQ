@@ -9,8 +9,6 @@ pub const COIN_SYMBOL: &str = "XPQ";
 pub const UNIT_NAME: &str = "zeno";
 pub const DECIMALS: u8 = 6;
 pub const ZENO: u64 = 1;
-pub const UNIT: u64 = ZENO;
-pub const COIN: u64 = XPARQCoin::ZENO_PER_COIN;
 
 const _: () = assert!(ZENO == 1);
 

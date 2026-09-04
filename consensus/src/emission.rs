@@ -3,7 +3,7 @@ use crate::block::{Block, BlockHeight, Height};
 use crate::consensus::{WBDA_WINDOW, is_wbda_epoch_boundary, next_emission_from_window};
 use static_assertions::const_assert;
 use std::{error::Error, fmt};
-use xparq_coin::{Amount, COIN};
+use xparq_coin::{Zeno, XPQ};
 use xparq_crypto::{Address, Hash, HashDomain, domain_hash};
 
 pub const MIN_BLOCK_EMISSION: u64 = 1_000_000;
@@ -11,21 +11,21 @@ pub const MAX_BLOCK_EMISSION: u64 = 10_000_000;
 pub const BLOCK_EMISSION_START: u64 = 5_000_000;
 pub const BLOCK_EMISSION_STEP: u64 = 100_000;
 
-const_assert!(MIN_BLOCK_EMISSION == 1 * COIN);
-const_assert!(MAX_BLOCK_EMISSION == 10 * COIN);
-const_assert!(BLOCK_EMISSION_START == 5 * COIN);
-const_assert!(BLOCK_EMISSION_STEP == COIN / 10);
+const_assert!(MIN_BLOCK_EMISSION == XPQ::ZENO_PER_COIN);
+const_assert!(MAX_BLOCK_EMISSION == 10 * XPQ::ZENO_PER_COIN);
+const_assert!(BLOCK_EMISSION_START == 5 * XPQ::ZENO_PER_COIN);
+const_assert!(BLOCK_EMISSION_STEP == XPQ::ZENO_PER_COIN / 10);
 
-pub const fn initial_block_emission() -> Amount {
-    Amount::from_zeno(BLOCK_EMISSION_START)
+pub const fn initial_block_emission() -> Zeno {
+    Zeno::from_zeno(BLOCK_EMISSION_START)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ValidatedEmission {
     recipient: Address,
-    subsidy: Amount,
-    miner_emission: Amount,
-    protocol_burn: Amount,
+    subsidy: Zeno,
+    miner_emission: Zeno,
+    protocol_burn: Zeno,
     origin: Hash,
 }
 
@@ -34,17 +34,17 @@ impl ValidatedEmission {
         self.recipient
     }
 
-    pub fn subsidy(self) -> Amount {
+    pub fn subsidy(self) -> Zeno {
         self.subsidy
     }
 
-    /// Net amount inserted into the miner's emission UTXO.
-    pub fn miner_emission(self) -> Amount {
+    /// Net Zeno inserted into the miner's emission UTXO.
+    pub fn miner_emission(self) -> Zeno {
         self.miner_emission
     }
 
     /// Archival burn for the block plus state-growth burn for its emission UTXO.
-    pub fn protocol_burn(self) -> Amount {
+    pub fn protocol_burn(self) -> Zeno {
         self.protocol_burn
     }
 
@@ -91,7 +91,7 @@ impl Error for EmissionError {
 
 pub(crate) fn authorize_emission(
     block: &Block,
-    parent_emission: Amount,
+    parent_emission: Zeno,
     weight_at: impl FnMut(Height) -> Option<u32>,
 ) -> Result<ValidatedEmission, EmissionError> {
     let emission = block.emission().ok_or(EmissionError::MissingEmission)?;
@@ -131,11 +131,11 @@ pub(crate) fn authorize_emission(
 /// `expected_difficulty_for_height` — same completed window, same signal.
 pub fn expected_emission_for_height(
     height: BlockHeight,
-    parent_emission: Amount,
+    parent_emission: Zeno,
     mut weight_at: impl FnMut(Height) -> Option<u32>,
-) -> Result<Amount, EmissionError> {
+) -> Result<Zeno, EmissionError> {
     if height.0 <= 1 {
-        return Ok(Amount::from_zeno(BLOCK_EMISSION_START));
+        return Ok(Zeno::from_zeno(BLOCK_EMISSION_START));
     }
 
     if !is_wbda_epoch_boundary(height.0) {
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn non_boundary_emission_uses_parent_without_loading_history() {
-        let parent = Amount::from_zeno(BLOCK_EMISSION_START + BLOCK_EMISSION_STEP);
+        let parent = Zeno::from_zeno(BLOCK_EMISSION_START + BLOCK_EMISSION_STEP);
         let emission = expected_emission_for_height(Height(2), parent, |_| {
             panic!("non-boundary emission must not load history")
         })
@@ -205,7 +205,7 @@ mod tests {
         let mut loaded = Vec::new();
         let emission = expected_emission_for_height(
             boundary,
-            Amount::from_zeno(BLOCK_EMISSION_START),
+            Zeno::from_zeno(BLOCK_EMISSION_START),
             |height| {
                 loaded.push(height);
                 Some(crate::WBDA_TARGET_BLOCK_WEIGHT as u32)
@@ -221,7 +221,7 @@ mod tests {
         // Full utilization decreases emission by one step from the parent.
         assert_eq!(
             emission,
-            Amount::from_zeno(BLOCK_EMISSION_START - BLOCK_EMISSION_STEP)
+            Zeno::from_zeno(BLOCK_EMISSION_START - BLOCK_EMISSION_STEP)
         );
     }
 }

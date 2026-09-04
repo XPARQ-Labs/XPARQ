@@ -10,7 +10,7 @@ use std::{
 
 use serde_json::Value;
 use xparq::{
-    coin::{Amount, CoinHash},
+    coin::{CoinHash, Zeno},
     common::canonical_bytes,
     crypto::{
         ProfileSigningSeed, SignatureProfile, address_from_profile_public_key, address_to_string,
@@ -325,9 +325,10 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
         .expect("available miner reward is missing");
     let input_id: CoinHash = input["id"].as_str().unwrap().parse().unwrap();
     let input_amount = input["amount"].as_u64().unwrap();
-    let sent = Amount::from_zeno(1);
+    let sent = Zeno::from_zeno(1);
     let state_burn = xparq::consensus::StateTransitionWeight {
         created_coin_utxos: 2,
+        consumed_coin_utxos: 1,
         created_account_key_weight: xparq::consensus::profile_key_state_weight(&sender.public_key)
             .unwrap(),
         ..xparq::consensus::StateTransitionWeight::default()
@@ -341,7 +342,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
             SpendOutput::new(recipient, sent),
             SpendOutput::new(
                 sender.address,
-                Amount::from_zeno(input_amount - sent.as_zeno() - state_burn.as_zeno()),
+                Zeno::from_zeno(input_amount - sent.as_zeno() - state_burn.as_zeno()),
             ),
             SpendOutput::burn(state_burn),
         ],

@@ -12,7 +12,7 @@ use xparq::common::Authority;
 use xparq::transaction::AssetInstruction;
 use xparq::{
     codec::canonical_bytes,
-    consensus::{Amount, COIN, DECIMALS, StateTransitionWeight, profile_key_state_weight},
+    consensus::{DECIMALS, StateTransitionWeight, XPQ, Zeno, profile_key_state_weight},
     crypto::{Address, SignatureProfile, address_from_string},
     transaction::{
         AuthorizedAssetTransaction, AuthorizedExtensionTransaction, AuthorizedTransaction,
@@ -93,6 +93,15 @@ struct AccountAssetBalance {
     symbol: String,
     decimals: u8,
     balance: String,
+    #[serde(default)]
+    shares: Vec<AccountAssetShare>,
+}
+
+#[derive(Deserialize)]
+struct AccountAssetShare {
+    share_id: String,
+    amount: String,
+    owner: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -148,6 +157,8 @@ struct ExtensionPreviewResponse {
     created_state_weight: u64,
 }
 
+const MAX_CONSOLIDATION_INPUTS: usize = 1_000;
+
 pub fn run(mut args: Vec<String>) -> Result<(), String> {
     let result = match args.first().map(String::as_str) {
         None | Some("menu") | Some("interactive") => interactive_menu(),
@@ -158,6 +169,7 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         Some("history") => print_history(&args[1..]),
         Some("utxos") | Some("utxo-tracker") => print_utxo_tracker(&args[1..]),
         Some("sign-spend") => sign_spend(&args[1..]),
+        Some("consolidate") => consolidate_coin_utxos(&args[1..]),
         Some("coin-deposit") => sign_spend(&args[1..]),
         Some("asset-register") => asset_register(&args[1..]),
         Some("asset-mint") => asset_mint(&args[1..]),
@@ -359,14 +371,11 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
         )?;
         let mut outputs = Vec::new();
         if change > 0 {
-            outputs.push(SpendOutput::new(
-                wallet.address(),
-                Amount::from_zeno(change),
-            ));
+            outputs.push(SpendOutput::new(wallet.address(), Zeno::from_zeno(change)));
         }
-        outputs.push(SpendOutput::block_miner(Amount::from_zeno(fee)));
+        outputs.push(SpendOutput::block_miner(Zeno::from_zeno(fee)));
         if state_burn > 0 {
-            outputs.push(SpendOutput::burn(Amount::from_zeno(state_burn)));
+            outputs.push(SpendOutput::burn(Zeno::from_zeno(state_burn)));
         }
         let fee_intent = CoinIntent::new(wallet.address(), inputs, outputs)
             .map_err(|error| error.to_string())?;
@@ -413,14 +422,11 @@ fn wasm_deploy(args: &[String]) -> Result<(), String> {
         )?;
         let mut outputs = Vec::new();
         if change > 0 {
-            outputs.push(SpendOutput::new(
-                wallet.address(),
-                Amount::from_zeno(change),
-            ));
+            outputs.push(SpendOutput::new(wallet.address(), Zeno::from_zeno(change)));
         }
-        outputs.push(SpendOutput::block_miner(Amount::from_zeno(fee)));
+        outputs.push(SpendOutput::block_miner(Zeno::from_zeno(fee)));
         if state_burn > 0 {
-            outputs.push(SpendOutput::burn(Amount::from_zeno(state_burn)));
+            outputs.push(SpendOutput::burn(Zeno::from_zeno(state_burn)));
         }
         let fee_intent = CoinIntent::new(wallet.address(), inputs, outputs)
             .map_err(|error| error.to_string())?;
@@ -482,14 +488,11 @@ fn wasm_call(args: &[String]) -> Result<(), String> {
         )?;
         let mut outputs = Vec::new();
         if change > 0 {
-            outputs.push(SpendOutput::new(
-                wallet.address(),
-                Amount::from_zeno(change),
-            ));
+            outputs.push(SpendOutput::new(wallet.address(), Zeno::from_zeno(change)));
         }
-        outputs.push(SpendOutput::block_miner(Amount::from_zeno(fee)));
+        outputs.push(SpendOutput::block_miner(Zeno::from_zeno(fee)));
         if state_burn > 0 {
-            outputs.push(SpendOutput::burn(Amount::from_zeno(state_burn)));
+            outputs.push(SpendOutput::burn(Zeno::from_zeno(state_burn)));
         }
         let fee_intent = CoinIntent::new(wallet.address(), inputs, outputs)
             .map_err(|error| error.to_string())?;
@@ -559,11 +562,12 @@ fn asset_inputs(args: &[String]) -> Result<Vec<xparq::asset::AssetShareHash>, St
     Ok(inputs)
 }
 
-fn parse_asset_amount(args: &[String], option_name: &str) -> Result<u128, String> {
+fn parse_asset_amount(args: &[String], option_name: &str) -> Result<xparq::asset::Unit, String> {
     option(args, option_name)
         .ok_or_else(|| format!("missing {option_name}"))?
         .parse::<u128>()
-        .map_err(|_| format!("invalid {option_name}; use integer base units"))
+        .map(xparq::asset::Unit::from_units)
+        .map_err(|_| format!("invalid {option_name}; use integer asset units"))
 }
 
 fn interactive_menu() -> Result<(), String> {
@@ -577,9 +581,10 @@ fn interactive_menu() -> Result<(), String> {
         println!("5. Transaction history");
         println!("6. UTXO tracker");
         println!("7. Send XPQ");
-        println!("8. Block explorer");
-        println!("9. Assets");
-        println!("10. Exit");
+        println!("8. Consolidate XPQ UTXOs");
+        println!("9. Block explorer");
+        println!("10. Assets");
+        println!("11. Exit");
 
         match prompt("Select")?.as_str() {
             "1" => {
@@ -610,9 +615,10 @@ fn interactive_menu() -> Result<(), String> {
             "5" => interactive_wallet_query(print_history)?,
             "6" => interactive_wallet_query(print_utxo_tracker)?,
             "7" => interactive_spend()?,
-            "12" => interactive_block_explorer()?,
-            "13" => interactive_assets()?,
-            "14" | "exit" | "quit" => return Ok(()),
+            "8" => interactive_wallet_query(consolidate_coin_utxos)?,
+            "9" => interactive_block_explorer()?,
+            "10" => interactive_assets()?,
+            "11" | "exit" | "quit" => return Ok(()),
             choice => println!("Unknown selection `{choice}`"),
         }
     }
@@ -650,20 +656,20 @@ fn interactive_assets() -> Result<(), String> {
             let mut args = interactive_asset_wallet_rpc()?;
             args.extend(["--asset".into(), prompt("Asset ID")?]);
             args.extend(["--to".into(), prompt("Recipient address")?]);
-            args.extend(["--amount".into(), prompt("Amount in base units")?]);
+            args.extend(["--amount".into(), prompt("Asset units")?]);
             asset_mint(&args)
         }
         "3" => {
             let mut args = interactive_asset_wallet_rpc()?;
             args.extend(["--asset".into(), prompt("Asset ID")?]);
             args.extend(["--to".into(), prompt("Recipient address")?]);
-            args.extend(["--amount".into(), prompt("Amount in base units")?]);
+            args.extend(["--amount".into(), prompt("Asset units")?]);
             asset_transfer(&args)
         }
         "4" => {
             let mut args = interactive_asset_wallet_rpc()?;
             args.extend(["--asset".into(), prompt("Asset ID")?]);
-            args.extend(["--amount".into(), prompt("Amount in base units")?]);
+            args.extend(["--amount".into(), prompt("Asset units")?]);
             asset_burn(&args)
         }
         "5" => {
@@ -725,7 +731,7 @@ fn interactive_spend() -> Result<(), String> {
         "--to".into(),
         prompt("Recipient address")?,
         "--amount".into(),
-        prompt("Amount XPQ")?,
+        prompt("XPQ amount")?,
         "--rpc".into(),
         rpc,
     ];
@@ -864,9 +870,20 @@ fn print_balance(args: &[String]) -> Result<(), String> {
     println!("assets: {}", balance.assets.len());
     for asset in &balance.assets {
         println!(
-            "- asset_id={} name={} symbol={} decimals={} balance={}",
-            asset.asset_id, asset.name, asset.symbol, asset.decimals, asset.balance
+            "- asset_id={} name={} symbol={} decimals={} balance={} shares={}",
+            asset.asset_id,
+            asset.name,
+            asset.symbol,
+            asset.decimals,
+            asset.balance,
+            asset.shares.len(),
         );
+        for share in &asset.shares {
+            println!(
+                "  - share_id={} amount={} owner={}",
+                share.share_id, share.amount, share.owner
+            );
+        }
     }
     Ok(())
 }
@@ -976,10 +993,12 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
                 select_account_inputs_with_state_burn(rpc, &wallet, required, 2, 0, archival_burn)?;
             (selected, change, state_burn, wallet.address())
         } else {
-            let gross_change = explicit_change.map_or(0, Amount::as_zeno);
+            let gross_change = explicit_change.map_or(0, Zeno::as_zeno);
             let created = 2_u64 + u64::from(gross_change > fee);
             let state_burn = StateTransitionWeight {
                 created_coin_utxos: created,
+                consumed_coin_utxos: u64::try_from(inputs.len())
+                    .map_err(|_| "coin input count overflow")?,
                 created_account_key_weight: wallet.new_account_key_weight(known)?,
                 ..StateTransitionWeight::default()
             }
@@ -1005,15 +1024,79 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
             _ => unreachable!("recipient choice validated above"),
         }];
         if change > 0 {
-            outputs.push(SpendOutput::new(change_address, Amount::from_zeno(change)));
+            outputs.push(SpendOutput::new(change_address, Zeno::from_zeno(change)));
         }
-        outputs.push(SpendOutput::block_miner(Amount::from_zeno(fee)));
+        outputs.push(SpendOutput::block_miner(Zeno::from_zeno(fee)));
         if state_burn > 0 {
-            outputs.push(SpendOutput::burn(Amount::from_zeno(state_burn)));
+            outputs.push(SpendOutput::burn(Zeno::from_zeno(state_burn)));
         }
         let intent = CoinIntent::new(wallet.address(), selected, outputs)
             .map_err(|error| error.to_string())?;
         let signed = wallet.sign_onchain_spend(intent, known)?;
+        Ok(AuthorizedTransaction::Coin(Box::new(signed)))
+    })?;
+    submit_or_print_transaction(args, &transaction)
+}
+
+fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
+    reject_manual_fee(args)?;
+    let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let wallet = load_wallet(path)?;
+    let public_key_known = account_public_key_registered(rpc, &wallet);
+    let mut candidates = account_input_candidates(rpc, &wallet)?;
+    if candidates.len() < 2 {
+        return Err("consolidation requires at least two available XPQ UTXOs".into());
+    }
+    candidates.sort_by(|left, right| {
+        left.amount
+            .cmp(&right.amount)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    candidates.truncate(MAX_CONSOLIDATION_INPUTS);
+    let inputs = candidates
+        .iter()
+        .map(|utxo| {
+            xparq::coin::CoinHash::from_str(&utxo.id)
+                .map_err(|_| "node returned an invalid coin id".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let total = candidates.iter().try_fold(0_u64, |total, utxo| {
+        total
+            .checked_add(utxo.amount)
+            .ok_or_else(|| "consolidation input amount overflow".to_string())
+    })?;
+    let consumed_coin_utxos =
+        u64::try_from(inputs.len()).map_err(|_| "coin input count overflow")?;
+
+    let transaction = automatic_fee_transaction(|fee, archival_burn| {
+        let state_growth_burn = StateTransitionWeight {
+            created_coin_utxos: 2,
+            consumed_coin_utxos,
+            created_account_key_weight: wallet.new_account_key_weight(public_key_known)?,
+            ..StateTransitionWeight::default()
+        }
+        .state_growth_burn()
+        .map_err(|error| error.to_string())?
+        .as_zeno();
+        let protocol_burn = archival_burn
+            .checked_add(state_growth_burn)
+            .ok_or("consolidation protocol burn overflow")?;
+        let consolidated = total
+            .checked_sub(fee)
+            .and_then(|amount| amount.checked_sub(protocol_burn))
+            .filter(|amount| *amount > 0)
+            .ok_or("UTXO total is insufficient for consolidation fee and protocol burn")?;
+        let mut outputs = vec![
+            SpendOutput::new(wallet.address(), Zeno::from_zeno(consolidated)),
+            SpendOutput::block_miner(Zeno::from_zeno(fee)),
+        ];
+        if protocol_burn > 0 {
+            outputs.push(SpendOutput::burn(Zeno::from_zeno(protocol_burn)));
+        }
+        let intent = CoinIntent::new(wallet.address(), inputs.clone(), outputs)
+            .map_err(|error| error.to_string())?;
+        let signed = wallet.sign_onchain_spend(intent, public_key_known)?;
         Ok(AuthorizedTransaction::Coin(Box::new(signed)))
     })?;
     submit_or_print_transaction(args, &transaction)
@@ -1063,6 +1146,8 @@ fn select_account_inputs_with_state_burn(
                 .ok_or("state output count overflow")?;
             let ledger_burn = StateTransitionWeight {
                 created_coin_utxos: created,
+                consumed_coin_utxos: u64::try_from(selected.len())
+                    .map_err(|_| "coin input count overflow")?,
                 created_account_key_weight,
                 extension_created_weight,
                 ..StateTransitionWeight::default()
@@ -1328,7 +1413,7 @@ fn address_option(args: &[String], name: &str) -> Result<Address, String> {
         .map_err(|error| format!("invalid {name}: {error}"))
 }
 
-fn parse_amount(value: &str) -> Result<Amount, String> {
+fn parse_amount(value: &str) -> Result<Zeno, String> {
     let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
     if fraction.len() > DECIMALS as usize || whole.is_empty() {
         return Err(format!("invalid XPQ amount `{value}`"));
@@ -1342,25 +1427,25 @@ fn parse_amount(value: &str) -> Result<Amount, String> {
         .parse::<u64>()
         .map_err(|_| format!("invalid XPQ amount `{value}`"))?;
     let units = whole
-        .checked_mul(COIN)
+        .checked_mul(XPQ::ZENO_PER_COIN)
         .and_then(|units| units.checked_add(fraction))
         .ok_or_else(|| "XPQ amount overflow".to_string())?;
     if units == 0 {
         return Err("XPQ amount must be positive".to_string());
     }
-    Ok(Amount::from_zeno(units))
+    Ok(Zeno::from_zeno(units))
 }
 
 fn format_amount(units: u64) -> String {
-    let whole = units / COIN;
-    let fraction = units % COIN;
+    let whole = units / XPQ::ZENO_PER_COIN;
+    let fraction = units % XPQ::ZENO_PER_COIN;
     let width = DECIMALS as usize;
     format!("{whole}.{fraction:0width$} XPQ")
 }
 
 fn print_help() {
     println!(
-        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--profile PROFILE]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--profile PROFILE]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet version\n\nAll signature profiles are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 zeno per canonical transaction byte; manual --miner fee input is not supported. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs.\nRunning without a command opens the interactive menu.\nWithout --input, spend selects active XPQ inputs and calculates change through node RPC."
+        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--profile PROFILE]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--profile PROFILE]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet consolidate [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet version\n\nAll signature profiles are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 zeno per canonical transaction byte; manual --miner fee input is not supported. Consolidation spends all available XPQ UTXOs into one self-owned output and remains subject to archival burn and miner fee. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs.\nRunning without a command opens the interactive menu.\nWithout --input, spend selects active XPQ inputs and calculates change through node RPC."
     );
     println!(
         "wallet coin-deposit --extension EXTENSION_ID --amount XPQ [--rpc ADDRESS] [--wallet PATH] [--offline]"
@@ -1389,7 +1474,9 @@ mod tests {
         let args = vec!["--amount".into(), "100000000000000000000000".into()];
         assert_eq!(
             parse_asset_amount(&args, "--amount"),
-            Ok(100_000_000_000_000_000_000_000_u128)
+            Ok(xparq::asset::Unit::from_units(
+                100_000_000_000_000_000_000_000_u128
+            ))
         );
     }
 
@@ -1467,23 +1554,26 @@ mod tests {
             utxos: vec![
                 AccountUtxo {
                     id: "available-one".into(),
-                    amount: 2 * COIN,
+                    amount: 2 * XPQ::ZENO_PER_COIN,
                     reserved: false,
                 },
                 AccountUtxo {
                     id: "available-two".into(),
-                    amount: 3 * COIN,
+                    amount: 3 * XPQ::ZENO_PER_COIN,
                     reserved: false,
                 },
                 AccountUtxo {
                     id: "reserved".into(),
-                    amount: COIN,
+                    amount: XPQ::ZENO_PER_COIN,
                     reserved: true,
                 },
             ],
         };
 
-        assert_eq!(format_amount(2 * COIN + 1), "2.000001 XPQ");
+        assert_eq!(
+            format_amount(2 * XPQ::ZENO_PER_COIN + 1),
+            "2.000001 XPQ"
+        );
         assert_eq!(utxo_status(&account.utxos[0]), "available");
         assert_eq!(utxo_status(&account.utxos[1]), "available");
         assert_eq!(utxo_status(&account.utxos[2]), "reserved");

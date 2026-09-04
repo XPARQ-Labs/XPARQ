@@ -1,7 +1,8 @@
 use std::{error::Error, fmt};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use xparq_coin::{Amount, Coin, CoinHash};
+use xparq_asset::Unit;
+use xparq_coin::{Coin, CoinHash, Zeno};
 use xparq_common::{Authority, ExtensionEffect, ExtensionHash};
 use xparq_consensus::{AuthorizationValidated, RevealedAccountKey, ValidatedTransaction};
 use xparq_crypto::Address;
@@ -17,7 +18,7 @@ pub struct LedgerState {
     pub account_keys: AccountKeyRegistry,
     pub assets: crate::AssetState,
     pub extensions: ExtensionStateSet,
-    pub total_burned: Amount,
+    pub total_burned: Zeno,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -244,7 +245,7 @@ impl LedgerState {
                         program,
                         xparq_asset::AssetHash::from_bytes(asset_id),
                         Authority::Address(Address(recipient)),
-                        amount,
+                        Unit::from_units(amount),
                         genesis_hash,
                         execution_nonce,
                     )
@@ -259,7 +260,7 @@ impl LedgerState {
                         program,
                         xparq_asset::AssetHash::from_bytes(asset_id),
                         Address(recipient),
-                        amount,
+                        Unit::from_units(amount),
                         genesis_hash,
                         execution_nonce,
                     )
@@ -268,7 +269,7 @@ impl LedgerState {
                     .apply_program_coin_transfer(
                         program,
                         Address(recipient),
-                        Amount::from_zeno(amount),
+                        Zeno::from_zeno(amount),
                         commitment,
                         index,
                         &mut coins,
@@ -319,7 +320,7 @@ impl LedgerState {
         &mut self,
         program: ExtensionHash,
         recipient: Address,
-        amount: Amount,
+        amount: Zeno,
         commitment: SpendCommitment,
         effect_index: usize,
         journal: &mut UtxoRollbackJournal,
@@ -329,7 +330,7 @@ impl LedgerState {
         }
         let owner = Authority::Extension(program);
         let mut selected = Vec::new();
-        let mut total = Amount::from_zeno(0);
+        let mut total = Zeno::from_zeno(0);
         for utxo in self.assets.utxos.owned_by(owner) {
             selected.push(utxo.coin.utxo);
             total = total
@@ -418,7 +419,7 @@ impl LedgerState {
         let burned = outputs
             .iter()
             .filter(|output| output.output == Recipient::Burn)
-            .try_fold(Amount::from_zeno(0), |total, output| {
+            .try_fold(Zeno::from_zeno(0), |total, output| {
                 total.checked_add(output.amount)
             })
             .ok_or(SpendStateError::BurnOverflow)?;
@@ -427,7 +428,7 @@ impl LedgerState {
 
     pub(crate) fn record_protocol_burn(
         &mut self,
-        burned: Amount,
+        burned: Zeno,
         journal: &mut UtxoRollbackJournal,
     ) -> Result<(), SpendStateError> {
         self.total_burned = self
@@ -544,14 +545,14 @@ mod tests {
         state.record_protocol_burn(burned, &mut journal).unwrap();
         assert_eq!(state.total_burned, burned);
         state.rollback(journal).unwrap();
-        assert_eq!(state.total_burned, Amount::from_zeno(0));
+        assert_eq!(state.total_burned, Zeno::from_zeno(0));
     }
 
     #[test]
     fn failed_in_place_transition_restores_consumed_inputs() {
         let id = CoinHash::from_bytes([0x51; CoinHash::SIZE]);
         let utxo = CoinUtxo {
-            coin: Coin::new(id, xparq_coin::Amount::from_zeno(7)),
+            coin: Coin::new(id, Zeno::from_zeno(7)),
             owner: Authority::Address(Address::ZERO),
         };
         let mut state = LedgerState::default();
@@ -587,8 +588,8 @@ mod tests {
                 name: "Program Asset".into(),
                 symbol: "PRG".into(),
                 decimals: 0,
-                max_supply: 120,
-                initial_mint: 100,
+                max_supply: Unit::from_units(120),
+                initial_mint: Unit::from_units(100),
                 mint_authority: Some(Authority::Extension(program)),
             },
             creator,
@@ -622,9 +623,15 @@ mod tests {
                 xparq_asset::AssetError::SupplyOverflow
             ))
         );
-        assert_eq!(state.assets.supply(asset_id), 100);
-        assert_eq!(state.assets.account_balance(asset_id, first_recipient), 0);
-        assert_eq!(state.assets.account_balance(asset_id, second_recipient), 0);
+        assert_eq!(state.assets.supply(asset_id), Unit::from_units(100));
+        assert_eq!(
+            state.assets.account_balance(asset_id, first_recipient),
+            Unit::ZERO
+        );
+        assert_eq!(
+            state.assets.account_balance(asset_id, second_recipient),
+            Unit::ZERO
+        );
     }
 
     #[test]
@@ -637,7 +644,7 @@ mod tests {
             .assets
             .utxos
             .insert(CoinUtxo {
-                coin: Coin::new(deposit_id, Amount::from_zeno(25)),
+                coin: Coin::new(deposit_id, Zeno::from_zeno(25)),
                 owner: Authority::Extension(program),
             })
             .unwrap();

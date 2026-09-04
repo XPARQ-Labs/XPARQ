@@ -10,7 +10,7 @@ use crate::transaction::AuthorizedTransaction;
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::HashSet;
 use std::io::{Error as IoError, ErrorKind, Read};
-use xparq_coin::Amount;
+use xparq_coin::Zeno;
 pub use xparq_common::{Height, Nonce};
 
 pub type BlockHeader = Header;
@@ -114,11 +114,11 @@ where
 pub struct Emission {
     // rename Emission
     pub to: Address,
-    pub subsidy: Amount,
+    pub subsidy: Zeno,
 }
 
 impl Emission {
-    pub fn new(to: Address, subsidy: Amount) -> Self {
+    pub fn new(to: Address, subsidy: Zeno) -> Self {
         Self { to, subsidy }
     }
 
@@ -419,7 +419,7 @@ mod tests {
             vec![CoinHash::from_bytes([0x31; crate::crypto::HASH_SIZE])],
             vec![SpendOutput::new(
                 Address([0x32; crate::crypto::ADDRESS_SIZE]),
-                Amount::from_zeno(100_000),
+                Zeno::from_zeno(100_000),
             )],
         )
         .unwrap();
@@ -438,7 +438,7 @@ mod tests {
             Nonce(0),
             Some(Emission::new(
                 Address([0x34; crate::crypto::ADDRESS_SIZE]),
-                Amount::from_zeno(0),
+                Zeno::from_zeno(0),
             )),
             vec![AuthorizedTransaction::Coin(Box::new(signed))],
         )
@@ -461,7 +461,7 @@ mod tests {
             inputs,
             vec![SpendOutput::new(
                 Address([seed as u8; crate::crypto::ADDRESS_SIZE]),
-                Amount::from_zeno(1),
+                Zeno::from_zeno(1),
             )],
         )
         .unwrap();
@@ -498,7 +498,7 @@ mod tests {
             PreviousHash([9; HASH_SIZE]),
             GENESIS_BLOCK_DIFFICULTY,
             Nonce(0),
-            Some(Emission::new(miner, Amount::from_zeno(0))),
+            Some(Emission::new(miner, Zeno::from_zeno(0))),
             transactions,
         )
         .unwrap();

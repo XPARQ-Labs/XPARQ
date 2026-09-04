@@ -2,11 +2,11 @@ use std::collections::BTreeSet;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_asset::{
-    AssetError, AssetHash, AssetMetadata, AssetShareHash, AssetTransferOutput, AssetUtxo,
+    AssetError, AssetHash, AssetMetadata, AssetShare, AssetShareHash, AssetTransferOutput, Unit,
     asset_domain_hash, checked_asset_entry_weight, ensure_nonzero_asset_amount,
-    ensure_unique_asset_inputs, Unit
+    ensure_unique_asset_inputs,
 };
-use xparq_coin::{Zeno, COIN_HASH_SIZE, CoinHash};
+use xparq_coin::{COIN_HASH_SIZE, CoinHash, Zeno};
 use xparq_common::{Authority, ExtensionHash, canonical_bytes, domain_hash};
 use xparq_crypto::{ADDRESS_SIZE, Address, HASH_SIZE};
 
@@ -266,7 +266,7 @@ impl AssetIntent {
                 }
                 .validate()?;
 
-                if *initial_mint == 0 || *initial_mint > *max_supply {
+                if *initial_mint == Unit::ZERO || *initial_mint > *max_supply {
                     return Err(AssetError::InvalidProgram);
                 }
             }
@@ -336,8 +336,8 @@ impl AssetIntent {
 
                 weight = checked_asset_entry_weight(weight, 32, &metadata)?;
 
-                let object = AssetUtxo {
-                    asset_id: AssetHash::derive(self.signer, symbol),
+                let object = AssetShare {
+                    parent: AssetHash::derive(self.signer, symbol),
                     owner: Authority::Address(self.signer),
                     amount: *initial_mint,
                 };
@@ -348,8 +348,8 @@ impl AssetIntent {
             AssetInstruction::Mint {
                 amount, recipient, ..
             } => {
-                let object = AssetUtxo {
-                    asset_id: self.asset_id(),
+                let object = AssetShare {
+                    parent: self.asset_id(),
                     owner: *recipient,
                     amount: *amount,
                 };
@@ -361,8 +361,8 @@ impl AssetIntent {
 
             AssetInstruction::Transfer { outputs, .. } => {
                 for output in outputs {
-                    let object = AssetUtxo {
-                        asset_id: self.asset_id(),
+                    let object = AssetShare {
+                        parent: self.asset_id(),
                         owner: output.recipient,
                         amount: output.amount,
                     };

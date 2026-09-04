@@ -20,7 +20,7 @@ pub mod common {
 }
 
 pub mod consensus {
-    pub use xparq_coin::{Amount, COIN, DECIMALS, UNIT};
+    pub use xparq_coin::{DECIMALS, XPQ, Zeno};
     pub use xparq_consensus::*;
 }
 

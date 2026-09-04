@@ -13,7 +13,7 @@ pub struct AssetMetadata {
     pub name: String,
     pub symbol: String,
     pub decimals: u8,
-    pub max_supply: u128,
+    pub max_supply: Unit,
     pub creator: Address,
     pub mint_authority: Option<Authority<Address>>,
 }
@@ -31,7 +31,7 @@ impl AssetMetadata {
             name,
             symbol,
             decimals,
-            max_supply: max_supply.as_units(),
+            max_supply,
             creator,
             mint_authority,
         };
@@ -42,14 +42,14 @@ impl AssetMetadata {
     pub fn validate(&self) -> Result<(), AssetError> {
         validate_name(&self.name)?;
         validate_symbol(&self.symbol)?;
-        if self.decimals > ASSET_DECIMALS_MAX || self.max_supply == 0 {
+        if self.decimals > ASSET_DECIMALS_MAX || self.max_supply.is_zero() {
             return Err(AssetError::InvalidProgram);
         }
         Ok(())
     }
 
     pub const fn max_supply_amount(&self) -> Unit {
-        Unit::from_units(self.max_supply)
+        self.max_supply
     }
 }
 

@@ -7,7 +7,7 @@ use crate::crypto::{BlockHash, HASH_SIZE, Hash, PoWHash};
 use crate::error::ConsensusError;
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::{collections::BTreeSet, error::Error, fmt};
-use xparq_coin::{Amount, CoinHash};
+use xparq_coin::{Zeno, CoinHash};
 use xparq_common::{ExtensionCall, ExtensionFailure, canonical_bytes};
 use xparq_crypto::{Address, ProfilePublicKey};
 use xparq_transaction::{
@@ -22,7 +22,7 @@ use crate::state_burn::{
 
 pub fn validate_emission(
     block: &xparq_blockchain::Block,
-    parent_emission: Amount,
+    parent_emission: Zeno,
     weight_at: impl FnMut(xparq_blockchain::Height) -> Option<u32>,
 ) -> Result<crate::ValidatedEmission, crate::EmissionError> {
     crate::apply::authorize_emission(block, parent_emission, weight_at)
@@ -138,7 +138,7 @@ pub struct ValidatedExtensionTransaction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoinInputState {
-    pub amount: Amount,
+    pub amount: Zeno,
     /// Account owner, or `None` when the coin is held by an extension.
     pub owner: Option<Address>,
 }
@@ -196,6 +196,8 @@ pub fn validate_transaction(
                 &validated.intent().outputs,
                 StateTransitionWeight {
                     created_coin_utxos: created_coin_output_count(&validated.intent().outputs)?,
+                    consumed_coin_utxos: u64::try_from(validated.intent().inputs.len())
+                        .map_err(|_| StateBurnError::WeightOverflow)?,
                     created_account_key_weight: revealed_profile_key_weight(
                         validated.revealed_account_key(),
                     )?,
@@ -229,6 +231,8 @@ pub fn validate_transaction(
                 &payment.intent().outputs,
                 StateTransitionWeight {
                     created_coin_utxos: created_coin_output_count(&payment.intent().outputs)?,
+                    consumed_coin_utxos: u64::try_from(payment.intent().inputs.len())
+                        .map_err(|_| StateBurnError::WeightOverflow)?,
                     created_account_key_weight: revealed_asset_profile_key_weight(&call, &payment)?,
                     extension_created_weight: asset_created_state_weight,
                     ..StateTransitionWeight::default()
@@ -258,6 +262,8 @@ pub fn validate_transaction(
                 &fee.intent().outputs,
                 StateTransitionWeight {
                     created_coin_utxos: created_coin_output_count(&fee.intent().outputs)?,
+                    consumed_coin_utxos: u64::try_from(fee.intent().inputs.len())
+                        .map_err(|_| StateBurnError::WeightOverflow)?,
                     created_account_key_weight: revealed_profile_key_weight(
                         fee.revealed_account_key(),
                     )?,
@@ -426,11 +432,11 @@ fn validate_profile_authorization(
 fn validate_coin_inputs(
     inputs: &[CoinHash],
     owner: Address,
-    outputs: &[Amount],
+    outputs: &[Zeno],
     state: &impl TransactionStateView,
 ) -> Result<(), TransactionConsensusError> {
     ensure_unique_coin_ids(inputs.iter().copied())?;
-    let mut input_total = Amount::from_zeno(0);
+    let mut input_total = Zeno::from_zeno(0);
     for id in inputs {
         let input = state
             .coin(*id)
@@ -440,13 +446,13 @@ fn validate_coin_inputs(
         }
         input_total = input_total
             .checked_add(input.amount)
-            .ok_or(TransactionConsensusError::AmountOverflow)?;
+            .ok_or(TransactionConsensusError::ZenoOverflow)?;
     }
     let output_total = outputs
         .iter()
-        .try_fold(Amount::from_zeno(0), |sum, amount| {
+        .try_fold(Zeno::from_zeno(0), |sum, amount| {
             sum.checked_add(*amount)
-                .ok_or(TransactionConsensusError::AmountOverflow)
+                .ok_or(TransactionConsensusError::ZenoOverflow)
         })?;
     if input_total != output_total {
         return Err(TransactionConsensusError::ValueMismatch);
@@ -474,9 +480,9 @@ pub enum TransactionConsensusError {
     SignatureSchemeInactive,
     UtxoNotFound,
     OwnerMismatch,
-    InputAmountMismatch,
+    InputZenoMismatch,
     ReusedBearerKey,
-    AmountOverflow,
+    ZenoOverflow,
     ValueMismatch,
     Asset(xparq_asset::AssetError),
     Extension(ExtensionFailure),
@@ -498,11 +504,11 @@ impl fmt::Display for TransactionConsensusError {
             Self::OwnerMismatch => {
                 formatter.write_str("transaction input belongs to another owner")
             }
-            Self::InputAmountMismatch => {
+            Self::InputZenoMismatch => {
                 formatter.write_str("transaction input amount does not match canonical state")
             }
             Self::ReusedBearerKey => formatter.write_str("transaction output key is reused"),
-            Self::AmountOverflow => formatter.write_str("transaction amount overflow"),
+            Self::ZenoOverflow => formatter.write_str("transaction amount overflow"),
             Self::ValueMismatch => formatter.write_str("input value does not equal output value"),
             Self::Asset(error) => write!(formatter, "invalid native asset transaction: {error}"),
             Self::Extension(error) => write!(formatter, "invalid extension transaction: {error:?}"),
@@ -526,7 +532,7 @@ mod transaction_tests {
     struct FalconAccountState {
         id: CoinHash,
         owner: Address,
-        amount: Amount,
+        amount: Zeno,
     }
 
     impl TransactionStateView for FalconAccountState {
@@ -560,8 +566,8 @@ mod transaction_tests {
                 sender,
                 vec![id],
                 vec![
-                    xparq_transaction::SpendOutput::new(sender, Amount::from_zeno(10)),
-                    xparq_transaction::SpendOutput::burn(Amount::from_zeno(state_burn)),
+                    xparq_transaction::SpendOutput::new(sender, Zeno::from_zeno(10)),
+                    xparq_transaction::SpendOutput::burn(Zeno::from_zeno(state_burn)),
                 ],
             )
             .unwrap();
@@ -582,7 +588,7 @@ mod transaction_tests {
         let state = FalconAccountState {
             id,
             owner: sender,
-            amount: Amount::from_zeno(10 + state_burn),
+            amount: Zeno::from_zeno(10 + state_burn),
         };
         assert!(matches!(
             validate_transaction(transaction, chain, 0, &state,),

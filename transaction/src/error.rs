@@ -6,7 +6,7 @@ use xparq_common::CodecError;
 pub enum IntentError {
     EmptyInputs,
     EmptyOutputs,
-    ZeroAmount,
+    ZeroZeno,
     DuplicateInput,
     InvalidMinerOutput,
     InvalidBurnOutput,
@@ -21,7 +21,7 @@ impl fmt::Display for IntentError {
         match self {
             Self::EmptyInputs => formatter.write_str("intent has no inputs"),
             Self::EmptyOutputs => formatter.write_str("intent has no outputs"),
-            Self::ZeroAmount => formatter.write_str("intent contains a zero amount"),
+            Self::ZeroZeno => formatter.write_str("intent contains a zero amount"),
             Self::DuplicateInput => formatter.write_str("intent contains a duplicate coin"),
             Self::InvalidMinerOutput => {
                 formatter.write_str("transform public output must target the block miner")
