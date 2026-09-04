@@ -4,7 +4,6 @@ pub mod argon2;
 mod error;
 pub mod hash;
 pub mod profile;
-pub mod qcash_signing;
 
 pub mod crypto {
     pub use crate::*;
@@ -22,7 +21,6 @@ pub use argon2::*;
 pub use error::CryptoError;
 pub use hash::*;
 pub use profile::*;
-pub use qcash_signing::*;
 
 pub mod block {
     pub use xparq_common::{BlockHeight, Height};

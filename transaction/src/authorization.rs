@@ -1,14 +1,11 @@
 use borsh::{BorshDeserialize, BorshSerialize};
-use xparq_common::{ExtensionCall, canonical_bytes};
+use xparq_common::{ExtensionCall, canonical_bytes, domain_hash};
 use xparq_crypto::{
-    Address, ProfilePublicKey, ProfileSignature, QCashSignature, address_from_profile_public_key,
-    profile_verify,
+    Address, ProfilePublicKey, ProfileSignature, address_from_profile_public_key, profile_verify,
 };
-use xparq_qcash::QCash;
 
 use crate::{
-    ChainContext, IntentError, MergeIntent, OnChainSpendIntent, QCashIntent, RedeemIntent,
-    SpendCommitment, SplitIntent, TransactionEncodingError, WithdrawIntent,
+    AssetIntent, ChainContext, CoinIntent, IntentError, SpendCommitment, TransactionEncodingError,
 };
 
 const TRANSACTION_ID_CONTEXT: &str = "XPARQ Transaction ID";
@@ -18,7 +15,7 @@ pub trait AccountIntent {
     fn commitment(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError>;
 }
 
-impl AccountIntent for OnChainSpendIntent {
+impl AccountIntent for CoinIntent {
     fn sender(&self) -> Address {
         self.sender
     }
@@ -28,13 +25,15 @@ impl AccountIntent for OnChainSpendIntent {
     }
 }
 
-impl AccountIntent for WithdrawIntent {
+impl AccountIntent for AssetIntent {
     fn sender(&self) -> Address {
-        self.sender
+        self.signer
     }
 
     fn commitment(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
-        self.commitment(chain)
+        self.commitment(chain.genesis_hash)
+            .map(SpendCommitment::from_bytes)
+            .map_err(|_| IntentError::InvalidAssetCall)
     }
 }
 
@@ -59,10 +58,6 @@ pub struct AuthorizedAccountIntent<T> {
 }
 
 impl<T: AccountIntent> AuthorizedAccountIntent<T> {
-    /// Verifies an authorization that reveals its public key.
-    ///
-    /// `AccountAuthorization::Known` requires the registered account key from
-    /// ledger state and must be verified by consensus validation instead.
     pub fn verify_revealed_signature(&self, chain: ChainContext) -> Result<bool, IntentError> {
         let commitment = self.intent.commitment(chain)?;
         match &self.authorization {
@@ -79,47 +74,20 @@ impl<T: AccountIntent> AuthorizedAccountIntent<T> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct QCashAuthorization {
-    pub signature: QCashSignature,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct AuthorizedQCashIntent<T> {
-    pub intent: T,
-    pub authorizations: Vec<QCashAuthorization>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AuthorizedExtensionTransaction {
     pub call: ExtensionCall,
-    pub fee: AuthorizedAccountIntent<OnChainSpendIntent>,
+    pub fee: AuthorizedAccountIntent<CoinIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AuthorizedAssetTransaction {
-    pub call: AuthorizedAccountIntent<xparq_asset::AssetCall>,
-    pub payment: AuthorizedAccountIntent<OnChainSpendIntent>,
-}
-
-impl<T: QCashIntent> AuthorizedQCashIntent<T> {
-    pub fn new(intent: T, authorizations: Vec<QCashAuthorization>) -> Result<Self, IntentError> {
-        if intent.qcash_inputs().len() != authorizations.len() {
-            return Err(IntentError::QCashAuthorizationCountMismatch);
-        }
-        Ok(Self {
-            intent,
-            authorizations,
-        })
-    }
+    pub call: AuthorizedAccountIntent<AssetIntent>,
+    pub payment: AuthorizedAccountIntent<CoinIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum AuthorizedTransaction {
-    OnChainSpend(Box<AuthorizedAccountIntent<OnChainSpendIntent>>),
-    Withdraw(Box<AuthorizedAccountIntent<WithdrawIntent>>),
-    Redeem(Box<AuthorizedQCashIntent<RedeemIntent>>),
-    Merge(Box<AuthorizedQCashIntent<MergeIntent>>),
-    Split(Box<AuthorizedQCashIntent<SplitIntent>>),
+    Coin(Box<AuthorizedAccountIntent<CoinIntent>>),
     Asset(Box<AuthorizedAssetTransaction>),
     Extension(Box<AuthorizedExtensionTransaction>),
 }
@@ -127,16 +95,12 @@ pub enum AuthorizedTransaction {
 impl AuthorizedTransaction {
     pub fn id(&self) -> Result<[u8; 32], TransactionEncodingError> {
         let bytes = canonical_bytes(self).map_err(TransactionEncodingError::Encoding)?;
-        Ok(blake3::derive_key(TRANSACTION_ID_CONTEXT, &bytes))
+        Ok(domain_hash(TRANSACTION_ID_CONTEXT.as_bytes(), &[&bytes]))
     }
 
     pub fn validate_structure(&self) -> Result<(), IntentError> {
         match self {
-            Self::OnChainSpend(tx) => tx.intent.validate(),
-            Self::Withdraw(tx) => tx.intent.validate(),
-            Self::Redeem(tx) => validate_bearer_shape(tx, &tx.intent.inputs),
-            Self::Merge(tx) => validate_bearer_shape(tx, &tx.intent.inputs),
-            Self::Split(tx) => validate_bearer_shape(tx, std::slice::from_ref(&tx.intent.input)),
+            Self::Coin(tx) => tx.intent.validate(),
             Self::Asset(tx) => {
                 tx.call
                     .intent
@@ -148,36 +112,6 @@ impl AuthorizedTransaction {
         }
     }
 }
-
-fn validate_bearer_shape<T>(
-    tx: &AuthorizedQCashIntent<T>,
-    inputs: &[QCash],
-) -> Result<(), IntentError>
-where
-    T: IntentValidation,
-{
-    tx.intent.validate_intent()?;
-    if inputs.len() != tx.authorizations.len() {
-        return Err(IntentError::QCashAuthorizationCountMismatch);
-    }
-    Ok(())
-}
-
-trait IntentValidation {
-    fn validate_intent(&self) -> Result<(), IntentError>;
-}
-
-macro_rules! impl_intent_validation {
-    ($($type:ty),+ $(,)?) => {$(
-        impl IntentValidation for $type {
-            fn validate_intent(&self) -> Result<(), IntentError> {
-                self.validate()
-            }
-        }
-    )+};
-}
-
-impl_intent_validation!(RedeemIntent, MergeIntent, SplitIntent);
 
 #[cfg(test)]
 mod tests {
@@ -212,14 +146,14 @@ mod tests {
             xparq_crypto::ProfileSigningSeed::new(xparq_crypto::SignatureProfile::MlDsa44, [7; 32]);
         let public_key = seed.public_key();
         let signer = xparq_crypto::address_from_profile_public_key(&public_key);
-        let call = xparq_asset::AssetCall::new(
-            xparq_asset::AssetInstruction::Register {
+        let call = crate::AssetIntent::new(
+            crate::AssetInstruction::Register {
                 name: "Test Asset".into(),
                 symbol: "TST".into(),
                 decimals: 8,
                 max_supply: 1_000,
                 initial_mint: 100,
-                mint_authority: Some(xparq_asset::AssetAuthority::Account(signer)),
+                mint_authority: Some(xparq_common::Authority::Address(signer)),
             },
             signer,
             0,
@@ -234,11 +168,11 @@ mod tests {
                 },
             },
             payment: AuthorizedAccountIntent {
-                intent: OnChainSpendIntent {
+                intent: CoinIntent {
                     sender: Address::ZERO,
                     inputs: vec![xparq_coin::CoinHash::from_bytes([8; 32])],
                     outputs: vec![crate::SpendOutput::block_miner(
-                        xparq_coin::Amount::from_zeno(1),
+                        xparq_coin::Zeno::from_zeno(1),
                     )],
                 },
                 authorization: AccountAuthorization::ProfileKnown {
@@ -251,7 +185,7 @@ mod tests {
             },
         }));
         let encoded = borsh::to_vec(&transaction).unwrap();
-        assert_eq!(encoded[0], 5);
+        assert_eq!(encoded[0], 1);
         assert_eq!(
             AuthorizedTransaction::try_from_slice(&encoded).unwrap(),
             transaction
@@ -267,11 +201,11 @@ mod tests {
         )
         .unwrap();
         let fee = AuthorizedAccountIntent {
-            intent: OnChainSpendIntent {
+            intent: CoinIntent {
                 sender: Address::ZERO,
                 inputs: vec![xparq_coin::CoinHash::from_bytes([9; 32])],
                 outputs: vec![crate::SpendOutput::block_miner(
-                    xparq_coin::Amount::from_zeno(1),
+                    xparq_coin::Zeno::from_zeno(1),
                 )],
             },
             authorization: AccountAuthorization::ProfileKnown {
@@ -289,7 +223,7 @@ mod tests {
             }));
         let encoded = borsh::to_vec(&transaction).unwrap();
         // Tag 5 is reserved for the native Layer-1 Asset transaction.
-        assert_eq!(encoded[0], 6);
+        assert_eq!(encoded[0], 2);
         assert_eq!(
             AuthorizedTransaction::try_from_slice(&encoded).unwrap(),
             transaction

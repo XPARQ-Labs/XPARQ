@@ -1,8 +1,13 @@
+mod authority;
 pub mod codec;
 mod error;
 pub mod extension;
+mod hash;
+pub mod input;
+pub mod output;
 pub mod types;
 
+pub use authority::Authority;
 pub use codec::{
     CANONICAL_ENCODING_PROFILE, canonical_bytes, canonical_decode, canonical_deserialize,
 };
@@ -14,4 +19,7 @@ pub use extension::{
     ExtensionFailure, ExtensionHash, ExtensionJournalEntry, ExtensionStateRead, ExtensionStateRoot,
     ExtensionStateWrite, extension_set_root,
 };
+pub use hash::{HASH_SIZE, domain_hash};
+pub use input::Input;
+pub use output::Output;
 pub use types::{BlockHeight, BlockNonce, Height, Nonce};

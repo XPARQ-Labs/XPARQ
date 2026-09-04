@@ -108,7 +108,7 @@ mod tests {
         let encoded = address_to_string(&address);
         assert_eq!(
             encoded,
-            "Qx0707070707070707070707070707070707070707eecbf9c9"
+            "Qx070707070707070707070707070707070707070722504b68"
         );
         assert!(encoded.starts_with(ADDRESS_PREFIX));
         assert_eq!(encoded.len(), ADDRESS_STRING_LEN);

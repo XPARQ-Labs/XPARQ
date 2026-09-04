@@ -1,4 +1,4 @@
-use crate::MINER_CREATED_STATE_BURN;
+use crate::MINER_PROTOCOL_BURN;
 use crate::block::{Block, BlockHeight, Height};
 use crate::consensus::{WBDA_WINDOW, is_wbda_epoch_boundary, next_emission_from_window};
 use static_assertions::const_assert;
@@ -25,7 +25,7 @@ pub struct ValidatedEmission {
     recipient: Address,
     subsidy: Amount,
     miner_emission: Amount,
-    state_burn: Amount,
+    protocol_burn: Amount,
     origin: Hash,
 }
 
@@ -43,9 +43,9 @@ impl ValidatedEmission {
         self.miner_emission
     }
 
-    /// Consensus burn charged for creating the block record and emission UTXO.
-    pub fn state_burn(self) -> Amount {
-        self.state_burn
+    /// Archival burn for the block plus state-growth burn for its emission UTXO.
+    pub fn protocol_burn(self) -> Amount {
+        self.protocol_burn
     }
 
     pub fn origin(self) -> Hash {
@@ -99,10 +99,10 @@ pub(crate) fn authorize_emission(
     if emission.subsidy != expected {
         return Err(EmissionError::InvalidSubsidy);
     }
-    let state_burn = MINER_CREATED_STATE_BURN;
+    let protocol_burn = MINER_PROTOCOL_BURN;
     let miner_emission = emission
         .subsidy
-        .checked_sub(state_burn)
+        .checked_sub(protocol_burn)
         .ok_or(EmissionError::InvalidSubsidy)?;
     let origin = domain_hash(
         HashDomain::XPQCoin,
@@ -119,7 +119,7 @@ pub(crate) fn authorize_emission(
         recipient: emission.to,
         subsidy: emission.subsidy,
         miner_emission,
-        state_burn,
+        protocol_burn,
         origin,
     })
 }
@@ -159,7 +159,7 @@ mod tests {
     use crate::{DIFFICULTY_START, block::Nonce};
 
     #[test]
-    fn emission_utxo_receives_net_reward_after_state_burn() {
+    fn emission_utxo_receives_net_reward_after_protocol_burn() {
         let genesis = Block::genesis().unwrap();
         let block = Block::from_protocol_transactions(
             Height(1),
@@ -173,15 +173,18 @@ mod tests {
             vec![],
         )
         .unwrap();
-        assert_eq!(block.weight().unwrap(), crate::BLOCK_STATE_WEIGHT as usize);
+        assert_eq!(
+            block.weight().unwrap(),
+            crate::EMPTY_BLOCK_ARCHIVAL_BYTES as usize
+        );
         let emission = authorize_emission(&block, initial_block_emission(), |_| None).unwrap();
 
         assert_eq!(emission.subsidy(), initial_block_emission());
-        assert_eq!(emission.state_burn(), MINER_CREATED_STATE_BURN);
+        assert_eq!(emission.protocol_burn(), MINER_PROTOCOL_BURN);
         assert_eq!(
             emission.miner_emission(),
             initial_block_emission()
-                .checked_sub(MINER_CREATED_STATE_BURN)
+                .checked_sub(MINER_PROTOCOL_BURN)
                 .unwrap()
         );
     }

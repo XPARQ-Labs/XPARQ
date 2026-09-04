@@ -42,10 +42,6 @@ pub mod ledger {
     pub use xparq_ledger::*;
 }
 
-pub mod qcash {
-    pub use xparq_qcash::*;
-}
-
 pub mod transaction {
     pub use xparq_transaction::*;
 }

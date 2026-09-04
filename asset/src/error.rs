@@ -5,9 +5,32 @@ pub struct AssetHashParseError;
 
 impl fmt::Display for AssetHashParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .write_str("asset ID must be `asset:` followed by 64 lowercase hexadecimal characters")
+        formatter.write_str("invalid asset hash")
     }
 }
 
 impl Error for AssetHashParseError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssetError {
+    InvalidProgram,
+    InvalidAmount,
+    AssetAlreadyExists,
+    UnknownAsset,
+    UnknownObject,
+    AssetMismatch,
+    Unauthorized,
+    InvalidNonce,
+    SupplyOverflow,
+    BalanceOverflow,
+    InsufficientBalance,
+    Encoding,
+}
+
+impl fmt::Display for AssetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl Error for AssetError {}

@@ -1,26 +1,24 @@
 use std::{error::Error, fmt};
 
 use xparq_coin::Amount;
-use xparq_crypto::{ADDRESS_SIZE, ProfilePublicKey, QCASH_PUBLIC_KEY_SIZE};
-use xparq_transaction::{OutputTarget, SpendOutput};
+use xparq_crypto::{ADDRESS_SIZE, ProfilePublicKey};
+use xparq_transaction::{Recipient, SpendOutput};
 
-pub const STATE_BURN_ALGORITHM: &str = "xparq-canonical-state-creation-burn";
+pub const STATE_BURN_ALGORITHM: &str = "xparq-canonical-archival-and-state-growth-burn";
 pub const STATE_BURN_RATE_ZENO_PER_WEIGHT: u64 = 1;
 /// Canonical encoded size of an empty non-genesis block with one emission.
-pub const BLOCK_STATE_WEIGHT: u64 = 153;
+pub const EMPTY_BLOCK_ARCHIVAL_BYTES: u64 = 153;
 
 pub const COIN_UTXO_STATE_WEIGHT: u64 = (xparq_coin::COIN_HASH_SIZE
     + core::mem::size_of::<u64>()
     + 1
     + xparq_common::EXTENSION_HASH_SIZE) as u64;
-pub const QCASH_UTXO_STATE_WEIGHT: u64 =
-    (xparq_coin::COIN_HASH_SIZE + core::mem::size_of::<u64>() + QCASH_PUBLIC_KEY_SIZE) as u64;
-pub const EMISSION_UTXO_STATE_BURN: Amount =
+pub const EMISSION_UTXO_STATE_GROWTH_BURN: Amount =
     Amount::from_zeno(COIN_UTXO_STATE_WEIGHT * STATE_BURN_RATE_ZENO_PER_WEIGHT);
-pub const BLOCK_STATE_BURN: Amount =
-    Amount::from_zeno(BLOCK_STATE_WEIGHT * STATE_BURN_RATE_ZENO_PER_WEIGHT);
-pub const MINER_CREATED_STATE_BURN: Amount = Amount::from_zeno(
-    (BLOCK_STATE_WEIGHT + COIN_UTXO_STATE_WEIGHT) * STATE_BURN_RATE_ZENO_PER_WEIGHT,
+pub const EMPTY_BLOCK_ARCHIVAL_BURN: Amount =
+    Amount::from_zeno(EMPTY_BLOCK_ARCHIVAL_BYTES * STATE_BURN_RATE_ZENO_PER_WEIGHT);
+pub const MINER_PROTOCOL_BURN: Amount = Amount::from_zeno(
+    (EMPTY_BLOCK_ARCHIVAL_BYTES + COIN_UTXO_STATE_WEIGHT) * STATE_BURN_RATE_ZENO_PER_WEIGHT,
 );
 
 pub fn profile_key_state_weight(public_key: &ProfilePublicKey) -> Result<u64, StateBurnError> {
@@ -39,21 +37,15 @@ pub fn profile_key_state_weight(public_key: &ProfilePublicKey) -> Result<u64, St
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StateTransitionWeight {
     pub created_coin_utxos: u64,
-    pub created_qcash_utxos: u64,
     pub created_account_key_weight: u64,
     pub extension_created_weight: u64,
 }
 
 impl StateTransitionWeight {
-    pub fn required_burn(self) -> Result<Amount, StateBurnError> {
+    pub fn state_growth_burn(self) -> Result<Amount, StateBurnError> {
         let created = self
             .created_coin_utxos
             .checked_mul(COIN_UTXO_STATE_WEIGHT)
-            .and_then(|weight| {
-                self.created_qcash_utxos
-                    .checked_mul(QCASH_UTXO_STATE_WEIGHT)
-                    .and_then(|qcash| weight.checked_add(qcash))
-            })
             .and_then(|weight| weight.checked_add(self.created_account_key_weight))
             .and_then(|weight| weight.checked_add(self.extension_created_weight))
             .ok_or(StateBurnError::WeightOverflow)?;
@@ -62,18 +54,31 @@ impl StateTransitionWeight {
             .ok_or(StateBurnError::AmountOverflow)?;
         Ok(Amount::from_zeno(burn))
     }
+}
 
-    pub fn required_burn_with_archival(
-        self,
-        canonical_transaction_weight: u64,
-    ) -> Result<Amount, StateBurnError> {
-        let state = self.required_burn()?.as_zeno();
-        let archival = canonical_transaction_weight
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProtocolBurn {
+    pub archival: Amount,
+    pub state_growth: Amount,
+}
+
+impl ProtocolBurn {
+    pub fn for_transaction(
+        transition: StateTransitionWeight,
+        canonical_transaction_bytes: u64,
+    ) -> Result<Self, StateBurnError> {
+        let archival = canonical_transaction_bytes
             .checked_mul(STATE_BURN_RATE_ZENO_PER_WEIGHT)
             .ok_or(StateBurnError::AmountOverflow)?;
-        state
-            .checked_add(archival)
-            .map(Amount::from_zeno)
+        Ok(Self {
+            archival: Amount::from_zeno(archival),
+            state_growth: transition.state_growth_burn()?,
+        })
+    }
+
+    pub fn total(self) -> Result<Amount, StateBurnError> {
+        self.archival
+            .checked_add(self.state_growth)
             .ok_or(StateBurnError::AmountOverflow)
     }
 }
@@ -82,7 +87,7 @@ pub fn created_coin_output_count(outputs: &[SpendOutput]) -> Result<u64, StateBu
     u64::try_from(
         outputs
             .iter()
-            .filter(|output| output.target != OutputTarget::Burn)
+            .filter(|output| output.output != Recipient::Burn)
             .count(),
     )
     .map_err(|_| StateBurnError::WeightOverflow)
@@ -94,7 +99,7 @@ pub fn validate_exact_burn(
 ) -> Result<(), StateBurnError> {
     let mut burns = outputs
         .iter()
-        .filter(|output| output.target == OutputTarget::Burn);
+        .filter(|output| output.output == Recipient::Burn);
     let declared = burns
         .next()
         .map_or(Amount::from_zeno(0), |output| output.amount);
@@ -145,17 +150,8 @@ mod tests {
             ..StateTransitionWeight::default()
         };
         assert_eq!(
-            replacement.required_burn(),
+            replacement.state_growth_burn(),
             Ok(Amount::from_zeno(COIN_UTXO_STATE_WEIGHT))
-        );
-
-        let two_outputs = StateTransitionWeight {
-            created_qcash_utxos: 2,
-            ..StateTransitionWeight::default()
-        };
-        assert_eq!(
-            two_outputs.required_burn(),
-            Ok(Amount::from_zeno(2 * QCASH_UTXO_STATE_WEIGHT))
         );
     }
 
@@ -165,8 +161,12 @@ mod tests {
             created_coin_utxos: 1,
             ..StateTransitionWeight::default()
         };
+        let burn = ProtocolBurn::for_transaction(transition, 906).unwrap();
+
+        assert_eq!(burn.archival, Amount::from_zeno(906));
+        assert_eq!(burn.state_growth, Amount::from_zeno(COIN_UTXO_STATE_WEIGHT));
         assert_eq!(
-            transition.required_burn_with_archival(906),
+            burn.total(),
             Ok(Amount::from_zeno(COIN_UTXO_STATE_WEIGHT + 906))
         );
     }
@@ -185,43 +185,43 @@ mod tests {
 
     #[test]
     fn miner_burn_charges_block_record_and_emission_utxo() {
-        assert_eq!(BLOCK_STATE_BURN, Amount::from_zeno(153));
-        assert_eq!(EMISSION_UTXO_STATE_BURN, Amount::from_zeno(73));
-        assert_eq!(MINER_CREATED_STATE_BURN, Amount::from_zeno(226));
+        assert_eq!(EMPTY_BLOCK_ARCHIVAL_BURN, Amount::from_zeno(153));
+        assert_eq!(EMISSION_UTXO_STATE_GROWTH_BURN, Amount::from_zeno(73));
+        assert_eq!(MINER_PROTOCOL_BURN, Amount::from_zeno(226));
     }
 
     #[test]
     fn exact_burn_cannot_be_missing_underpaid_overpaid_or_duplicated() {
-        let required = Amount::from_zeno(QCASH_UTXO_STATE_WEIGHT);
+        let required = Amount::from_zeno(COIN_UTXO_STATE_WEIGHT);
         assert_eq!(
             validate_exact_burn(&[], required),
             Err(StateBurnError::IncorrectBurn {
-                required: QCASH_UTXO_STATE_WEIGHT,
+                required: COIN_UTXO_STATE_WEIGHT,
                 declared: 0,
             })
         );
         assert_eq!(
             validate_exact_burn(
                 &[SpendOutput::burn(Amount::from_zeno(
-                    QCASH_UTXO_STATE_WEIGHT - 1,
+                    COIN_UTXO_STATE_WEIGHT - 1,
                 ))],
                 required,
             ),
             Err(StateBurnError::IncorrectBurn {
-                required: QCASH_UTXO_STATE_WEIGHT,
-                declared: QCASH_UTXO_STATE_WEIGHT - 1,
+                required: COIN_UTXO_STATE_WEIGHT,
+                declared: COIN_UTXO_STATE_WEIGHT - 1,
             })
         );
         assert_eq!(
             validate_exact_burn(
                 &[SpendOutput::burn(Amount::from_zeno(
-                    QCASH_UTXO_STATE_WEIGHT + 1,
+                    COIN_UTXO_STATE_WEIGHT + 1,
                 ))],
                 required,
             ),
             Err(StateBurnError::IncorrectBurn {
-                required: QCASH_UTXO_STATE_WEIGHT,
-                declared: QCASH_UTXO_STATE_WEIGHT + 1,
+                required: COIN_UTXO_STATE_WEIGHT,
+                declared: COIN_UTXO_STATE_WEIGHT + 1,
             })
         );
         assert_eq!(

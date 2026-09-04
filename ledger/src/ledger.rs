@@ -3,17 +3,17 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_blockchain::{Chain, ChainError, Height};
 use xparq_coin::{Coin, CoinHash};
-use xparq_common::{ExtensionContext, ExtensionFailure, ExtensionStateRoot};
+use xparq_common::{
+    Authority, ExtensionContext, ExtensionFailure, ExtensionStateRoot, domain_hash,
+};
 use xparq_consensus::{
-    ApplyBlockState, CoinInputState, ConsensusError, QCashInputState, TransactionConsensusError,
+    ApplyBlockState, CoinInputState, ConsensusError, TransactionConsensusError,
     TransactionStateView, ValidatedBlock, validate_transaction,
 };
 use xparq_crypto::{Address, BlockHash, ProfilePublicKey};
 use xparq_transaction::AuthorizedTransaction;
 
-use crate::{
-    CoinOwner, CoinUtxo, LedgerState, SpendStateError, StateRollbackJournal, UtxoRollbackJournal,
-};
+use crate::{CoinUtxo, LedgerState, SpendStateError, StateRollbackJournal, UtxoRollbackJournal};
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ledger {
@@ -50,12 +50,15 @@ impl Ledger {
         height: Height,
     ) -> Result<ExtensionStateRoot, LedgerError> {
         let mut staged = self.state.clone();
+        let genesis_hash = self
+            .chain_context
+            .map_or([0; 32], |chain| chain.genesis_hash);
         for transaction in transactions {
             match transaction {
                 AuthorizedTransaction::Asset(transaction) => {
                     staged
                         .assets
-                        .apply(&transaction.call.intent)
+                        .apply(&transaction.call.intent, genesis_hash)
                         .map_err(|error| LedgerError::Spend(SpendStateError::Asset(error)))?;
                 }
                 AuthorizedTransaction::Extension(transaction) => {
@@ -67,7 +70,10 @@ impl Ledger {
                             &transaction.call,
                         )
                         .map_err(extension_error)?;
-                    for effect in applied.effects {
+                    for (effect_index, effect) in applied.effects.into_iter().enumerate() {
+                        let execution_nonce = u64::try_from(effect_index).map_err(|_| {
+                            LedgerError::Spend(SpendStateError::OutputIndexOverflow)
+                        })?;
                         match effect {
                             xparq_common::ExtensionEffect::MintAsset {
                                 asset_id,
@@ -79,8 +85,10 @@ impl Ledger {
                                     .apply_program_mint(
                                         transaction.call.extension_id(),
                                         xparq_asset::AssetHash::from_bytes(asset_id),
-                                        Address(recipient),
+                                        Authority::Address(Address(recipient)),
                                         amount,
+                                        genesis_hash,
+                                        execution_nonce,
                                     )
                                     .map_err(|error| {
                                         LedgerError::Spend(SpendStateError::Asset(error))
@@ -91,13 +99,27 @@ impl Ledger {
                                 recipient,
                                 amount,
                             } => {
+                                let asset_id = xparq_asset::AssetHash::from_bytes(asset_id);
+                                let (inputs, outputs) = staged
+                                    .assets
+                                    .program_transfer_plan(
+                                        transaction.call.extension_id(),
+                                        asset_id,
+                                        Address(recipient),
+                                        amount,
+                                    )
+                                    .map_err(|error| {
+                                        LedgerError::Spend(SpendStateError::Asset(error))
+                                    })?;
                                 staged
                                     .assets
                                     .apply_program_transfer(
                                         transaction.call.extension_id(),
-                                        xparq_asset::AssetHash::from_bytes(asset_id),
-                                        Address(recipient),
-                                        amount,
+                                        asset_id,
+                                        &inputs,
+                                        &outputs,
+                                        genesis_hash,
+                                        execution_nonce,
                                     )
                                     .map_err(|error| {
                                         LedgerError::Spend(SpendStateError::Asset(error))
@@ -161,22 +183,27 @@ impl Ledger {
         let mut block_journals = Vec::new();
         if let Some(emission) = validated.emission() {
             let id = CoinHash::from_emission_origin(&emission.origin().0);
-            staged_state.coins.insert(CoinUtxo {
+            staged_state.assets.utxos.insert(CoinUtxo {
                 coin: Coin::new(id, emission.miner_emission()),
-                owner: emission.recipient().into(),
+                owner: Authority::Address(emission.recipient()),
             })?;
             let mut journal = UtxoRollbackJournal {
                 created_coin_ids: vec![id],
                 ..UtxoRollbackJournal::default()
             };
-            staged_state.record_protocol_burn(emission.state_burn(), &mut journal)?;
+            staged_state.record_protocol_burn(emission.protocol_burn(), &mut journal)?;
             block_journals.push(StateRollbackJournal::Utxo(journal));
         }
 
         for transaction in block.transactions() {
             let authorized =
                 validate_transaction(transaction.clone(), chain_context, height.0, &staged_state)?;
-            let journal = staged_state.apply_validated_transaction(&authorized, height, miner)?;
+            let journal = staged_state.apply_validated_transaction(
+                &authorized,
+                height,
+                miner,
+                chain_context,
+            )?;
             block_journals.push(journal);
         }
 
@@ -266,19 +293,12 @@ impl From<crate::UtxoError> for LedgerError {
 
 impl TransactionStateView for LedgerState {
     fn coin(&self, id: CoinHash) -> Option<CoinInputState> {
-        self.coins.get(&id).map(|utxo| CoinInputState {
+        self.assets.utxos.get(&id).map(|utxo| CoinInputState {
             amount: utxo.coin.amount,
             owner: match utxo.owner {
-                CoinOwner::Account(address) => Some(address),
-                CoinOwner::Extension(_) => None,
+                Authority::Address(address) => Some(address),
+                Authority::Extension(_) => None,
             },
-        })
-    }
-
-    fn qcash(&self, id: CoinHash) -> Option<QCashInputState> {
-        self.qcash.get(&id).map(|utxo| QCashInputState {
-            amount: utxo.coin.amount,
-            public_key: utxo.public_key,
         })
     }
 
@@ -286,17 +306,21 @@ impl TransactionStateView for LedgerState {
         self.account_keys.get_profile(&address).cloned()
     }
 
-    fn asset_state(&self) -> Option<&xparq_asset::AssetState> {
-        Some(&self.assets)
+    fn asset_transition_created_state_weight(
+        &self,
+        call: &xparq_transaction::AssetIntent,
+        genesis_hash: [u8; 32],
+    ) -> Result<u64, xparq_asset::AssetError> {
+        self.assets.validate_transition(call, genesis_hash)?;
+        call.created_state_weight_from_presence(self.assets.nonces.contains_key(&call.signer))
     }
 
     fn extension_created_state_weight(
         &self,
         call: &xparq_common::ExtensionCall,
         height: u64,
-    ) -> u64 {
+    ) -> Result<u64, ExtensionFailure> {
         self.extension_created_state_weight_checked(call, height)
-            .unwrap_or(0)
     }
 }
 
@@ -315,7 +339,9 @@ impl LedgerState {
         )?;
         let mut total = preview.created_state_weight;
         let mut assets = self.assets.clone();
-        for effect in preview.effects {
+        for (effect_index, effect) in preview.effects.into_iter().enumerate() {
+            let execution_nonce =
+                u64::try_from(effect_index).map_err(|_| ExtensionFailure::InvalidState)?;
             match effect {
                 xparq_common::ExtensionEffect::MintAsset {
                     asset_id,
@@ -323,7 +349,7 @@ impl LedgerState {
                     amount,
                 } => {
                     let asset_id = xparq_asset::AssetHash::from_bytes(asset_id);
-                    let recipient = Address(recipient);
+                    let recipient = Authority::Address(Address(recipient));
                     let weight = assets
                         .program_mint_created_state_weight(
                             call.extension_id(),
@@ -336,7 +362,14 @@ impl LedgerState {
                         .checked_add(weight)
                         .ok_or(ExtensionFailure::StateEntryLimit)?;
                     assets
-                        .apply_program_mint(call.extension_id(), asset_id, recipient, amount)
+                        .apply_program_mint(
+                            call.extension_id(),
+                            asset_id,
+                            recipient,
+                            amount,
+                            [0; 32],
+                            execution_nonce,
+                        )
                         .map_err(|_| ExtensionFailure::InvalidState)?;
                 }
                 xparq_common::ExtensionEffect::TransferAsset {
@@ -346,41 +379,36 @@ impl LedgerState {
                 } => {
                     let asset_id = xparq_asset::AssetHash::from_bytes(asset_id);
                     let recipient = Address(recipient);
+                    let (inputs, outputs) = assets
+                        .program_transfer_plan(call.extension_id(), asset_id, recipient, amount)
+                        .map_err(|_| ExtensionFailure::InvalidState)?;
                     let weight = assets
                         .program_transfer_created_state_weight(
                             call.extension_id(),
                             asset_id,
-                            recipient,
-                            amount,
+                            &inputs,
+                            &outputs,
                         )
                         .map_err(|_| ExtensionFailure::InvalidState)?;
                     total = total
                         .checked_add(weight)
                         .ok_or(ExtensionFailure::StateEntryLimit)?;
                     assets
-                        .apply_program_transfer(call.extension_id(), asset_id, recipient, amount)
+                        .apply_program_transfer(
+                            call.extension_id(),
+                            asset_id,
+                            &inputs,
+                            &outputs,
+                            [0; 32],
+                            execution_nonce,
+                        )
                         .map_err(|_| ExtensionFailure::InvalidState)?;
                 }
                 xparq_common::ExtensionEffect::TransferCoin { amount, .. } => {
-                    if amount == 0 {
-                        return Err(ExtensionFailure::InvalidState);
-                    }
-                    let owner = crate::CoinOwner::Extension(call.extension_id());
-                    let mut held = 0_u64;
-                    for utxo in self.coins.owned_by(owner) {
-                        held = held
-                            .checked_add(utxo.coin.amount.as_zeno())
-                            .ok_or(ExtensionFailure::InvalidState)?;
-                        if held >= amount {
-                            break;
-                        }
-                    }
-                    if held < amount {
-                        return Err(ExtensionFailure::InvalidState);
-                    }
-                    let outputs = if held == amount { 1 } else { 2 };
+                    let weight =
+                        preview_program_coin_transfer(&mut assets, call.extension_id(), amount)?;
                     total = total
-                        .checked_add(outputs * xparq_consensus::COIN_UTXO_STATE_WEIGHT)
+                        .checked_add(weight)
                         .ok_or(ExtensionFailure::StateEntryLimit)?;
                 }
             }
@@ -402,10 +430,87 @@ impl LedgerState {
         let mut input = [0_u8; 64];
         input[..32].copy_from_slice(&asset);
         input[32..].copy_from_slice(extension.as_bytes());
-        Ok(ExtensionStateRoot::from_bytes(blake3::derive_key(
-            "xparq:application-state-root",
-            &input,
+        Ok(ExtensionStateRoot::from_bytes(domain_hash(
+            b"xparq:application-state-root",
+            &[&input],
         )))
+    }
+}
+
+fn preview_program_coin_transfer(
+    assets: &mut crate::AssetState,
+    program: xparq_common::ExtensionHash,
+    amount: u64,
+) -> Result<u64, ExtensionFailure> {
+    if amount == 0 {
+        return Err(ExtensionFailure::InvalidState);
+    }
+
+    let owner = Authority::Extension(program);
+    let mut selected = Vec::new();
+    let mut held = 0_u64;
+    for utxo in assets.utxos.owned_by(owner) {
+        selected.push(utxo.coin.utxo);
+        held = held
+            .checked_add(utxo.coin.amount.as_zeno())
+            .ok_or(ExtensionFailure::InvalidState)?;
+        if held >= amount {
+            break;
+        }
+    }
+    if held < amount {
+        return Err(ExtensionFailure::InvalidState);
+    }
+
+    let outputs = if held == amount { 1 } else { 2 };
+    let change = held - amount;
+    for id in &selected {
+        assets
+            .utxos
+            .consume(id)
+            .map_err(|_| ExtensionFailure::InvalidState)?;
+    }
+    if change != 0 {
+        let change_id = selected
+            .first()
+            .copied()
+            .ok_or(ExtensionFailure::InvalidState)?;
+        assets
+            .utxos
+            .insert(CoinUtxo {
+                coin: Coin::new(change_id, xparq_coin::Amount::from_zeno(change)),
+                owner,
+            })
+            .map_err(|_| ExtensionFailure::InvalidState)?;
+    }
+
+    Ok(outputs * xparq_consensus::COIN_UTXO_STATE_WEIGHT)
+}
+
+#[cfg(test)]
+mod extension_preview_tests {
+    use super::*;
+
+    #[test]
+    fn sequential_coin_effects_cannot_reuse_extension_balance() {
+        let program = xparq_common::ExtensionHash::derive("preview.coin.vault");
+        let mut assets = crate::AssetState::default();
+        assets
+            .utxos
+            .insert(CoinUtxo {
+                coin: Coin::new(
+                    CoinHash::from_bytes([0x71; 32]),
+                    xparq_coin::Amount::from_zeno(10),
+                ),
+                owner: Authority::Extension(program),
+            })
+            .unwrap();
+
+        assert!(preview_program_coin_transfer(&mut assets, program, 7).is_ok());
+        assert_eq!(
+            preview_program_coin_transfer(&mut assets, program, 7),
+            Err(ExtensionFailure::InvalidState)
+        );
     }
 }
 

@@ -1,6 +1,11 @@
-mod error;
-mod identifier;
-mod program;
+//! Native asset types and identifiers.
 
-pub use error::AssetHashParseError;
-pub use program::*;
+mod asset;
+mod error;
+mod metadata;
+mod utxo;
+
+pub use asset::*;
+pub use error::{AssetError, AssetHashParseError};
+pub use metadata::*;
+pub use utxo::*;

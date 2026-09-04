@@ -18,7 +18,7 @@ use xparq_common::extension::{
     ExtensionContext, ExtensionEffect, ExtensionFailure, ExtensionHash, ExtensionStateRead,
     ExtensionStateWrite,
 };
-use xparq_common::{Height, canonical_bytes};
+use xparq_common::{Height, canonical_bytes, domain_hash};
 use xparq_crypto::{
     Address, ProfilePublicKey, ProfileSignature, ProfileSigningSeed,
     address_from_profile_public_key, profile_verify,
@@ -157,7 +157,10 @@ fn wasm_app_commitment(
         nonce,
     })
     .map_err(|_| ExtensionFailure::InvalidPayload)?;
-    Ok(blake3::derive_key(WASM_APP_COMMITMENT_CONTEXT, &bytes))
+    Ok(domain_hash(
+        WASM_APP_COMMITMENT_CONTEXT.as_bytes(),
+        &[&bytes],
+    ))
 }
 
 fn is_wasm_system_key(key: &[u8]) -> bool {
@@ -266,15 +269,14 @@ impl fmt::Display for WasmExtensionError {
 impl std::error::Error for WasmExtensionError {}
 
 pub fn wasm_code_hash(module: &[u8]) -> [u8; 32] {
-    blake3::derive_key(WASM_CODE_HASH_CONTEXT, module)
+    domain_hash(WASM_CODE_HASH_CONTEXT.as_bytes(), &[module])
 }
 
 pub fn wasm_extension_id(name: &str, code_hash: [u8; 32]) -> ExtensionHash {
-    let mut hasher = blake3::Hasher::new_derive_key(WASM_EXTENSION_HASH_CONTEXT);
-    hasher.update(&(name.len() as u64).to_le_bytes());
-    hasher.update(name.as_bytes());
-    hasher.update(&code_hash);
-    ExtensionHash::from_bytes(*hasher.finalize().as_bytes())
+    ExtensionHash::from_bytes(domain_hash(
+        WASM_EXTENSION_HASH_CONTEXT.as_bytes(),
+        &[name.as_bytes(), &code_hash],
+    ))
 }
 
 pub struct WasmExtension {

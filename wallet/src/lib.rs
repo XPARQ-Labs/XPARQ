@@ -168,123 +168,6 @@ fn tagged_wallet_hash(tag: &[u8], bytes: &[u8]) -> [u8; 32] {
     hash_bytes(&payload).0
 }
 
-/* Legacy wallet signing was removed after the profile-only chain reset.
-impl Wallet {
-    pub fn sign_onchain_spend(
-        &self,
-        intent: OnChainSpendIntent,
-    ) -> Result<AuthorizedAccountIntent<OnChainSpendIntent>, String> {
-        self.sign_account_intent(intent, false)
-    }
-
-    pub fn sign_known_onchain_spend(
-        &self,
-        intent: OnChainSpendIntent,
-    ) -> Result<AuthorizedAccountIntent<OnChainSpendIntent>, String> {
-        self.sign_account_intent(intent, true)
-    }
-
-    pub fn sign_withdraw(
-        &self,
-        intent: WithdrawIntent,
-    ) -> Result<AuthorizedAccountIntent<WithdrawIntent>, String> {
-        self.sign_account_intent(intent, false)
-    }
-
-    pub fn sign_known_withdraw(
-        &self,
-        intent: WithdrawIntent,
-    ) -> Result<AuthorizedAccountIntent<WithdrawIntent>, String> {
-        self.sign_account_intent(intent, true)
-    }
-
-    fn sign_account_intent<T: AccountIntent>(
-        &self,
-        intent: T,
-        public_key_known: bool,
-    ) -> Result<AuthorizedAccountIntent<T>, String> {
-        let chain = xparq::genesis::chain_context()
-            .map_err(|error| format!("failed to load chain identity: {error}"))?;
-        let commitment = intent
-            .commitment(chain)
-            .map_err(|error| format!("invalid transaction intent: {error}"))?;
-        let signature = sign(&self.secret_key, commitment.as_bytes());
-        let authorization = if public_key_known {
-            AccountAuthorization::Known { signature }
-        } else {
-            AccountAuthorization::Reveal {
-                public_key: self.public_key,
-                signature,
-            }
-        };
-        let signed = AuthorizedAccountIntent {
-            intent,
-            authorization,
-        };
-        if !public_key_known
-            && !signed
-                .verify_revealed_signature(chain)
-                .map_err(|error| format!("signed transaction validation failed: {error}"))?
-        {
-            return Err("signed transaction authorization is invalid".to_string());
-        }
-        Ok(signed)
-    }
-}
-
-impl FalconWallet {
-    pub fn sign_onchain_spend(
-        &self,
-        intent: OnChainSpendIntent,
-        public_key_known: bool,
-    ) -> Result<AuthorizedAccountIntent<OnChainSpendIntent>, String> {
-        self.sign_account_intent(intent, public_key_known)
-    }
-
-    pub fn sign_withdraw(
-        &self,
-        intent: WithdrawIntent,
-        public_key_known: bool,
-    ) -> Result<AuthorizedAccountIntent<WithdrawIntent>, String> {
-        self.sign_account_intent(intent, public_key_known)
-    }
-
-    fn sign_account_intent<T: AccountIntent>(
-        &self,
-        intent: T,
-        public_key_known: bool,
-    ) -> Result<AuthorizedAccountIntent<T>, String> {
-        let chain = xparq::genesis::chain_context()
-            .map_err(|error| format!("failed to load chain identity: {error}"))?;
-        let commitment = intent
-            .commitment(chain)
-            .map_err(|error| format!("invalid transaction intent: {error}"))?;
-        let signature = falcon_sign(&self.secret_key, commitment.as_bytes())
-            .map_err(|error| format!("Falcon-512 signing failed: {error:?}"))?;
-        let authorization = if public_key_known {
-            AccountAuthorization::Falcon512Known { signature }
-        } else {
-            AccountAuthorization::Falcon512Reveal {
-                public_key: self.public_key.clone(),
-                signature,
-            }
-        };
-        let signed = AuthorizedAccountIntent {
-            intent,
-            authorization,
-        };
-        if !public_key_known
-            && !signed
-                .verify_revealed_signature(chain)
-                .map_err(|error| format!("signed transaction validation failed: {error}"))?
-        {
-            return Err("signed Falcon-512 transaction authorization is invalid".to_string());
-        }
-        Ok(signed)
-    }
-}
-*/
-
 impl ProfileWallet {
     pub const fn profile(&self) -> SignatureProfile {
         self.signing_seed.profile()
@@ -317,34 +200,16 @@ impl ProfileWallet {
         })
     }
 
-    pub fn sign_asset_call(
+    pub fn sign_asset_intent(
         &self,
-        action: xparq::asset::AssetInstruction,
+        action: xparq::transaction::AssetInstruction,
         nonce: u64,
         public_key_known: bool,
-    ) -> Result<AuthorizedAccountIntent<xparq::asset::AssetCall>, String> {
-        let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
-        let call = xparq::asset::AssetCall::new(action, self.address, nonce);
-        let signature = self.signing_seed.sign(
-            &call
-                .commitment(chain.genesis_hash)
-                .map_err(|error| format!("asset call signing failed: {error:?}"))?,
-        );
-        let authorization = if public_key_known {
-            AccountAuthorization::ProfileKnown {
-                profile: self.profile(),
-                signature,
-            }
-        } else {
-            AccountAuthorization::ProfileReveal {
-                public_key: self.public_key.clone(),
-                signature,
-            }
-        };
-        Ok(AuthorizedAccountIntent {
-            intent: call,
-            authorization,
-        })
+    ) -> Result<AuthorizedAccountIntent<xparq::transaction::AssetIntent>, String> {
+        self.sign_account_intent(
+            xparq::transaction::AssetIntent::new(action, self.address, nonce),
+            public_key_known,
+        )
     }
 
     pub fn sign_wasm_deploy_call(

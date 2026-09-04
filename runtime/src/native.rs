@@ -22,7 +22,7 @@ use xparq::{
     block::{Block, Emission, Height, Nonce},
     codec::{block_bytes, decode_block},
     coin::Amount,
-    common::{canonical_bytes, canonical_decode},
+    common::{Authority, canonical_bytes, canonical_decode},
     consensus::{
         ReorgPlan, Work, apply_block, compare_chain_tips, expected_emission_for_height,
         expected_next_difficulty, new_pow_memory, validate_transaction,
@@ -30,7 +30,7 @@ use xparq::{
     crypto::{Address, BlockHash, StateRoot, address_from_string},
     genesis::{EXPECTED_GENESIS_HASH, chain_spec_hash, genesis_block},
     ledger::Ledger,
-    transaction::{AuthorizedTransaction, OutputTarget, SpendOutput},
+    transaction::{AuthorizedTransaction, Recipient, SpendOutput},
 };
 
 const NODE_ID_FILE: &str = "node-id";
@@ -588,27 +588,28 @@ fn account_response(
     let mut total = Amount::from_zeno(0);
     let mut account_utxos = ledger
         .state()
-        .coins
+        .assets
+        .utxos
         .iter()
-        .filter(|utxo| utxo.owner == xparq::ledger::CoinOwner::Account(address))
+        .filter(|utxo| utxo.owner == Authority::Address(address))
         .collect::<Vec<_>>();
-    account_utxos.sort_by_key(|utxo| utxo.coin.id);
+    account_utxos.sort_by_key(|utxo| utxo.coin.utxo);
     for utxo in &account_utxos {
         total = total
             .checked_add(utxo.coin.amount)
             .ok_or("account balance overflow")?;
     }
     let page_start = utxo_after.map_or(utxo_offset, |cursor| {
-        account_utxos.partition_point(|utxo| utxo.coin.id <= cursor)
+        account_utxos.partition_point(|utxo| utxo.coin.utxo <= cursor)
     });
     let utxos = account_utxos
         .iter()
         .skip(page_start)
         .take(MAX_ACCOUNT_UTXOS_PER_PAGE)
         .map(|utxo| {
-            let is_reserved = reserved.contains(&utxo.coin.id);
+            let is_reserved = reserved.contains(&utxo.coin.utxo);
             serde_json::json!({
-                "id": utxo.coin.id.to_string(),
+                "id": utxo.coin.utxo.to_string(),
                 "amount": utxo.coin.amount.as_zeno(),
                 "reserved": is_reserved,
             })
@@ -619,7 +620,7 @@ fn account_response(
         .filter(|offset| *offset < account_utxos.len());
     let next_utxo_cursor = next_utxo_offset
         .and_then(|_| account_utxos.get(page_start + utxos.len().saturating_sub(1)))
-        .map(|utxo| utxo.coin.id.to_string());
+        .map(|utxo| utxo.coin.utxo.to_string());
     let registered_signature_profile = ledger
         .state()
         .account_keys
@@ -629,9 +630,9 @@ fn account_response(
         .iter()
         .map(|utxo| {
             (
-                utxo.coin.id,
+                utxo.coin.utxo,
                 utxo.coin.amount,
-                reserved.contains(&utxo.coin.id),
+                reserved.contains(&utxo.coin.utxo),
             )
         })
         .collect::<Vec<_>>();
@@ -672,14 +673,15 @@ fn balance_response(
     let mut utxo_count = 0_usize;
     for utxo in ledger
         .state()
-        .coins
+        .assets
+        .utxos
         .iter()
-        .filter(|utxo| utxo.owner == xparq::ledger::CoinOwner::Account(address))
+        .filter(|utxo| utxo.owner == Authority::Address(address))
     {
         total = total
             .checked_add(utxo.coin.amount)
             .ok_or("account balance overflow")?;
-        if reserved_ids.contains(&utxo.coin.id) {
+        if reserved_ids.contains(&utxo.coin.utxo) {
             reserved = reserved
                 .checked_add(utxo.coin.amount)
                 .ok_or("reserved account balance overflow")?;
@@ -709,16 +711,19 @@ fn account_asset_balances(
     let mut balances = std::collections::BTreeMap::new();
     for (asset_id, metadata) in ledger.state().assets.metadata_entries() {
         if metadata.creator == address
-            || metadata.mint_authority == Some(xparq::asset::AssetAuthority::Account(address))
+            || metadata.mint_authority == Some(Authority::Address(address))
         {
             balances.entry(asset_id).or_insert(0_u128);
         }
     }
-    for (asset_id, owner, balance) in ledger.state().assets.balances() {
-        if owner != address || balance == 0 {
+    for (_, utxo) in ledger.state().assets.utxos() {
+        if utxo.owner != Authority::Address(address) || utxo.amount == 0 {
             continue;
         }
-        balances.insert(asset_id, balance);
+        let balance = balances.entry(utxo.asset_id).or_insert(0_u128);
+        *balance = balance
+            .checked_add(utxo.amount)
+            .ok_or("asset balance overflow")?;
     }
     let mut response = Vec::with_capacity(balances.len());
     for (asset_id, balance) in balances {
@@ -749,14 +754,15 @@ fn explorer_address_response(
     let mut reserved = Amount::from_zeno(0);
     for utxo in ledger
         .state()
-        .coins
+        .assets
+        .utxos
         .iter()
-        .filter(|utxo| utxo.owner == xparq::ledger::CoinOwner::Account(address))
+        .filter(|utxo| utxo.owner == Authority::Address(address))
     {
         total = total
             .checked_add(utxo.coin.amount)
             .ok_or("explorer balance overflow")?;
-        if reserved_ids.contains(&utxo.coin.id) {
+        if reserved_ids.contains(&utxo.coin.utxo) {
             reserved = reserved
                 .checked_add(utxo.coin.amount)
                 .ok_or("explorer reserved balance overflow")?;
@@ -770,11 +776,11 @@ fn explorer_address_response(
         if let Some(emission) = block.emission().filter(|emission| emission.to == address) {
             emission_count = emission_count.saturating_add(1);
             if include_emissions {
-                let state_burn = xparq::consensus::MINER_CREATED_STATE_BURN;
+                let protocol_burn = xparq::consensus::MINER_PROTOCOL_BURN;
                 let miner_emission = emission
                     .subsidy
-                    .checked_sub(state_burn)
-                    .ok_or("block emission is below its created-state burn")?;
+                    .checked_sub(protocol_burn)
+                    .ok_or("block emission is below its protocol burn")?;
                 activities.push(serde_json::json!({
                     "height": block.height().0,
                     "block_hash": block_hash,
@@ -816,27 +822,9 @@ fn address_transaction_activity(
 ) -> Result<Option<serde_json::Value>, String> {
     let miner = block.miner_address();
     let (sender, outputs, extra_sent) = match transaction {
-        AuthorizedTransaction::OnChainSpend(tx) => (
+        AuthorizedTransaction::Coin(tx) => (
             Some(tx.intent.sender),
             tx.intent.outputs.as_slice(),
-            Amount::from_zeno(0),
-        ),
-        AuthorizedTransaction::Withdraw(tx) => (
-            Some(tx.intent.sender),
-            tx.intent.outputs.as_slice(),
-            checked_output_sum(tx.intent.qcash_outputs.iter().map(|output| output.amount))?,
-        ),
-        AuthorizedTransaction::Redeem(tx) => {
-            (None, tx.intent.outputs.as_slice(), Amount::from_zeno(0))
-        }
-        AuthorizedTransaction::Merge(tx) => (
-            None,
-            tx.intent.public_outputs.as_slice(),
-            Amount::from_zeno(0),
-        ),
-        AuthorizedTransaction::Split(tx) => (
-            None,
-            tx.intent.public_outputs.as_slice(),
             Amount::from_zeno(0),
         ),
         AuthorizedTransaction::Asset(tx) => (
@@ -915,30 +903,9 @@ fn explorer_transaction_response(
 
 fn transaction_response(transaction: &AuthorizedTransaction, miner: Address) -> serde_json::Value {
     match transaction {
-        AuthorizedTransaction::OnChainSpend(tx) => serde_json::json!({
+        AuthorizedTransaction::Coin(tx) => serde_json::json!({
             "sender": xparq::crypto::address_to_string(&tx.intent.sender),
             "outputs": public_outputs_response(&tx.intent.outputs, miner, Some(tx.intent.sender)),
-        }),
-        AuthorizedTransaction::Withdraw(tx) => serde_json::json!({
-            "sender": xparq::crypto::address_to_string(&tx.intent.sender),
-            "outputs": public_outputs_response(&tx.intent.outputs, miner, Some(tx.intent.sender)),
-            "qcash_output_count": tx.intent.qcash_outputs.len(),
-            "qcash_amount": tx.intent.qcash_outputs.iter().map(|output| output.amount.as_zeno()).sum::<u64>(),
-        }),
-        AuthorizedTransaction::Redeem(tx) => serde_json::json!({
-            "outputs": public_outputs_response(&tx.intent.outputs, miner, None),
-            "qcash_input_count": tx.intent.inputs.len(),
-            "qcash_output_count": tx.intent.qcash_outputs.len(),
-        }),
-        AuthorizedTransaction::Merge(tx) => serde_json::json!({
-            "qcash_input_count": tx.intent.inputs.len(),
-            "qcash_output_count": 1,
-            "public_outputs": public_outputs_response(&tx.intent.public_outputs, miner, None),
-        }),
-        AuthorizedTransaction::Split(tx) => serde_json::json!({
-            "qcash_input_count": 1,
-            "qcash_output_count": tx.intent.outputs.len(),
-            "public_outputs": public_outputs_response(&tx.intent.public_outputs, miner, None),
         }),
         AuthorizedTransaction::Asset(tx) => asset_transaction_response(tx, miner),
         AuthorizedTransaction::Extension(tx) => extension_transaction_response(tx, miner),
@@ -951,7 +918,7 @@ fn asset_transaction_response(
 ) -> serde_json::Value {
     let call = &transaction.call.intent;
     let instruction = match &call.instruction {
-        xparq::asset::AssetInstruction::Register {
+        xparq::transaction::AssetInstruction::Register {
             name,
             symbol,
             decimals,
@@ -964,25 +931,23 @@ fn asset_transaction_response(
             "mint_authority": asset_authority_response(*mint_authority),
             "recipient": xparq::crypto::address_to_string(&call.signer),
         }),
-        xparq::asset::AssetInstruction::Mint {
+        xparq::transaction::AssetInstruction::Mint {
             recipient, amount, ..
         } => serde_json::json!({
-            "type": "mint", "recipient": xparq::crypto::address_to_string(recipient), "amount": amount.to_string(),
+            "type": "mint", "recipient": asset_owner_response(*recipient), "amount": amount.to_string(),
         }),
-        xparq::asset::AssetInstruction::Burn { amount, .. } => {
-            serde_json::json!({ "type": "burn", "amount": amount.to_string() })
+        xparq::transaction::AssetInstruction::Burn { inputs, .. } => {
+            serde_json::json!({ "type": "burn", "inputs": inputs.iter().map(ToString::to_string).collect::<Vec<_>>() })
         }
-        xparq::asset::AssetInstruction::Transfer {
-            recipient, amount, ..
+        xparq::transaction::AssetInstruction::Transfer {
+            inputs, outputs, ..
         } => serde_json::json!({
-            "type": "transfer", "recipient": xparq::crypto::address_to_string(recipient), "amount": amount.to_string(),
-        }),
-        xparq::asset::AssetInstruction::TransferToExtension {
-            extension, amount, ..
-        } => serde_json::json!({
-            "type": "transfer_to_extension",
-            "extension_id": hex::encode(extension.as_bytes()),
-            "amount": amount.to_string(),
+            "type": "transfer",
+            "inputs": inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "outputs": outputs.iter().map(|output| serde_json::json!({
+                "owner": asset_owner_response(output.recipient),
+                "amount": output.amount.to_string(),
+            })).collect::<Vec<_>>(),
         }),
     };
     serde_json::json!({
@@ -993,6 +958,19 @@ fn asset_transaction_response(
         "payment_sender": xparq::crypto::address_to_string(&transaction.payment.intent.sender),
         "payment_outputs": public_outputs_response(&transaction.payment.intent.outputs, miner, Some(transaction.payment.intent.sender)),
     })
+}
+
+fn asset_owner_response(owner: Authority<Address>) -> serde_json::Value {
+    match owner {
+        Authority::Address(address) => serde_json::json!({
+            "type": "account",
+            "address": xparq::crypto::address_to_string(&address),
+        }),
+        Authority::Extension(program) => serde_json::json!({
+            "type": "program",
+            "extension_id": hex::encode(program.as_bytes()),
+        }),
+    }
 }
 
 fn extension_transaction_response(
@@ -1053,8 +1031,8 @@ fn public_outputs_response(
     outputs
         .iter()
         .map(|output| {
-            let (address, output_type, role) = match output.target {
-                OutputTarget::Address(address) => (
+            let (address, output_type, role) = match output.output {
+                Recipient::Address(address) => (
                     Some(xparq::crypto::address_to_string(&address)),
                     "address",
                     if sender == Some(address) {
@@ -1063,13 +1041,13 @@ fn public_outputs_response(
                         "recipient"
                     },
                 ),
-                OutputTarget::BlockMiner => (
+                Recipient::BlockMiner => (
                     Some(xparq::crypto::address_to_string(&miner)),
                     "miner",
                     "miner_fee",
                 ),
-                OutputTarget::Burn => (None, "burn", "state_burn"),
-                OutputTarget::Extension(extension) => (
+                Recipient::Burn => (None, "burn", "state_burn"),
+                Recipient::Extension(extension) => (
                     Some(hex::encode(extension.as_bytes())),
                     "extension",
                     "extension_deposit",
@@ -1087,11 +1065,11 @@ fn public_outputs_response(
 }
 
 fn output_recipient(output: &SpendOutput, miner: Address) -> Option<Address> {
-    match output.target {
-        OutputTarget::Address(address) => Some(address),
-        OutputTarget::BlockMiner => Some(miner),
-        OutputTarget::Burn => None,
-        OutputTarget::Extension(_) => None,
+    match output.output {
+        Recipient::Address(address) => Some(address),
+        Recipient::BlockMiner => Some(miner),
+        Recipient::Burn => None,
+        Recipient::Extension(_) => None,
     }
 }
 
@@ -1107,11 +1085,7 @@ fn checked_output_sum(amounts: impl IntoIterator<Item = Amount>) -> Result<Amoun
 
 fn transaction_kind(transaction: &AuthorizedTransaction) -> &'static str {
     match transaction {
-        AuthorizedTransaction::OnChainSpend(_) => "transfer",
-        AuthorizedTransaction::Withdraw(_) => "qcash_withdraw",
-        AuthorizedTransaction::Redeem(_) => "qcash_redeem",
-        AuthorizedTransaction::Merge(_) => "qcash_merge",
-        AuthorizedTransaction::Split(_) => "qcash_split",
+        AuthorizedTransaction::Coin(_) => "transfer",
         AuthorizedTransaction::Asset(_) => "asset",
         AuthorizedTransaction::Extension(_) => "extension",
     }
@@ -1217,12 +1191,11 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
                 "state_burn_algorithm": xparq::consensus::STATE_BURN_ALGORITHM,
                 "next_block_emission": emission.as_zeno(),
                 "state_burn_rate_zeno_per_weight": xparq::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT,
-                "block_state_weight": xparq::consensus::BLOCK_STATE_WEIGHT,
+                "empty_block_archival_bytes": xparq::consensus::EMPTY_BLOCK_ARCHIVAL_BYTES,
                 "coin_utxo_state_weight": xparq::consensus::COIN_UTXO_STATE_WEIGHT,
-                "qcash_utxo_state_weight": xparq::consensus::QCASH_UTXO_STATE_WEIGHT,
-                "block_state_burn": xparq::consensus::BLOCK_STATE_BURN.as_zeno(),
-                "emission_utxo_state_burn": xparq::consensus::EMISSION_UTXO_STATE_BURN.as_zeno(),
-                "miner_created_state_burn": xparq::consensus::MINER_CREATED_STATE_BURN.as_zeno(),
+                "empty_block_archival_burn": xparq::consensus::EMPTY_BLOCK_ARCHIVAL_BURN.as_zeno(),
+                "emission_utxo_state_growth_burn": xparq::consensus::EMISSION_UTXO_STATE_GROWTH_BURN.as_zeno(),
+                "miner_protocol_burn": xparq::consensus::MINER_PROTOCOL_BURN.as_zeno(),
             })
         }
         "/blocks/latest" => latest_blocks_response(&ledger)?,
@@ -1335,7 +1308,7 @@ fn asset_nonce_response(
         let validated = validate_transaction(transaction, chain, height.0, &state)
             .map_err(|error| format!("validate pending asset nonce: {error}"))?;
         state
-            .apply_validated_transaction(&validated, height, Address::ZERO)
+            .apply_validated_transaction(&validated, height, Address::ZERO, chain)
             .map_err(|error| format!("apply pending asset nonce: {error}"))?;
     }
     let nonce = state.assets.nonce(address);
@@ -1361,7 +1334,7 @@ fn wasm_nonce_response(
         let validated = validate_transaction(transaction, chain, height.0, &state)
             .map_err(|error| format!("validate pending WASM deploy nonce: {error}"))?;
         state
-            .apply_validated_transaction(&validated, height, Address::ZERO)
+            .apply_validated_transaction(&validated, height, Address::ZERO, chain)
             .map_err(|error| format!("apply pending WASM deploy nonce: {error}"))?;
     }
     let namespace = state
@@ -1482,13 +1455,13 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
     Err("invalid asset route".into())
 }
 
-fn asset_authority_response(authority: Option<xparq::asset::AssetAuthority>) -> serde_json::Value {
+fn asset_authority_response(authority: Option<Authority<Address>>) -> serde_json::Value {
     match authority {
-        Some(xparq::asset::AssetAuthority::Account(address)) => serde_json::json!({
+        Some(Authority::Address(address)) => serde_json::json!({
             "type": "account",
             "address": xparq::crypto::address_to_string(&address),
         }),
-        Some(xparq::asset::AssetAuthority::Program(extension_id)) => serde_json::json!({
+        Some(Authority::Extension(extension_id)) => serde_json::json!({
             "type": "program",
             "extension_id": hex::encode(extension_id.as_bytes()),
         }),
@@ -1619,7 +1592,7 @@ fn block_response(block: &Block) -> Result<serde_json::Value, String> {
         .emission()
         .map_or(Amount::from_zeno(0), |emission| emission.subsidy);
     let state_burn = if block.emission().is_some() {
-        xparq::consensus::MINER_CREATED_STATE_BURN
+        xparq::consensus::MINER_PROTOCOL_BURN
     } else {
         Amount::from_zeno(0)
     };
@@ -2866,7 +2839,7 @@ fn reconcile_mempool(
             continue;
         };
         if state
-            .apply_validated_transaction(&validated, height, Address::ZERO)
+            .apply_validated_transaction(&validated, height, Address::ZERO, chain)
             .is_err()
         {
             continue;
@@ -3168,13 +3141,9 @@ fn reserved_coin_inputs(transactions: &[AuthorizedTransaction]) -> BTreeSet<xpar
     transactions
         .iter()
         .flat_map(|transaction| match transaction {
-            AuthorizedTransaction::OnChainSpend(transaction) => transaction.intent.inputs.clone(),
-            AuthorizedTransaction::Withdraw(transaction) => transaction.intent.inputs.clone(),
+            AuthorizedTransaction::Coin(transaction) => transaction.intent.inputs.clone(),
             AuthorizedTransaction::Asset(transaction) => transaction.payment.intent.inputs.clone(),
             AuthorizedTransaction::Extension(transaction) => transaction.fee.intent.inputs.clone(),
-            AuthorizedTransaction::Redeem(_)
-            | AuthorizedTransaction::Merge(_)
-            | AuthorizedTransaction::Split(_) => Vec::new(),
         })
         .collect()
 }
@@ -3206,7 +3175,7 @@ fn validate_mempool(ledger: &Ledger, transactions: &[AuthorizedTransaction]) -> 
         let validated = validate_transaction(transaction.clone(), chain, height.0, &state)
             .map_err(|error| format!("mempool transaction is invalid: {error}"))?;
         state
-            .apply_validated_transaction(&validated, height, Address::ZERO)
+            .apply_validated_transaction(&validated, height, Address::ZERO, chain)
             .map_err(|error| format!("mempool state transition is invalid: {error}"))?;
     }
     Ok(())
@@ -3229,7 +3198,7 @@ fn transaction_miner_fee(transaction: &AuthorizedTransaction) -> Result<u64, Str
     fn fee_from_outputs(outputs: &[xparq::transaction::SpendOutput]) -> Result<u64, String> {
         let mut fees = outputs
             .iter()
-            .filter(|output| output.target == xparq::transaction::OutputTarget::BlockMiner);
+            .filter(|output| output.output == xparq::transaction::Recipient::BlockMiner);
         let fee = fees.next().map_or(0, |output| output.amount.as_zeno());
         if fees.next().is_some() {
             return Err("transaction has multiple block-miner fee outputs".into());
@@ -3238,19 +3207,7 @@ fn transaction_miner_fee(transaction: &AuthorizedTransaction) -> Result<u64, Str
     }
 
     match transaction {
-        AuthorizedTransaction::OnChainSpend(transaction) => {
-            fee_from_outputs(&transaction.intent.outputs)
-        }
-        AuthorizedTransaction::Withdraw(transaction) => {
-            fee_from_outputs(&transaction.intent.outputs)
-        }
-        AuthorizedTransaction::Redeem(transaction) => fee_from_outputs(&transaction.intent.outputs),
-        AuthorizedTransaction::Merge(transaction) => {
-            fee_from_outputs(&transaction.intent.public_outputs)
-        }
-        AuthorizedTransaction::Split(transaction) => {
-            fee_from_outputs(&transaction.intent.public_outputs)
-        }
+        AuthorizedTransaction::Coin(transaction) => fee_from_outputs(&transaction.intent.outputs),
         AuthorizedTransaction::Asset(transaction) => {
             fee_from_outputs(&transaction.payment.intent.outputs)
         }
@@ -3573,8 +3530,7 @@ fn print_status(ledger: &Ledger, database: &Path) {
     println!("genesis: {}", hex::encode(EXPECTED_GENESIS_HASH.0));
     println!("height: {}", height.0);
     println!("tip: {tip}");
-    println!("coin_utxos: {}", ledger.state().coins.len());
-    println!("qcash_utxos: {}", ledger.state().qcash.len());
+    println!("utxos: {}", ledger.state().assets.utxos.len());
 }
 
 fn print_network_info() -> Result<(), String> {
@@ -3739,14 +3695,14 @@ mod tests {
         );
         let public_key = seed.public_key();
         let signer = xparq::crypto::address_from_profile_public_key(&public_key);
-        let asset_call = xparq::asset::AssetCall::new(
-            xparq::asset::AssetInstruction::Register {
+        let asset_call = xparq::transaction::AssetIntent::new(
+            xparq::transaction::AssetInstruction::Register {
                 name: "Test Token".into(),
                 symbol: "TEST".into(),
                 decimals: 8,
                 max_supply: 100_000_000_000_000_000_000_000,
                 initial_mint: 1_000_000,
-                mint_authority: Some(xparq::asset::AssetAuthority::Account(signer)),
+                mint_authority: Some(Authority::Address(signer)),
             },
             signer,
             0,
@@ -3762,7 +3718,7 @@ mod tests {
                 },
             },
             payment: xparq::transaction::AuthorizedAccountIntent {
-                intent: xparq::transaction::OnChainSpendIntent {
+                intent: xparq::transaction::CoinIntent {
                     sender: Address::ZERO,
                     inputs: vec![],
                     outputs: vec![],
@@ -3792,70 +3748,25 @@ mod tests {
             [0x61; 32],
         );
         let authority = xparq::crypto::address_from_profile_public_key(&seed.public_key());
-        let call = xparq::asset::AssetCall::new(
-            xparq::asset::AssetInstruction::Register {
+        let call = xparq::transaction::AssetIntent::new(
+            xparq::transaction::AssetInstruction::Register {
                 name: "Authority Asset".into(),
                 symbol: "AUTH".into(),
                 decimals: 0,
                 max_supply: 10,
                 initial_mint: 4,
-                mint_authority: Some(xparq::asset::AssetAuthority::Account(authority)),
+                mint_authority: Some(Authority::Address(authority)),
             },
             authority,
             0,
         );
         let mut ledger = Ledger::new();
-        ledger.state.assets.apply(&call).unwrap();
+        ledger.state.assets.apply(&call, [0; 32]).unwrap();
 
         let assets = account_asset_balances(&ledger, authority).unwrap();
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0]["symbol"], "AUTH");
         assert_eq!(assets[0]["balance"], "4");
-    }
-
-    fn policy_split_transaction(fee: u64) -> AuthorizedTransaction {
-        let input_seed = xparq::qcash::QCashSigningSeed::from_bytes([0x41; 32]);
-        let input = xparq::qcash::QCash::new(
-            xparq::coin::CoinHash::from_bytes([0x42; xparq::coin::CoinHash::SIZE]),
-            Amount::from_zeno(1_000_000),
-        );
-        let intent = xparq::transaction::SplitIntent::new(
-            input,
-            vec![
-                xparq::transaction::QCashOutput::new(
-                    Amount::from_zeno(1),
-                    xparq::qcash::QCashSigningSeed::from_bytes([0x43; 32]).public_key(),
-                ),
-                xparq::transaction::QCashOutput::new(
-                    Amount::from_zeno(999_999 - fee),
-                    xparq::qcash::QCashSigningSeed::from_bytes([0x44; 32]).public_key(),
-                ),
-            ],
-            vec![SpendOutput::block_miner(Amount::from_zeno(fee))],
-        )
-        .unwrap();
-        let chain = xparq::genesis::chain_context().unwrap();
-        let commitment = intent.commitment(chain).unwrap();
-        let authorized = xparq::transaction::AuthorizedQCashIntent::new(
-            intent,
-            vec![xparq::transaction::QCashAuthorization {
-                signature: input_seed.sign(commitment.as_bytes()),
-            }],
-        )
-        .unwrap();
-        AuthorizedTransaction::Split(Box::new(authorized))
-    }
-
-    #[test]
-    fn relay_policy_requires_one_zeno_per_canonical_byte() {
-        let underpaid = policy_split_transaction(1);
-        let underpaid_size = canonical_bytes(&underpaid).unwrap().len();
-        assert!(!meets_minimum_relay_fee(&underpaid, underpaid_size));
-
-        let paid = policy_split_transaction(10_000);
-        let paid_size = canonical_bytes(&paid).unwrap().len();
-        assert!(meets_minimum_relay_fee(&paid, paid_size));
-        assert_eq!(transaction_miner_fee(&paid), Ok(10_000));
     }
 
     #[test]
@@ -3877,7 +3788,7 @@ mod tests {
         .unwrap();
         let recipient = Address([4; 20]);
         let miner = Address([5; 20]);
-        let intent = xparq::transaction::OnChainSpendIntent::new(
+        let intent = xparq::transaction::CoinIntent::new(
             sender.address,
             vec![xparq::coin::CoinHash::from_bytes([6; 32])],
             vec![
@@ -3886,7 +3797,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let transaction = AuthorizedTransaction::OnChainSpend(Box::new(
+        let transaction = AuthorizedTransaction::Coin(Box::new(
             sender.sign_account_intent(intent, false).unwrap(),
         ));
         let genesis = genesis_block().unwrap();

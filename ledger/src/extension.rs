@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use xparq_common::domain_hash;
 use xparq_common::extension::{
     EXTENSION_STATE_KEY_MAX_SIZE, EXTENSION_STATE_MAX_ENTRIES, EXTENSION_STATE_VALUE_MAX_SIZE,
     ExtensionCall, ExtensionCommitment, ExtensionContext, ExtensionEffect, ExtensionFailure,
@@ -10,7 +11,7 @@ use xparq_common::extension::{
     ExtensionStateWrite, extension_set_root,
 };
 
-const EXTENSION_NAMESPACE_ROOT_CONTEXT: &str = "XPARQ Extension Namespace Root";
+const EXTENSION_NAMESPACE_ROOT_CONTEXT: &[u8] = b"XPARQ Extension Namespace Root";
 
 type Namespace = BTreeMap<Vec<u8>, Vec<u8>>;
 
@@ -366,15 +367,15 @@ fn validate_key(key: &[u8]) -> Result<(), ExtensionFailure> {
 }
 
 fn namespace_root(namespace: &Namespace) -> ExtensionStateRoot {
-    let mut hasher = blake3::Hasher::new_derive_key(EXTENSION_NAMESPACE_ROOT_CONTEXT);
-    hasher.update(&(namespace.len() as u64).to_le_bytes());
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(&(namespace.len() as u64).to_le_bytes());
     for (key, value) in namespace {
-        hasher.update(&(key.len() as u64).to_le_bytes());
-        hasher.update(key);
-        hasher.update(&(value.len() as u64).to_le_bytes());
-        hasher.update(value);
+        encoded.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        encoded.extend_from_slice(key);
+        encoded.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        encoded.extend_from_slice(value);
     }
-    ExtensionStateRoot::from_bytes(*hasher.finalize().as_bytes())
+    ExtensionStateRoot::from_bytes(domain_hash(EXTENSION_NAMESPACE_ROOT_CONTEXT, &[&encoded]))
 }
 
 fn journal_diff(previous: &Namespace, applied: &Namespace) -> Vec<ExtensionJournalEntry> {

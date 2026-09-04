@@ -133,7 +133,6 @@ pub enum SignatureSchemeStatus {
 #[repr(u8)]
 pub enum SignatureContext {
     ProtocolTransaction = 1,
-    QCashTransaction = 2,
     RecoveryProof = 3,
 }
 

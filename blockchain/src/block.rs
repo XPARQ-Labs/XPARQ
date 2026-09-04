@@ -393,7 +393,7 @@ mod tests {
     use std::io::Cursor;
     use xparq_coin::CoinHash;
     use xparq_transaction::{
-        AccountAuthorization, AuthorizedAccountIntent, OnChainSpendIntent, SpendOutput,
+        AccountAuthorization, AuthorizedAccountIntent, CoinIntent, SpendOutput,
     };
 
     #[test]
@@ -414,7 +414,7 @@ mod tests {
         let owner = ProfileSigningSeed::new(SignatureProfile::MlDsa44, [7; 32]);
         let public_key = owner.public_key();
         let sender = address_from_profile_public_key(&public_key);
-        let transaction = OnChainSpendIntent::new(
+        let transaction = CoinIntent::new(
             sender,
             vec![CoinHash::from_bytes([0x31; crate::crypto::HASH_SIZE])],
             vec![SpendOutput::new(
@@ -440,7 +440,7 @@ mod tests {
                 Address([0x34; crate::crypto::ADDRESS_SIZE]),
                 Amount::from_zeno(0),
             )),
-            vec![AuthorizedTransaction::OnChainSpend(Box::new(signed))],
+            vec![AuthorizedTransaction::Coin(Box::new(signed))],
         )
         .unwrap();
 
@@ -456,7 +456,7 @@ mod tests {
                 CoinHash::from_bytes(coin_id)
             })
             .collect();
-        let transaction = OnChainSpendIntent::new(
+        let transaction = CoinIntent::new(
             Address([0xff; crate::crypto::ADDRESS_SIZE]),
             inputs,
             vec![SpendOutput::new(
@@ -465,7 +465,7 @@ mod tests {
             )],
         )
         .unwrap();
-        AuthorizedTransaction::OnChainSpend(Box::new(AuthorizedAccountIntent {
+        AuthorizedTransaction::Coin(Box::new(AuthorizedAccountIntent {
             intent: transaction,
             authorization: AccountAuthorization::ProfileKnown {
                 profile: SignatureProfile::MlDsa44,

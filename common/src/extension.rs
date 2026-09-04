@@ -7,7 +7,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::BTreeSet;
 use std::io::{Error as IoError, ErrorKind, Read};
 
-use crate::Height;
+use crate::{Height, domain_hash};
 
 pub const EXTENSION_HASH_SIZE: usize = 32;
 pub const EXTENSION_STATE_ROOT_SIZE: usize = 32;
@@ -16,8 +16,8 @@ pub const EXTENSION_STATE_KEY_MAX_SIZE: usize = 256;
 pub const EXTENSION_STATE_VALUE_MAX_SIZE: usize = 3 * 1024 * 1024;
 pub const EXTENSION_STATE_MAX_ENTRIES: usize = 65_536;
 
-const EXTENSION_HASH_CONTEXT: &str = "XPARQ Extension Id";
-const EXTENSION_SET_ROOT_CONTEXT: &str = "XPARQ Extension Set Root";
+const EXTENSION_HASH_CONTEXT: &[u8] = b"XPARQ Extension Id";
+const EXTENSION_SET_ROOT_CONTEXT: &[u8] = b"XPARQ Extension Set Root";
 
 #[derive(
     BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -26,7 +26,7 @@ pub struct ExtensionHash([u8; EXTENSION_HASH_SIZE]);
 
 impl ExtensionHash {
     pub fn derive(name: &str) -> Self {
-        Self(blake3::derive_key(EXTENSION_HASH_CONTEXT, name.as_bytes()))
+        Self(domain_hash(EXTENSION_HASH_CONTEXT, &[name.as_bytes()]))
     }
 
     pub const fn from_bytes(bytes: [u8; EXTENSION_HASH_SIZE]) -> Self {
@@ -197,18 +197,19 @@ pub fn extension_set_root(
     ordered.sort_by_key(|commitment| commitment.extension_id);
 
     let mut ids = BTreeSet::new();
-    let mut hasher = blake3::Hasher::new_derive_key(EXTENSION_SET_ROOT_CONTEXT);
-    hasher.update(&(ordered.len() as u64).to_le_bytes());
+    let mut encoded = Vec::with_capacity(8 + ordered.len() * 64);
+    encoded.extend_from_slice(&(ordered.len() as u64).to_le_bytes());
     for commitment in ordered {
         if !ids.insert(commitment.extension_id) {
             return Err(ExtensionFailure::DuplicateExtension);
         }
-        hasher.update(commitment.extension_id.as_bytes());
-        hasher.update(commitment.state_root.as_bytes());
+        encoded.extend_from_slice(commitment.extension_id.as_bytes());
+        encoded.extend_from_slice(commitment.state_root.as_bytes());
     }
-    Ok(ExtensionStateRoot::from_bytes(
-        *hasher.finalize().as_bytes(),
-    ))
+    Ok(ExtensionStateRoot::from_bytes(domain_hash(
+        EXTENSION_SET_ROOT_CONTEXT,
+        &[&encoded],
+    )))
 }
 
 #[cfg(test)]

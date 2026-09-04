@@ -6,11 +6,10 @@ mod intent;
 
 pub use authorization::{
     AccountAuthorization, AccountIntent, AuthorizedAccountIntent, AuthorizedAssetTransaction,
-    AuthorizedExtensionTransaction, AuthorizedQCashIntent, AuthorizedTransaction,
-    QCashAuthorization,
+    AuthorizedExtensionTransaction, AuthorizedTransaction,
 };
 pub use error::{IntentError, TransactionEncodingError};
 pub use intent::{
-    ChainContext, MergeIntent, OnChainSpendIntent, OutputTarget, QCashIntent, QCashOutput,
-    RedeemIntent, SpendCommitment, SpendOutput, SplitIntent, WithdrawIntent,
+    AssetInstruction, AssetIntent, ChainContext, CoinIntent, Recipient, SpendCommitment,
+    SpendOutput,
 };

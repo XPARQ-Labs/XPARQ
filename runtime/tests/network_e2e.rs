@@ -15,7 +15,7 @@ use xparq::{
     crypto::{
         ProfileSigningSeed, SignatureProfile, address_from_profile_public_key, address_to_string,
     },
-    transaction::{AuthorizedTransaction, OnChainSpendIntent, SpendOutput},
+    transaction::{AuthorizedTransaction, CoinIntent, SpendOutput},
 };
 use xparq_wallet::{ProfileWallet, encode_xparq_mnemonic, profile_wallet_from_xparq_mnemonic};
 
@@ -332,9 +332,9 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
             .unwrap(),
         ..xparq::consensus::StateTransitionWeight::default()
     }
-    .required_burn()
+    .state_growth_burn()
     .unwrap();
-    let intent = OnChainSpendIntent::new(
+    let intent = CoinIntent::new(
         sender.address,
         vec![input_id],
         vec![
@@ -347,9 +347,8 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
         ],
     )
     .unwrap();
-    let transaction = AuthorizedTransaction::OnChainSpend(Box::new(
-        sender.sign_account_intent(intent, false).unwrap(),
-    ));
+    let transaction =
+        AuthorizedTransaction::Coin(Box::new(sender.sign_account_intent(intent, false).unwrap()));
     let submitted = post_transaction(&a_rpc, &transaction);
     assert_eq!(
         submitted["transaction_id"],

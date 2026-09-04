@@ -4,7 +4,6 @@ members = [
     "common",
     "crypto",
     "coin",
-    "qcash",
     "transaction",
     "blockchain",
     "consensus",
@@ -32,7 +31,6 @@ debug = true
 
 [workspace.dependencies]
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc"], path = "depend/argon2/argon2" }
-blake3 = { version = "1.8", path = "depend/blake3" }
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 async-trait = "0.1"
@@ -72,7 +70,6 @@ rand_10 = { package = "rand", version = "0.10.2", features = ["sys_rng"], path =
 xparq-common = { path = "common" }
 xparq-crypto = { path = "crypto", default-features = false }
 xparq-coin = { path = "coin", default-features = false }
-xparq-qcash = { path = "qcash", default-features = false }
 xparq-transaction = { path = "transaction", default-features = false }
 xparq-blockchain = { path = "blockchain", default-features = false }
 xparq-consensus = { path = "consensus", default-features = false }

@@ -3,7 +3,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use xparq_common::{
     Extension, ExtensionCall, ExtensionContext, ExtensionFailure, ExtensionHash,
-    ExtensionStateRead, ExtensionStateWrite, Height, canonical_bytes,
+    ExtensionStateRead, ExtensionStateWrite, Height, canonical_bytes, domain_hash,
 };
 use xparq_crypto::{
     Address, ProfilePublicKey, ProfileSignature, ProfileSigningSeed,
@@ -225,7 +225,7 @@ fn deploy_commitment(
         nonce,
     };
     let bytes = canonical_bytes(&unsigned).map_err(|_| ExtensionFailure::InvalidPayload)?;
-    Ok(blake3::derive_key(DEPLOY_COMMITMENT_CONTEXT, &bytes))
+    Ok(domain_hash(DEPLOY_COMMITMENT_CONTEXT.as_bytes(), &[&bytes]))
 }
 
 #[cfg(test)]

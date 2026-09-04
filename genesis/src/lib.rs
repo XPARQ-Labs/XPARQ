@@ -5,15 +5,14 @@ use std::{error::Error, fmt};
 use borsh::BorshSerialize;
 use xparq_blockchain::{Block, MAX_BLOCK_WEIGHT, Nonce};
 use xparq_consensus::{
-    BLOCK_EMISSION_STEP, BLOCK_STATE_WEIGHT, COIN_UTXO_STATE_WEIGHT, DIFFICULTY_START,
+    BLOCK_EMISSION_STEP, COIN_UTXO_STATE_WEIGHT, DIFFICULTY_START, EMPTY_BLOCK_ARCHIVAL_BYTES,
     MAX_BLOCK_EMISSION, MAX_DIFFICULTY, MIN_BLOCK_EMISSION, MIN_DIFFICULTY, POW_ALGORITHM,
-    POW_ARGON2_ITERATIONS, POW_ARGON2_LANES, POW_ARGON2_MEMORY_KIB, QCASH_UTXO_STATE_WEIGHT,
-    STATE_BURN_ALGORITHM, STATE_BURN_RATE_ZENO_PER_WEIGHT, WBDA_ALGORITHM, WBDA_DIFFICULTY_STEP,
+    POW_ARGON2_ITERATIONS, POW_ARGON2_LANES, POW_ARGON2_MEMORY_KIB, STATE_BURN_ALGORITHM,
+    STATE_BURN_RATE_ZENO_PER_WEIGHT, WBDA_ALGORITHM, WBDA_DIFFICULTY_STEP,
     WBDA_HIGH_UTILIZATION_PPM, WBDA_LOW_UTILIZATION_PPM, WBDA_TARGET_BLOCK_WEIGHT, WBDA_WINDOW,
 };
 use xparq_crypto::{
     ADDRESS_SIZE, BlockHash, FALCON_512_ACTIVATION_HEIGHT, HASH_SIZE, Hash, HashDomain,
-    QCASH_PUBLIC_KEY_SIZE, QCASH_SIGNATURE_ALGORITHM, QCASH_SIGNATURE_SIZE,
     SIGNATURE_PROFILE_ACTIVATION_HEIGHT, domain_hash,
 };
 use xparq_ledger::{Ledger, LedgerError};
@@ -56,7 +55,6 @@ struct ChainSpecIdentity<'a> {
     state_burn_rate_zeno_per_weight: u64,
     block_state_weight: u64,
     coin_utxo_state_weight: u64,
-    qcash_utxo_state_weight: u64,
     max_block_weight: u64,
     address_size: u32,
     address_encoding: &'a str,
@@ -64,9 +62,6 @@ struct ChainSpecIdentity<'a> {
     fork_choice_algorithm: &'a str,
     falcon_512_activation_height: u64,
     signature_profile_activation_height: u64,
-    qcash_signature_algorithm: &'a str,
-    qcash_public_key_size: u32,
-    qcash_signature_size: u32,
     extension_protocol: &'a str,
     native_asset_program: &'a str,
     wasm_deploy_extension_id: [u8; 32],
@@ -103,9 +98,8 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         block_emission_step: BLOCK_EMISSION_STEP,
         state_burn_algorithm: STATE_BURN_ALGORITHM,
         state_burn_rate_zeno_per_weight: STATE_BURN_RATE_ZENO_PER_WEIGHT,
-        block_state_weight: BLOCK_STATE_WEIGHT,
+        block_state_weight: EMPTY_BLOCK_ARCHIVAL_BYTES,
         coin_utxo_state_weight: COIN_UTXO_STATE_WEIGHT,
-        qcash_utxo_state_weight: QCASH_UTXO_STATE_WEIGHT,
         max_block_weight: MAX_BLOCK_WEIGHT as u64,
         address_size: ADDRESS_SIZE as u32,
         address_encoding: "xparq-0x-sha3-checksum",
@@ -113,9 +107,6 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         fork_choice_algorithm: FORK_CHOICE_ALGORITHM,
         falcon_512_activation_height: FALCON_512_ACTIVATION_HEIGHT,
         signature_profile_activation_height: SIGNATURE_PROFILE_ACTIVATION_HEIGHT,
-        qcash_signature_algorithm: QCASH_SIGNATURE_ALGORITHM,
-        qcash_public_key_size: QCASH_PUBLIC_KEY_SIZE as u32,
-        qcash_signature_size: QCASH_SIGNATURE_SIZE as u32,
         extension_protocol: "xparq-extension-permissionless-wasm",
         native_asset_program: "xparq-native-asset-program",
         wasm_deploy_extension_id: *xparq_extension::wasm_deploy_extension_id().as_bytes(),
