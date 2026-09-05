@@ -76,28 +76,25 @@ Only the original mint authority may mint. Supply can never exceed
 `max_supply`.
 
 ```bash
-cargo run -p xparq-wallet -- asset-mint \
+cargo run -p wallet -- asset-mint \
   --asset ASSET_ID --to QxRECIPIENT --amount 5 \
   --wallet wallet.json --rpc 127.0.0.1:6666
 
-cargo run -p xparq-wallet -- asset-transfer \
+cargo run -p wallet -- asset-transfer \
   --asset ASSET_ID --to QxRECIPIENT --amount 2.5 \
   --wallet wallet.json --rpc 127.0.0.1:6666
 
-cargo run -p xparq-wallet -- asset-burn \
+cargo run -p wallet -- asset-burn \
   --asset ASSET_ID --amount 1 \
   --wallet wallet.json --rpc 127.0.0.1:6666
 ```
 
-Mint credits the selected recipient, transfer debits the signer and credits
-the recipient, and burn destroys units owned by the signer. Each operation is
-one signed native asset transaction and pays its XPQ payment, including the miner
-fee. It also burns
-XPQ for persistent state created by that call: registration accounts for the
-metadata, supply, creator balance, and first nonce entries; mint or transfer
-accounts for a recipient balance entry when one does not already exist; and a
-signer's first asset call accounts for its nonce entry. Existing-entry updates
-do not pay state-creation burn, and deletion does not receive a refund.
+Mint creates a share for the selected recipient, transfer consumes shares owned
+by the signer and creates recipient/change shares, and burn destroys the units
+in signer-owned shares. Transfer, deposit, and burn select shares through RPC.
+Because burn has no change output, its amount must exactly match selected shares. Every
+operation pays its XPQ miner fee and exact state/history burn. Registration and
+mint are native asset operations, while user transfers use `Spend::Asset`.
 
 Asset metadata preserves the original `creator` address independently from the
 optional `mint_authority`. The creator never changes; `mint_authority: null`

@@ -13,12 +13,12 @@ fn mainnet_genesis_is_unchanged_and_effect_rules_have_a_new_identity() {
     );
     // Extension effect v2 intentionally separates this protocol from the old
     // chain spec, while preserving the frozen genesis block and native IDs.
-    assert_eq!(genesis::CHAIN_SPEC_VERSION, 3);
+    assert_eq!(genesis::CHAIN_SPEC_VERSION, 4);
     assert_eq!(
         genesis::chain_spec_hash().unwrap().0,
         [
-            113, 241, 38, 60, 226, 188, 247, 89, 203, 26, 225, 79, 193, 146, 200, 233, 185, 99,
-            221, 94, 115, 180, 73, 11, 16, 54, 34, 241, 78, 41, 141, 245
+            69, 189, 157, 76, 207, 56, 235, 250, 223, 178, 18, 147, 249, 113, 15, 7, 171, 218, 153,
+            171, 9, 58, 154, 231, 159, 62, 151, 175, 9, 64, 39, 100
         ]
     );
     assert_ne!(

@@ -8,8 +8,8 @@ use crate::consensus::error::ConsensusError;
 use crate::consensus::fork::Work;
 use crate::crypto::{BlockHash, HASH_SIZE, Hash, PoWHash};
 use crate::transaction::{
-    AccountAuthorization, AuthorizedAccountIntent, AuthorizedTransaction, ChainContext, CoinIntent,
-    IntentError, SpendCommitment,
+    AccountAuthorization, AuthorizedAccountIntent, AuthorizedTransaction, ChainContext,
+    IntentError, Spend, SpendCommitment, SpendIntent,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{Address, PublicKey};
@@ -53,7 +53,7 @@ macro_rules! impl_consensus_intent {
     };
 }
 
-impl_consensus_intent!(CoinIntent);
+impl_consensus_intent!(SpendIntent);
 
 /// Structural consensus result. Authorization is intentionally not implied.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,21 +119,27 @@ impl<T> AuthorizationValidated<T> {
 // This validation-only enum is short-lived; boxing would complicate every apply path.
 #[allow(clippy::large_enum_variant)]
 pub enum ValidatedTransaction {
-    Coin(AuthorizationValidated<CoinIntent>),
+    Spend(ValidatedSpendTransaction),
     Asset(ValidatedAssetTransaction),
     Extension(ValidatedExtensionTransaction),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedSpendTransaction {
+    pub spend: AuthorizationValidated<SpendIntent>,
+    pub payment: Option<AuthorizationValidated<SpendIntent>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedAssetTransaction {
     pub call: AuthorizationValidated<crate::transaction::AssetIntent>,
-    pub payment: AuthorizationValidated<CoinIntent>,
+    pub payment: AuthorizationValidated<SpendIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedExtensionTransaction {
     pub call: ExtensionCall,
-    pub fee: AuthorizationValidated<CoinIntent>,
+    pub fee: AuthorizationValidated<SpendIntent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +153,13 @@ pub struct CoinInputState {
 pub trait TransactionStateView {
     fn coin(&self, id: CoinHash) -> Option<CoinInputState>;
     fn account_public_key(&self, address: Address) -> Option<PublicKey>;
+
+    fn asset_spend_created_state_weight(
+        &self,
+        _intent: &SpendIntent,
+    ) -> Result<u64, crate::asset::AssetError> {
+        Err(crate::asset::AssetError::UnknownAsset)
+    }
 
     fn asset_transition_created_state_weight(
         &self,
@@ -178,34 +191,100 @@ pub fn validate_transaction(
     )
     .map_err(|_| TransactionConsensusError::StateBurn(StateBurnError::WeightOverflow))?;
     match transaction {
-        AuthorizedTransaction::Coin(transaction) => {
-            let validated =
-                validate_account_intent_authorization(*transaction, chain, current_height, state)?;
-            validate_coin_inputs(
-                &validated.intent().inputs,
-                validated.intent().sender,
-                &validated
-                    .intent()
-                    .outputs
-                    .iter()
-                    .map(|output| output.amount)
-                    .collect::<Vec<_>>(),
+        AuthorizedTransaction::Spend(transaction) => {
+            let transaction = *transaction;
+            let validated = validate_account_intent_authorization(
+                transaction.spend,
+                chain,
+                current_height,
                 state,
             )?;
-            validate_state_burn(
-                &validated.intent().outputs,
-                StateTransitionWeight {
-                    created_coin_utxos: created_coin_output_count(&validated.intent().outputs)?,
-                    consumed_coin_utxos: u64::try_from(validated.intent().inputs.len())
-                        .map_err(|_| StateBurnError::WeightOverflow)?,
-                    created_account_key_weight: revealed_account_key_weight(
-                        validated.revealed_account_key(),
-                    )?,
-                    ..StateTransitionWeight::default()
-                },
-                canonical_transaction_weight,
-            )?;
-            Ok(ValidatedTransaction::Coin(validated))
+            match &validated.intent().spend {
+                Spend::Coin { inputs, outputs } => {
+                    if transaction.payment.is_some() {
+                        return Err(TransactionConsensusError::Intent(
+                            IntentError::InvalidAssetCall,
+                        ));
+                    }
+                    validate_coin_inputs(
+                        inputs,
+                        validated.intent().signer,
+                        &outputs
+                            .iter()
+                            .map(|output| output.amount)
+                            .collect::<Vec<_>>(),
+                        state,
+                    )?;
+                    validate_state_burn(
+                        outputs,
+                        StateTransitionWeight {
+                            created_coin_utxos: created_coin_output_count(outputs)?,
+                            consumed_coin_utxos: u64::try_from(inputs.len())
+                                .map_err(|_| StateBurnError::WeightOverflow)?,
+                            created_account_key_weight: revealed_account_key_weight(
+                                validated.revealed_account_key(),
+                            )?,
+                            ..StateTransitionWeight::default()
+                        },
+                        canonical_transaction_weight,
+                    )?;
+                    Ok(ValidatedTransaction::Spend(ValidatedSpendTransaction {
+                        spend: validated,
+                        payment: None,
+                    }))
+                }
+                Spend::Asset { .. } => {
+                    let payment = transaction
+                        .payment
+                        .ok_or(TransactionConsensusError::Intent(
+                            IntentError::InvalidAssetCall,
+                        ))?;
+                    let payment = validate_account_intent_authorization(
+                        payment,
+                        chain,
+                        current_height,
+                        state,
+                    )?;
+                    let (inputs, outputs) = coin_parts(payment.intent())?;
+                    validate_coin_inputs(
+                        inputs,
+                        payment.intent().signer,
+                        &outputs.iter().map(|o| o.amount).collect::<Vec<_>>(),
+                        state,
+                    )?;
+                    let asset_weight = state
+                        .asset_spend_created_state_weight(validated.intent())
+                        .map_err(TransactionConsensusError::Asset)?;
+                    let key_weight = if validated.intent().signer == payment.intent().signer
+                        && validated.revealed_account_key().is_some()
+                        && payment.revealed_account_key().is_some()
+                    {
+                        revealed_account_key_weight(validated.revealed_account_key())?
+                    } else {
+                        revealed_account_key_weight(validated.revealed_account_key())?
+                            .checked_add(revealed_account_key_weight(
+                                payment.revealed_account_key(),
+                            )?)
+                            .ok_or(StateBurnError::WeightOverflow)?
+                    };
+                    validate_state_burn(
+                        outputs,
+                        StateTransitionWeight {
+                            created_coin_utxos: created_coin_output_count(outputs)?,
+                            consumed_coin_utxos: u64::try_from(inputs.len())
+                                .map_err(|_| StateBurnError::WeightOverflow)?,
+                            created_account_key_weight: key_weight,
+                            extension_created_weight: asset_weight,
+                            ..StateTransitionWeight::default()
+                        },
+                        canonical_transaction_weight,
+                    )?;
+                    Ok(ValidatedTransaction::Spend(ValidatedSpendTransaction {
+                        spend: validated,
+                        payment: Some(payment),
+                    }))
+                }
+            }
         }
         AuthorizedTransaction::Asset(transaction) => {
             let transaction = *transaction;
@@ -220,22 +299,21 @@ pub fn validate_transaction(
                 current_height,
                 state,
             )?;
+            let (payment_inputs, payment_outputs) = coin_parts(payment.intent())?;
             validate_coin_inputs(
-                &payment.intent().inputs,
-                payment.intent().sender,
-                &payment
-                    .intent()
-                    .outputs
+                payment_inputs,
+                payment.intent().signer,
+                &payment_outputs
                     .iter()
                     .map(|output| output.amount)
                     .collect::<Vec<_>>(),
                 state,
             )?;
             validate_state_burn(
-                &payment.intent().outputs,
+                payment_outputs,
                 StateTransitionWeight {
-                    created_coin_utxos: created_coin_output_count(&payment.intent().outputs)?,
-                    consumed_coin_utxos: u64::try_from(payment.intent().inputs.len())
+                    created_coin_utxos: created_coin_output_count(payment_outputs)?,
+                    consumed_coin_utxos: u64::try_from(payment_inputs.len())
                         .map_err(|_| StateBurnError::WeightOverflow)?,
                     created_account_key_weight: revealed_asset_account_key_weight(&call, &payment)?,
                     extension_created_weight: asset_created_state_weight,
@@ -256,21 +334,21 @@ pub fn validate_transaction(
                 current_height,
                 state,
             )?;
+            let (fee_inputs, fee_outputs) = coin_parts(fee.intent())?;
             validate_coin_inputs(
-                &fee.intent().inputs,
-                fee.intent().sender,
-                &fee.intent()
-                    .outputs
+                fee_inputs,
+                fee.intent().signer,
+                &fee_outputs
                     .iter()
                     .map(|output| output.amount)
                     .collect::<Vec<_>>(),
                 state,
             )?;
             validate_state_burn(
-                &fee.intent().outputs,
+                fee_outputs,
                 StateTransitionWeight {
-                    created_coin_utxos: created_coin_output_count(&fee.intent().outputs)?,
-                    consumed_coin_utxos: u64::try_from(fee.intent().inputs.len())
+                    created_coin_utxos: created_coin_output_count(fee_outputs)?,
+                    consumed_coin_utxos: u64::try_from(fee_inputs.len())
                         .map_err(|_| StateBurnError::WeightOverflow)?,
                     created_account_key_weight: revealed_account_key_weight(
                         fee.revealed_account_key(),
@@ -305,10 +383,10 @@ fn revealed_account_key_weight(
 
 fn revealed_asset_account_key_weight(
     call: &AuthorizationValidated<crate::transaction::AssetIntent>,
-    payment: &AuthorizationValidated<CoinIntent>,
+    payment: &AuthorizationValidated<SpendIntent>,
 ) -> Result<u64, TransactionConsensusError> {
     let call_weight = revealed_account_key_weight(call.revealed_account_key())?;
-    if call.intent().signer == payment.intent().sender
+    if call.intent().signer == payment.intent().signer
         && call.revealed_account_key().is_some()
         && payment.revealed_account_key().is_some()
     {
@@ -321,8 +399,16 @@ fn revealed_asset_account_key_weight(
         ))
 }
 
+fn coin_parts(
+    intent: &SpendIntent,
+) -> Result<(&[CoinHash], &[crate::transaction::CoinOutput]), TransactionConsensusError> {
+    intent.coin_parts().ok_or(TransactionConsensusError::Intent(
+        IntentError::InvalidAssetCall,
+    ))
+}
+
 fn validate_state_burn(
-    outputs: &[crate::transaction::SpendOutput],
+    outputs: &[crate::transaction::CoinOutput],
     transition: StateTransitionWeight,
     canonical_transaction_weight: u64,
 ) -> Result<(), TransactionConsensusError> {
@@ -564,23 +650,28 @@ mod transaction_tests {
         let chain = ChainContext::new([28; 32]);
         let mut state_burn = ledger_burn;
         let transaction = loop {
-            let intent = CoinIntent::new(
+            let intent = SpendIntent::coin(
                 sender,
                 vec![id],
                 vec![
-                    crate::transaction::SpendOutput::new(sender, Zeno::from_zeno(10)),
-                    crate::transaction::SpendOutput::burn(Zeno::from_zeno(state_burn)),
+                    crate::transaction::CoinOutput::new(sender, Zeno::from_zeno(10)),
+                    crate::transaction::CoinOutput::burn(Zeno::from_zeno(state_burn)),
                 ],
             )
             .unwrap();
             let signature = signing.sign(intent.commitment(chain).unwrap().as_bytes());
-            let transaction = AuthorizedTransaction::Coin(Box::new(AuthorizedAccountIntent {
-                intent,
-                authorization: AccountAuthorization::AccountReveal {
-                    public_key: public_key.clone(),
-                    signature,
+            let transaction = AuthorizedTransaction::Spend(Box::new(
+                crate::transaction::AuthorizedSpendTransaction {
+                    spend: AuthorizedAccountIntent {
+                        intent,
+                        authorization: AccountAuthorization::AccountReveal {
+                            public_key: public_key.clone(),
+                            signature,
+                        },
+                    },
+                    payment: None,
                 },
-            }));
+            ));
             let required = ledger_burn + canonical_bytes(&transaction).unwrap().len() as u64;
             if required == state_burn {
                 break transaction;
@@ -593,7 +684,7 @@ mod transaction_tests {
             amount: Zeno::from_zeno(10 + state_burn),
         };
         let validated = validate_transaction(transaction, chain, 0, &state).unwrap();
-        assert!(matches!(validated, ValidatedTransaction::Coin(_)));
+        assert!(matches!(validated, ValidatedTransaction::Spend(_)));
     }
 }
 

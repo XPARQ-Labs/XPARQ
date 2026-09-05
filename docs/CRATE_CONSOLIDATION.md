@@ -1,5 +1,32 @@
 # Crate Consolidation and Repository History
 
+## Unified spend and ledger UTXOs
+
+Chain-spec version 4 completes the reset-chain transfer migration.
+`SpendIntent` signs either `Spend::Coin`, which consumes `CoinHash` inputs, or
+`Spend::Asset`, which consumes `AssetShareHash` inputs. Asset registration,
+minting, and burning remain native `AssetInstruction` operations because they
+change metadata or supply.
+
+`AssetShareOutput` is the canonical asset-transfer output. Its parent
+`AssetHash` identifies the asset but is never spendable; the resulting
+`AssetShareHash` identifies the UTXO. Coin and asset-share UTXOs live together
+in the single `LedgerState.utxos` map. `AssetState` now contains metadata,
+supply, and asset-operation nonces.
+
+The wallet selects shares for `asset-transfer` and `asset-deposit` through the
+account RPC and creates an asset-share change output when required. These
+commands no longer require manual `--input` arguments.
+
+Coin ownership uses the semantic alias `CoinOwner` (`Authority<Address>`) in the ledger. An address spends with
+an account signature; an extension spends only from its authenticated execution
+context. Both authority variants may receive coin outputs. WASM ABI v2 exposes
+`coin_transfer` for an address recipient and `coin_transfer_extension` for an
+extension recipient.
+
+Asset share ownership uses the matching semantic alias `AssetShareOwner`
+(`Authority<Address>`), covering shares controlled by an address or an extension hash.
+
 ## Implemented workspace
 
 The workspace has five packages. Protocol crates have been moved into modules
@@ -7,11 +34,11 @@ of the `kernel` package; `extension/bridge` is now `extension/src/bridge`.
 
 | Package | Directory | Responsibility |
 | --- | --- | --- |
-| `kernel` | `xparq/` | Canonical protocol types, coin and asset primitives, transactions, blocks, consensus, ledger, genesis |
-| `xparq-crypto` | `crypto/` | Cryptographic implementations and shared canonical encoding, hash, and scalar primitives |
-| `xparq-extension` | `extension/` | Extension contracts, WASM execution, bounded host interface, bridge primitives |
-| `xparq-node` | `runtime/` | Storage, networking, RPC, mempool, mining |
-| `xparq-wallet` | `wallet/` | Wallet library, keys, transaction construction, user interface |
+| `kernel` | `kernel/` | Canonical protocol types, coin and asset primitives, transactions, blocks, consensus, ledger, genesis |
+| `crypto` | `crypto/` | Cryptographic implementations and shared canonical encoding, hash, and scalar primitives |
+| `extension` | `extension/` | Extension contracts, WASM execution, bounded host interface, bridge primitives |
+| `node` | `runtime/` | Storage, networking, RPC, mempool, mining |
+| `wallet` | `wallet/` | Wallet library, keys, transaction construction, user interface |
 
 ## Kernel and infrastructure boundaries
 

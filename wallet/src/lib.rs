@@ -1,12 +1,12 @@
 use bip39::{Language, Mnemonic};
-use serde::{Deserialize, Serialize};
 use kernel::{
     crypto::{
-        Address, PublicKey, SigningSeed, Signature,
-        address_from_public_key, address_from_string, address_to_string, hash_bytes,
+        Address, PublicKey, Signature, SigningSeed, address_from_public_key, address_from_string,
+        address_to_string, hash_bytes,
     },
     transaction::{AccountAuthorization, AccountIntent, AuthorizedAccountIntent},
 };
+use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub const BIP39_MNEMONIC_DEFAULT_WORDS: usize = 12;
@@ -377,8 +377,7 @@ mod tests {
     #[test]
     fn account_wallet_file_rejects_keys_that_do_not_match_recovery_material() {
         let mnemonic = encode_bip39_mnemonic(&[14; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
-        let mut wallet =
-            account_wallet_from_bip39_mnemonic(&mnemonic, Signature::MlDsa44).unwrap();
+        let mut wallet = account_wallet_from_bip39_mnemonic(&mnemonic, Signature::MlDsa44).unwrap();
         wallet.mnemonic = Some(mnemonic);
         let bytes = account_wallet_file_bytes(&wallet).unwrap();
         let mut json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

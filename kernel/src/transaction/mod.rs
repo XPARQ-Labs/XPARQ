@@ -3,13 +3,14 @@
 mod authorization;
 mod error;
 mod intent;
+mod spend;
 
 pub use authorization::{
     AccountAuthorization, AccountIntent, AuthorizedAccountIntent, AuthorizedAssetTransaction,
-    AuthorizedExtensionTransaction, AuthorizedTransaction,
+    AuthorizedExtensionTransaction, AuthorizedSpendTransaction, AuthorizedTransaction,
 };
 pub use error::{IntentError, TransactionEncodingError};
 pub use intent::{
-    AssetInstruction, AssetIntent, ChainContext, CoinIntent, Recipient, SpendCommitment,
-    SpendOutput,
+    AssetInstruction, AssetIntent, ChainContext, CoinOutput, Recipient, SpendCommitment,
 };
+pub use spend::{Spend, SpendIntent};

@@ -1,12 +1,11 @@
 use super::*;
 use crate::asset::{AssetError, AssetHash};
-use crate::transaction::{AssetInstruction, AssetIntent, SpendOutput};
+use crate::transaction::{AssetInstruction, AssetIntent, CoinOutput};
 
 fn funded() -> (LedgerState, ExtensionHash) {
     let program = ExtensionHash::derive("regression.coin.vault");
     let mut state = LedgerState::default();
     state
-        .assets
         .utxos
         .insert(CoinUtxo {
             coin: Coin::new(CoinHash::from_bytes([7; 32]), Zeno::from_zeno(100)),
@@ -17,7 +16,7 @@ fn funded() -> (LedgerState, ExtensionHash) {
 }
 fn transfer(amount: u64) -> ExtensionEffect {
     ExtensionEffect::TransferCoin {
-        recipient: [2; 20],
+        recipient: extension::CoinRecipient::Address([2; 20]),
         amount,
     }
 }
@@ -58,15 +57,10 @@ fn failed_later_effect_restores_chained_transfers() {
 fn fee_output_consumed_by_effect_is_not_restored_on_rollback() {
     let (mut state, program) = funded();
     // Use only a fee-created deposit as the program's funding.
-    state
-        .assets
-        .utxos
-        .consume(&CoinHash::from_bytes([7; 32]))
-        .unwrap();
+    state.utxos.consume(&CoinHash::from_bytes([7; 32])).unwrap();
     let payer = Address([4; 20]);
     let input = CoinHash::from_bytes([8; 32]);
     state
-        .assets
         .utxos
         .insert(CoinUtxo {
             coin: Coin::new(input, Zeno::from_zeno(100)),
@@ -74,10 +68,10 @@ fn fee_output_consumed_by_effect_is_not_restored_on_rollback() {
         })
         .unwrap();
     let before = state.clone();
-    let fee = CoinIntent::new(
+    let fee = SpendIntent::coin(
         payer,
         vec![input],
-        vec![SpendOutput::extension(program, Zeno::from_zeno(100))],
+        vec![CoinOutput::extension(program, Zeno::from_zeno(100))],
     )
     .unwrap();
     let commitment = fee
@@ -122,7 +116,10 @@ fn repeated_mints_preserve_supply_and_reject_reused_origin() {
         creator,
         0,
     );
-    state.assets.apply(&call, [9; 32]).unwrap();
+    state
+        .assets
+        .apply(&mut state.utxos, &call, [9; 32])
+        .unwrap();
     let asset = AssetHash::derive(creator, "REG");
     let initial = state.clone();
     let mut journals = Vec::new();
@@ -143,7 +140,7 @@ fn repeated_mints_preserve_supply_and_reject_reused_origin() {
     }
     assert_eq!(state.assets.supply(asset), Unit::from_units(21));
     assert_eq!(
-        state.assets.account_balance(asset, recipient),
+        state.assets.account_balance(&state.utxos, asset, recipient),
         Unit::from_units(20)
     );
     let before_retry = state.clone();
@@ -163,7 +160,7 @@ fn repeated_mints_preserve_supply_and_reject_reused_origin() {
     );
     assert_eq!(state, before_retry);
     for journal in journals.into_iter().rev() {
-        state.assets.rollback(journal);
+        state.assets.rollback(&mut state.utxos, journal);
     }
     assert_eq!(state, initial);
 }
@@ -229,7 +226,6 @@ fn validated_extension_applies_and_rolls_back_with_fee_output_at_index_zero() {
     let sender = address_from_public_key(&public);
     let input = CoinHash::from_bytes([4; 32]);
     state
-        .assets
         .utxos
         .insert(CoinUtxo {
             coin: Coin::new(input, Zeno::from_zeno(100_000)),
@@ -251,13 +247,13 @@ fn validated_extension_applies_and_rolls_back_with_fee_output_at_index_zero() {
     let mut size = 1;
     let transaction = loop {
         let burn = state_burn + size;
-        let intent = CoinIntent::new(
+        let intent = SpendIntent::coin(
             sender,
             vec![input],
             vec![
-                SpendOutput::new(sender, Zeno::from_zeno(100_000 - burn - size)),
-                SpendOutput::burn(Zeno::from_zeno(burn)),
-                SpendOutput::block_miner(Zeno::from_zeno(size)),
+                CoinOutput::new(sender, Zeno::from_zeno(100_000 - burn - size)),
+                CoinOutput::burn(Zeno::from_zeno(burn)),
+                CoinOutput::block_miner(Zeno::from_zeno(size)),
             ],
         )
         .unwrap();

@@ -12,7 +12,7 @@ use kernel::{
     coin::{CoinHash, Zeno},
     common::canonical_bytes,
     crypto::{Signature, SigningSeed, address_from_public_key, address_to_string},
-    transaction::{AuthorizedTransaction, CoinIntent, SpendOutput},
+    transaction::{AuthorizedTransaction, CoinOutput, SpendIntent},
 };
 use serde_json::Value;
 use wallet::{AccountWallet, account_wallet_from_bip39_mnemonic, encode_bip39_mnemonic};
@@ -330,22 +330,25 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     let mut archival_bytes = 0;
     let transaction = loop {
         let burn = state_burn.as_zeno() + archival_bytes;
-        let intent = CoinIntent::new(
+        let intent = SpendIntent::coin(
             sender.address,
             vec![input_id],
             vec![
-                SpendOutput::new(recipient, sent),
-                SpendOutput::new(
+                CoinOutput::new(recipient, sent),
+                CoinOutput::new(
                     sender.address,
                     Zeno::from_zeno(input_amount - sent.as_zeno() - burn - archival_bytes.max(1)),
                 ),
-                SpendOutput::burn(Zeno::from_zeno(burn)),
-                SpendOutput::block_miner(Zeno::from_zeno(archival_bytes.max(1))),
+                CoinOutput::burn(Zeno::from_zeno(burn)),
+                CoinOutput::block_miner(Zeno::from_zeno(archival_bytes.max(1))),
             ],
         )
         .unwrap();
-        let transaction = AuthorizedTransaction::Coin(Box::new(
-            sender.sign_account_intent(intent, false).unwrap(),
+        let transaction = AuthorizedTransaction::Spend(Box::new(
+            kernel::transaction::AuthorizedSpendTransaction {
+                spend: sender.sign_account_intent(intent, false).unwrap(),
+                payment: None,
+            },
         ));
         let required = canonical_bytes(&transaction).unwrap().len() as u64;
         if required == archival_bytes {

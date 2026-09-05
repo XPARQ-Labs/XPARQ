@@ -406,7 +406,7 @@ mod tests {
     use crate::coin::CoinHash;
     use crate::crypto::{AccountSignature, Signature, SigningSeed, address_from_public_key};
     use crate::transaction::{
-        AccountAuthorization, AuthorizedAccountIntent, CoinIntent, SpendOutput,
+        AccountAuthorization, AuthorizedAccountIntent, CoinOutput, SpendIntent,
     };
     use std::io::Cursor;
 
@@ -428,10 +428,10 @@ mod tests {
         let owner = SigningSeed::new(Signature::MlDsa44, [7; 32]);
         let public_key = owner.public_key();
         let sender = address_from_public_key(&public_key);
-        let transaction = CoinIntent::new(
+        let transaction = SpendIntent::coin(
             sender,
             vec![CoinHash::from_bytes([0x31; crate::crypto::HASH_SIZE])],
-            vec![SpendOutput::new(
+            vec![CoinOutput::new(
                 Address([0x32; crate::crypto::ADDRESS_SIZE]),
                 Zeno::from_zeno(100_000),
             )],
@@ -454,7 +454,12 @@ mod tests {
                 Address([0x34; crate::crypto::ADDRESS_SIZE]),
                 Zeno::from_zeno(0),
             )),
-            vec![AuthorizedTransaction::Coin(Box::new(signed))],
+            vec![AuthorizedTransaction::Spend(Box::new(
+                crate::transaction::AuthorizedSpendTransaction {
+                    spend: signed,
+                    payment: None,
+                },
+            ))],
         )
         .unwrap();
 
@@ -470,24 +475,27 @@ mod tests {
                 CoinHash::from_bytes(coin_id)
             })
             .collect();
-        let transaction = CoinIntent::new(
+        let transaction = SpendIntent::coin(
             Address([0xff; crate::crypto::ADDRESS_SIZE]),
             inputs,
-            vec![SpendOutput::new(
+            vec![CoinOutput::new(
                 Address([seed as u8; crate::crypto::ADDRESS_SIZE]),
                 Zeno::from_zeno(1),
             )],
         )
         .unwrap();
-        AuthorizedTransaction::Coin(Box::new(AuthorizedAccountIntent {
-            intent: transaction,
-            authorization: AccountAuthorization::AccountKnown {
-                account: Signature::MlDsa44,
-                signature: AccountSignature {
+        AuthorizedTransaction::Spend(Box::new(crate::transaction::AuthorizedSpendTransaction {
+            spend: AuthorizedAccountIntent {
+                intent: transaction,
+                authorization: AccountAuthorization::AccountKnown {
                     account: Signature::MlDsa44,
-                    bytes: vec![1; 16],
+                    signature: AccountSignature {
+                        account: Signature::MlDsa44,
+                        bytes: vec![1; 16],
+                    },
                 },
             },
+            payment: None,
         }))
     }
 

@@ -28,7 +28,9 @@ Native coin output derivation and the parent `AssetHash` derivation are unchange
 
 ## Compatibility
 
-`CHAIN_SPEC_VERSION` is now 3, and the extension protocol marker is
+`CHAIN_SPEC_VERSION` is now 4. Version 4 also moves coin and asset-share UTXOs
+into one ledger-owned map and replaces the separate transfer encodings with
+the canonical `Spend::{Coin, Asset}` model. The extension protocol marker is
 `xparq-extension-permissionless-wasm-effects-v2`. The genesis block and hash
 remain unchanged, but the chain-spec hash changes because extension state
 transitions produce different IDs.

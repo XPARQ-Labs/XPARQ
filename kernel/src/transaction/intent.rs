@@ -1,18 +1,14 @@
-use std::collections::BTreeSet;
-
 use crate::asset::{
-    AssetError, AssetHash, AssetMetadata, AssetShare, AssetShareHash, AssetTransferOutput, Unit,
+    AssetError, AssetHash, AssetMetadata, AssetShare, AssetShareHash, AssetShareOwner, Unit,
     asset_domain_hash, checked_asset_entry_weight, ensure_nonzero_asset_amount,
     ensure_unique_asset_inputs,
 };
-use crate::coin::{COIN_HASH_SIZE, CoinHash, Zeno};
-use crate::common::{Authority, ExtensionHash, canonical_bytes, domain_hash};
+use crate::coin::{COIN_HASH_SIZE, Zeno};
+use crate::common::{Authority, ExtensionHash, canonical_bytes};
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{ADDRESS_SIZE, Address, HASH_SIZE};
 
 use crate::transaction::IntentError;
-
-const COIN_INTENT_COMMITMENT_CONTEXT: &[u8] = b"XPARQ OnChain SpendIntent";
 
 /// Genesis identity supplied by consensus, not serialized inside transactions.
 ///
@@ -38,12 +34,12 @@ pub enum Recipient {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
-pub struct SpendOutput {
+pub struct CoinOutput {
     pub output: Recipient,
     pub amount: Zeno,
 }
 
-impl SpendOutput {
+impl CoinOutput {
     pub const fn new(recipient: Address, amount: Zeno) -> Self {
         Self {
             output: Recipient::Address(recipient),
@@ -73,66 +69,17 @@ impl SpendOutput {
     }
 }
 
-/// XPQ UTXO spend intent. Input amounts and ownership come from ledger state.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct CoinIntent {
-    pub sender: Address,
-    pub inputs: Vec<CoinHash>,
-    pub outputs: Vec<SpendOutput>,
-}
-
-impl CoinIntent {
-    pub fn new(
-        sender: Address,
-        inputs: Vec<CoinHash>,
-        outputs: Vec<SpendOutput>,
-    ) -> Result<Self, IntentError> {
-        let intent = Self {
-            sender,
-            inputs,
-            outputs,
-        };
-        intent.validate()?;
-        Ok(intent)
-    }
-
-    pub fn validate(&self) -> Result<(), IntentError> {
-        validate_input_ids(&self.inputs)?;
-        validate_public_outputs(&self.outputs, false)
-    }
-
-    pub fn signing_bytes(&self, chain: ChainContext) -> Result<Vec<u8>, IntentError> {
-        self.validate()?;
-        chain_bound_bytes(chain, self)
-    }
-
-    pub fn commitment(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
-        Ok(SpendCommitment(domain_hash(
-            COIN_INTENT_COMMITMENT_CONTEXT,
-            &[&self.signing_bytes(chain)?],
-        )))
-    }
-}
-
-fn validate_input_ids(inputs: &[CoinHash]) -> Result<(), IntentError> {
-    if inputs.is_empty() {
-        return Err(IntentError::EmptyInputs);
-    }
-    let mut unique = BTreeSet::new();
-    if inputs.iter().any(|id| !unique.insert(*id)) {
-        return Err(IntentError::DuplicateInput);
-    }
-    Ok(())
-}
-
-fn chain_bound_bytes<T: BorshSerialize>(
+pub(crate) fn chain_bound_bytes<T: BorshSerialize>(
     chain: ChainContext,
     intent: &T,
 ) -> Result<Vec<u8>, IntentError> {
     canonical_bytes(&(chain, intent)).map_err(IntentError::Encoding)
 }
 
-fn validate_public_outputs(outputs: &[SpendOutput], allow_empty: bool) -> Result<(), IntentError> {
+pub(crate) fn validate_public_outputs(
+    outputs: &[CoinOutput],
+    allow_empty: bool,
+) -> Result<(), IntentError> {
     if outputs.is_empty() && !allow_empty {
         return Err(IntentError::EmptyOutputs);
     }
@@ -192,19 +139,13 @@ pub enum AssetInstruction {
 
     Mint {
         asset_id: AssetHash,
-        recipient: Authority<Address>,
+        recipient: AssetShareOwner,
         amount: Unit,
     },
 
     Burn {
         asset_id: AssetHash,
         inputs: Vec<AssetShareHash>,
-    },
-
-    Transfer {
-        asset_id: AssetHash,
-        inputs: Vec<AssetShareHash>,
-        outputs: Vec<AssetTransferOutput>,
     },
 }
 
@@ -228,9 +169,9 @@ impl AssetIntent {
         match &self.instruction {
             AssetInstruction::Register { symbol, .. } => AssetHash::derive(self.signer, symbol),
 
-            AssetInstruction::Mint { asset_id, .. }
-            | AssetInstruction::Burn { asset_id, .. }
-            | AssetInstruction::Transfer { asset_id, .. } => *asset_id,
+            AssetInstruction::Mint { asset_id, .. } | AssetInstruction::Burn { asset_id, .. } => {
+                *asset_id
+            }
         }
     }
 
@@ -281,20 +222,6 @@ impl AssetIntent {
                 }
 
                 ensure_unique_asset_inputs(inputs)?;
-            }
-
-            AssetInstruction::Transfer {
-                inputs, outputs, ..
-            } => {
-                if inputs.is_empty() || outputs.is_empty() {
-                    return Err(AssetError::InvalidProgram);
-                }
-
-                ensure_unique_asset_inputs(inputs)?;
-
-                for output in outputs {
-                    ensure_nonzero_asset_amount(output.amount)?;
-                }
             }
         }
 
@@ -358,18 +285,6 @@ impl AssetIntent {
             }
 
             AssetInstruction::Burn { .. } => {}
-
-            AssetInstruction::Transfer { outputs, .. } => {
-                for output in outputs {
-                    let object = AssetShare {
-                        parent: self.asset_id(),
-                        owner: output.recipient,
-                        amount: output.amount,
-                    };
-
-                    weight = checked_asset_entry_weight(weight, 32, &object)?;
-                }
-            }
         }
 
         Ok(weight)

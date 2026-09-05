@@ -3,7 +3,8 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{AccountSignature, Address, PublicKey, address_from_public_key, verify};
 
 use crate::transaction::{
-    AssetIntent, ChainContext, CoinIntent, IntentError, SpendCommitment, TransactionEncodingError,
+    AssetIntent, ChainContext, IntentError, Spend, SpendCommitment, SpendIntent,
+    TransactionEncodingError,
 };
 
 const TRANSACTION_ID_CONTEXT: &str = "XPARQ Transaction ID";
@@ -13,9 +14,9 @@ pub trait AccountIntent {
     fn commitment(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError>;
 }
 
-impl AccountIntent for CoinIntent {
+impl AccountIntent for SpendIntent {
     fn sender(&self) -> Address {
-        self.sender
+        self.signer
     }
 
     fn commitment(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
@@ -72,18 +73,26 @@ impl<T: AccountIntent> AuthorizedAccountIntent<T> {
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AuthorizedExtensionTransaction {
     pub call: ExtensionCall,
-    pub fee: AuthorizedAccountIntent<CoinIntent>,
+    pub fee: AuthorizedAccountIntent<SpendIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AuthorizedAssetTransaction {
     pub call: AuthorizedAccountIntent<AssetIntent>,
-    pub payment: AuthorizedAccountIntent<CoinIntent>,
+    pub payment: AuthorizedAccountIntent<SpendIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct AuthorizedSpendTransaction {
+    pub spend: AuthorizedAccountIntent<SpendIntent>,
+    /// Asset transfers pay their protocol/miner cost with a separate coin spend.
+    /// Coin transfers carry their own miner and burn outputs and leave this empty.
+    pub payment: Option<AuthorizedAccountIntent<SpendIntent>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum AuthorizedTransaction {
-    Coin(Box<AuthorizedAccountIntent<CoinIntent>>),
+    Spend(Box<AuthorizedSpendTransaction>),
     Asset(Box<AuthorizedAssetTransaction>),
     Extension(Box<AuthorizedExtensionTransaction>),
 }
@@ -96,7 +105,18 @@ impl AuthorizedTransaction {
 
     pub fn validate_structure(&self) -> Result<(), IntentError> {
         match self {
-            Self::Coin(tx) => tx.intent.validate(),
+            Self::Spend(tx) => {
+                tx.spend.intent.validate()?;
+                match (&tx.spend.intent.spend, &tx.payment) {
+                    (Spend::Coin { .. }, None) => Ok(()),
+                    (Spend::Asset { .. }, Some(payment))
+                        if matches!(payment.intent.spend, Spend::Coin { .. }) =>
+                    {
+                        payment.intent.validate()
+                    }
+                    _ => Err(IntentError::InvalidAssetCall),
+                }
+            }
             Self::Asset(tx) => {
                 tx.call
                     .intent
@@ -163,13 +183,14 @@ mod tests {
                 },
             },
             payment: AuthorizedAccountIntent {
-                intent: CoinIntent {
-                    sender: Address::ZERO,
-                    inputs: vec![crate::coin::CoinHash::from_bytes([8; 32])],
-                    outputs: vec![crate::transaction::SpendOutput::block_miner(
+                intent: SpendIntent::coin(
+                    Address::ZERO,
+                    vec![crate::coin::CoinHash::from_bytes([8; 32])],
+                    vec![crate::transaction::CoinOutput::block_miner(
                         crate::coin::Zeno::from_zeno(1),
                     )],
-                },
+                )
+                .unwrap(),
                 authorization: AccountAuthorization::AccountKnown {
                     account: crypto::Signature::MlDsa44,
                     signature: AccountSignature {
@@ -196,13 +217,14 @@ mod tests {
         )
         .unwrap();
         let fee = AuthorizedAccountIntent {
-            intent: CoinIntent {
-                sender: Address::ZERO,
-                inputs: vec![crate::coin::CoinHash::from_bytes([9; 32])],
-                outputs: vec![crate::transaction::SpendOutput::block_miner(
+            intent: SpendIntent::coin(
+                Address::ZERO,
+                vec![crate::coin::CoinHash::from_bytes([9; 32])],
+                vec![crate::transaction::CoinOutput::block_miner(
                     crate::coin::Zeno::from_zeno(1),
                 )],
-            },
+            )
+            .unwrap(),
             authorization: AccountAuthorization::AccountKnown {
                 account: crypto::Signature::MlDsa44,
                 signature: AccountSignature {

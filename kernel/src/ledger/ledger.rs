@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use crate::blockchain::{Block, Chain, ChainError, Height};
 use crate::coin::{Coin, CoinHash};
 use crate::common::{
-    Authority, ExtensionContext, ExtensionFailure, ExtensionStateRoot, domain_hash,
+    Authority, ExtensionContext, ExtensionFailure, ExtensionStateRoot, canonical_bytes, domain_hash,
 };
 use crate::consensus::{
     ApplyBlockState, CoinInputState, ConsensusError, EmissionError, TransactionConsensusError,
@@ -75,7 +75,7 @@ impl Ledger {
             self.chain.header(&height).map(|header| header.block_weight)
         })?;
         let id = CoinHash::from_emission_origin(&emission.origin().0);
-        staged.assets.utxos.insert(CoinUtxo {
+        staged.utxos.insert(CoinUtxo {
             coin: Coin::new(id, emission.miner_emission()),
             owner: Authority::Address(emission.recipient()),
         })?;
@@ -154,7 +154,7 @@ impl Ledger {
         let mut block_journals = Vec::new();
         if let Some(emission) = validated.emission() {
             let id = CoinHash::from_emission_origin(&emission.origin().0);
-            staged_state.assets.utxos.insert(CoinUtxo {
+            staged_state.utxos.insert(CoinUtxo {
                 coin: Coin::new(id, emission.miner_emission()),
                 owner: Authority::Address(emission.recipient()),
             })?;
@@ -289,7 +289,7 @@ impl From<crate::ledger::UtxoError> for LedgerError {
 
 impl TransactionStateView for LedgerState {
     fn coin(&self, id: CoinHash) -> Option<CoinInputState> {
-        self.assets.utxos.get(&id).map(|utxo| CoinInputState {
+        self.utxos.get(&id).map(|utxo| CoinInputState {
             amount: utxo.coin.amount,
             owner: match utxo.owner {
                 Authority::Address(address) => Some(address),
@@ -302,12 +302,29 @@ impl TransactionStateView for LedgerState {
         self.account_keys.get_account(&address).cloned()
     }
 
+    fn asset_spend_created_state_weight(
+        &self,
+        intent: &crate::transaction::SpendIntent,
+    ) -> Result<u64, crate::asset::AssetError> {
+        let (asset, inputs, outputs) = intent
+            .asset_parts()
+            .ok_or(crate::asset::AssetError::InvalidProgram)?;
+        self.assets.user_transfer_created_state_weight(
+            &self.utxos,
+            intent.signer,
+            asset,
+            inputs,
+            outputs,
+        )
+    }
+
     fn asset_transition_created_state_weight(
         &self,
         call: &crate::transaction::AssetIntent,
         genesis_hash: [u8; 32],
     ) -> Result<u64, crate::asset::AssetError> {
-        self.assets.validate_transition(call, genesis_hash)?;
+        self.assets
+            .validate_transition(&self.utxos, call, genesis_hash)?;
         call.created_state_weight_from_presence(self.assets.nonces.contains_key(&call.signer))
     }
 
@@ -351,6 +368,7 @@ impl LedgerState {
         )?;
         let mut total = preview.created_state_weight;
         let mut assets = self.assets.clone();
+        let mut utxos = self.utxos.clone();
         for (effect_index, effect) in preview.effects.into_iter().enumerate() {
             let execution_nonce =
                 u64::try_from(effect_index).map_err(|_| ExtensionFailure::InvalidState)?;
@@ -364,6 +382,7 @@ impl LedgerState {
                     let recipient = Authority::Address(Address(recipient));
                     let weight = assets
                         .program_mint_created_state_weight(
+                            &utxos,
                             call.extension_id(),
                             asset_id,
                             recipient,
@@ -375,6 +394,7 @@ impl LedgerState {
                         .ok_or(ExtensionFailure::StateEntryLimit)?;
                     assets
                         .apply_program_mint(
+                            &mut utxos,
                             call.extension_id(),
                             asset_id,
                             recipient,
@@ -393,10 +413,17 @@ impl LedgerState {
                     let recipient = Address(recipient);
                     let amount = crate::asset::Unit::from_units(amount);
                     let (inputs, outputs) = assets
-                        .program_transfer_plan(call.extension_id(), asset_id, recipient, amount)
+                        .program_transfer_plan(
+                            &utxos,
+                            call.extension_id(),
+                            asset_id,
+                            recipient,
+                            amount,
+                        )
                         .map_err(|_| ExtensionFailure::InvalidState)?;
                     let weight = assets
                         .program_transfer_created_state_weight(
+                            &utxos,
                             call.extension_id(),
                             asset_id,
                             &inputs,
@@ -408,6 +435,7 @@ impl LedgerState {
                         .ok_or(ExtensionFailure::StateEntryLimit)?;
                     assets
                         .apply_program_transfer(
+                            &mut utxos,
                             call.extension_id(),
                             asset_id,
                             &inputs,
@@ -419,7 +447,7 @@ impl LedgerState {
                 }
                 crate::common::ExtensionEffect::TransferCoin { amount, .. } => {
                     let weight =
-                        preview_program_coin_transfer(&mut assets, call.extension_id(), amount)?;
+                        preview_program_coin_transfer(&mut utxos, call.extension_id(), amount)?;
                     total = total
                         .checked_add(weight)
                         .ok_or(ExtensionFailure::StateEntryLimit)?;
@@ -433,13 +461,11 @@ impl LedgerState {
 impl LedgerState {
     fn application_state_root(&self) -> Result<ExtensionStateRoot, LedgerError> {
         let extension = self.extensions.state_root().map_err(extension_error)?;
-        if self.assets.is_empty() {
+        if self.assets.is_empty() && self.utxos.is_empty() {
             return Ok(extension);
         }
-        let asset = self
-            .assets
-            .state_root()
-            .map_err(|error| LedgerError::Spend(SpendStateError::Asset(error)))?;
+        let state = canonical_bytes(&(&self.assets, &self.utxos))?;
+        let asset = domain_hash(b"xparq:ledger-asset-and-utxo-state-v2", &[&state]);
         let mut input = [0_u8; 64];
         input[..32].copy_from_slice(&asset);
         input[32..].copy_from_slice(extension.as_bytes());
@@ -451,7 +477,7 @@ impl LedgerState {
 }
 
 fn preview_program_coin_transfer(
-    assets: &mut crate::ledger::AssetState,
+    utxos: &mut crate::ledger::UtxoSet,
     program: crate::common::ExtensionHash,
     amount: u64,
 ) -> Result<u64, ExtensionFailure> {
@@ -462,7 +488,7 @@ fn preview_program_coin_transfer(
     let owner = Authority::Extension(program);
     let mut selected = Vec::new();
     let mut held = 0_u64;
-    for utxo in assets.utxos.owned_by(owner) {
+    for utxo in utxos.owned_by(owner) {
         selected.push(utxo.coin.utxo);
         held = held
             .checked_add(utxo.coin.amount.as_zeno())
@@ -478,8 +504,7 @@ fn preview_program_coin_transfer(
     let outputs = if held == amount { 1 } else { 2 };
     let change = held - amount;
     for id in &selected {
-        assets
-            .utxos
+        utxos
             .consume(id)
             .map_err(|_| ExtensionFailure::InvalidState)?;
     }
@@ -488,8 +513,7 @@ fn preview_program_coin_transfer(
             .first()
             .copied()
             .ok_or(ExtensionFailure::InvalidState)?;
-        assets
-            .utxos
+        utxos
             .insert(CoinUtxo {
                 coin: Coin::new(change_id, crate::coin::Zeno::from_zeno(change)),
                 owner,
@@ -507,9 +531,8 @@ mod extension_preview_tests {
     #[test]
     fn sequential_coin_effects_cannot_reuse_extension_balance() {
         let program = crate::common::ExtensionHash::derive("preview.coin.vault");
-        let mut assets = crate::ledger::AssetState::default();
-        assets
-            .utxos
+        let mut utxos = crate::ledger::UtxoSet::default();
+        utxos
             .insert(CoinUtxo {
                 coin: Coin::new(
                     CoinHash::from_bytes([0x71; 32]),
@@ -519,9 +542,9 @@ mod extension_preview_tests {
             })
             .unwrap();
 
-        assert!(preview_program_coin_transfer(&mut assets, program, 7).is_ok());
+        assert!(preview_program_coin_transfer(&mut utxos, program, 7).is_ok());
         assert_eq!(
-            preview_program_coin_transfer(&mut assets, program, 7),
+            preview_program_coin_transfer(&mut utxos, program, 7),
             Err(ExtensionFailure::InvalidState)
         );
     }

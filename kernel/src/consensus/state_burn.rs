@@ -1,7 +1,7 @@
 use std::{error::Error, fmt};
 
 use crate::coin::Zeno;
-use crate::transaction::{Recipient, SpendOutput};
+use crate::transaction::{CoinOutput, Recipient};
 use crypto::{ADDRESS_SIZE, HASH_SIZE, PublicKey};
 
 pub const STATE_BURN_ALGORITHM: &str = "xparq-canonical-archival-and-net-coin-state-growth-burn";
@@ -104,7 +104,7 @@ impl ProtocolBurn {
     }
 }
 
-pub fn created_coin_output_count(outputs: &[SpendOutput]) -> Result<u64, StateBurnError> {
+pub fn created_coin_output_count(outputs: &[CoinOutput]) -> Result<u64, StateBurnError> {
     u64::try_from(
         outputs
             .iter()
@@ -114,7 +114,7 @@ pub fn created_coin_output_count(outputs: &[SpendOutput]) -> Result<u64, StateBu
     .map_err(|_| StateBurnError::WeightOverflow)
 }
 
-pub fn validate_exact_burn(outputs: &[SpendOutput], required: Zeno) -> Result<(), StateBurnError> {
+pub fn validate_exact_burn(outputs: &[CoinOutput], required: Zeno) -> Result<(), StateBurnError> {
     let mut burns = outputs
         .iter()
         .filter(|output| output.output == Recipient::Burn);
@@ -184,8 +184,8 @@ mod tests {
     #[test]
     fn burn_output_is_not_counted_as_created_ledger_state() {
         let outputs = [
-            SpendOutput::new(crypto::Address::ZERO, Zeno::from_zeno(1)),
-            SpendOutput::burn(Zeno::from_zeno(1)),
+            CoinOutput::new(crypto::Address::ZERO, Zeno::from_zeno(1)),
+            CoinOutput::burn(Zeno::from_zeno(1)),
         ];
 
         assert_eq!(created_coin_output_count(&outputs), Ok(1));
@@ -238,7 +238,7 @@ mod tests {
         );
         assert_eq!(
             validate_exact_burn(
-                &[SpendOutput::burn(Zeno::from_zeno(
+                &[CoinOutput::burn(Zeno::from_zeno(
                     COIN_UTXO_STATE_WEIGHT - 1,
                 ))],
                 required,
@@ -250,7 +250,7 @@ mod tests {
         );
         assert_eq!(
             validate_exact_burn(
-                &[SpendOutput::burn(Zeno::from_zeno(
+                &[CoinOutput::burn(Zeno::from_zeno(
                     COIN_UTXO_STATE_WEIGHT + 1,
                 ))],
                 required,
@@ -262,13 +262,13 @@ mod tests {
         );
         assert_eq!(
             validate_exact_burn(
-                &[SpendOutput::burn(required), SpendOutput::burn(required),],
+                &[CoinOutput::burn(required), CoinOutput::burn(required),],
                 required,
             ),
             Err(StateBurnError::MultipleBurnOutputs)
         );
         assert_eq!(
-            validate_exact_burn(&[SpendOutput::burn(required)], required),
+            validate_exact_burn(&[CoinOutput::burn(required)], required),
             Ok(())
         );
     }

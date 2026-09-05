@@ -172,6 +172,12 @@ pub struct ExtensionJournalEntry {
     pub previous_value: Option<Vec<u8>>,
 }
 
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoinRecipient {
+    Address([u8; 20]),
+    Extension([u8; 32]),
+}
+
 /// A native L1 state transition requested by an authenticated extension.
 /// The executing extension ID is supplied separately by the ledger and is
 /// never accepted from guest-controlled data.
@@ -188,7 +194,7 @@ pub enum ExtensionEffect {
         amount: u128,
     },
     TransferCoin {
-        recipient: [u8; 20],
+        recipient: CoinRecipient,
         amount: u64,
     },
 }

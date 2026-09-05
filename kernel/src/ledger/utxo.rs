@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use crate::asset::{
-    AssetError, AssetHash, AssetMetadata, AssetShare, AssetShareHash, AssetTransferOutput, Unit,
-    asset_domain_hash, checked_asset_entry_weight, ensure_nonzero_asset_amount,
-    ensure_unique_asset_inputs,
+    AssetError, AssetHash, AssetMetadata, AssetShare, AssetShareHash, AssetShareOutput,
+    AssetShareOwner, Unit, asset_domain_hash, checked_asset_entry_weight,
+    ensure_nonzero_asset_amount, ensure_unique_asset_inputs,
 };
 use crate::coin::{Coin, CoinHash};
 use crate::common::{Authority, ExtensionHash, Input, Output, canonical_bytes};
@@ -11,16 +11,21 @@ use crate::transaction::{AssetInstruction, AssetIntent};
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{Address, PublicKey};
 
+/// Owner of a native coin UTXO.
+///
+/// Coin can be controlled by either an account address or an extension hash.
+pub type CoinOwner = Authority<Address>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct CoinUtxo {
     pub coin: Coin,
-    pub owner: Authority<Address>,
+    pub owner: CoinOwner,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct CoinOutput {
     pub amount: crate::coin::Zeno,
-    pub owner: Authority<Address>,
+    pub owner: CoinOwner,
 }
 
 pub type UtxoId = Input<CoinHash, AssetShareHash>;
@@ -83,7 +88,7 @@ impl UtxoSet {
             })
     }
 
-    pub fn owned_by(&self, owner: Authority<Address>) -> impl Iterator<Item = CoinUtxo> + '_ {
+    pub fn owned_by(&self, owner: CoinOwner) -> impl Iterator<Item = CoinUtxo> + '_ {
         self.iter().filter(move |utxo| utxo.owner == owner)
     }
 
@@ -213,16 +218,12 @@ const ASSET_STATE_CONTEXT: &[u8] = b"xparq:native-asset-state";
 pub struct AssetState {
     pub(crate) metadata: BTreeMap<AssetHash, AssetMetadata>,
     pub(crate) supplies: BTreeMap<AssetHash, Unit>,
-    pub utxos: UtxoSet,
     pub(crate) nonces: BTreeMap<Address, u64>,
 }
 
 impl AssetState {
     pub fn is_empty(&self) -> bool {
-        self.metadata.is_empty()
-            && self.supplies.is_empty()
-            && self.utxos.is_empty()
-            && self.nonces.is_empty()
+        self.metadata.is_empty() && self.supplies.is_empty() && self.nonces.is_empty()
     }
 
     pub fn state_root(&self) -> Result<[u8; 32], AssetError> {
@@ -239,12 +240,17 @@ impl AssetState {
         self.metadata.iter().map(|(&id, metadata)| (id, metadata))
     }
 
-    pub fn balance(&self, asset_id: AssetHash, owner: Address) -> Unit {
-        self.account_balance(asset_id, owner)
+    pub fn balance(&self, utxos: &UtxoSet, asset_id: AssetHash, owner: Address) -> Unit {
+        self.account_balance(utxos, asset_id, owner)
     }
 
-    pub fn extension_balance(&self, asset_id: AssetHash, program: ExtensionHash) -> Unit {
-        self.utxos
+    pub fn extension_balance(
+        &self,
+        utxos: &UtxoSet,
+        asset_id: AssetHash,
+        program: ExtensionHash,
+    ) -> Unit {
+        utxos
             .assets()
             .map(|(_, utxo)| utxo)
             .filter(|utxo| utxo.parent == asset_id && utxo.owner == Authority::Extension(program))
@@ -255,16 +261,19 @@ impl AssetState {
         self.supplies.get(&id).copied().unwrap_or(Unit::ZERO)
     }
 
-    pub fn utxo(&self, id: AssetShareHash) -> Option<&AssetShare> {
-        self.utxos.asset(id)
+    pub fn utxo<'a>(&self, utxos: &'a UtxoSet, id: AssetShareHash) -> Option<&'a AssetShare> {
+        utxos.asset(id)
     }
 
-    pub fn utxos(&self) -> impl Iterator<Item = (AssetShareHash, &AssetShare)> + '_ {
-        self.utxos.assets()
+    pub fn utxos<'a>(
+        &self,
+        utxos: &'a UtxoSet,
+    ) -> impl Iterator<Item = (AssetShareHash, &'a AssetShare)> + 'a {
+        utxos.assets()
     }
 
-    pub fn account_balance(&self, asset_id: AssetHash, owner: Address) -> Unit {
-        self.utxos
+    pub fn account_balance(&self, utxos: &UtxoSet, asset_id: AssetHash, owner: Address) -> Unit {
+        utxos
             .assets()
             .map(|(_, utxo)| utxo)
             .filter(|utxo| utxo.parent == asset_id && utxo.owner == Authority::Address(owner))
@@ -273,16 +282,17 @@ impl AssetState {
 
     pub fn program_transfer_plan(
         &self,
+        utxos: &UtxoSet,
         program: ExtensionHash,
         asset_id: AssetHash,
         recipient: Address,
         amount: Unit,
-    ) -> Result<(Vec<AssetShareHash>, Vec<AssetTransferOutput>), AssetError> {
+    ) -> Result<(Vec<AssetShareHash>, Vec<AssetShareOutput>), AssetError> {
         ensure_nonzero_asset_amount(amount)?;
         let program_owner = Authority::Extension(program);
         let mut inputs = Vec::new();
         let mut total = Unit::ZERO;
-        for (id, utxo) in self.utxos.assets() {
+        for (id, utxo) in utxos.assets() {
             if utxo.parent == asset_id && utxo.owner == program_owner {
                 inputs.push(id);
                 total = total
@@ -296,12 +306,12 @@ impl AssetState {
         if total < amount {
             return Err(AssetError::InsufficientBalance);
         }
-        let mut outputs = vec![AssetTransferOutput {
+        let mut outputs = vec![AssetShareOutput {
             recipient: Authority::Address(recipient),
             amount,
         }];
         if total > amount {
-            outputs.push(AssetTransferOutput {
+            outputs.push(AssetShareOutput {
                 recipient: program_owner,
                 amount: total
                     .checked_sub(amount)
@@ -317,11 +327,12 @@ impl AssetState {
 
     pub fn apply(
         &mut self,
+        utxos: &mut UtxoSet,
         call: &AssetIntent,
         genesis_hash: [u8; 32],
     ) -> Result<AssetRollbackJournal, AssetError> {
         call.validate_structure()?;
-        self.validate_transition(call, genesis_hash)?;
+        self.validate_transition(utxos, call, genesis_hash)?;
 
         let commitment = call.commitment(genesis_hash)?;
 
@@ -356,7 +367,7 @@ impl AssetState {
 
                 journal
                     .utxos
-                    .push((object_id, self.utxos.asset(object_id).copied()));
+                    .push((object_id, utxos.asset(object_id).copied()));
 
                 self.metadata.insert(
                     asset_id,
@@ -372,7 +383,7 @@ impl AssetState {
 
                 self.supplies.insert(asset_id, *initial_mint);
 
-                self.utxos.insert_asset(
+                utxos.insert_asset(
                     object_id,
                     AssetShare {
                         parent: asset_id,
@@ -400,11 +411,11 @@ impl AssetState {
 
                 journal
                     .utxos
-                    .push((object_id, self.utxos.asset(object_id).copied()));
+                    .push((object_id, utxos.asset(object_id).copied()));
 
                 self.supplies.insert(*asset_id, supply);
 
-                self.utxos.insert_asset(
+                utxos.insert_asset(
                     object_id,
                     AssetShare {
                         parent: *asset_id,
@@ -415,8 +426,12 @@ impl AssetState {
             }
 
             AssetInstruction::Burn { asset_id, inputs } => {
-                let total =
-                    self.validate_inputs(*asset_id, inputs, Authority::Address(call.signer))?;
+                let total = self.validate_inputs(
+                    utxos,
+                    *asset_id,
+                    inputs,
+                    Authority::Address(call.signer),
+                )?;
 
                 let supply = self
                     .supply(*asset_id)
@@ -428,56 +443,12 @@ impl AssetState {
                     .push((*asset_id, self.supplies.get(asset_id).copied()));
 
                 for input in inputs {
-                    journal
-                        .utxos
-                        .push((*input, self.utxos.asset(*input).copied()));
+                    journal.utxos.push((*input, utxos.asset(*input).copied()));
 
-                    self.utxos.remove_asset(*input);
+                    utxos.remove_asset(*input);
                 }
 
                 self.supplies.insert(*asset_id, supply);
-            }
-
-            AssetInstruction::Transfer {
-                asset_id,
-                inputs,
-                outputs,
-            } => {
-                let input_total =
-                    self.validate_inputs(*asset_id, inputs, Authority::Address(call.signer))?;
-
-                let output_total = outputs_total(outputs)?;
-
-                if input_total != output_total {
-                    return Err(AssetError::InvalidAmount);
-                }
-
-                for input in inputs {
-                    journal
-                        .utxos
-                        .push((*input, self.utxos.asset(*input).copied()));
-
-                    self.utxos.remove_asset(*input);
-                }
-
-                for (index, output) in outputs.iter().enumerate() {
-                    let index = u32::try_from(index).map_err(|_| AssetError::InvalidProgram)?;
-
-                    let object_id = AssetShareHash::derive(*asset_id, commitment, index);
-
-                    journal
-                        .utxos
-                        .push((object_id, self.utxos.asset(object_id).copied()));
-
-                    self.utxos.insert_asset(
-                        object_id,
-                        AssetShare {
-                            parent: *asset_id,
-                            owner: output.recipient,
-                            amount: output.amount,
-                        },
-                    );
-                }
             }
         }
 
@@ -488,14 +459,87 @@ impl AssetState {
         Ok(journal)
     }
 
+    pub fn apply_user_transfer(
+        &mut self,
+        utxos: &mut UtxoSet,
+        signer: Address,
+        asset_id: AssetHash,
+        inputs: &[AssetShareHash],
+        outputs: &[AssetShareOutput],
+        commitment: [u8; 32],
+    ) -> Result<AssetRollbackJournal, AssetError> {
+        self.metadata(asset_id).ok_or(AssetError::UnknownAsset)?;
+        let input_total =
+            self.validate_inputs(utxos, asset_id, inputs, Authority::Address(signer))?;
+        if input_total != outputs_total(outputs)? {
+            return Err(AssetError::InvalidAmount);
+        }
+        for index in 0..outputs.len() {
+            let index = u32::try_from(index).map_err(|_| AssetError::InvalidProgram)?;
+            if utxos
+                .asset(AssetShareHash::derive(asset_id, commitment, index))
+                .is_some()
+            {
+                return Err(AssetError::ShareAlreadyExists);
+            }
+        }
+        let mut journal = AssetRollbackJournal::default();
+        for input in inputs {
+            journal.utxos.push((*input, utxos.asset(*input).copied()));
+            utxos.remove_asset(*input);
+        }
+        for (index, output) in outputs.iter().enumerate() {
+            let index = u32::try_from(index).map_err(|_| AssetError::InvalidProgram)?;
+            let id = AssetShareHash::derive(asset_id, commitment, index);
+            journal.utxos.push((id, utxos.asset(id).copied()));
+            utxos.insert_asset(
+                id,
+                AssetShare {
+                    parent: asset_id,
+                    owner: output.recipient,
+                    amount: output.amount,
+                },
+            );
+        }
+        Ok(journal)
+    }
+
+    pub fn user_transfer_created_state_weight(
+        &self,
+        utxos: &UtxoSet,
+        signer: Address,
+        asset_id: AssetHash,
+        inputs: &[AssetShareHash],
+        outputs: &[AssetShareOutput],
+    ) -> Result<u64, AssetError> {
+        self.metadata(asset_id).ok_or(AssetError::UnknownAsset)?;
+        let input_total =
+            self.validate_inputs(utxos, asset_id, inputs, Authority::Address(signer))?;
+        if input_total != outputs_total(outputs)? {
+            return Err(AssetError::InvalidAmount);
+        }
+        outputs.iter().try_fold(0_u64, |weight, output| {
+            checked_asset_entry_weight(
+                weight,
+                32,
+                &AssetShare {
+                    parent: asset_id,
+                    owner: output.recipient,
+                    amount: output.amount,
+                },
+            )
+        })
+    }
+
     /// Mint under a trusted extension execution context.
     /// `execution_origin` must identify the invoking fee spend, chain and program;
     /// `execution_nonce` is the effect index within that invocation.
     pub fn apply_program_mint(
         &mut self,
+        utxos: &mut UtxoSet,
         program: ExtensionHash,
         asset_id: AssetHash,
-        recipient: Authority<Address>,
+        recipient: AssetShareOwner,
         amount: Unit,
         execution_origin: [u8; 32],
         execution_nonce: u64,
@@ -524,7 +568,7 @@ impl AssetState {
         )?;
 
         let object_id = AssetShareHash::derive(asset_id, commitment, 0);
-        if self.utxos.asset(object_id).is_some() {
+        if utxos.asset(object_id).is_some() {
             return Err(AssetError::ShareAlreadyExists);
         }
 
@@ -536,11 +580,11 @@ impl AssetState {
 
         journal
             .utxos
-            .push((object_id, self.utxos.asset(object_id).copied()));
+            .push((object_id, utxos.asset(object_id).copied()));
 
         self.supplies.insert(asset_id, supply);
 
-        self.utxos.insert_asset(
+        utxos.insert_asset(
             object_id,
             AssetShare {
                 parent: asset_id,
@@ -554,9 +598,10 @@ impl AssetState {
 
     pub fn program_mint_created_state_weight(
         &self,
+        _utxos: &UtxoSet,
         program: ExtensionHash,
         asset_id: AssetHash,
-        recipient: Authority<Address>,
+        recipient: AssetShareOwner,
         amount: Unit,
     ) -> Result<u64, AssetError> {
         ensure_nonzero_asset_amount(amount)?;
@@ -584,10 +629,11 @@ impl AssetState {
     /// Transfers UTXOs held by an extension.
     pub fn apply_program_transfer(
         &mut self,
+        utxos: &mut UtxoSet,
         program: ExtensionHash,
         asset_id: AssetHash,
         inputs: &[AssetShareHash],
-        outputs: &[AssetTransferOutput],
+        outputs: &[AssetShareOutput],
         execution_origin: [u8; 32],
         execution_nonce: u64,
     ) -> Result<AssetRollbackJournal, AssetError> {
@@ -597,7 +643,7 @@ impl AssetState {
 
         let source = Authority::Extension(program);
 
-        let input_total = self.validate_inputs(asset_id, inputs, source)?;
+        let input_total = self.validate_inputs(utxos, asset_id, inputs, source)?;
 
         let output_total = outputs_total(outputs)?;
 
@@ -617,8 +663,7 @@ impl AssetState {
         // Reject collisions before consuming inputs or changing any state.
         for index in 0..outputs.len() {
             let index = u32::try_from(index).map_err(|_| AssetError::InvalidProgram)?;
-            if self
-                .utxos
+            if utxos
                 .asset(AssetShareHash::derive(asset_id, commitment, index))
                 .is_some()
             {
@@ -629,11 +674,9 @@ impl AssetState {
         let mut journal = AssetRollbackJournal::default();
 
         for input in inputs {
-            journal
-                .utxos
-                .push((*input, self.utxos.asset(*input).copied()));
+            journal.utxos.push((*input, utxos.asset(*input).copied()));
 
-            self.utxos.remove_asset(*input);
+            utxos.remove_asset(*input);
         }
 
         for (index, output) in outputs.iter().enumerate() {
@@ -643,9 +686,9 @@ impl AssetState {
 
             journal
                 .utxos
-                .push((object_id, self.utxos.asset(object_id).copied()));
+                .push((object_id, utxos.asset(object_id).copied()));
 
-            self.utxos.insert_asset(
+            utxos.insert_asset(
                 object_id,
                 AssetShare {
                     parent: asset_id,
@@ -660,14 +703,15 @@ impl AssetState {
 
     pub fn program_transfer_created_state_weight(
         &self,
+        utxos: &UtxoSet,
         program: ExtensionHash,
         asset_id: AssetHash,
         inputs: &[AssetShareHash],
-        outputs: &[AssetTransferOutput],
+        outputs: &[AssetShareOutput],
     ) -> Result<u64, AssetError> {
         let source = Authority::Extension(program);
 
-        let input_total = self.validate_inputs(asset_id, inputs, source)?;
+        let input_total = self.validate_inputs(utxos, asset_id, inputs, source)?;
 
         let output_total = outputs_total(outputs)?;
 
@@ -690,7 +734,7 @@ impl AssetState {
         Ok(weight)
     }
 
-    pub fn rollback(&mut self, journal: AssetRollbackJournal) {
+    pub fn rollback(&mut self, utxos: &mut UtxoSet, journal: AssetRollbackJournal) {
         restore_map(&mut self.metadata, journal.metadata);
 
         restore_map(&mut self.supplies, journal.supplies);
@@ -698,10 +742,10 @@ impl AssetState {
         for (id, previous) in journal.utxos.into_iter().rev() {
             match previous {
                 Some(utxo) => {
-                    self.utxos.insert_asset(id, utxo);
+                    utxos.insert_asset(id, utxo);
                 }
                 None => {
-                    self.utxos.remove_asset(id);
+                    utxos.remove_asset(id);
                 }
             }
         }
@@ -711,6 +755,7 @@ impl AssetState {
 
     pub(crate) fn validate_transition(
         &self,
+        utxos: &UtxoSet,
         call: &AssetIntent,
         _genesis_hash: [u8; 32],
     ) -> Result<(), AssetError> {
@@ -745,24 +790,7 @@ impl AssetState {
             AssetInstruction::Burn { asset_id, inputs } => {
                 self.metadata(*asset_id).ok_or(AssetError::UnknownAsset)?;
 
-                self.validate_inputs(*asset_id, inputs, Authority::Address(call.signer))?;
-            }
-
-            AssetInstruction::Transfer {
-                asset_id,
-                inputs,
-                outputs,
-            } => {
-                self.metadata(*asset_id).ok_or(AssetError::UnknownAsset)?;
-
-                let input_total =
-                    self.validate_inputs(*asset_id, inputs, Authority::Address(call.signer))?;
-
-                let output_total = outputs_total(outputs)?;
-
-                if input_total != output_total {
-                    return Err(AssetError::InvalidAmount);
-                }
+                self.validate_inputs(utxos, *asset_id, inputs, Authority::Address(call.signer))?;
             }
         }
 
@@ -771,9 +799,10 @@ impl AssetState {
 
     fn validate_inputs(
         &self,
+        utxos: &UtxoSet,
         asset_id: AssetHash,
         inputs: &[AssetShareHash],
-        expected_owner: Authority<Address>,
+        expected_owner: AssetShareOwner,
     ) -> Result<Unit, AssetError> {
         if inputs.is_empty() {
             return Err(AssetError::InvalidProgram);
@@ -784,7 +813,7 @@ impl AssetState {
         let mut total = Unit::ZERO;
 
         for input in inputs {
-            let utxo = self.utxo(*input).ok_or(AssetError::UnknownObject)?;
+            let utxo = self.utxo(utxos, *input).ok_or(AssetError::UnknownObject)?;
 
             if utxo.parent != asset_id {
                 return Err(AssetError::AssetMismatch);
@@ -818,7 +847,7 @@ fn program_commitment(
     execution_origin: [u8; 32],
     program: ExtensionHash,
     asset_id: AssetHash,
-    recipient: Authority<Address>,
+    recipient: AssetShareOwner,
     amount: Unit,
     execution_nonce: u64,
 ) -> Result<[u8; 32], AssetError> {
@@ -843,7 +872,7 @@ fn program_transfer_commitment(
     program: ExtensionHash,
     asset_id: AssetHash,
     inputs: &[AssetShareHash],
-    outputs: &[AssetTransferOutput],
+    outputs: &[AssetShareOutput],
     execution_nonce: u64,
 ) -> Result<[u8; 32], AssetError> {
     let bytes = canonical_bytes(&(
@@ -870,7 +899,7 @@ fn ensure_nonempty_inputs(inputs: &[AssetShareHash]) -> Result<(), AssetError> {
     }
 }
 
-fn ensure_nonempty_outputs(outputs: &[AssetTransferOutput]) -> Result<(), AssetError> {
+fn ensure_nonempty_outputs(outputs: &[AssetShareOutput]) -> Result<(), AssetError> {
     if outputs.is_empty() {
         Err(AssetError::InvalidProgram)
     } else {
@@ -878,7 +907,7 @@ fn ensure_nonempty_outputs(outputs: &[AssetTransferOutput]) -> Result<(), AssetE
     }
 }
 
-fn outputs_total(outputs: &[AssetTransferOutput]) -> Result<Unit, AssetError> {
+fn outputs_total(outputs: &[AssetShareOutput]) -> Result<Unit, AssetError> {
     if outputs.is_empty() {
         return Err(AssetError::InvalidProgram);
     }
@@ -909,6 +938,60 @@ fn restore_map<K: Ord, V>(map: &mut BTreeMap<K, V>, entries: Vec<(K, Option<V>)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_asset_spend_consumes_shares_creates_change_and_rolls_back() {
+        let signer = Address([3; crypto::ADDRESS_SIZE]);
+        let recipient = Address([4; crypto::ADDRESS_SIZE]);
+        let asset = AssetHash::derive(signer, "TST");
+        let input = AssetShareHash::from_bytes([5; 32]);
+        let mut assets = AssetState::default();
+        assets.metadata.insert(
+            asset,
+            AssetMetadata {
+                name: "Test".into(),
+                symbol: "TST".into(),
+                decimals: 0,
+                max_supply: Unit::from_units(10),
+                creator: signer,
+                mint_authority: Some(Authority::Address(signer)),
+            },
+        );
+        let mut utxos = UtxoSet::default();
+        utxos.insert_asset(
+            input,
+            AssetShare {
+                parent: asset,
+                owner: Authority::Address(signer),
+                amount: Unit::from_units(10),
+            },
+        );
+        let outputs = [
+            AssetShareOutput {
+                recipient: Authority::Address(recipient),
+                amount: Unit::from_units(6),
+            },
+            AssetShareOutput {
+                recipient: Authority::Address(signer),
+                amount: Unit::from_units(4),
+            },
+        ];
+        let journal = assets
+            .apply_user_transfer(&mut utxos, signer, asset, &[input], &outputs, [6; 32])
+            .unwrap();
+        assert!(utxos.asset(input).is_none());
+        assert_eq!(
+            assets.account_balance(&utxos, asset, recipient),
+            Unit::from_units(6)
+        );
+        assert_eq!(
+            assets.account_balance(&utxos, asset, signer),
+            Unit::from_units(4)
+        );
+        assets.rollback(&mut utxos, journal);
+        assert_eq!(utxos.asset(input).unwrap().amount, Unit::from_units(10));
+        assert_eq!(assets.account_balance(&utxos, asset, recipient), Unit::ZERO);
+    }
 
     #[test]
     fn canonical_utxo_storage_does_not_duplicate_coin_id() {

@@ -15,11 +15,11 @@ pub const SIGNATURE_ACTIVATION_HEIGHT: u64 = 0;
 #[repr(u8)]
 #[borsh(use_discriminant = true)]
 pub enum Signature {
-    MlDsa44 = 0,
-    MlDsa65 = 1,
-    MlDsa87 = 2,
-    Falcon512 = 3,
-    Falcon1024 = 4,
+    MlDsa44 = 1,
+    MlDsa65 = 2,
+    MlDsa87 = 3,
+    Falcon512 = 4,
+    Falcon1024 = 5,
 }
 
 impl Signature {

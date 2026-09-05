@@ -139,8 +139,9 @@ same state before inclusion, in which case the transaction must be rebuilt.
 The WASM host API supports native-value custody. A Coin output created with
 `OutputTarget::Extension(extension_hash)` is owned by that extension, while an
 asset `TransferToExtension` credits its extension asset balance. During apply,
-the authenticated extension may emit `coin_transfer` or `asset_transfer` to
-send its own holdings to an account. The ledger supplies the executing
+the authenticated extension may emit `coin_transfer` to an account,
+`coin_transfer_extension` to another extension, or `asset_transfer` to send
+its own holdings. The ledger supplies the executing
 `ExtensionHash`; guest payloads cannot choose the debit authority. All effects,
 extension state, fees, Coin change, and asset balances commit or roll back as
 one transition.

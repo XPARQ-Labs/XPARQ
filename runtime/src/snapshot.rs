@@ -146,8 +146,8 @@ fn load_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use kernel::{consensus::apply_genesis, genesis::genesis_block};
+    use std::fs;
 
     fn test_directory(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(

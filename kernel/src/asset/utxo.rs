@@ -12,6 +12,11 @@ use crate::asset::{
 const ASSET_SHARE_HASH_CONTEXT: &[u8] = b"XPARQ Native Asset Share";
 pub const ASSET_SHARE_HASH_PREFIX: &str = "share:";
 
+/// Owner of a native asset share UTXO.
+///
+/// An asset share can be controlled by either an account address or an extension hash.
+pub type AssetShareOwner = Authority<Address>;
+
 /// Unique identifier of one concrete asset share/UTXO.
 #[derive(
     BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -89,11 +94,11 @@ impl FromStr for AssetShareHash {
 pub struct AssetShare {
     pub parent: AssetHash,
     pub amount: Unit,
-    pub owner: Authority<Address>,
+    pub owner: AssetShareOwner,
 }
 
 impl AssetShare {
-    pub const fn new(parent: AssetHash, amount: Unit, owner: Authority<Address>) -> Self {
+    pub const fn new(parent: AssetHash, amount: Unit, owner: AssetShareOwner) -> Self {
         Self {
             parent,
             amount,
@@ -107,8 +112,8 @@ impl AssetShare {
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
-pub struct AssetTransferOutput {
-    pub recipient: Authority<Address>,
+pub struct AssetShareOutput {
+    pub recipient: AssetShareOwner,
     pub amount: Unit,
 }
 

@@ -12,16 +12,16 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::protocol::{
-    EXTENSION_STATE_KEY_MAX_SIZE, EXTENSION_STATE_VALUE_MAX_SIZE, Extension, ExtensionCall,
-    ExtensionContext, ExtensionEffect, ExtensionFailure, ExtensionHash, ExtensionStateRead,
-    ExtensionStateWrite,
+    CoinRecipient, EXTENSION_STATE_KEY_MAX_SIZE, EXTENSION_STATE_VALUE_MAX_SIZE, Extension,
+    ExtensionCall, ExtensionContext, ExtensionEffect, ExtensionFailure, ExtensionHash,
+    ExtensionStateRead, ExtensionStateWrite,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::primitives::{Height, canonical_bytes, domain_hash};
 use crypto::{AccountSignature, Address, PublicKey, SigningSeed, address_from_public_key, verify};
 use wasmi::{Caller, CompilationMode, Config, Engine, ExternType, Linker, Memory, Module, Store};
 
-pub const WASM_ABI_VERSION: u32 = 1;
+pub const WASM_ABI_VERSION: u32 = 2;
 pub const WASM_CODE_MAX_SIZE: usize = 2 * 1024 * 1024;
 pub const WASM_PACKAGE_MAX_SIZE: usize = WASM_CODE_MAX_SIZE + 4096;
 pub const WASM_MEMORY_MAX_PAGES: u32 = 16;
@@ -549,6 +549,11 @@ fn define_host_functions(linker: &mut Linker<HostState>) -> Result<(), wasmi::Er
     linker.func_wrap("xparq", "asset_mint", host_asset_mint)?;
     linker.func_wrap("xparq", "asset_transfer", host_asset_transfer)?;
     linker.func_wrap("xparq", "coin_transfer", host_coin_transfer)?;
+    linker.func_wrap(
+        "xparq",
+        "coin_transfer_extension",
+        host_coin_transfer_extension,
+    )?;
     Ok(())
 }
 
@@ -759,7 +764,36 @@ fn host_coin_transfer(mut caller: Caller<'_, HostState>, recipient_ptr: i32, amo
         .data_mut()
         .effects
         .push(ExtensionEffect::TransferCoin {
-            recipient: recipient.try_into().expect("fixed address length"),
+            recipient: CoinRecipient::Address(recipient.try_into().expect("fixed address length")),
+            amount: amount as u64,
+        });
+    0
+}
+
+fn host_coin_transfer_extension(
+    mut caller: Caller<'_, HostState>,
+    recipient_ptr: i32,
+    amount: i64,
+) -> i32 {
+    if !caller.data().writable {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    }
+    if caller.data().effects.len() >= WASM_EFFECT_MAX_COUNT || amount <= 0 {
+        return fail(&mut caller, ExtensionFailure::InvalidState);
+    }
+    let Some(recipient) = read_guest(&caller, recipient_ptr, 32, 32) else {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    };
+    if charge_host_fuel(&mut caller, 32 + core::mem::size_of::<i64>()).is_err() {
+        return fail(&mut caller, ExtensionFailure::InvalidState);
+    }
+    caller
+        .data_mut()
+        .effects
+        .push(ExtensionEffect::TransferCoin {
+            recipient: CoinRecipient::Extension(
+                recipient.try_into().expect("fixed extension hash length"),
+            ),
             amount: amount as u64,
         });
     0
@@ -979,6 +1013,7 @@ mod tests {
             r#"(module
                 (import "xparq" "asset_transfer" (func $asset (param i32 i32 i32) (result i32)))
                 (import "xparq" "coin_transfer" (func $coin (param i32 i64) (result i32)))
+                (import "xparq" "coin_transfer_extension" (func $coin_extension (param i32 i64) (result i32)))
                 (memory (export "memory") 16 16)
                 (data (i32.const 0) "\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01")
                 (data (i32.const 32) "\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02")
@@ -987,7 +1022,8 @@ mod tests {
                 (func (export "xparq_validate") (param i32 i32 i64) (result i32) (i32.const 0))
                 (func (export "xparq_apply") (param i32 i32 i64) (result i32)
                     i32.const 0 i32.const 32 i32.const 64 call $asset drop
-                    i32.const 32 i64.const 9 call $coin)
+                    i32.const 32 i64.const 9 call $coin drop
+                    i32.const 0 i64.const 7 call $coin_extension)
             )"#,
         );
         let mut state = MemoryState::default();
@@ -1007,8 +1043,12 @@ mod tests {
                     amount: 25
                 },
                 ExtensionEffect::TransferCoin {
-                    recipient: [2; 20],
+                    recipient: CoinRecipient::Address([2; 20]),
                     amount: 9
+                },
+                ExtensionEffect::TransferCoin {
+                    recipient: CoinRecipient::Extension([1; 32]),
+                    amount: 7
                 },
             ]
         );
