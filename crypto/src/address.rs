@@ -1,4 +1,4 @@
-use crate::ProfilePublicKey;
+use crate::PublicKey;
 use crate::error::CryptoError;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -37,10 +37,10 @@ const ADDRESS_CHECKSUM_DOMAIN: &[u8] = b"XPARQ address checksum";
 const_assert_eq!(ADDRESS_CHECKSUM_SIZE, 4);
 const_assert_eq!(ADDRESS_STRING_LEN, 50);
 
-pub fn address_from_profile_public_key(public_key: &ProfilePublicKey) -> Address {
+pub fn address_from_public_key(public_key: &PublicKey) -> Address {
     let mut material = Vec::with_capacity(32 + public_key.bytes.len());
-    material.extend_from_slice(b"XPARQ signature profile address");
-    material.push(public_key.profile as u8);
+    material.extend_from_slice(b"XPARQ signature  address");
+    material.push(public_key.account as u8);
     material.extend_from_slice(&public_key.bytes);
     address_from_key_material(&material)
 }

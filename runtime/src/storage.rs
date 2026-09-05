@@ -65,7 +65,7 @@ fn initialize(database: &Database) -> Result<(), String> {
                     .map_err(|error| format!("write schema version: {error}"))?;
             }
         }
-        let expected_genesis = xparq::genesis::EXPECTED_GENESIS_HASH.0;
+        let expected_genesis = kernel::genesis::EXPECTED_GENESIS_HASH.0;
         let stored_genesis = metadata
             .get("genesis_hash")
             .map_err(|error| format!("read stored genesis hash: {error}"))?
@@ -81,7 +81,7 @@ fn initialize(database: &Database) -> Result<(), String> {
                     .map_err(|error| format!("write genesis hash: {error}"))?;
             }
         }
-        let expected_chain_spec = xparq::genesis::chain_spec_hash()
+        let expected_chain_spec = kernel::genesis::chain_spec_hash()
             .map_err(|error| format!("calculate chain specification: {error}"))?
             .0;
         let stored_chain_spec = metadata

@@ -115,6 +115,11 @@ Package boundaries alone do not establish wire or consensus compatibility.
 
 ## Compatibility and validation
 
+The later [kernel extension effects v2 update](KERNEL_EFFECTS_V2.md) changes
+extension output IDs and advances the chain-spec identity to version 3.
+Its compatibility requirements are separate from the package consolidation
+itself described below.
+
 This is a package/module reorganization. Canonical Borsh encodings, hash
 domains, identifiers, genesis identity, and consensus rules are preserved.
 The move itself does not require a chain reset or database migration.

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["xparq", "crypto", "extension", "runtime", "wallet"]
+members = ["kernel", "crypto", "extension", "runtime", "wallet"]
 exclude = [
     "depend",
 ]
@@ -36,9 +36,9 @@ wasmi = { version = "1.1.0", default-features = false, features = ["std", "extra
 zeroize = { version = "1.9.0", features = ["alloc", "derive"], path = "depend/traits/zeroize" }
 rand_10 = { package = "rand", version = "0.10.2", features = ["sys_rng"], path = "depend/sqisign/rand-0.10" }
 
-xparq-crypto = { path = "crypto", default-features = false }
-xparq-extension = { path = "extension" }
-xparq = { package = "kernel", path = "xparq", default-features = false }
+crypto = { path = "crypto", default-features = false }
+extension = { path = "extension" }
+kernel = { path = "kernel", default-features = false }
 
 [patch.crates-io]
 serde = { path = "depend/traits/serde" }

@@ -5,11 +5,8 @@ use crate::protocol::{
     ExtensionStateRead, ExtensionStateWrite,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
-use xparq_crypto::primitives::{Height, canonical_bytes, domain_hash};
-use xparq_crypto::{
-    Address, ProfilePublicKey, ProfileSignature, ProfileSigningSeed,
-    address_from_profile_public_key, profile_verify,
-};
+use crypto::primitives::{Height, canonical_bytes, domain_hash};
+use crypto::{AccountSignature, Address, PublicKey, SigningSeed, address_from_public_key, verify};
 
 use crate::{WasmExtensionPackage, wasm_code_hash, wasm_extension_id};
 
@@ -25,8 +22,8 @@ pub struct WasmDeployCall {
     pub module: Vec<u8>,
     pub signer: Address,
     pub nonce: u64,
-    pub public_key: ProfilePublicKey,
-    pub signature: ProfileSignature,
+    pub public_key: PublicKey,
+    pub signature: AccountSignature,
 }
 
 #[derive(BorshSerialize)]
@@ -48,10 +45,10 @@ impl WasmDeployCall {
         name: String,
         module: Vec<u8>,
         nonce: u64,
-        signing_seed: &ProfileSigningSeed,
+        signing_seed: &SigningSeed,
     ) -> Result<Self, ExtensionFailure> {
         let public_key = signing_seed.public_key();
-        let signer = address_from_profile_public_key(&public_key);
+        let signer = address_from_public_key(&public_key);
         let commitment =
             deploy_commitment(chain_id, &name, wasm_code_hash(&module), signer, nonce)?;
         let signature = signing_seed.sign(&commitment);
@@ -125,7 +122,7 @@ impl Extension for WasmDeployExtension {
         state: &dyn ExtensionStateRead,
     ) -> Result<(), ExtensionFailure> {
         let deploy = decode_call(call)?;
-        let expected_signer = address_from_profile_public_key(&deploy.public_key);
+        let expected_signer = address_from_public_key(&deploy.public_key);
         if expected_signer != deploy.signer {
             return Err(ExtensionFailure::InvalidPayload);
         }
@@ -136,7 +133,7 @@ impl Extension for WasmDeployExtension {
             deploy.signer,
             deploy.nonce,
         )?;
-        if !profile_verify(&deploy.public_key, &commitment, &deploy.signature) {
+        if !verify(&deploy.public_key, &commitment, &deploy.signature) {
             return Err(ExtensionFailure::InvalidPayload);
         }
         if deploy.nonce != wasm_deploy_nonce(state, deploy.signer)? {
@@ -235,7 +232,7 @@ mod tests {
 
     use super::*;
     use crate::{ExtensionRegistry, WASM_APP_CALL_ACTIVATION_HEIGHT, WasmAppCall, wasm_app_nonce};
-    use xparq_crypto::SignatureProfile;
+    use crypto::Signature;
 
     struct MultiState {
         current: ExtensionHash,
@@ -311,7 +308,7 @@ mod tests {
             (func (export "xparq_apply") (param i32 i32 i64) (result i32) (i32.const 0)))"#,
         )
         .unwrap();
-        let seed = ProfileSigningSeed::new(SignatureProfile::MlDsa44, [9; 32]);
+        let seed = SigningSeed::new(Signature::MlDsa44, [9; 32]);
         let deploy =
             WasmDeployCall::sign(chain_id, "permissionless.test".into(), module, 0, &seed).unwrap();
         let signer = deploy.signer;

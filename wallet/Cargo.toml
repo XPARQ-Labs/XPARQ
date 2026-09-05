@@ -1,5 +1,5 @@
 [package]
-name = "xparq-wallet"
+name = "wallet"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,21 +11,21 @@ name = "wallet"
 path = "src/main.rs"
 
 [lib]
-name = "xparq_wallet"
+name = "wallet"
 path = "src/lib.rs"
 
 [features]
 default = ["mainnet"]
-mainnet = ["xparq/mainnet"]
-testnet = ["xparq/testnet"]
-devnet = ["xparq/devnet"]
-sqisign-blockchain-test = ["xparq/sqisign-blockchain-test"]
+mainnet = ["kernel/mainnet"]
+testnet = ["kernel/testnet"]
+devnet = ["kernel/devnet"]
+sqisign-blockchain-test = ["kernel/sqisign-blockchain-test"]
 
 [dependencies]
 bip39.workspace = true
 getrandom.workspace = true
 hex.workspace = true
-xparq.workspace = true
+kernel.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true

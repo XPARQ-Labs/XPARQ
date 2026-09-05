@@ -1,27 +1,27 @@
 use bip39::{Language, Mnemonic};
 use serde::{Deserialize, Serialize};
-use xparq::{
+use kernel::{
     crypto::{
-        Address, ProfilePublicKey, ProfileSigningSeed, SignatureProfile,
-        address_from_profile_public_key, address_from_string, address_to_string, hash_bytes,
+        Address, PublicKey, SigningSeed, Signature,
+        address_from_public_key, address_from_string, address_to_string, hash_bytes,
     },
     transaction::{AccountAuthorization, AccountIntent, AuthorizedAccountIntent},
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const XPARQ_MNEMONIC_DEFAULT_WORDS: usize = 12;
-pub const XPARQ_MNEMONIC_12_ENTROPY_BYTES: usize = 16;
-pub const XPARQ_MNEMONIC_24_ENTROPY_BYTES: usize = 32;
+pub const BIP39_MNEMONIC_DEFAULT_WORDS: usize = 12;
+pub const BIP39_MNEMONIC_12_ENTROPY_BYTES: usize = 16;
+pub const BIP39_MNEMONIC_24_ENTROPY_BYTES: usize = 32;
 
 #[derive(Debug)]
-pub struct ProfileWallet {
+pub struct AccountWallet {
     pub mnemonic: Option<String>,
     pub address: Address,
-    pub public_key: ProfilePublicKey,
-    signing_seed: ProfileSigningSeed,
+    pub public_key: PublicKey,
+    signing_seed: SigningSeed,
 }
 
-impl Drop for ProfileWallet {
+impl Drop for AccountWallet {
     fn drop(&mut self) {
         self.mnemonic.zeroize();
     }
@@ -33,7 +33,7 @@ struct WalletFile {
     address: String,
     mnemonic: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    signature_profile: Option<String>,
+    signature_account: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     public_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -51,16 +51,16 @@ pub fn wallet_address_from_file_bytes(bytes: &[u8]) -> Result<Address, String> {
     address_from_string(&header.address).map_err(|error| format!("invalid wallet address: {error}"))
 }
 
-pub fn profile_wallet_file_bytes(wallet: &ProfileWallet) -> Result<Zeroizing<Vec<u8>>, String> {
+pub fn account_wallet_file_bytes(wallet: &AccountWallet) -> Result<Zeroizing<Vec<u8>>, String> {
     let mnemonic = wallet
         .mnemonic
         .as_deref()
         .ok_or_else(|| "wallet has no mnemonic recovery material".to_string())?;
-    decode_xparq_mnemonic(mnemonic)?;
+    decode_bip39_mnemonic(mnemonic)?;
     let wallet_file = WalletFile {
         address: address_to_string(&wallet.address),
         mnemonic: mnemonic.to_string(),
-        signature_profile: Some(wallet.profile().as_str().to_string()),
+        signature_account: Some(wallet.account().as_str().to_string()),
         public_key: Some(hex::encode(&wallet.public_key.bytes)),
         private_key: Some(hex::encode(wallet.signing_seed.to_bytes())),
     };
@@ -69,82 +69,82 @@ pub fn profile_wallet_file_bytes(wallet: &ProfileWallet) -> Result<Zeroizing<Vec
         .map_err(|error| format!("failed to encode wallet file: {error}"))
 }
 
-pub fn profile_wallet_from_file_bytes(bytes: &[u8]) -> Result<ProfileWallet, String> {
+pub fn account_wallet_from_file_bytes(bytes: &[u8]) -> Result<AccountWallet, String> {
     let wallet_file: WalletFile = serde_json::from_slice(bytes)
         .map_err(|error| format!("failed to parse wallet: {error}"))?;
-    let profile = wallet_file
-        .signature_profile
+    let account = wallet_file
+        .signature_account
         .as_deref()
-        .ok_or("wallet file does not contain a signature profile")?
-        .parse::<SignatureProfile>()
+        .ok_or("wallet file does not contain a signature account")?
+        .parse::<Signature>()
         .map_err(str::to_string)?;
-    let mut wallet = profile_wallet_from_xparq_mnemonic(&wallet_file.mnemonic, profile)?;
+    let mut wallet = account_wallet_from_bip39_mnemonic(&wallet_file.mnemonic, account)?;
     let stored_address = address_from_string(&wallet_file.address)
         .map_err(|error| format!("invalid wallet address: {error}"))?;
     if wallet.address != stored_address {
-        return Err("wallet address does not match its mnemonic and signature profile".to_string());
+        return Err("wallet address does not match its mnemonic and signature account".to_string());
     }
     if let Some(public_key) = wallet_file.public_key.as_deref()
         && public_key != hex::encode(&wallet.public_key.bytes)
     {
-        return Err("wallet public key does not match its mnemonic and signature profile".into());
+        return Err("wallet public key does not match its mnemonic and signature account".into());
     }
     if let Some(private_key) = wallet_file.private_key.as_deref()
         && private_key != hex::encode(wallet.signing_seed.to_bytes())
     {
-        return Err("wallet private key does not match its mnemonic and signature profile".into());
+        return Err("wallet private key does not match its mnemonic and signature account".into());
     }
     wallet.mnemonic = Some(wallet_file.mnemonic.clone());
     Ok(wallet)
 }
 
-pub fn wallet_file_signature_profile(bytes: &[u8]) -> Result<Option<SignatureProfile>, String> {
+pub fn wallet_file_signature_account(bytes: &[u8]) -> Result<Option<Signature>, String> {
     let wallet_file: WalletFile = serde_json::from_slice(bytes)
         .map_err(|error| format!("failed to parse wallet: {error}"))?;
     wallet_file
-        .signature_profile
+        .signature_account
         .as_deref()
-        .map(|profile| profile.parse::<SignatureProfile>().map_err(str::to_string))
+        .map(|account| account.parse::<Signature>().map_err(str::to_string))
         .transpose()
 }
 
-pub fn generate_xparq_mnemonic(words: usize) -> Result<Zeroizing<String>, String> {
+pub fn generate_bip39_mnemonic(words: usize) -> Result<Zeroizing<String>, String> {
     let entropy_len = match words {
-        12 => XPARQ_MNEMONIC_12_ENTROPY_BYTES,
-        24 => XPARQ_MNEMONIC_24_ENTROPY_BYTES,
+        12 => BIP39_MNEMONIC_12_ENTROPY_BYTES,
+        24 => BIP39_MNEMONIC_24_ENTROPY_BYTES,
         _ => return Err("mnemonic words must be 12 or 24".to_string()),
     };
     let mut entropy = Zeroizing::new(vec![0_u8; entropy_len]);
     getrandom::fill(&mut entropy)
         .map_err(|error| format!("secure random generation failed: {error}"))?;
-    encode_xparq_mnemonic(&entropy).map(Zeroizing::new)
+    encode_bip39_mnemonic(&entropy).map(Zeroizing::new)
 }
 
-pub fn profile_wallet_from_xparq_mnemonic(
+pub fn account_wallet_from_bip39_mnemonic(
     phrase: &str,
-    profile: SignatureProfile,
-) -> Result<ProfileWallet, String> {
-    let entropy = decode_xparq_mnemonic(phrase)?;
-    let mut tag = Vec::from(b"XPARQ_WALLET_SIGNATURE_PROFILE".as_slice());
-    tag.push(profile as u8);
+    account: Signature,
+) -> Result<AccountWallet, String> {
+    let entropy = decode_bip39_mnemonic(phrase)?;
+    let mut tag = Vec::from(b"XPARQ_WALLET_SIGNATURE_ACCOUNT".as_slice());
+    tag.push(account as u8);
     let seed = tagged_wallet_hash(&tag, &entropy);
-    let signing_seed = ProfileSigningSeed::new(profile, seed);
+    let signing_seed = SigningSeed::new(account, seed);
     let public_key = signing_seed.public_key();
-    Ok(ProfileWallet {
+    Ok(AccountWallet {
         mnemonic: None,
-        address: address_from_profile_public_key(&public_key),
+        address: address_from_public_key(&public_key),
         public_key,
         signing_seed,
     })
 }
 
-pub fn encode_xparq_mnemonic(entropy: &[u8]) -> Result<String, String> {
+pub fn encode_bip39_mnemonic(entropy: &[u8]) -> Result<String, String> {
     Mnemonic::from_entropy_in(Language::English, entropy)
         .map(|mnemonic| mnemonic.to_string())
         .map_err(|error| format!("failed to encode mnemonic: {error}"))
 }
 
-pub fn decode_xparq_mnemonic(phrase: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+pub fn decode_bip39_mnemonic(phrase: &str) -> Result<Zeroizing<Vec<u8>>, String> {
     let normalized = Zeroizing::new(
         phrase
             .split_whitespace()
@@ -154,11 +154,11 @@ pub fn decode_xparq_mnemonic(phrase: &str) -> Result<Zeroizing<Vec<u8>>, String>
     );
     let word_count = normalized.split_whitespace().count();
     if !matches!(word_count, 12 | 24) {
-        return Err("invalid XPARQ mnemonic: expected 12 or 24 words".to_string());
+        return Err("invalid bip39 mnemonic: expected 12 or 24 words".to_string());
     }
     Mnemonic::parse_in_normalized(Language::English, &normalized)
         .map(|mnemonic| Zeroizing::new(mnemonic.to_entropy()))
-        .map_err(|error| format!("invalid XPARQ mnemonic: {error}"))
+        .map_err(|error| format!("invalid bip39 mnemonic: {error}"))
 }
 
 fn tagged_wallet_hash(tag: &[u8], bytes: &[u8]) -> [u8; 32] {
@@ -168,9 +168,9 @@ fn tagged_wallet_hash(tag: &[u8], bytes: &[u8]) -> [u8; 32] {
     hash_bytes(&payload).0
 }
 
-impl ProfileWallet {
-    pub const fn profile(&self) -> SignatureProfile {
-        self.signing_seed.profile()
+impl AccountWallet {
+    pub const fn account(&self) -> Signature {
+        self.signing_seed.account()
     }
 
     pub fn sign_account_intent<T: AccountIntent>(
@@ -178,18 +178,18 @@ impl ProfileWallet {
         intent: T,
         public_key_known: bool,
     ) -> Result<AuthorizedAccountIntent<T>, String> {
-        let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
+        let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
         let commitment = intent
             .commitment(chain)
             .map_err(|error| error.to_string())?;
         let signature = self.signing_seed.sign(commitment.as_bytes());
         let authorization = if public_key_known {
-            AccountAuthorization::ProfileKnown {
-                profile: self.profile(),
+            AccountAuthorization::AccountKnown {
+                account: self.account(),
                 signature,
             }
         } else {
-            AccountAuthorization::ProfileReveal {
+            AccountAuthorization::AccountReveal {
                 public_key: self.public_key.clone(),
                 signature,
             }
@@ -202,12 +202,12 @@ impl ProfileWallet {
 
     pub fn sign_asset_intent(
         &self,
-        action: xparq::transaction::AssetInstruction,
+        action: kernel::transaction::AssetInstruction,
         nonce: u64,
         public_key_known: bool,
-    ) -> Result<AuthorizedAccountIntent<xparq::transaction::AssetIntent>, String> {
+    ) -> Result<AuthorizedAccountIntent<kernel::transaction::AssetIntent>, String> {
         self.sign_account_intent(
-            xparq::transaction::AssetIntent::new(action, self.address, nonce),
+            kernel::transaction::AssetIntent::new(action, self.address, nonce),
             public_key_known,
         )
     }
@@ -217,27 +217,27 @@ impl ProfileWallet {
         name: String,
         module: Vec<u8>,
         nonce: u64,
-    ) -> Result<xparq::common::ExtensionCall, String> {
-        let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
-        xparq::extension::WasmDeployCall::sign(
+    ) -> Result<kernel::common::ExtensionCall, String> {
+        let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
+        kernel::extension::WasmDeployCall::sign(
             chain.genesis_hash,
             name,
             module,
             nonce,
             &self.signing_seed,
         )
-        .and_then(xparq::extension::WasmDeployCall::into_extension_call)
+        .and_then(kernel::extension::WasmDeployCall::into_extension_call)
         .map_err(|error| format!("WASM deploy call signing failed: {error:?}"))
     }
 
     pub fn sign_wasm_app_call(
         &self,
-        extension_id: xparq::common::ExtensionHash,
+        extension_id: kernel::common::ExtensionHash,
         payload: Vec<u8>,
         nonce: u64,
-    ) -> Result<xparq::common::ExtensionCall, String> {
-        let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
-        xparq::extension::WasmAppCall::sign(
+    ) -> Result<kernel::common::ExtensionCall, String> {
+        let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
+        kernel::extension::WasmAppCall::sign(
             chain.genesis_hash,
             extension_id,
             payload,
@@ -253,11 +253,11 @@ impl ProfileWallet {
 mod tests {
     use super::*;
 
-    /* Legacy wallet tests removed with the profile-only chain reset.
+    /* Legacy wallet tests removed with the account-only chain reset.
     #[test]
     fn wallet_file_roundtrip_preserves_signing_identity() {
-        let mnemonic = encode_xparq_mnemonic(&[7; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
-        let mut wallet = wallet_from_xparq_mnemonic(&mnemonic).unwrap();
+        let mnemonic = encode_bip39_mnemonic(&[7; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+        let mut wallet = wallet_from_bip39_mnemonic(&mnemonic).unwrap();
         wallet.mnemonic = Some(mnemonic.clone());
         let encoded = wallet_file_bytes(&wallet).unwrap();
         let decoded = wallet_from_file_bytes(&encoded).unwrap();
@@ -278,8 +278,8 @@ mod tests {
 
     #[test]
     fn wallet_address_reader_accepts_legacy_version_field() {
-        let mnemonic = encode_xparq_mnemonic(&[8; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
-        let wallet = wallet_from_xparq_mnemonic(&mnemonic).unwrap();
+        let mnemonic = encode_bip39_mnemonic(&[8; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+        let wallet = wallet_from_bip39_mnemonic(&mnemonic).unwrap();
         let encoded = serde_json::to_vec(&serde_json::json!({
             "version": 1,
             "address": wallet_address_string(&wallet),
@@ -292,12 +292,12 @@ mod tests {
 
     #[test]
     fn mnemonic_restore_preserves_signing_identity() {
-        let mnemonic = encode_xparq_mnemonic(&[9; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
-        let mut first = wallet_from_xparq_mnemonic(&mnemonic).unwrap();
+        let mnemonic = encode_bip39_mnemonic(&[9; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+        let mut first = wallet_from_bip39_mnemonic(&mnemonic).unwrap();
         first.mnemonic = Some(mnemonic.clone());
         let first_file = wallet_file_bytes(&first).unwrap();
 
-        let mut restored = wallet_from_xparq_mnemonic(&mnemonic).unwrap();
+        let mut restored = wallet_from_bip39_mnemonic(&mnemonic).unwrap();
         restored.mnemonic = Some(mnemonic);
         let restored_file = wallet_file_bytes(&restored).unwrap();
 
@@ -311,9 +311,9 @@ mod tests {
 
     #[test]
     fn mnemonic_restore_preserves_falcon_signing_identity() {
-        let mnemonic = encode_xparq_mnemonic(&[10; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
-        let first = falcon_wallet_from_xparq_mnemonic(&mnemonic).unwrap();
-        let restored = falcon_wallet_from_xparq_mnemonic(&mnemonic).unwrap();
+        let mnemonic = encode_bip39_mnemonic(&[10; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+        let first = falcon_wallet_from_bip39_mnemonic(&mnemonic).unwrap();
+        let restored = falcon_wallet_from_bip39_mnemonic(&mnemonic).unwrap();
         assert_eq!(first.address, restored.address);
         assert_eq!(first.public_key, restored.public_key);
         assert_eq!(first.secret_key, restored.secret_key);
@@ -321,19 +321,19 @@ mod tests {
 
     */
     #[test]
-    fn mnemonic_derives_distinct_recoverable_profile_addresses() {
-        let mnemonic = encode_xparq_mnemonic(&[12; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
-        let profiles = [
-            SignatureProfile::MlDsa44,
-            SignatureProfile::MlDsa65,
-            SignatureProfile::MlDsa87,
-            SignatureProfile::Falcon512,
-            SignatureProfile::Falcon1024,
+    fn mnemonic_derives_distinct_recoverable_account_addresses() {
+        let mnemonic = encode_bip39_mnemonic(&[12; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+        let accounts = [
+            Signature::MlDsa44,
+            Signature::MlDsa65,
+            Signature::MlDsa87,
+            Signature::Falcon512,
+            Signature::Falcon1024,
         ];
         let first =
-            profiles.map(|profile| profile_wallet_from_xparq_mnemonic(&mnemonic, profile).unwrap());
+            accounts.map(|account| account_wallet_from_bip39_mnemonic(&mnemonic, account).unwrap());
         let second =
-            profiles.map(|profile| profile_wallet_from_xparq_mnemonic(&mnemonic, profile).unwrap());
+            accounts.map(|account| account_wallet_from_bip39_mnemonic(&mnemonic, account).unwrap());
         for (left, right) in first.iter().zip(&second) {
             assert_eq!(left.address, right.address);
         }
@@ -341,22 +341,22 @@ mod tests {
             .iter()
             .map(|wallet| wallet.address)
             .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(unique.len(), profiles.len());
+        assert_eq!(unique.len(), accounts.len());
     }
 
     #[test]
-    fn profile_wallet_file_roundtrip_preserves_profile_and_identity() {
-        let mnemonic = encode_xparq_mnemonic(&[13; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
-        for profile in [
-            SignatureProfile::MlDsa44,
-            SignatureProfile::MlDsa65,
-            SignatureProfile::MlDsa87,
-            SignatureProfile::Falcon512,
-            SignatureProfile::Falcon1024,
+    fn account_wallet_file_roundtrip_preserves_account_and_identity() {
+        let mnemonic = encode_bip39_mnemonic(&[13; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+        for account in [
+            Signature::MlDsa44,
+            Signature::MlDsa65,
+            Signature::MlDsa87,
+            Signature::Falcon512,
+            Signature::Falcon1024,
         ] {
-            let mut wallet = profile_wallet_from_xparq_mnemonic(&mnemonic, profile).unwrap();
+            let mut wallet = account_wallet_from_bip39_mnemonic(&mnemonic, account).unwrap();
             wallet.mnemonic = Some(mnemonic.clone());
-            let bytes = profile_wallet_file_bytes(&wallet).unwrap();
+            let bytes = account_wallet_file_bytes(&wallet).unwrap();
             let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(json["public_key"], hex::encode(&wallet.public_key.bytes));
             assert_eq!(
@@ -364,29 +364,29 @@ mod tests {
                 hex::encode(wallet.signing_seed.to_bytes())
             );
             assert_eq!(
-                wallet_file_signature_profile(&bytes).unwrap(),
-                Some(profile)
+                wallet_file_signature_account(&bytes).unwrap(),
+                Some(account)
             );
-            let restored = profile_wallet_from_file_bytes(&bytes).unwrap();
-            assert_eq!(restored.profile(), profile);
+            let restored = account_wallet_from_file_bytes(&bytes).unwrap();
+            assert_eq!(restored.account(), account);
             assert_eq!(restored.address, wallet.address);
             assert_eq!(restored.public_key, wallet.public_key);
         }
     }
 
     #[test]
-    fn profile_wallet_file_rejects_keys_that_do_not_match_recovery_material() {
-        let mnemonic = encode_xparq_mnemonic(&[14; XPARQ_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+    fn account_wallet_file_rejects_keys_that_do_not_match_recovery_material() {
+        let mnemonic = encode_bip39_mnemonic(&[14; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
         let mut wallet =
-            profile_wallet_from_xparq_mnemonic(&mnemonic, SignatureProfile::MlDsa44).unwrap();
+            account_wallet_from_bip39_mnemonic(&mnemonic, Signature::MlDsa44).unwrap();
         wallet.mnemonic = Some(mnemonic);
-        let bytes = profile_wallet_file_bytes(&wallet).unwrap();
+        let bytes = account_wallet_file_bytes(&wallet).unwrap();
         let mut json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         json["public_key"] = serde_json::Value::String("00".repeat(wallet.public_key.bytes.len()));
         let tampered_public = serde_json::to_vec(&json).unwrap();
         assert!(
-            profile_wallet_from_file_bytes(&tampered_public)
+            account_wallet_from_file_bytes(&tampered_public)
                 .unwrap_err()
                 .contains("public key does not match")
         );
@@ -395,7 +395,7 @@ mod tests {
         json["private_key"] = serde_json::Value::String("00".repeat(32));
         let tampered_private = serde_json::to_vec(&json).unwrap();
         assert!(
-            profile_wallet_from_file_bytes(&tampered_private)
+            account_wallet_from_file_bytes(&tampered_private)
                 .unwrap_err()
                 .contains("private key does not match")
         );

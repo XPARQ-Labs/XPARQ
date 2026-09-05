@@ -18,7 +18,7 @@ use crate::sync::{
     decode_header_chain_chunk,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
-use xparq::{
+use kernel::{
     block::{Block, Emission, Height, Nonce},
     codec::{block_bytes, decode_block},
     coin::Zeno,
@@ -34,8 +34,8 @@ use xparq::{
 };
 
 const NODE_ID_FILE: &str = "node-id";
-const MAX_STORED_BLOCK_SIZE: usize = xparq::block::MAX_BLOCK_WEIGHT + 1024;
-const MAX_STORED_TRANSACTION_SIZE: usize = xparq::block::MAX_BLOCK_WEIGHT;
+const MAX_STORED_BLOCK_SIZE: usize = kernel::block::MAX_BLOCK_WEIGHT + 1024;
+const MAX_STORED_TRANSACTION_SIZE: usize = kernel::block::MAX_BLOCK_WEIGHT;
 const MAX_STORED_MEMPOOL_SIZE: u64 = 64 * 1024 * 1024;
 const MAX_RPC_HEADER_SIZE: usize = 16 * 1024;
 const MAX_ACCOUNT_UTXOS_PER_PAGE: usize = 1_000;
@@ -46,7 +46,7 @@ const API_DOCS_HTML: &[u8] = br#"<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>XPARQ Node RPC API</title>
+  <title>kernel Node RPC API</title>
 </head>
 <body>
   <script id="api-reference" data-url="/openapi.json"></script>
@@ -99,7 +99,7 @@ const DEFAULT_NAT_LEASE: Duration = Duration::from_secs(3_600);
 struct HeaderSyncResult {
     ancestor_height: Height,
     ancestor_hash: BlockHash,
-    headers: Vec<xparq::consensus::HeaderAtHeight>,
+    headers: Vec<kernel::consensus::HeaderAtHeight>,
     peer_work: Work,
     peer_weight: u64,
     preferred: bool,
@@ -148,7 +148,7 @@ struct ConnectedPeer {
 
 struct HandshakeExchange {
     peer: Handshake,
-    local_headers: Vec<(Height, xparq::block::Header)>,
+    local_headers: Vec<(Height, kernel::block::Header)>,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
@@ -248,7 +248,7 @@ fn extract_extension_packages(args: Vec<String>) -> Result<(Vec<String>, Vec<Pat
 fn initialize_extensions(package_paths: &[PathBuf]) -> Result<(), String> {
     let mut wasm_extensions = Vec::with_capacity(package_paths.len());
     for path in package_paths {
-        let package = xparq::extension::WasmExtensionPackage::read(path)
+        let package = kernel::extension::WasmExtensionPackage::read(path)
             .map_err(|error| format!("load WASM extension `{}`: {error}", path.display()))?;
         let extension = package
             .compile()
@@ -256,7 +256,7 @@ fn initialize_extensions(package_paths: &[PathBuf]) -> Result<(), String> {
         wasm_extensions.push(extension);
     }
     wasm_extensions.sort_by_key(|extension| extension.manifest().extension_id);
-    xparq::extension::configure_wasm_chain_spec(
+    kernel::extension::configure_wasm_chain_spec(
         wasm_extensions
             .iter()
             .map(|extension| extension.manifest().clone())
@@ -264,10 +264,10 @@ fn initialize_extensions(package_paths: &[PathBuf]) -> Result<(), String> {
     )
     .map_err(|error| format!("configure WASM chain specification: {error:?}"))?;
 
-    let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
-    let mut registry = xparq::extension::ExtensionRegistry::with_chain_id(chain.genesis_hash);
+    let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
+    let mut registry = kernel::extension::ExtensionRegistry::with_chain_id(chain.genesis_hash);
     registry
-        .register(xparq::extension::WasmDeployExtension::new(
+        .register(kernel::extension::WasmDeployExtension::new(
             chain.genesis_hash,
         ))
         .map_err(|error| format!("register WASM deploy extension: {error:?}"))?;
@@ -276,7 +276,7 @@ fn initialize_extensions(package_paths: &[PathBuf]) -> Result<(), String> {
             .register(extension)
             .map_err(|error| format!("register WASM extension: {error:?}"))?;
     }
-    xparq::extension::initialize_production_registry(registry)
+    kernel::extension::initialize_production_registry(registry)
         .map_err(|error| format!("initialize extension registry: {error:?}"))
 }
 
@@ -473,7 +473,7 @@ fn select_block_transactions(
         let mut candidate = selected.clone();
         candidate.push(transaction.clone());
         let block = candidate_block(ledger, miner, candidate.clone())?;
-        if block.block_weight() as usize > xparq::block::MAX_BLOCK_WEIGHT {
+        if block.block_weight() as usize > kernel::block::MAX_BLOCK_WEIGHT {
             break;
         }
         selected = candidate;
@@ -518,7 +518,7 @@ fn expected_next_emission(ledger: &Ledger) -> Result<Zeno, String> {
             .map_or(0, |height| height.0.saturating_add(1)),
     );
     let parent_emission = if height.0 <= 1 {
-        xparq::consensus::initial_block_emission()
+        kernel::consensus::initial_block_emission()
     } else {
         ledger
             .chain
@@ -580,7 +580,7 @@ fn account_response(
     mempool: &[AuthorizedTransaction],
     address: Address,
     utxo_offset: usize,
-    utxo_after: Option<xparq::coin::CoinHash>,
+    utxo_after: Option<kernel::coin::CoinHash>,
 ) -> Result<serde_json::Value, String> {
     let next_height = ledger
         .tip_height()
@@ -622,11 +622,11 @@ fn account_response(
     let next_utxo_cursor = next_utxo_offset
         .and_then(|_| account_utxos.get(page_start + utxos.len().saturating_sub(1)))
         .map(|utxo| utxo.coin.utxo.to_string());
-    let registered_signature_profile = ledger
+    let registered_signature_account = ledger
         .state()
         .account_keys
-        .get_profile(&address)
-        .map(|key| key.profile.as_str());
+        .get_account(&address)
+        .map(|key| key.account.as_str());
     let utxo_snapshot_entries = account_utxos
         .iter()
         .map(|utxo| {
@@ -637,21 +637,21 @@ fn account_response(
             )
         })
         .collect::<Vec<_>>();
-    let utxo_snapshot_bytes = xparq::common::canonical_bytes(&(
+    let utxo_snapshot_bytes = kernel::common::canonical_bytes(&(
         address,
-        registered_signature_profile,
+        registered_signature_account,
         utxo_snapshot_entries,
     ))
     .map_err(|error| format!("encode account UTXO snapshot: {error}"))?;
-    let utxo_snapshot = xparq::crypto::domain_hash(
-        xparq::crypto::HashDomain::AccountState,
+    let utxo_snapshot = kernel::crypto::domain_hash(
+        kernel::crypto::HashDomain::AccountState,
         &utxo_snapshot_bytes,
     );
     let assets = account_asset_balances(ledger, address)?;
     Ok(serde_json::json!({
-        "address": xparq::crypto::address_to_string(&address),
-        "public_key_registered": registered_signature_profile.is_some(),
-        "signature_profile": registered_signature_profile,
+        "address": kernel::crypto::address_to_string(&address),
+        "public_key_registered": registered_signature_account.is_some(),
+        "signature_account": registered_signature_account,
         "utxo_snapshot": hex::encode(utxo_snapshot.0),
         "tip_height": ledger.tip_height().map_or(0, |height| height.0),
         "next_height": next_height,
@@ -695,7 +695,7 @@ fn balance_response(
         .checked_sub(reserved)
         .ok_or("reserved account balance exceeds total")?;
     Ok(serde_json::json!({
-        "address": xparq::crypto::address_to_string(&address),
+        "address": kernel::crypto::address_to_string(&address),
         "tip_height": ledger.tip_height().map_or(0, |height| height.0),
         "total": total.as_zeno(),
         "available": available.as_zeno(),
@@ -747,7 +747,7 @@ fn account_asset_balances(
 
 fn account_asset_shares(
     ledger: &Ledger,
-    asset_id: xparq::asset::AssetHash,
+    asset_id: kernel::asset::AssetHash,
     address: Address,
 ) -> Vec<serde_json::Value> {
     ledger
@@ -798,7 +798,7 @@ fn explorer_address_response(
         if let Some(emission) = block.emission().filter(|emission| emission.to == address) {
             emission_count = emission_count.saturating_add(1);
             if include_emissions {
-                let protocol_burn = xparq::consensus::MINER_PROTOCOL_BURN;
+                let protocol_burn = kernel::consensus::MINER_PROTOCOL_BURN;
                 let miner_emission = emission
                     .subsidy
                     .checked_sub(protocol_burn)
@@ -825,7 +825,7 @@ fn explorer_address_response(
     activities.reverse();
 
     Ok(serde_json::json!({
-        "address": xparq::crypto::address_to_string(&address),
+        "address": kernel::crypto::address_to_string(&address),
         "tip_height": ledger.tip_height().map_or(0, |height| height.0),
         "balance": {
             "total": total.as_zeno(),
@@ -926,7 +926,7 @@ fn explorer_transaction_response(
 fn transaction_response(transaction: &AuthorizedTransaction, miner: Address) -> serde_json::Value {
     match transaction {
         AuthorizedTransaction::Coin(tx) => serde_json::json!({
-            "sender": xparq::crypto::address_to_string(&tx.intent.sender),
+            "sender": kernel::crypto::address_to_string(&tx.intent.sender),
             "outputs": public_outputs_response(&tx.intent.outputs, miner, Some(tx.intent.sender)),
         }),
         AuthorizedTransaction::Asset(tx) => asset_transaction_response(tx, miner),
@@ -935,12 +935,12 @@ fn transaction_response(transaction: &AuthorizedTransaction, miner: Address) -> 
 }
 
 fn asset_transaction_response(
-    transaction: &xparq::transaction::AuthorizedAssetTransaction,
+    transaction: &kernel::transaction::AuthorizedAssetTransaction,
     miner: Address,
 ) -> serde_json::Value {
     let call = &transaction.call.intent;
     let instruction = match &call.instruction {
-        xparq::transaction::AssetInstruction::Register {
+        kernel::transaction::AssetInstruction::Register {
             name,
             symbol,
             decimals,
@@ -951,17 +951,17 @@ fn asset_transaction_response(
             "type": "register", "name": name, "symbol": symbol, "decimals": decimals,
             "max_supply": max_supply.to_string(), "initial_mint": initial_mint.to_string(),
             "mint_authority": asset_authority_response(*mint_authority),
-            "recipient": xparq::crypto::address_to_string(&call.signer),
+            "recipient": kernel::crypto::address_to_string(&call.signer),
         }),
-        xparq::transaction::AssetInstruction::Mint {
+        kernel::transaction::AssetInstruction::Mint {
             recipient, amount, ..
         } => serde_json::json!({
             "type": "mint", "recipient": asset_owner_response(*recipient), "amount": amount.to_string(),
         }),
-        xparq::transaction::AssetInstruction::Burn { inputs, .. } => {
+        kernel::transaction::AssetInstruction::Burn { inputs, .. } => {
             serde_json::json!({ "type": "burn", "inputs": inputs.iter().map(ToString::to_string).collect::<Vec<_>>() })
         }
-        xparq::transaction::AssetInstruction::Transfer {
+        kernel::transaction::AssetInstruction::Transfer {
             inputs, outputs, ..
         } => serde_json::json!({
             "type": "transfer",
@@ -974,10 +974,10 @@ fn asset_transaction_response(
     };
     serde_json::json!({
         "asset_id": call.asset_id().to_string(),
-        "signer": xparq::crypto::address_to_string(&call.signer),
+        "signer": kernel::crypto::address_to_string(&call.signer),
         "nonce": call.nonce,
         "asset_instruction": instruction,
-        "payment_sender": xparq::crypto::address_to_string(&transaction.payment.intent.sender),
+        "payment_sender": kernel::crypto::address_to_string(&transaction.payment.intent.sender),
         "payment_outputs": public_outputs_response(&transaction.payment.intent.outputs, miner, Some(transaction.payment.intent.sender)),
     })
 }
@@ -986,7 +986,7 @@ fn asset_owner_response(owner: Authority<Address>) -> serde_json::Value {
     match owner {
         Authority::Address(address) => serde_json::json!({
             "type": "account",
-            "address": xparq::crypto::address_to_string(&address),
+            "address": kernel::crypto::address_to_string(&address),
         }),
         Authority::Extension(program) => serde_json::json!({
             "type": "program",
@@ -996,21 +996,21 @@ fn asset_owner_response(owner: Authority<Address>) -> serde_json::Value {
 }
 
 fn extension_transaction_response(
-    transaction: &xparq::transaction::AuthorizedExtensionTransaction,
+    transaction: &kernel::transaction::AuthorizedExtensionTransaction,
     miner: Address,
 ) -> serde_json::Value {
     let base = serde_json::json!({
         "extension_id": transaction.call.extension_id().to_string(),
         "payload_size": transaction.call.payload().len(),
-        "fee_sender": xparq::crypto::address_to_string(&transaction.fee.intent.sender),
+        "fee_sender": kernel::crypto::address_to_string(&transaction.fee.intent.sender),
         "fee_outputs": public_outputs_response(
             &transaction.fee.intent.outputs,
             miner,
             Some(transaction.fee.intent.sender),
         ),
     });
-    if transaction.call.extension_id() == xparq::extension::wasm_deploy_extension_id() {
-        let Ok(call) = xparq::extension::WasmDeployCall::from_extension_call(&transaction.call)
+    if transaction.call.extension_id() == kernel::extension::wasm_deploy_extension_id() {
+        let Ok(call) = kernel::extension::WasmDeployCall::from_extension_call(&transaction.call)
         else {
             return base;
         };
@@ -1025,7 +1025,7 @@ fn extension_transaction_response(
         object.insert("wasm_name".into(), serde_json::json!(call.name));
         object.insert(
             "wasm_code_hash".into(),
-            serde_json::json!(hex::encode(xparq::extension::wasm_code_hash(&call.module))),
+            serde_json::json!(hex::encode(kernel::extension::wasm_code_hash(&call.module))),
         );
         object.insert(
             "wasm_code_size".into(),
@@ -1033,12 +1033,12 @@ fn extension_transaction_response(
         );
         object.insert(
             "signer".into(),
-            serde_json::json!(xparq::crypto::address_to_string(&call.signer)),
+            serde_json::json!(kernel::crypto::address_to_string(&call.signer)),
         );
         object.insert("nonce".into(), serde_json::json!(call.nonce));
         object.insert(
             "activation_delay_blocks".into(),
-            serde_json::json!(xparq::extension::WASM_DEPLOY_ACTIVATION_DELAY),
+            serde_json::json!(kernel::extension::WASM_DEPLOY_ACTIVATION_DELAY),
         );
         return response;
     }
@@ -1055,7 +1055,7 @@ fn public_outputs_response(
         .map(|output| {
             let (address, output_type, role) = match output.output {
                 Recipient::Address(address) => (
-                    Some(xparq::crypto::address_to_string(&address)),
+                    Some(kernel::crypto::address_to_string(&address)),
                     "address",
                     if sender == Some(address) {
                         "change"
@@ -1064,7 +1064,7 @@ fn public_outputs_response(
                     },
                 ),
                 Recipient::BlockMiner => (
-                    Some(xparq::crypto::address_to_string(&miner)),
+                    Some(kernel::crypto::address_to_string(&miner)),
                     "miner",
                     "miner_fee",
                 ),
@@ -1078,7 +1078,7 @@ fn public_outputs_response(
             serde_json::json!({
                 "address": address,
                 "amount": output.amount.as_zeno(),
-                "unit": xparq::coin::UNIT_NAME,
+                "unit": kernel::coin::UNIT_NAME,
                 "type": output_type,
                 "role": role,
             })
@@ -1167,7 +1167,7 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
         );
     }
     if method == "POST" && route == "/extension/preview" {
-        let call: xparq::common::ExtensionCall = canonical_decode(&request.body)
+        let call: kernel::common::ExtensionCall = canonical_decode(&request.body)
             .map_err(|error| format!("invalid extension call: {error}"))?;
         let ledger = load_or_initialize(database)?;
         let height = Height(ledger.tip_height().map_or(0, |tip| tip.0.saturating_add(1)));
@@ -1175,7 +1175,7 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             .preview_extension_created_state_weight(&call, height)
             .map_err(|error| error.to_string())?;
         let state_burn = created_state_weight
-            .checked_mul(xparq::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT)
+            .checked_mul(kernel::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT)
             .ok_or("extension preview state burn overflow")?;
         return write_http_response(
             stream,
@@ -1183,7 +1183,7 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             &serde_json::json!({
                 "height": height.0,
                 "created_state_weight": created_state_weight,
-                "state_burn_rate_zeno_per_weight": xparq::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT,
+                "state_burn_rate_zeno_per_weight": kernel::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT,
                 "state_burn": state_burn,
             }),
         );
@@ -1210,14 +1210,14 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             let emission = expected_next_emission(&ledger)?;
             serde_json::json!({
                 "minimum_fee_rate_zeno_per_byte": MIN_RELAY_FEE_ZENO_PER_BYTE,
-                "state_burn_algorithm": xparq::consensus::STATE_BURN_ALGORITHM,
+                "state_burn_algorithm": kernel::consensus::STATE_BURN_ALGORITHM,
                 "next_block_emission": emission.as_zeno(),
-                "state_burn_rate_zeno_per_weight": xparq::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT,
-                "empty_block_archival_bytes": xparq::consensus::EMPTY_BLOCK_ARCHIVAL_BYTES,
-                "coin_utxo_state_weight": xparq::consensus::COIN_UTXO_STATE_WEIGHT,
-                "empty_block_archival_burn": xparq::consensus::EMPTY_BLOCK_ARCHIVAL_BURN.as_zeno(),
-                "emission_utxo_state_growth_burn": xparq::consensus::EMISSION_UTXO_STATE_GROWTH_BURN.as_zeno(),
-                "miner_protocol_burn": xparq::consensus::MINER_PROTOCOL_BURN.as_zeno(),
+                "state_burn_rate_zeno_per_weight": kernel::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT,
+                "empty_block_archival_bytes": kernel::consensus::EMPTY_BLOCK_ARCHIVAL_BYTES,
+                "coin_utxo_state_weight": kernel::consensus::COIN_UTXO_STATE_WEIGHT,
+                "empty_block_archival_burn": kernel::consensus::EMPTY_BLOCK_ARCHIVAL_BURN.as_zeno(),
+                "emission_utxo_state_growth_burn": kernel::consensus::EMISSION_UTXO_STATE_GROWTH_BURN.as_zeno(),
+                "miner_protocol_burn": kernel::consensus::MINER_PROTOCOL_BURN.as_zeno(),
             })
         }
         "/blocks/latest" => latest_blocks_response(&ledger)?,
@@ -1273,7 +1273,7 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
                     "utxo_after" => {
                         utxo_after = Some(
                             value
-                                .parse::<xparq::coin::CoinHash>()
+                                .parse::<kernel::coin::CoinHash>()
                                 .map_err(|_| "invalid account UTXO cursor")?,
                         );
                     }
@@ -1325,7 +1325,7 @@ fn asset_nonce_response(
             .tip_height()
             .map_or(0, |height| height.0.saturating_add(1)),
     );
-    let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
+    let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
     for transaction in read_mempool(database)? {
         let validated = validate_transaction(transaction, chain, height.0, &state)
             .map_err(|error| format!("validate pending asset nonce: {error}"))?;
@@ -1335,7 +1335,7 @@ fn asset_nonce_response(
     }
     let nonce = state.assets.nonce(address);
     Ok(serde_json::json!({
-        "address": xparq::crypto::address_to_string(&address),
+        "address": kernel::crypto::address_to_string(&address),
         "nonce": nonce,
     }))
 }
@@ -1351,7 +1351,7 @@ fn wasm_nonce_response(
             .tip_height()
             .map_or(0, |height| height.0.saturating_add(1)),
     );
-    let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
+    let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
     for transaction in read_mempool(database)? {
         let validated = validate_transaction(transaction, chain, height.0, &state)
             .map_err(|error| format!("validate pending WASM deploy nonce: {error}"))?;
@@ -1361,11 +1361,11 @@ fn wasm_nonce_response(
     }
     let namespace = state
         .extensions
-        .namespace(xparq::extension::wasm_deploy_extension_id());
-    let nonce = xparq::extension::wasm_deploy_nonce(&namespace, address)
+        .namespace(kernel::extension::wasm_deploy_extension_id());
+    let nonce = kernel::extension::wasm_deploy_nonce(&namespace, address)
         .map_err(|error| format!("read WASM deploy nonce: {error:?}"))?;
     Ok(serde_json::json!({
-        "address": xparq::crypto::address_to_string(&address),
+        "address": kernel::crypto::address_to_string(&address),
         "nonce": nonce,
     }))
 }
@@ -1376,8 +1376,8 @@ fn wasm_extension_response(ledger: &Ledger, route: &str) -> Result<serde_json::V
     let namespace = ledger
         .state()
         .extensions
-        .namespace(xparq::extension::wasm_deploy_extension_id());
-    let package = xparq::extension::wasm_deployed_package(&namespace, extension_id)
+        .namespace(kernel::extension::wasm_deploy_extension_id());
+    let package = kernel::extension::wasm_deployed_package(&namespace, extension_id)
         .map_err(|error| format!("read WASM extension: {error:?}"))?
         .ok_or("WASM extension was not found")?;
     let tip_height = ledger.tip_height().map_or(0, |height| height.0);
@@ -1403,16 +1403,16 @@ fn wasm_app_nonce_response(ledger: &Ledger, route: &str) -> Result<serde_json::V
     let extension_id = parse_extension_id(extension)?;
     let address = parse_address(address)?;
     let namespace = ledger.state().extensions.namespace(extension_id);
-    let nonce = xparq::extension::wasm_app_nonce(&namespace, address)
+    let nonce = kernel::extension::wasm_app_nonce(&namespace, address)
         .map_err(|error| format!("read WASM application nonce: {error:?}"))?;
     Ok(serde_json::json!({
         "extension_id": extension_id.to_string(),
-        "address": xparq::crypto::address_to_string(&address),
+        "address": kernel::crypto::address_to_string(&address),
         "nonce": nonce,
     }))
 }
 
-fn parse_extension_id(value: &str) -> Result<xparq::common::ExtensionHash, String> {
+fn parse_extension_id(value: &str) -> Result<kernel::common::ExtensionHash, String> {
     value
         .parse()
         .map_err(|_| "invalid extension ID; expected extension:<64 lowercase hex>".into())
@@ -1424,7 +1424,7 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
     let asset_id = parts
         .first()
         .ok_or("missing asset id")?
-        .parse::<xparq::asset::AssetHash>()
+        .parse::<kernel::asset::AssetHash>()
         .map_err(|_| "invalid asset id")?;
     if parts.len() == 1 {
         let metadata = ledger
@@ -1440,7 +1440,7 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
             "decimals": metadata.decimals,
             "max_supply": metadata.max_supply.to_string(),
             "supply": supply.to_string(),
-            "creator": xparq::crypto::address_to_string(&metadata.creator),
+            "creator": kernel::crypto::address_to_string(&metadata.creator),
             "mint_authority": asset_authority_response(metadata.mint_authority),
         }));
     }
@@ -1449,7 +1449,7 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
         let balance = ledger.state().assets.balance(asset_id, address);
         return Ok(serde_json::json!({
             "asset_id": asset_id.to_string(),
-            "address": xparq::crypto::address_to_string(&address),
+            "address": kernel::crypto::address_to_string(&address),
             "balance": balance.to_string(),
             "shares": account_asset_shares(ledger, asset_id, address),
         }));
@@ -1470,7 +1470,7 @@ fn asset_authority_response(authority: Option<Authority<Address>>) -> serde_json
     match authority {
         Some(Authority::Address(address)) => serde_json::json!({
             "type": "account",
-            "address": xparq::crypto::address_to_string(&address),
+            "address": kernel::crypto::address_to_string(&address),
         }),
         Some(Authority::Extension(extension_id)) => serde_json::json!({
             "type": "program",
@@ -1566,8 +1566,8 @@ fn status_response(ledger: &Ledger) -> Result<serde_json::Value, String> {
         .chain
         .blocks()
         .filter(|block| !block.is_genesis())
-        .fold(xparq::consensus::Work::ZERO, |work, block| {
-            work.saturating_add(xparq::consensus::block_work(block.difficulty()))
+        .fold(kernel::consensus::Work::ZERO, |work, block| {
+            work.saturating_add(kernel::consensus::block_work(block.difficulty()))
         });
     let cumulative_weight = ledger
         .chain
@@ -1603,7 +1603,7 @@ fn block_response(block: &Block) -> Result<serde_json::Value, String> {
         .emission()
         .map_or(Zeno::from_zeno(0), |emission| emission.subsidy);
     let state_burn = if block.emission().is_some() {
-        xparq::consensus::MINER_PROTOCOL_BURN
+        kernel::consensus::MINER_PROTOCOL_BURN
     } else {
         Zeno::from_zeno(0)
     };
@@ -1640,7 +1640,7 @@ fn block_response(block: &Block) -> Result<serde_json::Value, String> {
         "transactions": block.transaction_count(),
         "transaction_ids": transaction_ids,
         "transaction_details": transaction_details,
-        "miner": xparq::crypto::address_to_string(&block.miner_address()),
+        "miner": kernel::crypto::address_to_string(&block.miner_address()),
         "subsidy": gross_subsidy.as_zeno(),
         "state_burn": state_burn.as_zeno(),
         "miner_emission": miner_emission.as_zeno(),
@@ -1904,7 +1904,7 @@ fn connect_peer_database(database: &Path, peer: &str) -> Result<ConnectedPeer, S
 fn serve_peer_requests(
     database: &Path,
     stream: &mut TcpStream,
-    session_headers: &[(Height, xparq::block::Header)],
+    session_headers: &[(Height, kernel::block::Header)],
 ) -> Result<PeerSessionOutcome, String> {
     serve_header_requests(stream, session_headers)?;
     serve_block_requests(database, stream)
@@ -1912,7 +1912,7 @@ fn serve_peer_requests(
 
 fn serve_header_requests(
     stream: &mut TcpStream,
-    headers: &[(Height, xparq::block::Header)],
+    headers: &[(Height, kernel::block::Header)],
 ) -> Result<(), String> {
     let mut requests = 0_usize;
     loop {
@@ -1940,7 +1940,7 @@ fn serve_header_requests(
             .iter()
             .skip(ancestor_index + 1)
             .take(MAX_HEADER_CHAIN_CHUNK_HEADERS)
-            .map(|(height, header)| xparq::consensus::HeaderAtHeight::new(*height, header.clone()))
+            .map(|(height, header)| kernel::consensus::HeaderAtHeight::new(*height, header.clone()))
             .collect::<Vec<_>>();
         if extension.is_empty() {
             let mut response = Vec::with_capacity(33);
@@ -2093,7 +2093,7 @@ fn gossip_inventory(database: &Path) -> Result<GossipInventory, String> {
         .chain
         .chain_headers()
         .into_iter()
-        .map(|(height, header)| xparq::consensus::HeaderAtHeight::new(height, header))
+        .map(|(height, header)| kernel::consensus::HeaderAtHeight::new(height, header))
         .collect::<Vec<_>>();
     let state = validated_header_state(&headers)?;
     let transactions = read_mempool(database)?;
@@ -2251,7 +2251,7 @@ fn gossip_outbound_session(
 fn canonical_headers_through(
     database: &Path,
     tip_hash: [u8; 32],
-) -> Result<Vec<(Height, xparq::block::Header)>, String> {
+) -> Result<Vec<(Height, kernel::block::Header)>, String> {
     let mut headers = cached_chain_headers(database)?;
     let Some(index) = headers
         .iter()
@@ -2545,7 +2545,7 @@ fn synchronize_headers(
 ) -> Result<HeaderSyncResult, String> {
     let local_headers = cached_chain_headers(database)?
         .into_iter()
-        .map(|(height, header)| xparq::consensus::HeaderAtHeight::new(height, header))
+        .map(|(height, header)| kernel::consensus::HeaderAtHeight::new(height, header))
         .collect::<Vec<_>>();
     let locator = header_locator(&local_headers)?;
     let mut validation_state = None;
@@ -2620,7 +2620,7 @@ fn synchronize_headers(
             ancestor_height = Some(current.height);
             ancestor_hash = Some(ancestor);
         }
-        let advanced = xparq::consensus::advance_header_validation_state_with_memory(
+        let advanced = kernel::consensus::advance_header_validation_state_with_memory(
             &current,
             &chunk.headers,
             pow_memory.get_or_insert_with(new_pow_memory),
@@ -2645,11 +2645,11 @@ fn synchronize_headers(
     }
 }
 
-fn map_peer_header_error(error: xparq::consensus::HeaderChainError) -> String {
+fn map_peer_header_error(error: kernel::consensus::HeaderChainError) -> String {
     let invalid_pow = matches!(
         error,
-        xparq::consensus::HeaderChainError::InvalidHeaderChain(
-            xparq::consensus::ForkChoiceError::InvalidProofOfWork(_)
+        kernel::consensus::HeaderChainError::InvalidHeaderChain(
+            kernel::consensus::ForkChoiceError::InvalidProofOfWork(_)
         )
     );
     if invalid_pow {
@@ -2719,7 +2719,7 @@ fn synchronize_blocks(
         .chain
         .chain_headers()
         .into_iter()
-        .map(|(height, header)| xparq::consensus::HeaderAtHeight::new(height, header))
+        .map(|(height, header)| kernel::consensus::HeaderAtHeight::new(height, header))
         .collect::<Vec<_>>();
     let current_state = validated_header_state(&current_headers)?;
     let current_tip = old_tip.ok_or("canonical chain has no tip during reorg")?;
@@ -2820,7 +2820,7 @@ fn reconcile_mempool(
             .tip_height()
             .map_or(0, |height| height.0.saturating_add(1)),
     );
-    let Ok(chain) = xparq::genesis::chain_context() else {
+    let Ok(chain) = kernel::genesis::chain_context() else {
         return Vec::new();
     };
     let mut state = ledger.state().clone();
@@ -2839,7 +2839,7 @@ fn reconcile_mempool(
         let Ok(encoded) = canonical_bytes(&transaction) else {
             continue;
         };
-        if encoded.len() > xparq::block::MAX_BLOCK_WEIGHT {
+        if encoded.len() > kernel::block::MAX_BLOCK_WEIGHT {
             continue;
         }
         if !meets_minimum_relay_fee(&transaction, encoded.len()) {
@@ -2860,7 +2860,7 @@ fn reconcile_mempool(
     retained
 }
 
-fn header_locator(headers: &[xparq::consensus::HeaderAtHeight]) -> Result<Vec<[u8; 32]>, String> {
+fn header_locator(headers: &[kernel::consensus::HeaderAtHeight]) -> Result<Vec<[u8; 32]>, String> {
     if headers.is_empty() {
         return Err("local header chain is empty".into());
     }
@@ -2884,9 +2884,9 @@ fn header_locator(headers: &[xparq::consensus::HeaderAtHeight]) -> Result<Vec<[u
 }
 
 fn local_header_state_at_hash(
-    headers: &[xparq::consensus::HeaderAtHeight],
+    headers: &[kernel::consensus::HeaderAtHeight],
     hash: [u8; 32],
-) -> Result<Option<xparq::consensus::HeaderValidationState>, String> {
+) -> Result<Option<kernel::consensus::HeaderValidationState>, String> {
     let Some(index) = headers
         .iter()
         .position(|header| header.hash().is_ok_and(|candidate| candidate.0 == hash))
@@ -2897,8 +2897,8 @@ fn local_header_state_at_hash(
 }
 
 fn validated_header_state(
-    headers: &[xparq::consensus::HeaderAtHeight],
-) -> Result<xparq::consensus::HeaderValidationState, String> {
+    headers: &[kernel::consensus::HeaderAtHeight],
+) -> Result<kernel::consensus::HeaderValidationState, String> {
     let tip = headers.last().ok_or("validated header chain is empty")?;
     if headers[0].height != Height(0)
         || headers[0].hash().map_err(|error| error.to_string())? != EXPECTED_GENESIS_HASH
@@ -2908,16 +2908,16 @@ fn validated_header_state(
     let cumulative_work = headers
         .iter()
         .skip(1)
-        .fold(xparq::consensus::Work::ZERO, |work, header| {
-            work.saturating_add(xparq::consensus::block_work(header.header.difficulty))
+        .fold(kernel::consensus::Work::ZERO, |work, header| {
+            work.saturating_add(kernel::consensus::block_work(header.header.difficulty))
         });
     let cumulative_weight = headers.iter().skip(1).fold(0_u64, |total, header| {
         total.saturating_add(u64::from(header.header.block_weight))
     });
     let start = headers
         .len()
-        .saturating_sub(xparq::consensus::RECENT_HEADER_WINDOW);
-    Ok(xparq::consensus::HeaderValidationState {
+        .saturating_sub(kernel::consensus::RECENT_HEADER_WINDOW);
+    Ok(kernel::consensus::HeaderValidationState {
         height: tip.height,
         header: tip.header.clone(),
         cumulative_work,
@@ -3011,7 +3011,7 @@ fn local_handshake(database: &Path, ledger: &Ledger) -> Result<Handshake, String
         .chain
         .chain_headers()
         .into_iter()
-        .map(|(height, header)| xparq::consensus::HeaderAtHeight::new(height, header))
+        .map(|(height, header)| kernel::consensus::HeaderAtHeight::new(height, header))
         .collect::<Vec<_>>();
     let state = validated_header_state(&headers)?;
     Ok(Handshake {
@@ -3148,7 +3148,7 @@ fn format_work(limbs: [u64; 8]) -> String {
         .collect()
 }
 
-fn reserved_coin_inputs(transactions: &[AuthorizedTransaction]) -> BTreeSet<xparq::coin::CoinHash> {
+fn reserved_coin_inputs(transactions: &[AuthorizedTransaction]) -> BTreeSet<kernel::coin::CoinHash> {
     transactions
         .iter()
         .flat_map(|transaction| match transaction {
@@ -3168,11 +3168,11 @@ fn validate_mempool(ledger: &Ledger, transactions: &[AuthorizedTransaction]) -> 
             .tip_height()
             .map_or(0, |height| height.0.saturating_add(1)),
     );
-    let chain = xparq::genesis::chain_context().map_err(|error| error.to_string())?;
+    let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
     let mut state = ledger.state().clone();
     for transaction in transactions {
         let encoded = canonical_bytes(transaction).map_err(|error| error.to_string())?;
-        if encoded.len() > xparq::block::MAX_BLOCK_WEIGHT {
+        if encoded.len() > kernel::block::MAX_BLOCK_WEIGHT {
             return Err("transaction cannot fit in a block".into());
         }
         let required_fee = minimum_relay_fee(encoded.len())?;
@@ -3206,10 +3206,10 @@ fn meets_minimum_relay_fee(transaction: &AuthorizedTransaction, encoded_size: us
 }
 
 fn transaction_miner_fee(transaction: &AuthorizedTransaction) -> Result<u64, String> {
-    fn fee_from_outputs(outputs: &[xparq::transaction::SpendOutput]) -> Result<u64, String> {
+    fn fee_from_outputs(outputs: &[kernel::transaction::SpendOutput]) -> Result<u64, String> {
         let mut fees = outputs
             .iter()
-            .filter(|output| output.output == xparq::transaction::Recipient::BlockMiner);
+            .filter(|output| output.output == kernel::transaction::Recipient::BlockMiner);
         let fee = fees.next().map_or(0, |output| output.amount.as_zeno());
         if fees.next().is_some() {
             return Err("transaction has multiple block-miner fee outputs".into());
@@ -3304,7 +3304,7 @@ fn persist_chain_and_mempool(
 
 fn parse_address(value: &str) -> Result<Address, String> {
     address_from_string(value)
-        .map_err(|_| "miner address must use canonical Qx hex with an XPARQ checksum".to_string())
+        .map_err(|_| "miner address must use canonical Qx hex with an kernel checksum".to_string())
 }
 
 fn check_database(path: Option<&str>) -> Result<(), String> {
@@ -3375,7 +3375,7 @@ fn load_or_initialize_uncached(path: &Path) -> Result<Ledger, String> {
     fs::create_dir_all(path).map_err(|error| format!("create database: {error}"))?;
     let block = genesis_block().map_err(|error| error.to_string())?;
     let mut ledger = Ledger::new();
-    xparq::consensus::apply_genesis(&mut ledger, block.clone(), EXPECTED_GENESIS_HASH)
+    kernel::consensus::apply_genesis(&mut ledger, block.clone(), EXPECTED_GENESIS_HASH)
         .map_err(|error| error.to_string())?;
     append_block(path, &block)?;
     Ok(ledger)
@@ -3395,7 +3395,7 @@ fn cached_ledger(path: &Path) -> Result<Option<Ledger>, String> {
         .map(|cached| cached.ledger.clone()))
 }
 
-fn cached_chain_headers(path: &Path) -> Result<Vec<(Height, xparq::block::Header)>, String> {
+fn cached_chain_headers(path: &Path) -> Result<Vec<(Height, kernel::block::Header)>, String> {
     ensure_ledger_cache(path)?;
     let cache = ledger_cache()
         .read()
@@ -3490,7 +3490,7 @@ fn load_existing(path: &Path) -> Result<Ledger, String> {
         Err(error) => eprintln!("node: snapshot ignored, using full replay: {error}"),
     }
     let mut ledger = Ledger::new();
-    xparq::consensus::apply_genesis(&mut ledger, genesis.clone(), EXPECTED_GENESIS_HASH)
+    kernel::consensus::apply_genesis(&mut ledger, genesis.clone(), EXPECTED_GENESIS_HASH)
         .map_err(|error| format!("invalid stored genesis: {error}"))?;
     replay_stored_blocks(path, ledger, rest)
 }
@@ -3551,13 +3551,13 @@ fn print_network_info() -> Result<(), String> {
         hex::encode(chain_spec_hash().map_err(|error| error.to_string())?.0)
     );
     println!("p2p_protocol: {P2P_PROTOCOL_VERSION}");
-    println!("pow: {}", xparq::consensus::POW_ALGORITHM);
-    println!("difficulty: {}", xparq::consensus::DIFFICULTY_ALGORITHM);
+    println!("pow: {}", kernel::consensus::POW_ALGORITHM);
+    println!("difficulty: {}", kernel::consensus::DIFFICULTY_ALGORITHM);
     Ok(())
 }
 
 fn inspect_extension_package(path: &str) -> Result<(), String> {
-    let package = xparq::extension::WasmExtensionPackage::read(path)
+    let package = kernel::extension::WasmExtensionPackage::read(path)
         .map_err(|error| format!("load WASM extension `{path}`: {error}"))?;
     let extension = package
         .compile()
@@ -3584,12 +3584,12 @@ fn build_extension_package(args: &[String]) -> Result<(), String> {
         .map_err(|_| "invalid extension activation height")?;
     let metadata = fs::metadata(wasm_path)
         .map_err(|error| format!("read WASM module metadata `{wasm_path}`: {error}"))?;
-    if metadata.len() > xparq::extension::WASM_CODE_MAX_SIZE as u64 {
+    if metadata.len() > kernel::extension::WASM_CODE_MAX_SIZE as u64 {
         return Err("WASM module exceeds the size limit".into());
     }
     let module =
         fs::read(wasm_path).map_err(|error| format!("read WASM module `{wasm_path}`: {error}"))?;
-    let package = xparq::extension::WasmExtensionPackage::new(
+    let package = kernel::extension::WasmExtensionPackage::new(
         name.clone(),
         Height(activation_height),
         module,
@@ -3693,20 +3693,20 @@ mod tests {
 
     #[test]
     fn asset_transaction_projection_exposes_asset_id_and_action() {
-        let chain = xparq::genesis::chain_context().unwrap();
-        let seed = xparq::crypto::ProfileSigningSeed::new(
-            xparq::crypto::SignatureProfile::MlDsa44,
+        let chain = kernel::genesis::chain_context().unwrap();
+        let seed = kernel::crypto::SigningSeed::new(
+            kernel::crypto::Signature::MlDsa44,
             [0x51; 32],
         );
         let public_key = seed.public_key();
-        let signer = xparq::crypto::address_from_profile_public_key(&public_key);
-        let asset_call = xparq::transaction::AssetIntent::new(
-            xparq::transaction::AssetInstruction::Register {
+        let signer = kernel::crypto::address_from_public_key(&public_key);
+        let asset_call = kernel::transaction::AssetIntent::new(
+            kernel::transaction::AssetInstruction::Register {
                 name: "Test Token".into(),
                 symbol: "TEST".into(),
                 decimals: 8,
-                max_supply: xparq::asset::Unit::from_units(100_000_000_000_000_000_000_000),
-                initial_mint: xparq::asset::Unit::from_units(1_000_000),
+                max_supply: kernel::asset::Unit::from_units(100_000_000_000_000_000_000_000),
+                initial_mint: kernel::asset::Unit::from_units(1_000_000),
                 mint_authority: Some(Authority::Address(signer)),
             },
             signer,
@@ -3714,24 +3714,24 @@ mod tests {
         );
         let signature = seed.sign(&asset_call.commitment(chain.genesis_hash).unwrap());
         let asset_id = asset_call.asset_id().to_string();
-        let transaction = xparq::transaction::AuthorizedAssetTransaction {
-            call: xparq::transaction::AuthorizedAccountIntent {
+        let transaction = kernel::transaction::AuthorizedAssetTransaction {
+            call: kernel::transaction::AuthorizedAccountIntent {
                 intent: asset_call,
-                authorization: xparq::transaction::AccountAuthorization::ProfileReveal {
+                authorization: kernel::transaction::AccountAuthorization::AccountReveal {
                     public_key,
                     signature,
                 },
             },
-            payment: xparq::transaction::AuthorizedAccountIntent {
-                intent: xparq::transaction::CoinIntent {
+            payment: kernel::transaction::AuthorizedAccountIntent {
+                intent: kernel::transaction::CoinIntent {
                     sender: Address::ZERO,
                     inputs: vec![],
                     outputs: vec![],
                 },
-                authorization: xparq::transaction::AccountAuthorization::ProfileKnown {
-                    profile: xparq::crypto::SignatureProfile::MlDsa44,
-                    signature: xparq::crypto::ProfileSignature {
-                        profile: xparq::crypto::SignatureProfile::MlDsa44,
+                authorization: kernel::transaction::AccountAuthorization::AccountKnown {
+                    account: kernel::crypto::Signature::MlDsa44,
+                    signature: kernel::crypto::AccountSignature {
+                        account: kernel::crypto::Signature::MlDsa44,
                         bytes: vec![],
                     },
                 },
@@ -3748,18 +3748,18 @@ mod tests {
 
     #[test]
     fn account_projection_lists_asset_supply_and_creator_shares() {
-        let seed = xparq::crypto::ProfileSigningSeed::new(
-            xparq::crypto::SignatureProfile::MlDsa44,
+        let seed = kernel::crypto::SigningSeed::new(
+            kernel::crypto::Signature::MlDsa44,
             [0x61; 32],
         );
-        let authority = xparq::crypto::address_from_profile_public_key(&seed.public_key());
-        let call = xparq::transaction::AssetIntent::new(
-            xparq::transaction::AssetInstruction::Register {
+        let authority = kernel::crypto::address_from_public_key(&seed.public_key());
+        let call = kernel::transaction::AssetIntent::new(
+            kernel::transaction::AssetInstruction::Register {
                 name: "Authority Asset".into(),
                 symbol: "AUTH".into(),
                 decimals: 0,
-                max_supply: xparq::asset::Unit::from_units(10),
-                initial_mint: xparq::asset::Unit::from_units(4),
+                max_supply: kernel::asset::Unit::from_units(10),
+                initial_mint: kernel::asset::Unit::from_units(4),
                 mint_authority: Some(Authority::Address(authority)),
             },
             authority,
@@ -3786,7 +3786,7 @@ mod tests {
 
     #[test]
     fn explorer_address_response_is_aggregate_only() {
-        let ledger = xparq::genesis::genesis_ledger().unwrap();
+        let ledger = kernel::genesis::genesis_ledger().unwrap();
         let response = explorer_address_response(&ledger, &[], Address([7; 20]), true).unwrap();
         assert_eq!(response["balance"]["total"], 0);
         assert_eq!(response["activity_count"], 0);
@@ -3795,17 +3795,17 @@ mod tests {
 
     #[test]
     fn explorer_activity_reports_net_transfer_for_sender_and_recipient() {
-        let mnemonic = xparq_wallet::encode_xparq_mnemonic(&[3; 16]).unwrap();
-        let sender = xparq_wallet::profile_wallet_from_xparq_mnemonic(
+        let mnemonic = wallet::encode_bip39_mnemonic(&[3; 16]).unwrap();
+        let sender = wallet::account_wallet_from_bip39_mnemonic(
             &mnemonic,
-            xparq::crypto::SignatureProfile::MlDsa44,
+            kernel::crypto::Signature::MlDsa44,
         )
         .unwrap();
         let recipient = Address([4; 20]);
         let miner = Address([5; 20]);
-        let intent = xparq::transaction::CoinIntent::new(
+        let intent = kernel::transaction::CoinIntent::new(
             sender.address,
-            vec![xparq::coin::CoinHash::from_bytes([6; 32])],
+            vec![kernel::coin::CoinHash::from_bytes([6; 32])],
             vec![
                 SpendOutput::new(recipient, Zeno::from_zeno(10)),
                 SpendOutput::new(sender.address, Zeno::from_zeno(5)),
@@ -3858,7 +3858,7 @@ mod tests {
 
     fn test_database(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "xparq-node-{label}-{}-{}",
+            "kernel-node-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

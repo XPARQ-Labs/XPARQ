@@ -142,8 +142,8 @@ impl ExtensionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crypto::primitives::Height;
     use std::collections::BTreeMap;
-    use xparq_crypto::primitives::Height;
 
     struct TestExtension {
         id: ExtensionHash,

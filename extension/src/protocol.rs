@@ -9,7 +9,7 @@ use std::fmt;
 use std::io::{Error as IoError, ErrorKind, Read};
 use std::str::FromStr;
 
-use xparq_crypto::primitives::{Height, domain_hash};
+use crypto::primitives::{Height, domain_hash};
 
 pub const EXTENSION_HASH_SIZE: usize = 32;
 pub const EXTENSION_HASH_PREFIX: &str = "extension:";

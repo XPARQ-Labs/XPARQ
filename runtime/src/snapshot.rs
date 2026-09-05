@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use xparq::{
+use kernel::{
     block::{Block, Height},
     common::{canonical_bytes, canonical_decode},
     crypto::{BlockHash, hash_bytes},
@@ -147,11 +147,11 @@ fn load_bytes(
 mod tests {
     use super::*;
     use std::fs;
-    use xparq::{consensus::apply_genesis, genesis::genesis_block};
+    use kernel::{consensus::apply_genesis, genesis::genesis_block};
 
     fn test_directory(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "xparq-snapshot-{label}-{}-{}",
+            "kernel-snapshot-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

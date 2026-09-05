@@ -7,21 +7,21 @@ use std::{
 };
 
 use serde::Deserialize;
-use xparq::asset::AssetHash;
-use xparq::common::Authority;
-use xparq::transaction::AssetInstruction;
-use xparq::{
+use kernel::asset::AssetHash;
+use kernel::common::Authority;
+use kernel::transaction::AssetInstruction;
+use kernel::{
     codec::canonical_bytes,
-    consensus::{DECIMALS, StateTransitionWeight, XPQ, Zeno, profile_key_state_weight},
-    crypto::{Address, SignatureProfile, address_from_string},
+    consensus::{DECIMALS, StateTransitionWeight, XPQ, Zeno, account_key_state_weight},
+    crypto::{Address, Signature, address_from_string},
     transaction::{
         AuthorizedAssetTransaction, AuthorizedExtensionTransaction, AuthorizedTransaction,
         CoinIntent, SpendOutput,
     },
 };
-use xparq_wallet::{
-    ProfileWallet, generate_xparq_mnemonic, profile_wallet_file_bytes,
-    profile_wallet_from_file_bytes, profile_wallet_from_xparq_mnemonic,
+use wallet::{
+    AccountWallet, generate_bip39_mnemonic, account_wallet_file_bytes,
+    account_wallet_from_file_bytes, account_wallet_from_bip39_mnemonic,
     wallet_address_from_file_bytes,
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -30,7 +30,7 @@ const DEFAULT_WALLET_PATH: &str = "wallet.json";
 const AUTOMATIC_FEE_ZENO_PER_BYTE: u64 = 1;
 const MAX_FEE_CONVERGENCE_ROUNDS: usize = 8;
 
-struct LoadedWallet(ProfileWallet);
+struct LoadedWallet(AccountWallet);
 
 impl LoadedWallet {
     fn address(&self) -> Address {
@@ -41,7 +41,7 @@ impl LoadedWallet {
         if public_key_known {
             Ok(0)
         } else {
-            profile_key_state_weight(&self.0.public_key).map_err(|error| error.to_string())
+            account_key_state_weight(&self.0.public_key).map_err(|error| error.to_string())
         }
     }
 
@@ -49,7 +49,7 @@ impl LoadedWallet {
         &self,
         intent: CoinIntent,
         public_key_known: bool,
-    ) -> Result<xparq::transaction::AuthorizedAccountIntent<CoinIntent>, String> {
+    ) -> Result<kernel::transaction::AuthorizedAccountIntent<CoinIntent>, String> {
         self.0.sign_account_intent(intent, public_key_known)
     }
 }
@@ -240,14 +240,14 @@ fn asset_register(args: &[String]) -> Result<(), String> {
 fn normalize_asset_name(name: &str) -> Result<String, String> {
     let normalized = name.trim().to_string();
     if normalized.is_empty()
-        || normalized.len() > xparq::asset::ASSET_NAME_MAX_LEN
+        || normalized.len() > kernel::asset::ASSET_NAME_MAX_LEN
         || !normalized
             .bytes()
             .all(|byte| byte == b' ' || byte.is_ascii_graphic())
     {
         return Err(format!(
             "invalid token name; use 1-{} printable ASCII characters",
-            xparq::asset::ASSET_NAME_MAX_LEN
+            kernel::asset::ASSET_NAME_MAX_LEN
         ));
     }
     Ok(normalized)
@@ -256,14 +256,14 @@ fn normalize_asset_name(name: &str) -> Result<String, String> {
 fn normalize_asset_symbol(symbol: &str) -> Result<String, String> {
     let normalized = symbol.to_ascii_uppercase();
     if normalized.is_empty()
-        || normalized.len() > xparq::asset::ASSET_SYMBOL_MAX_LEN
+        || normalized.len() > kernel::asset::ASSET_SYMBOL_MAX_LEN
         || !normalized
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
     {
         return Err(format!(
             "invalid token symbol; use 1-{} ASCII letters A-Z or digits",
-            xparq::asset::ASSET_SYMBOL_MAX_LEN
+            kernel::asset::ASSET_SYMBOL_MAX_LEN
         ));
     }
     Ok(normalized)
@@ -300,7 +300,7 @@ fn asset_transfer(args: &[String]) -> Result<(), String> {
         AssetInstruction::Transfer {
             asset_id,
             inputs: asset_inputs(args)?,
-            outputs: vec![xparq::asset::AssetTransferOutput {
+            outputs: vec![kernel::asset::AssetTransferOutput {
                 recipient: Authority::Address(address_option(args, "--to")?),
                 amount: parse_asset_amount(args, "--amount", decimals)?,
             }],
@@ -316,7 +316,7 @@ fn asset_deposit(args: &[String]) -> Result<(), String> {
         AssetInstruction::Transfer {
             asset_id,
             inputs: asset_inputs(args)?,
-            outputs: vec![xparq::asset::AssetTransferOutput {
+            outputs: vec![kernel::asset::AssetTransferOutput {
                 recipient: Authority::Extension(parse_extension_id(
                     option(args, "--extension").ok_or("missing --extension")?,
                 )?),
@@ -348,7 +348,7 @@ fn asset_balance(args: &[String]) -> Result<(), String> {
         &format!(
             "/asset/{}/balance/{}",
             parse_asset_id(args)?,
-            xparq::crypto::address_to_string(&address)
+            kernel::crypto::address_to_string(&address)
         ),
     )?;
     println!(
@@ -362,7 +362,7 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
     reject_manual_fee(args)?;
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    let address = xparq::crypto::address_to_string(&wallet.address());
+    let address = kernel::crypto::address_to_string(&wallet.address());
     let nonce = http_get_json::<AssetNonceResponse>(rpc, &format!("/asset/nonce/{address}"))?.nonce;
     let public_key_known = account_public_key_registered(rpc, &wallet);
     let call = wallet
@@ -408,17 +408,17 @@ fn wasm_deploy(args: &[String]) -> Result<(), String> {
     let module_path = option(args, "--wasm").ok_or("missing --wasm")?;
     let metadata = fs::metadata(module_path)
         .map_err(|error| format!("read WASM module metadata `{module_path}`: {error}"))?;
-    if metadata.len() > xparq::extension::WASM_CODE_MAX_SIZE as u64 {
+    if metadata.len() > kernel::extension::WASM_CODE_MAX_SIZE as u64 {
         return Err("WASM module exceeds the size limit".into());
     }
     let module = fs::read(module_path)
         .map_err(|error| format!("read WASM module `{module_path}`: {error}"))?;
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    let address = xparq::crypto::address_to_string(&wallet.address());
+    let address = kernel::crypto::address_to_string(&wallet.address());
     let nonce = http_get_json::<AssetNonceResponse>(rpc, &format!("/wasm/nonce/{address}"))?.nonce;
     let call = wallet.0.sign_wasm_deploy_call(name, module, nonce)?;
-    let extension_id = xparq::extension::WasmDeployCall::from_extension_call(&call)
+    let extension_id = kernel::extension::WasmDeployCall::from_extension_call(&call)
         .map_err(|error| format!("decode signed WASM deploy call: {error:?}"))?
         .extension_id();
     let extension_created_weight = preview_extension_created_weight(rpc, &call)?;
@@ -454,7 +454,7 @@ fn wasm_deploy(args: &[String]) -> Result<(), String> {
     println!("extension_id: {extension_id}");
     println!(
         "activation_delay_blocks: {}",
-        xparq::extension::WASM_DEPLOY_ACTIVATION_DELAY
+        kernel::extension::WASM_DEPLOY_ACTIVATION_DELAY
     );
     Ok(())
 }
@@ -476,7 +476,7 @@ fn wasm_call(args: &[String]) -> Result<(), String> {
     };
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    let address = xparq::crypto::address_to_string(&wallet.address());
+    let address = kernel::crypto::address_to_string(&wallet.address());
     let nonce = http_get_json::<AssetNonceResponse>(
         rpc,
         &format!("/wasm-app/nonce/{}/{}", extension_id, address),
@@ -517,14 +517,14 @@ fn wasm_call(args: &[String]) -> Result<(), String> {
 
 fn preview_extension_created_weight(
     rpc: &str,
-    call: &xparq::common::ExtensionCall,
+    call: &kernel::common::ExtensionCall,
 ) -> Result<u64, String> {
     let bytes = canonical_bytes(call).map_err(|error| error.to_string())?;
     let preview = http_post_bytes::<ExtensionPreviewResponse>(rpc, "/extension/preview", &bytes)?;
     Ok(preview.created_state_weight)
 }
 
-fn parse_extension_id(value: &str) -> Result<xparq::common::ExtensionHash, String> {
+fn parse_extension_id(value: &str) -> Result<kernel::common::ExtensionHash, String> {
     value
         .parse()
         .map_err(|_| "extension ID must be extension:<64 lowercase hex>".into())
@@ -548,13 +548,13 @@ fn parse_asset_id(args: &[String]) -> Result<AssetHash, String> {
         .map_err(|_| "invalid --asset id".to_string())
 }
 
-fn asset_inputs(args: &[String]) -> Result<Vec<xparq::asset::AssetShareHash>, String> {
+fn asset_inputs(args: &[String]) -> Result<Vec<kernel::asset::AssetShareHash>, String> {
     let inputs = args
         .windows(2)
         .filter(|pair| pair[0] == "--input")
         .map(|pair| {
             pair[1]
-                .parse::<xparq::asset::AssetShareHash>()
+                .parse::<kernel::asset::AssetShareHash>()
                 .map_err(|_| "invalid --input asset object id".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -573,10 +573,10 @@ fn parse_asset_amount(
     args: &[String],
     option_name: &str,
     decimals: u8,
-) -> Result<xparq::asset::Unit, String> {
+) -> Result<kernel::asset::Unit, String> {
     let value = option(args, option_name).ok_or_else(|| format!("missing {option_name}"))?;
     parse_asset_display_amount(value, decimals)
-        .map(xparq::asset::Unit::from_units)
+        .map(kernel::asset::Unit::from_units)
         .map_err(|error| format!("invalid {option_name}: {error}"))
 }
 
@@ -636,7 +636,7 @@ fn format_asset_amount(value: &str, decimals: u8, symbol: &str) -> Result<String
 fn interactive_menu() -> Result<(), String> {
     loop {
         println!();
-        println!("XPARQ Wallet");
+        println!("kernel Wallet");
         println!("1. Create wallet");
         println!("2. Restore wallet");
         println!("3. Show address");
@@ -653,17 +653,17 @@ fn interactive_menu() -> Result<(), String> {
             "1" => {
                 let path = prompt_default("Wallet file", DEFAULT_WALLET_PATH)?;
                 let words = prompt_default("Mnemonic words (12 or 24)", "12")?;
-                let profile = prompt_signature_profile()?;
+                let account = prompt_signature_account()?;
                 let mut args = vec!["--wallet".into(), path, "--words".into(), words];
-                args.extend(["--profile".into(), profile]);
+                args.extend(["--account".into(), account]);
                 create_wallet(&args)?;
             }
             "2" => {
                 let path = prompt_default("Wallet file", DEFAULT_WALLET_PATH)?;
                 let phrase = prompt("Mnemonic")?;
-                let profile = prompt_signature_profile()?;
+                let account = prompt_signature_account()?;
                 let mut args = vec!["--wallet".into(), path, "--mnemonic".into(), phrase];
-                args.extend(["--profile".into(), profile]);
+                args.extend(["--account".into(), account]);
                 restore_wallet(&args)?;
             }
             "3" => {
@@ -689,7 +689,7 @@ fn interactive_menu() -> Result<(), String> {
 
 fn interactive_assets() -> Result<(), String> {
     println!();
-    println!("XPARQ Assets");
+    println!("kernel Assets");
     println!("1. Create asset");
     println!("2. Mint asset");
     println!("3. Transfer asset");
@@ -769,16 +769,16 @@ fn interactive_asset_wallet_rpc() -> Result<Vec<String>, String> {
     ])
 }
 
-fn prompt_signature_profile() -> Result<String, String> {
+fn prompt_signature_account() -> Result<String, String> {
     loop {
         let value = prompt_default(
-            "Signature profile (mldsa44, mldsa65, mldsa87, falcon512, falcon1024)",
+            "Signature account (mldsa44, mldsa65, mldsa87, falcon512, falcon1024)",
             "mldsa44",
         )?;
-        if value.parse::<SignatureProfile>().is_ok() {
+        if value.parse::<Signature>().is_ok() {
             return Ok(value);
         }
-        println!("Unknown signature profile `{value}`");
+        println!("Unknown signature account `{value}`");
     }
 }
 
@@ -868,14 +868,14 @@ fn create_wallet(args: &[String]) -> Result<(), String> {
         .unwrap_or("12")
         .parse::<usize>()
         .map_err(|_| "--words must be 12 or 24".to_string())?;
-    let mnemonic = generate_xparq_mnemonic(words)?;
-    let profile = signature_profile_option(args)?.unwrap_or(SignatureProfile::MlDsa44);
-    let mut wallet = profile_wallet_from_xparq_mnemonic(&mnemonic, profile)?;
+    let mnemonic = generate_bip39_mnemonic(words)?;
+    let account = signature_account_option(args)?.unwrap_or(Signature::MlDsa44);
+    let mut wallet = account_wallet_from_bip39_mnemonic(&mnemonic, account)?;
     wallet.mnemonic = Some(mnemonic.to_string());
     let address = wallet.address;
-    write_profile_wallet(path, &wallet)?;
-    println!("signature_profile: {profile}");
-    println!("address: {}", xparq::crypto::address_to_string(&address));
+    write_account_wallet(path, &wallet)?;
+    println!("signature_account: {account}");
+    println!("address: {}", kernel::crypto::address_to_string(&address));
     println!("mnemonic: {}", mnemonic.as_str());
     println!("wallet: {path}");
     Ok(())
@@ -884,22 +884,22 @@ fn create_wallet(args: &[String]) -> Result<(), String> {
 fn restore_wallet(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
     let phrase = option(args, "--mnemonic").ok_or("missing --mnemonic")?;
-    let profile = signature_profile_option(args)?.unwrap_or(SignatureProfile::MlDsa44);
-    let mut wallet = profile_wallet_from_xparq_mnemonic(phrase, profile)?;
+    let account = signature_account_option(args)?.unwrap_or(Signature::MlDsa44);
+    let mut wallet = account_wallet_from_bip39_mnemonic(phrase, account)?;
     wallet.mnemonic = Some(phrase.to_string());
     let address = wallet.address;
-    write_profile_wallet(path, &wallet)?;
-    println!("signature_profile: {profile}");
-    println!("address: {}", xparq::crypto::address_to_string(&address));
+    write_account_wallet(path, &wallet)?;
+    println!("signature_account: {account}");
+    println!("address: {}", kernel::crypto::address_to_string(&address));
     println!("wallet: {path}");
     Ok(())
 }
 
-fn signature_profile_option(args: &[String]) -> Result<Option<SignatureProfile>, String> {
-    option(args, "--profile")
+fn signature_account_option(args: &[String]) -> Result<Option<Signature>, String> {
+    option(args, "--account")
         .map(|value| {
-            value.parse::<SignatureProfile>().map_err(|_| {
-                "invalid --profile; use mldsa44, mldsa65, mldsa87, falcon512, or falcon1024"
+            value.parse::<Signature>().map_err(|_| {
+                "invalid --account; use mldsa44, mldsa65, mldsa87, falcon512, or falcon1024"
                     .to_string()
             })
         })
@@ -911,7 +911,7 @@ fn print_address(args: &[String]) -> Result<(), String> {
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
     let address = wallet_address_from_file_bytes(&bytes)?;
-    println!("{}", xparq::crypto::address_to_string(&address));
+    println!("{}", kernel::crypto::address_to_string(&address));
     Ok(())
 }
 
@@ -920,7 +920,7 @@ fn print_balance(args: &[String]) -> Result<(), String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
-    let address = xparq::crypto::address_to_string(&wallet_address_from_file_bytes(&bytes)?);
+    let address = kernel::crypto::address_to_string(&wallet_address_from_file_bytes(&bytes)?);
     let balance: BalanceResponse = http_get_json(rpc, &format!("/balance/{address}"))?;
     let burn: NodeBurnResponse = http_get_json(rpc, "/status")?;
 
@@ -960,7 +960,7 @@ fn print_history(args: &[String]) -> Result<(), String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
-    let address = xparq::crypto::address_to_string(&wallet_address_from_file_bytes(&bytes)?);
+    let address = kernel::crypto::address_to_string(&wallet_address_from_file_bytes(&bytes)?);
     let mut history: AddressHistoryResponse = http_get_json(
         rpc,
         &format!("/explorer/address/{address}?include_emissions=false"),
@@ -1003,7 +1003,7 @@ fn print_utxo_tracker(args: &[String]) -> Result<(), String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
-    let address = xparq::crypto::address_to_string(&wallet_address_from_file_bytes(&bytes)?);
+    let address = kernel::crypto::address_to_string(&wallet_address_from_file_bytes(&bytes)?);
     let account = fetch_account(rpc, &address)?;
 
     println!("address: {address}");
@@ -1037,7 +1037,7 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
     let amount = parse_amount(option(args, "--amount").ok_or("missing --amount")?)?;
     let inputs = repeated_options(args, "--input")
         .into_iter()
-        .map(xparq::coin::CoinHash::from_str)
+        .map(kernel::coin::CoinHash::from_str)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "invalid --input coin id".to_string())?;
     let wallet = load_wallet(path)?;
@@ -1124,7 +1124,7 @@ fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
     let inputs = candidates
         .iter()
         .map(|utxo| {
-            xparq::coin::CoinHash::from_str(&utxo.id)
+            kernel::coin::CoinHash::from_str(&utxo.id)
                 .map_err(|_| "node returned an invalid coin id".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1170,7 +1170,7 @@ fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
 }
 
 fn account_input_candidates(rpc: &str, wallet: &LoadedWallet) -> Result<Vec<AccountUtxo>, String> {
-    let address = xparq::crypto::address_to_string(&wallet.address());
+    let address = kernel::crypto::address_to_string(&wallet.address());
     let response = fetch_account(rpc, &address)?;
     let mut candidates = response
         .utxos
@@ -1193,7 +1193,7 @@ fn select_account_inputs_with_state_burn(
     created_coin_without_change: u64,
     extension_created_weight: u64,
     archival_burn: u64,
-) -> Result<(Vec<xparq::coin::CoinHash>, u64, u64, u64), String> {
+) -> Result<(Vec<kernel::coin::CoinHash>, u64, u64, u64), String> {
     let created_account_key_weight =
         wallet.new_account_key_weight(account_public_key_registered(rpc, wallet))?;
     let candidates = account_input_candidates(rpc, wallet)?;
@@ -1201,7 +1201,7 @@ fn select_account_inputs_with_state_burn(
     let mut total = 0_u64;
     for utxo in candidates {
         selected.push(
-            xparq::coin::CoinHash::from_str(&utxo.id)
+            kernel::coin::CoinHash::from_str(&utxo.id)
                 .map_err(|_| "node returned an invalid coin id".to_string())?,
         );
         total = total
@@ -1244,7 +1244,7 @@ fn select_account_inputs_with_state_burn(
 }
 
 fn account_public_key_registered(rpc: &str, wallet: &LoadedWallet) -> bool {
-    let address = xparq::crypto::address_to_string(&wallet.address());
+    let address = kernel::crypto::address_to_string(&wallet.address());
     http_get_json::<AccountResponse>(rpc, &format!("/account/{address}"))
         .map(|response| response.public_key_registered)
         .unwrap_or(false)
@@ -1392,11 +1392,11 @@ fn http_post_bytes<T: for<'de> Deserialize<'de>>(
 fn load_wallet(path: &str) -> Result<LoadedWallet, String> {
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
-    profile_wallet_from_file_bytes(&bytes).map(LoadedWallet)
+    account_wallet_from_file_bytes(&bytes).map(LoadedWallet)
 }
 
-fn write_profile_wallet(path: &str, wallet: &ProfileWallet) -> Result<(), String> {
-    let bytes = profile_wallet_file_bytes(wallet)?;
+fn write_account_wallet(path: &str, wallet: &AccountWallet) -> Result<(), String> {
+    let bytes = account_wallet_file_bytes(wallet)?;
     write_private_file_atomically(Path::new(path), &bytes)
 }
 
@@ -1512,7 +1512,7 @@ fn format_amount(units: u64) -> String {
 
 fn print_help() {
     println!(
-        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--profile PROFILE]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--profile PROFILE]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet consolidate [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet version\n\nAll signature profiles are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 zeno per canonical transaction byte; manual --miner fee input is not supported. Consolidation spends all available XPQ UTXOs into one self-owned output and remains subject to archival burn and miner fee. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs.\nRunning without a command opens the interactive menu.\nWithout --input, spend selects active XPQ inputs and calculates change through node RPC."
+        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--account account]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--account ACCOUNT]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet consolidate [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet version\n\nAll signature accounts are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 zeno per canonical transaction byte; manual --miner fee input is not supported. Consolidation spends all available XPQ UTXOs into one self-owned output and remains subject to archival burn and miner fee. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs.\nRunning without a command opens the interactive menu.\nWithout --input, spend selects active XPQ inputs and calculates change through node RPC."
     );
     println!(
         "wallet coin-deposit --extension EXTENSION_ID --amount XPQ [--rpc ADDRESS] [--wallet PATH] [--offline]"
@@ -1541,7 +1541,7 @@ mod tests {
         let args = vec!["--amount".into(), "1000000000000000.00000000".into()];
         assert_eq!(
             parse_asset_amount(&args, "--amount", 8),
-            Ok(xparq::asset::Unit::from_units(
+            Ok(kernel::asset::Unit::from_units(
                 100_000_000_000_000_000_000_000_u128
             ))
         );
@@ -1591,7 +1591,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let directory = std::env::temp_dir().join(format!(
-            "xparq-private-wallet-{}-{unique}",
+            "kernel-private-wallet-{}-{unique}",
             std::process::id()
         ));
         let path = directory.join("wallet.json");

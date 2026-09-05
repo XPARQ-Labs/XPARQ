@@ -17,12 +17,9 @@ use crate::protocol::{
     ExtensionStateWrite,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
+use crypto::primitives::{Height, canonical_bytes, domain_hash};
+use crypto::{AccountSignature, Address, PublicKey, SigningSeed, address_from_public_key, verify};
 use wasmi::{Caller, CompilationMode, Config, Engine, ExternType, Linker, Memory, Module, Store};
-use xparq_crypto::primitives::{Height, canonical_bytes, domain_hash};
-use xparq_crypto::{
-    Address, ProfilePublicKey, ProfileSignature, ProfileSigningSeed,
-    address_from_profile_public_key, profile_verify,
-};
 
 pub const WASM_ABI_VERSION: u32 = 1;
 pub const WASM_CODE_MAX_SIZE: usize = 2 * 1024 * 1024;
@@ -55,8 +52,8 @@ pub struct WasmAppCall {
     pub payload: Vec<u8>,
     pub signer: Address,
     pub nonce: u64,
-    pub public_key: ProfilePublicKey,
-    pub signature: ProfileSignature,
+    pub public_key: PublicKey,
+    pub signature: AccountSignature,
 }
 
 #[derive(BorshSerialize)]
@@ -78,10 +75,10 @@ impl WasmAppCall {
         extension_id: ExtensionHash,
         payload: Vec<u8>,
         nonce: u64,
-        signing_seed: &ProfileSigningSeed,
+        signing_seed: &SigningSeed,
     ) -> Result<Self, ExtensionFailure> {
         let public_key = signing_seed.public_key();
-        let signer = address_from_profile_public_key(&public_key);
+        let signer = address_from_public_key(&public_key);
         let commitment = wasm_app_commitment(chain_id, extension_id, &payload, signer, nonce)?;
         let signature = signing_seed.sign(&commitment);
         Ok(Self {
@@ -107,8 +104,8 @@ impl WasmAppCall {
         extension_id: ExtensionHash,
         state: &dyn ExtensionStateRead,
     ) -> Result<(), ExtensionFailure> {
-        if address_from_profile_public_key(&self.public_key) != self.signer
-            || self.public_key.profile != self.signature.profile
+        if address_from_public_key(&self.public_key) != self.signer
+            || self.public_key.account != self.signature.account
         {
             return Err(ExtensionFailure::InvalidPayload);
         }
@@ -122,7 +119,7 @@ impl WasmAppCall {
             self.signer,
             self.nonce,
         )?;
-        if !profile_verify(&self.public_key, &commitment, &self.signature) {
+        if !verify(&self.public_key, &commitment, &self.signature) {
             return Err(ExtensionFailure::InvalidPayload);
         }
         self.nonce

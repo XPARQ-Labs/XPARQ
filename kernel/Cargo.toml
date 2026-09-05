@@ -1,0 +1,24 @@
+[package]
+name = "kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "kernel"
+
+[features]
+default = ["mainnet"]
+mainnet = ["crypto/mainnet"]
+testnet = ["crypto/testnet"]
+devnet = ["crypto/devnet"]
+sqisign-blockchain-test = ["devnet"]
+
+[dependencies]
+borsh.workspace = true
+sha3.workspace = true
+static_assertions.workspace = true
+crypto.workspace = true
+extension.workspace = true

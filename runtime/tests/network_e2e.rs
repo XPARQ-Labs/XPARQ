@@ -8,16 +8,14 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use serde_json::Value;
-use xparq::{
+use kernel::{
     coin::{CoinHash, Zeno},
     common::canonical_bytes,
-    crypto::{
-        ProfileSigningSeed, SignatureProfile, address_from_profile_public_key, address_to_string,
-    },
+    crypto::{Signature, SigningSeed, address_from_public_key, address_to_string},
     transaction::{AuthorizedTransaction, CoinIntent, SpendOutput},
 };
-use xparq_wallet::{ProfileWallet, encode_xparq_mnemonic, profile_wallet_from_xparq_mnemonic};
+use serde_json::Value;
+use wallet::{AccountWallet, account_wallet_from_bip39_mnemonic, encode_bip39_mnemonic};
 
 const WAIT: Duration = Duration::from_secs(120);
 
@@ -54,9 +52,9 @@ fn miner_address() -> String {
     address_to_string(&sender_wallet().address)
 }
 
-fn sender_wallet() -> ProfileWallet {
-    let mnemonic = encode_xparq_mnemonic(&[42; 16]).unwrap();
-    profile_wallet_from_xparq_mnemonic(&mnemonic, SignatureProfile::MlDsa44).unwrap()
+fn sender_wallet() -> AccountWallet {
+    let mnemonic = encode_bip39_mnemonic(&[42; 16]).unwrap();
+    account_wallet_from_bip39_mnemonic(&mnemonic, Signature::MlDsa44).unwrap()
 }
 
 fn mine(database: &Path, blocks: u64) {
@@ -306,8 +304,8 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
 
     let sender = sender_wallet();
     let sender_address = address_to_string(&sender.address);
-    let recipient_keys = ProfileSigningSeed::new(SignatureProfile::MlDsa44, [43; 32]);
-    let recipient = address_from_profile_public_key(&recipient_keys.public_key());
+    let recipient_keys = SigningSeed::new(Signature::MlDsa44, [43; 32]);
+    let recipient = address_from_public_key(&recipient_keys.public_key());
     let recipient_address = address_to_string(&recipient);
     let sender_account = account(&a_rpc, &sender_address).unwrap();
     let input = sender_account["utxos"]
@@ -319,12 +317,12 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     let input_id: CoinHash = input["id"].as_str().unwrap().parse().unwrap();
     let input_amount = input["amount"].as_u64().unwrap();
     let sent = Zeno::from_zeno(1);
-    let state_burn = xparq::consensus::StateTransitionWeight {
+    let state_burn = kernel::consensus::StateTransitionWeight {
         created_coin_utxos: 3,
         consumed_coin_utxos: 1,
-        created_account_key_weight: xparq::consensus::profile_key_state_weight(&sender.public_key)
+        created_account_key_weight: kernel::consensus::account_key_state_weight(&sender.public_key)
             .unwrap(),
-        ..xparq::consensus::StateTransitionWeight::default()
+        ..kernel::consensus::StateTransitionWeight::default()
     }
     .state_growth_burn()
     .unwrap();
