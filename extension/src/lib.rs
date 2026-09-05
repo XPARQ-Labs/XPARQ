@@ -16,11 +16,13 @@ pub use deploy::{
 pub use registry::{ExtensionRegistry, RegistryError};
 pub use wasm::{
     WASM_ABI_VERSION, WASM_APP_CALL_ACTIVATION_HEIGHT, WASM_CODE_MAX_SIZE, WASM_DEFAULT_FUEL,
+    WASM_FUEL_PER_BLOCK_WEIGHT, WASM_HOST_CALL_BASE_FUEL, WASM_HOST_FUEL_PER_BYTE,
     WASM_MEMORY_MAX_PAGES, WASM_STATE_MAX_SIZE, WasmAppCall, WasmExtension, WasmExtensionError,
     WasmExtensionManifest, WasmExtensionPackage, wasm_app_nonce, wasm_code_hash, wasm_extension_id,
 };
-pub use xparq_bridge as bridge;
-pub use xparq_common::extension::*;
+pub mod bridge;
+pub mod protocol;
+pub use crate::protocol::*;
 
 static WASM_CHAIN_SPEC_MANIFESTS: OnceLock<Vec<WasmExtensionManifest>> = OnceLock::new();
 
@@ -63,7 +65,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn facade_exposes_bridge_crate() {
+    fn facade_exposes_bridge_module() {
         assert_eq!(
             bridge::SourceNetwork::Bitcoin,
             bridge::SourceNetwork::Bitcoin

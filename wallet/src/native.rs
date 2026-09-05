@@ -92,7 +92,8 @@ struct AccountAssetBalance {
     name: String,
     symbol: String,
     decimals: u8,
-    balance: String,
+    max_supply: String,
+    mint: String,
     #[serde(default)]
     shares: Vec<AccountAssetShare>,
 }
@@ -102,6 +103,11 @@ struct AccountAssetShare {
     share_id: String,
     amount: String,
     owner: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct AssetMetadataResponse {
+    decimals: u8,
 }
 
 #[derive(Deserialize)]
@@ -202,8 +208,8 @@ fn asset_register(args: &[String]) -> Result<(), String> {
         .ok_or("missing --decimals")?
         .parse::<u8>()
         .map_err(|_| "invalid --decimals")?;
-    let max_supply = parse_asset_amount(args, "--max-supply")?;
-    let initial_mint = parse_asset_amount(args, "--initial-mint")?;
+    let max_supply = parse_asset_amount(args, "--max-supply", decimals)?;
+    let initial_mint = parse_asset_amount(args, "--initial-mint", decimals)?;
     let authority = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?.address();
     let asset_id = AssetHash::derive(authority, &symbol);
     let mint_authority = if has_flag(args, "--fixed-supply") {
@@ -264,12 +270,14 @@ fn normalize_asset_symbol(symbol: &str) -> Result<String, String> {
 }
 
 fn asset_mint(args: &[String]) -> Result<(), String> {
+    let asset_id = parse_asset_id(args)?;
+    let decimals = asset_decimals(args, asset_id)?;
     submit_asset_instruction(
         args,
         AssetInstruction::Mint {
-            asset_id: parse_asset_id(args)?,
+            asset_id,
             recipient: Authority::Address(address_option(args, "--to")?),
-            amount: parse_asset_amount(args, "--amount")?,
+            amount: parse_asset_amount(args, "--amount", decimals)?,
         },
     )
 }
@@ -285,30 +293,34 @@ fn asset_burn(args: &[String]) -> Result<(), String> {
 }
 
 fn asset_transfer(args: &[String]) -> Result<(), String> {
+    let asset_id = parse_asset_id(args)?;
+    let decimals = asset_decimals(args, asset_id)?;
     submit_asset_instruction(
         args,
         AssetInstruction::Transfer {
-            asset_id: parse_asset_id(args)?,
+            asset_id,
             inputs: asset_inputs(args)?,
             outputs: vec![xparq::asset::AssetTransferOutput {
                 recipient: Authority::Address(address_option(args, "--to")?),
-                amount: parse_asset_amount(args, "--amount")?,
+                amount: parse_asset_amount(args, "--amount", decimals)?,
             }],
         },
     )
 }
 
 fn asset_deposit(args: &[String]) -> Result<(), String> {
+    let asset_id = parse_asset_id(args)?;
+    let decimals = asset_decimals(args, asset_id)?;
     submit_asset_instruction(
         args,
         AssetInstruction::Transfer {
-            asset_id: parse_asset_id(args)?,
+            asset_id,
             inputs: asset_inputs(args)?,
             outputs: vec![xparq::asset::AssetTransferOutput {
                 recipient: Authority::Extension(parse_extension_id(
                     option(args, "--extension").ok_or("missing --extension")?,
                 )?),
-                amount: parse_asset_amount(args, "--amount")?,
+                amount: parse_asset_amount(args, "--amount", decimals)?,
             }],
         },
     )
@@ -439,7 +451,7 @@ fn wasm_deploy(args: &[String]) -> Result<(), String> {
         )))
     })?;
     submit_or_print_transaction(args, &transaction)?;
-    println!("extension_id: {}", hex::encode(extension_id.as_bytes()));
+    println!("extension_id: {extension_id}");
     println!(
         "activation_delay_blocks: {}",
         xparq::extension::WASM_DEPLOY_ACTIVATION_DELAY
@@ -467,11 +479,7 @@ fn wasm_call(args: &[String]) -> Result<(), String> {
     let address = xparq::crypto::address_to_string(&wallet.address());
     let nonce = http_get_json::<AssetNonceResponse>(
         rpc,
-        &format!(
-            "/wasm-app/nonce/{}/{}",
-            hex::encode(extension_id.as_bytes()),
-            address
-        ),
+        &format!("/wasm-app/nonce/{}/{}", extension_id, address),
     )?
     .nonce;
     let call = wallet.0.sign_wasm_app_call(extension_id, payload, nonce)?;
@@ -517,15 +525,9 @@ fn preview_extension_created_weight(
 }
 
 fn parse_extension_id(value: &str) -> Result<xparq::common::ExtensionHash, String> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("extension ID must be 64 hexadecimal characters".into());
-    }
-    let bytes = hex::decode(value).map_err(|_| "invalid extension ID")?;
-    Ok(xparq::common::ExtensionHash::from_bytes(
-        bytes
-            .try_into()
-            .map_err(|_| "extension ID must be 32 bytes")?,
-    ))
+    value
+        .parse()
+        .map_err(|_| "extension ID must be extension:<64 lowercase hex>".into())
 }
 
 fn wasm_info(args: &[String]) -> Result<(), String> {
@@ -562,12 +564,73 @@ fn asset_inputs(args: &[String]) -> Result<Vec<xparq::asset::AssetShareHash>, St
     Ok(inputs)
 }
 
-fn parse_asset_amount(args: &[String], option_name: &str) -> Result<xparq::asset::Unit, String> {
-    option(args, option_name)
-        .ok_or_else(|| format!("missing {option_name}"))?
-        .parse::<u128>()
+fn asset_decimals(args: &[String], asset_id: AssetHash) -> Result<u8, String> {
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    Ok(http_get_json::<AssetMetadataResponse>(rpc, &format!("/asset/{asset_id}"))?.decimals)
+}
+
+fn parse_asset_amount(
+    args: &[String],
+    option_name: &str,
+    decimals: u8,
+) -> Result<xparq::asset::Unit, String> {
+    let value = option(args, option_name).ok_or_else(|| format!("missing {option_name}"))?;
+    parse_asset_display_amount(value, decimals)
         .map(xparq::asset::Unit::from_units)
-        .map_err(|_| format!("invalid {option_name}; use integer asset units"))
+        .map_err(|error| format!("invalid {option_name}: {error}"))
+}
+
+fn parse_asset_display_amount(value: &str, decimals: u8) -> Result<u128, String> {
+    if value.is_empty() || value.starts_with('+') || value.starts_with('-') {
+        return Err("use a non-negative decimal amount".into());
+    }
+    let mut parts = value.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    if parts.next().is_some()
+        || whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("use digits with at most one decimal point".into());
+    }
+    let fraction = fraction.unwrap_or_default();
+    if fraction.len() > decimals as usize || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!("at most {decimals} fractional digits are allowed"));
+    }
+    let scale = 10_u128
+        .checked_pow(decimals as u32)
+        .ok_or_else(|| "decimal scale overflow".to_string())?;
+    let whole = whole
+        .parse::<u128>()
+        .map_err(|_| "amount exceeds the u128 range".to_string())?;
+    let fractional_units = if fraction.is_empty() {
+        0
+    } else {
+        let fraction_value = fraction
+            .parse::<u128>()
+            .map_err(|_| "invalid fractional amount".to_string())?;
+        fraction_value
+            .checked_mul(10_u128.pow(decimals as u32 - fraction.len() as u32))
+            .ok_or_else(|| "amount exceeds the u128 range".to_string())?
+    };
+    whole
+        .checked_mul(scale)
+        .and_then(|units| units.checked_add(fractional_units))
+        .ok_or_else(|| "amount exceeds the u128 range".to_string())
+}
+
+fn format_asset_amount(value: &str, decimals: u8, symbol: &str) -> Result<String, String> {
+    let units = value
+        .parse::<u128>()
+        .map_err(|_| "node returned an invalid asset amount".to_string())?;
+    if decimals == 0 {
+        return Ok(format!("{units} {symbol}"));
+    }
+    let scale = 10_u128.pow(decimals as u32);
+    let whole = units / scale;
+    let fraction = units % scale;
+    let width = decimals as usize;
+    Ok(format!("{whole}.{fraction:0width$} {symbol}"))
 }
 
 fn interactive_menu() -> Result<(), String> {
@@ -641,8 +704,8 @@ fn interactive_assets() -> Result<(), String> {
             let name = prompt("Token name")?;
             let symbol = prompt("Token symbol")?;
             let decimals = prompt_default("Decimals", "0")?;
-            let max_supply = prompt("Maximum supply in base units")?;
-            let mint_amount = prompt("Initial mint in base units")?;
+            let max_supply = prompt("Maximum supply")?;
+            let mint_amount = prompt("Initial mint")?;
 
             let mut register_args = wallet_rpc_args.clone();
             register_args.extend(["--name".into(), name]);
@@ -656,20 +719,20 @@ fn interactive_assets() -> Result<(), String> {
             let mut args = interactive_asset_wallet_rpc()?;
             args.extend(["--asset".into(), prompt("Asset ID")?]);
             args.extend(["--to".into(), prompt("Recipient address")?]);
-            args.extend(["--amount".into(), prompt("Asset units")?]);
+            args.extend(["--amount".into(), prompt("Asset amount")?]);
             asset_mint(&args)
         }
         "3" => {
             let mut args = interactive_asset_wallet_rpc()?;
             args.extend(["--asset".into(), prompt("Asset ID")?]);
             args.extend(["--to".into(), prompt("Recipient address")?]);
-            args.extend(["--amount".into(), prompt("Asset units")?]);
+            args.extend(["--amount".into(), prompt("Asset amount")?]);
             asset_transfer(&args)
         }
         "4" => {
             let mut args = interactive_asset_wallet_rpc()?;
             args.extend(["--asset".into(), prompt("Asset ID")?]);
-            args.extend(["--amount".into(), prompt("Asset units")?]);
+            args.extend(["--amount".into(), prompt("Asset amount")?]);
             asset_burn(&args)
         }
         "5" => {
@@ -869,19 +932,23 @@ fn print_balance(args: &[String]) -> Result<(), String> {
     println!("burned supply: {}", format_amount(burn.total_burned));
     println!("assets: {}", balance.assets.len());
     for asset in &balance.assets {
+        let max_supply = format_asset_amount(&asset.max_supply, asset.decimals, &asset.symbol)?;
+        let mint = format_asset_amount(&asset.mint, asset.decimals, &asset.symbol)?;
         println!(
-            "- asset_id={} name={} symbol={} decimals={} balance={} shares={}",
+            "- asset_id={} name={} symbol={} decimals={} max_supply={} mint={} shares={}",
             asset.asset_id,
             asset.name,
             asset.symbol,
             asset.decimals,
-            asset.balance,
+            max_supply,
+            mint,
             asset.shares.len(),
         );
         for share in &asset.shares {
+            let amount = format_asset_amount(&share.amount, asset.decimals, &asset.symbol)?;
             println!(
                 "  - share_id={} amount={} owner={}",
-                share.share_id, share.amount, share.owner
+                share.share_id, amount, share.owner
             );
         }
     }
@@ -1451,7 +1518,7 @@ fn print_help() {
         "wallet coin-deposit --extension EXTENSION_ID --amount XPQ [--rpc ADDRESS] [--wallet PATH] [--offline]"
     );
     println!(
-        "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply UNITS --initial-mint UNITS [--mint-program EXTENSION_ID | --fixed-supply] [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset ID --to ADDRESS --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset ID --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset ID --to ADDRESS --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-deposit --asset ID --extension EXTENSION_ID --amount UNITS [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset ID [--rpc ADDRESS]\nwallet asset-balance --asset ID [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts are integer base units. Registration atomically credits the initial mint to the signing creator address. Use asset-deposit to transfer assets into extension custody."
+        "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply AMOUNT --initial-mint AMOUNT [--mint-program EXTENSION_ID | --fixed-supply] [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset ID --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset ID --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset ID --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-deposit --asset ID --extension EXTENSION_ID --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset ID [--rpc ADDRESS]\nwallet asset-balance --asset ID [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts use the human decimal denomination declared by asset metadata. For decimals=8, 1.25 is encoded canonically as 125000000 Unit. Registration atomically credits the initial mint to the signing creator address. Use asset-deposit to transfer assets into extension custody."
     );
     println!(
         "\nWASM commands:\nwallet wasm-deploy --name NAME --wasm MODULE [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet wasm-call --extension ID (--payload-hex HEX | --payload-file PATH) [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet wasm-info --extension ID [--rpc ADDRESS]\n\nWASM deploys are immutable and activate automatically after 100 blocks. Signed generic WASM calls and WASM persistent-state burn are active from genesis."
@@ -1471,12 +1538,19 @@ mod tests {
         assert_eq!(normalize_asset_symbol("test"), Ok("TEST".into()));
         assert!(normalize_asset_symbol("test-token").is_err());
         assert!(normalize_asset_symbol("").is_err());
-        let args = vec!["--amount".into(), "100000000000000000000000".into()];
+        let args = vec!["--amount".into(), "1000000000000000.00000000".into()];
         assert_eq!(
-            parse_asset_amount(&args, "--amount"),
+            parse_asset_amount(&args, "--amount", 8),
             Ok(xparq::asset::Unit::from_units(
                 100_000_000_000_000_000_000_000_u128
             ))
+        );
+        assert_eq!(parse_asset_display_amount("1.25", 8), Ok(125_000_000));
+        assert_eq!(parse_asset_display_amount("1", 8), Ok(100_000_000));
+        assert!(parse_asset_display_amount("1.000000001", 8).is_err());
+        assert_eq!(
+            format_asset_amount("125000000", 8, "TEST"),
+            Ok("1.25000000 TEST".into())
         );
     }
 
@@ -1570,10 +1644,7 @@ mod tests {
             ],
         };
 
-        assert_eq!(
-            format_amount(2 * XPQ::ZENO_PER_COIN + 1),
-            "2.000001 XPQ"
-        );
+        assert_eq!(format_amount(2 * XPQ::ZENO_PER_COIN + 1), "2.000001 XPQ");
         assert_eq!(utxo_status(&account.utxos[0]), "available");
         assert_eq!(utxo_status(&account.utxos[1]), "available");
         assert_eq!(utxo_status(&account.utxos[2]), "reserved");

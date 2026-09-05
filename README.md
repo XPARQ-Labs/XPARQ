@@ -10,23 +10,21 @@ The workspace targets Rust 1.90 and the Rust 2024 edition.
 
 ## Workspace
 
-- `common/`: shared canonical primitives and authority types
-- `crypto/`: addresses, signature profiles, hashing, and Argon2id proof of work
-- `coin/`: XPQ denomination, `Zeno`, coin objects, and coin hashes
-- `asset/`: asset metadata, `Unit`, asset hashes, shares, and asset UTXOs
-- `transaction/`: canonical intents and authorization
-- `blockchain/`: blocks, headers, and chain structures
-- `consensus/`: validation, emission, state burn, fork choice, and reorg rules
-- `ledger/`: canonical coin, asset, and extension state
-- `genesis/`: frozen network genesis identity
-- `xparq/`: public protocol facade
-- `extension/`: WASM execution and extension-facing primitives
-- `runtime/`: the `node` binary, storage, RPC, mining, mempool, and P2P
-- `wallet/`: the reusable wallet library and `wallet` binary
-- `depend/`: vendored dependency sources, excluded from workspace membership
+The workspace contains five packages:
 
-The recommended reduction from the current crate graph is documented in
-[`docs/CRATE_CONSOLIDATION.md`](docs/CRATE_CONSOLIDATION.md).
+| Directory | Package | Responsibility |
+| --- | --- | --- |
+| `xparq/` | `kernel` | Protocol kernel: coin, assets, transactions, blocks, consensus, ledger, genesis |
+| `crypto/` | `xparq-crypto` | Cryptography and shared encoding/hash/scalar primitives |
+| `extension/` | `xparq-extension` | Extension contracts, WASM execution, bridge primitives |
+| `runtime/` | `xparq-node` | Storage, RPC, mining, mempool, and P2P |
+| `wallet/` | `xparq-wallet` | Reusable wallet library and wallet application |
+
+`depend/` contains vendored dependency sources and is excluded from workspace
+membership. Protocol modules live under `xparq/src/`; the public
+`xparq::block`, `xparq::coin`, `xparq::asset`, and other existing facade paths
+remain available. See [`docs/CRATE_CONSOLIDATION.md`](docs/CRATE_CONSOLIDATION.md)
+for package boundaries and compatibility details.
 
 ## Build and test
 
@@ -37,6 +35,19 @@ cargo test --workspace
 ```
 
 The release binaries are `target/release/node` and `target/release/wallet`.
+
+Maintenance can target one package, for example `cargo test -p kernel --locked`.
+Node and wallet can also be built and deployed separately:
+
+```bash
+cargo build --release -p xparq-node --locked
+cargo build --release -p xparq-wallet --locked
+```
+
+Shared library changes require rebuilding the applications that use them.
+Consensus or encoding changes also require compatibility review and coordinated
+releases where needed. See [package maintenance and deployment](docs/CRATE_CONSOLIDATION.md#package-maintenance-and-deployment)
+for scope and validation guidance.
 
 ## Run a node
 

@@ -193,15 +193,7 @@ fn block_gossip_crosses_three_nodes_and_survives_restart() {
     let a = root.join("a");
     let b = root.join("b");
     let c = root.join("c");
-    let mature_chain = std::env::var_os("XPARQ_E2E_MATURE_CHAIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mature"));
-    assert!(
-        mature_chain.join("xparq.redb").is_file(),
-        "missing mature E2E fixture at {}",
-        mature_chain.display()
-    );
-    copy_tree(&mature_chain, &a);
+    // Build the fixture with the current schema and chain identity.
     mine(&a, 1);
 
     let a_p2p = free_address();
@@ -304,12 +296,13 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     let b_rpc = free_address();
     let c_p2p = free_address();
     let c_rpc = free_address();
+    mine(&a, 1);
     let mut a_node = start_node(&a, &a_p2p, &a_rpc, &[], None);
-    wait_for_status(&a_rpc, |status| status["tip_height"] == 51);
+    wait_for_status(&a_rpc, |status| status["tip_height"] == 1);
     let b_node = start_node(&b, &b_p2p, &b_rpc, &[&a_p2p], None);
-    wait_for_status(&b_rpc, |status| status["tip_height"] == 51);
+    wait_for_status(&b_rpc, |status| status["tip_height"] == 1);
     let mut c_node = start_node(&c, &c_p2p, &c_rpc, &[&b_p2p], None);
-    wait_for_status(&c_rpc, |status| status["tip_height"] == 51);
+    wait_for_status(&c_rpc, |status| status["tip_height"] == 1);
 
     let sender = sender_wallet();
     let sender_address = address_to_string(&sender.address);
@@ -327,7 +320,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     let input_amount = input["amount"].as_u64().unwrap();
     let sent = Zeno::from_zeno(1);
     let state_burn = xparq::consensus::StateTransitionWeight {
-        created_coin_utxos: 2,
+        created_coin_utxos: 3,
         consumed_coin_utxos: 1,
         created_account_key_weight: xparq::consensus::profile_key_state_weight(&sender.public_key)
             .unwrap(),
@@ -335,21 +328,33 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     }
     .state_growth_burn()
     .unwrap();
-    let intent = CoinIntent::new(
-        sender.address,
-        vec![input_id],
-        vec![
-            SpendOutput::new(recipient, sent),
-            SpendOutput::new(
-                sender.address,
-                Zeno::from_zeno(input_amount - sent.as_zeno() - state_burn.as_zeno()),
-            ),
-            SpendOutput::burn(state_burn),
-        ],
-    )
-    .unwrap();
-    let transaction =
-        AuthorizedTransaction::Coin(Box::new(sender.sign_account_intent(intent, false).unwrap()));
+    // Both canonical history burn and relay fee depend on the signed size.
+    let mut archival_bytes = 0;
+    let transaction = loop {
+        let burn = state_burn.as_zeno() + archival_bytes;
+        let intent = CoinIntent::new(
+            sender.address,
+            vec![input_id],
+            vec![
+                SpendOutput::new(recipient, sent),
+                SpendOutput::new(
+                    sender.address,
+                    Zeno::from_zeno(input_amount - sent.as_zeno() - burn - archival_bytes.max(1)),
+                ),
+                SpendOutput::burn(Zeno::from_zeno(burn)),
+                SpendOutput::block_miner(Zeno::from_zeno(archival_bytes.max(1))),
+            ],
+        )
+        .unwrap();
+        let transaction = AuthorizedTransaction::Coin(Box::new(
+            sender.sign_account_intent(intent, false).unwrap(),
+        ));
+        let required = canonical_bytes(&transaction).unwrap().len() as u64;
+        if required == archival_bytes {
+            break transaction;
+        }
+        archival_bytes = required;
+    };
     let submitted = post_transaction(&a_rpc, &transaction);
     assert_eq!(
         submitted["transaction_id"],

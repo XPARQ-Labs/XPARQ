@@ -556,6 +556,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "sha3",
+ "static_assertions",
+ "xparq-crypto",
+ "xparq-extension",
+]
+
+[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1165,81 +1176,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "xparq"
-version = "0.1.0"
-dependencies = [
- "xparq-asset",
- "xparq-blockchain",
- "xparq-coin",
- "xparq-common",
- "xparq-consensus",
- "xparq-crypto",
- "xparq-extension",
- "xparq-genesis",
- "xparq-ledger",
- "xparq-transaction",
-]
-
-[[package]]
-name = "xparq-asset"
-version = "0.1.0"
-dependencies = [
- "borsh",
- "xparq-common",
- "xparq-crypto",
-]
-
-[[package]]
-name = "xparq-blockchain"
-version = "0.1.0"
-dependencies = [
- "borsh",
- "static_assertions",
- "xparq-coin",
- "xparq-common",
- "xparq-crypto",
- "xparq-transaction",
-]
-
-[[package]]
-name = "xparq-bridge"
-version = "0.1.0"
-dependencies = [
- "xparq-asset",
-]
-
-[[package]]
-name = "xparq-coin"
-version = "0.1.0"
-dependencies = [
- "borsh",
- "sha3",
-]
-
-[[package]]
-name = "xparq-common"
-version = "0.1.0"
-dependencies = [
- "borsh",
- "serde",
- "sha3",
-]
-
-[[package]]
-name = "xparq-consensus"
-version = "0.1.0"
-dependencies = [
- "borsh",
- "static_assertions",
- "xparq-asset",
- "xparq-blockchain",
- "xparq-coin",
- "xparq-common",
- "xparq-crypto",
- "xparq-transaction",
-]
-
-[[package]]
 name = "xparq-crypto"
 version = "0.1.0"
 dependencies = [
@@ -1254,7 +1190,6 @@ dependencies = [
  "serde",
  "sha3",
  "static_assertions",
- "xparq-common",
  "xparq-sqisign",
  "zeroize 1.9.0",
 ]
@@ -1266,39 +1201,7 @@ dependencies = [
  "borsh",
  "wasmi",
  "wat",
- "xparq-bridge",
- "xparq-common",
  "xparq-crypto",
-]
-
-[[package]]
-name = "xparq-genesis"
-version = "0.1.0"
-dependencies = [
- "borsh",
- "xparq-asset",
- "xparq-blockchain",
- "xparq-common",
- "xparq-consensus",
- "xparq-crypto",
- "xparq-extension",
- "xparq-ledger",
- "xparq-transaction",
-]
-
-[[package]]
-name = "xparq-ledger"
-version = "0.1.0"
-dependencies = [
- "borsh",
- "xparq-asset",
- "xparq-blockchain",
- "xparq-coin",
- "xparq-common",
- "xparq-consensus",
- "xparq-crypto",
- "xparq-extension",
- "xparq-transaction",
 ]
 
 [[package]]
@@ -1309,10 +1212,10 @@ dependencies = [
  "getrandom 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "hex",
  "igd-next",
+ "kernel",
  "redb",
  "serde",
  "serde_json",
- "xparq",
  "xparq-wallet",
 ]
 
@@ -1336,26 +1239,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "xparq-transaction"
-version = "0.1.0"
-dependencies = [
- "borsh",
- "xparq-asset",
- "xparq-coin",
- "xparq-common",
- "xparq-crypto",
-]
-
-[[package]]
 name = "xparq-wallet"
 version = "0.1.0"
 dependencies = [
  "bip39",
  "getrandom 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "hex",
+ "kernel",
  "serde",
  "serde_json",
- "xparq",
  "zeroize 1.9.0",
 ]
 

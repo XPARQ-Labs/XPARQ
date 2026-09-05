@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use xparq_common::extension::{
+use crate::protocol::{
     Extension, ExtensionCall, ExtensionContext, ExtensionFailure, ExtensionHash,
     ExtensionStateRead, ExtensionStateWrite,
 };
@@ -46,6 +46,29 @@ impl ExtensionRegistry {
             .get(&id)
             .map(Box::as_ref)
             .ok_or(ExtensionFailure::UnknownExtension)
+    }
+
+    pub fn execution_weight(
+        &self,
+        context: ExtensionContext,
+        call: &ExtensionCall,
+        state: &dyn ExtensionStateRead,
+    ) -> Result<u64, ExtensionFailure> {
+        if let Some(extension) = self.extensions.get(&call.extension_id()) {
+            if context.height < extension.activation_height() {
+                return Err(ExtensionFailure::InactiveExtension);
+            }
+            return extension.execution_weight(call);
+        }
+        let package = crate::deploy::wasm_deployed_package(state, call.extension_id())?
+            .ok_or(ExtensionFailure::UnknownExtension)?;
+        if context.height < package.manifest.activation_height {
+            return Err(ExtensionFailure::InactiveExtension);
+        }
+        Ok(package
+            .manifest
+            .fuel_limit
+            .div_ceil(crate::wasm::WASM_FUEL_PER_BLOCK_WEIGHT))
     }
 
     pub fn validate(
@@ -120,7 +143,7 @@ impl ExtensionRegistry {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use xparq_common::Height;
+    use xparq_crypto::primitives::Height;
 
     struct TestExtension {
         id: ExtensionHash,

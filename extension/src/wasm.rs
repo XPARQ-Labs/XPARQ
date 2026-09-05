@@ -4,21 +4,21 @@
 //! floating-point instructions. The only imports are bounded extension-state
 //! operations under the `xparq` module.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
-use borsh::{BorshDeserialize, BorshSerialize};
-use wasmi::{Caller, CompilationMode, Config, Engine, ExternType, Linker, Memory, Module, Store};
-use xparq_common::extension::{
+use crate::protocol::{
     EXTENSION_STATE_KEY_MAX_SIZE, EXTENSION_STATE_VALUE_MAX_SIZE, Extension, ExtensionCall,
     ExtensionContext, ExtensionEffect, ExtensionFailure, ExtensionHash, ExtensionStateRead,
     ExtensionStateWrite,
 };
-use xparq_common::{Height, canonical_bytes, domain_hash};
+use borsh::{BorshDeserialize, BorshSerialize};
+use wasmi::{Caller, CompilationMode, Config, Engine, ExternType, Linker, Memory, Module, Store};
+use xparq_crypto::primitives::{Height, canonical_bytes, domain_hash};
 use xparq_crypto::{
     Address, ProfilePublicKey, ProfileSignature, ProfileSigningSeed,
     address_from_profile_public_key, profile_verify,
@@ -33,6 +33,13 @@ pub const WASM_MAX_FUEL: u64 = 10_000_000;
 pub const WASM_STATE_MAX_SIZE: usize = 16 * 1024 * 1024;
 pub const WASM_EFFECT_MAX_COUNT: usize = 1_024;
 pub const WASM_APP_CALL_ACTIVATION_HEIGHT: Height = Height(0);
+/// Host work is charged in the same deterministic fuel pool as guest
+/// instructions. The fixed part accounts for dispatch; the byte part accounts
+/// for copying across the guest boundary.
+pub const WASM_HOST_CALL_BASE_FUEL: u64 = 32;
+pub const WASM_HOST_FUEL_PER_BYTE: u64 = 1;
+/// Four units of Wasmi fuel reserve one unit of block execution weight.
+pub const WASM_FUEL_PER_BLOCK_WEIGHT: u64 = 4;
 
 const WASM_CODE_HASH_CONTEXT: &str = "XPARQ WASM Extension Code";
 const WASM_EXTENSION_HASH_CONTEXT: &str = "XPARQ WASM Extension Id";
@@ -314,23 +321,17 @@ impl WasmExtension {
         state: &dyn ExtensionStateRead,
         writable: bool,
     ) -> Result<HostExecutionResult, ExtensionFailure> {
-        let entries = state.entries()?;
-        let state_bytes = entries
-            .iter()
-            .try_fold(0_usize, |total, (key, value)| {
-                total.checked_add(key.len())?.checked_add(value.len())
-            })
-            .ok_or(ExtensionFailure::InvalidState)?;
+        let state_bytes = state.state_size()?;
         if state_bytes > WASM_STATE_MAX_SIZE {
             return Err(ExtensionFailure::InvalidState);
         }
-        let original: BTreeMap<_, _> = entries.into_iter().collect();
         let mut linker = Linker::<HostState>::new(&self.engine);
         define_host_functions(&mut linker).map_err(|_| ExtensionFailure::InvalidState)?;
         let mut store = Store::new(
             &self.engine,
             HostState {
-                state: original.clone(),
+                base: state,
+                changes: BTreeMap::new(),
                 state_bytes,
                 failure: None,
                 writable,
@@ -373,7 +374,7 @@ impl WasmExtension {
         }
         let host = store.into_data();
         Ok(HostExecutionResult {
-            state: host.state,
+            changes: host.changes,
             effects: host.effects,
         })
     }
@@ -386,6 +387,13 @@ impl Extension for WasmExtension {
 
     fn activation_height(&self) -> Height {
         self.manifest.activation_height
+    }
+
+    fn execution_weight(&self, _call: &ExtensionCall) -> Result<u64, ExtensionFailure> {
+        Ok(self
+            .manifest
+            .fuel_limit
+            .div_ceil(WASM_FUEL_PER_BLOCK_WEIGHT))
     }
 
     fn validate(
@@ -404,19 +412,11 @@ impl Extension for WasmExtension {
         call: &ExtensionCall,
         state: &mut dyn ExtensionStateWrite,
     ) -> Result<(), ExtensionFailure> {
-        let original: BTreeMap<_, _> = state.entries()?.into_iter().collect();
         let resulting = self.execute("xparq_apply", context, call.payload(), state, true)?;
-        let keys: BTreeSet<_> = original
-            .keys()
-            .chain(resulting.state.keys())
-            .cloned()
-            .collect();
-        for key in keys {
-            match (original.get(&key), resulting.state.get(&key)) {
-                (Some(before), Some(after)) if before == after => {}
-                (_, Some(after)) => state.put(key, after.clone())?,
-                (Some(_), None) => state.delete(&key)?,
-                (None, None) => {}
+        for (key, value) in resulting.changes {
+            match value {
+                Some(value) => state.put(key, value)?,
+                None => state.delete(&key)?,
             }
         }
         for effect in resulting.effects {
@@ -480,8 +480,9 @@ fn validate_module_memory(module: &Module, pages: u32) -> Result<(), WasmExtensi
     Ok(())
 }
 
-struct HostState {
-    state: BTreeMap<Vec<u8>, Vec<u8>>,
+struct HostState<'a> {
+    base: &'a dyn ExtensionStateRead,
+    changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     state_bytes: usize,
     failure: Option<ExtensionFailure>,
     writable: bool,
@@ -490,16 +491,19 @@ struct HostState {
 }
 
 struct HostExecutionResult {
-    state: BTreeMap<Vec<u8>, Vec<u8>>,
+    changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     effects: Vec<ExtensionEffect>,
 }
 
-impl HostState {
+impl HostState<'_> {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ExtensionFailure> {
         if self.protect_system_keys && is_wasm_system_key(key) {
             return Err(ExtensionFailure::StateAccess);
         }
-        Ok(self.state.get(key).cloned())
+        match self.changes.get(key) {
+            Some(value) => Ok(value.clone()),
+            None => self.base.get(key),
+        }
     }
 
     fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), ExtensionFailure> {
@@ -510,8 +514,7 @@ impl HostState {
             return Err(ExtensionFailure::StateAccess);
         }
         let previous_size = self
-            .state
-            .get(&key)
+            .get(&key)?
             .map_or(0, |previous| key.len() + previous.len());
         let next_size = self
             .state_bytes
@@ -522,7 +525,7 @@ impl HostState {
         if next_size > WASM_STATE_MAX_SIZE {
             return Err(ExtensionFailure::StateEntryLimit);
         }
-        self.state.insert(key, value);
+        self.changes.insert(key, Some(value));
         self.state_bytes = next_size;
         Ok(())
     }
@@ -534,8 +537,9 @@ impl HostState {
         if self.protect_system_keys && is_wasm_system_key(key) {
             return Err(ExtensionFailure::StateAccess);
         }
-        if let Some(value) = self.state.remove(key) {
+        if let Some(value) = self.get(key)? {
             self.state_bytes -= key.len() + value.len();
+            self.changes.insert(key.to_vec(), None);
         }
         Ok(())
     }
@@ -580,6 +584,18 @@ fn fail(caller: &mut Caller<'_, HostState>, failure: ExtensionFailure) -> i32 {
     HOST_FAILURE
 }
 
+fn charge_host_fuel(caller: &mut Caller<'_, HostState>, bytes: usize) -> Result<(), ()> {
+    let bytes = u64::try_from(bytes).map_err(|_| ())?;
+    let charge = bytes
+        .checked_mul(WASM_HOST_FUEL_PER_BYTE)
+        .and_then(|charge| charge.checked_add(WASM_HOST_CALL_BASE_FUEL))
+        .ok_or(())?;
+    let remaining = caller.get_fuel().map_err(|_| ())?;
+    caller
+        .set_fuel(remaining.checked_sub(charge).ok_or(())?)
+        .map_err(|_| ())
+}
+
 fn host_state_get(
     mut caller: Caller<'_, HostState>,
     key_ptr: i32,
@@ -590,11 +606,17 @@ fn host_state_get(
     let Some(key) = read_guest(&caller, key_ptr, key_len, EXTENSION_STATE_KEY_MAX_SIZE) else {
         return fail(&mut caller, ExtensionFailure::StateAccess);
     };
+    if charge_host_fuel(&mut caller, key.len()).is_err() {
+        return fail(&mut caller, ExtensionFailure::InvalidState);
+    }
     let value = match caller.data().get(&key) {
         Ok(Some(value)) => value,
         Ok(None) => return HOST_MISSING,
         Err(error) => return fail(&mut caller, error),
     };
+    if charge_host_fuel(&mut caller, value.len()).is_err() {
+        return fail(&mut caller, ExtensionFailure::InvalidState);
+    }
     let Ok(value_len) = i32::try_from(value.len()) else {
         return fail(&mut caller, ExtensionFailure::StateAccess);
     };
@@ -634,6 +656,9 @@ fn host_state_put(
     ) else {
         return fail(&mut caller, ExtensionFailure::StateValueTooLarge);
     };
+    if charge_host_fuel(&mut caller, key.len().saturating_add(value.len())).is_err() {
+        return fail(&mut caller, ExtensionFailure::InvalidState);
+    }
     match caller.data_mut().put(key, value) {
         Ok(()) => 0,
         Err(error) => fail(&mut caller, error),
@@ -644,6 +669,9 @@ fn host_state_delete(mut caller: Caller<'_, HostState>, key_ptr: i32, key_len: i
     let Some(key) = read_guest(&caller, key_ptr, key_len, EXTENSION_STATE_KEY_MAX_SIZE) else {
         return fail(&mut caller, ExtensionFailure::StateKeyTooLarge);
     };
+    if charge_host_fuel(&mut caller, key.len()).is_err() {
+        return fail(&mut caller, ExtensionFailure::InvalidState);
+    }
     match caller.data_mut().delete(&key) {
         Ok(()) => 0,
         Err(error) => fail(&mut caller, error),
@@ -671,6 +699,9 @@ fn host_asset_mint(
     let Some(amount) = read_guest(&caller, amount_ptr, 16, 16) else {
         return fail(&mut caller, ExtensionFailure::StateAccess);
     };
+    if charge_host_fuel(&mut caller, 32 + 20 + 16).is_err() {
+        return fail(&mut caller, ExtensionFailure::InvalidState);
+    }
     caller.data_mut().effects.push(ExtensionEffect::MintAsset {
         asset_id: asset_id.try_into().expect("fixed asset ID length"),
         recipient: recipient.try_into().expect("fixed address length"),
@@ -700,6 +731,9 @@ fn host_asset_transfer(
     let Some(amount) = read_guest(&caller, amount_ptr, 16, 16) else {
         return fail(&mut caller, ExtensionFailure::StateAccess);
     };
+    if charge_host_fuel(&mut caller, 32 + 20 + 16).is_err() {
+        return fail(&mut caller, ExtensionFailure::InvalidState);
+    }
     caller
         .data_mut()
         .effects
@@ -721,6 +755,9 @@ fn host_coin_transfer(mut caller: Caller<'_, HostState>, recipient_ptr: i32, amo
     let Some(recipient) = read_guest(&caller, recipient_ptr, 20, 20) else {
         return fail(&mut caller, ExtensionFailure::StateAccess);
     };
+    if charge_host_fuel(&mut caller, 20 + core::mem::size_of::<i64>()).is_err() {
+        return fail(&mut caller, ExtensionFailure::InvalidState);
+    }
     caller
         .data_mut()
         .effects
@@ -778,6 +815,64 @@ mod tests {
             self.effects.push(effect);
             Ok(())
         }
+    }
+
+    struct LazyReadState {
+        value: Vec<u8>,
+    }
+
+    impl ExtensionStateRead for LazyReadState {
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ExtensionFailure> {
+            Ok(key.is_empty().then(|| self.value.clone()))
+        }
+
+        fn entries(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ExtensionFailure> {
+            panic!("WASM execution must not materialize the full namespace")
+        }
+
+        fn state_size(&self) -> Result<usize, ExtensionFailure> {
+            Ok(self.value.len())
+        }
+
+        fn get_extension(
+            &self,
+            _extension_id: ExtensionHash,
+            _key: &[u8],
+        ) -> Result<Option<Vec<u8>>, ExtensionFailure> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn execution_uses_lazy_state_and_host_bytes_consume_fuel() {
+        let module = wat::parse_str(
+            r#"(module
+                (import "xparq" "state_get" (func $get (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 16 16)
+                (func (export "xparq_alloc") (param i32) (result i32) (i32.const 0))
+                (func (export "xparq_validate") (param i32 i32 i64) (result i32)
+                    (drop (call $get (i32.const 0) (i32.const 0) (i32.const 1024) (i32.const 30000)))
+                    (i32.const 0))
+                (func (export "xparq_apply") (param i32 i32 i64) (result i32) (i32.const 0)))"#,
+        )
+        .unwrap();
+        let mut manifest = WasmExtensionManifest::new("lazy.fuel".into(), Height(0), &module);
+        manifest.fuel_limit = 10_000;
+        let extension = WasmExtension::new(manifest.clone(), module).unwrap();
+        assert_eq!(
+            extension.execution_weight(&call(&extension, b"")),
+            Ok(manifest.fuel_limit.div_ceil(WASM_FUEL_PER_BLOCK_WEIGHT))
+        );
+        assert_eq!(
+            extension.validate(
+                ExtensionContext { height: Height(0) },
+                &call(&extension, b""),
+                &LazyReadState {
+                    value: vec![7; 20_000],
+                },
+            ),
+            Err(ExtensionFailure::InvalidState)
+        );
     }
 
     fn compile(wat_source: &str) -> WasmExtension {

@@ -9,9 +9,7 @@ repository.workspace = true
 [dependencies]
 borsh.workspace = true
 wasmi.workspace = true
-xparq-common.workspace = true
 xparq-crypto.workspace = true
-xparq-bridge = { path = "bridge" }
 
 [dev-dependencies]
 wat = "1.244.0"

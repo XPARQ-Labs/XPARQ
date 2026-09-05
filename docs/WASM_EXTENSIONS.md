@@ -37,6 +37,27 @@ ABI v1 limits module code to 2 MiB, linear memory to 16 fixed 64-KiB pages,
 fuel to 10,000,000, keys to 256 bytes, individual values to 1 MiB, and the
 WASM-visible state snapshot to 16 MiB.
 
+## Execution accounting
+
+WASM execution is part of consensus block weight. Each call reserves
+`ceil(manifest.fuel_limit / 4)` weight units in addition to the canonical
+serialized block bytes. The reservation uses the immutable manifest limit,
+not the fuel actually consumed, so miners cannot obtain a different block
+weight by choosing a cheaper execution path. The combined weight must remain
+within the 5 MiB consensus block-weight limit and is committed in the block
+header.
+
+Wasmi instruction metering remains active. Host calls additionally cost 32
+fuel plus 1 fuel for every byte crossing the host boundary. State reads charge
+the key and returned value; state writes charge the key and value; deletion
+charges the key. Native coin and asset effects charge their fixed encoded
+fields. These parameters are committed by the chain-spec hash.
+
+Execution reads state through the ledger namespace and records only a
+per-call write overlay. It does not clone the complete namespace before every
+call. The overlay, emitted effects, and nonce update are committed atomically
+on success and discarded together on failure.
+
 ## Build and inspect a package
 
 Compile the extension to a raw WebAssembly module whose memory declaration is
@@ -68,6 +89,10 @@ the verified module in extension state and activates it exactly 100 blocks after
 the deployment block. Deploying the same ID twice is rejected. There is no
 governance approval, owner upgrade, deletion, or emergency pause; a new version
 must use new bytecode and therefore a new ID.
+
+Extension IDs use the canonical `extension:` prefix followed by exactly 64
+lowercase hexadecimal characters. Raw or uppercase hexadecimal IDs are
+rejected by wallet and RPC input parsers.
 
 Query its activation status with:
 

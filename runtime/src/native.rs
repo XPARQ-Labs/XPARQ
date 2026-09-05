@@ -473,7 +473,7 @@ fn select_block_transactions(
         let mut candidate = selected.clone();
         candidate.push(transaction.clone());
         let block = candidate_block(ledger, miner, candidate.clone())?;
-        if block.weight().map_err(|error| error.to_string())? > xparq::block::MAX_BLOCK_WEIGHT {
+        if block.block_weight() as usize > xparq::block::MAX_BLOCK_WEIGHT {
             break;
         }
         selected = candidate;
@@ -503,10 +503,11 @@ fn candidate_block(
         transactions,
     )
     .map_err(|error| error.to_string())?;
-    let extension_root = ledger
-        .preview_block_state_root(&block)
+    let (extension_root, block_weight) = ledger
+        .preview_block_commitments(&block)
         .map_err(|error| error.to_string())?;
     block.set_state_root(StateRoot(*extension_root.as_bytes()));
+    block.set_block_weight(block_weight);
     Ok(block)
 }
 
@@ -708,37 +709,36 @@ fn account_asset_balances(
     ledger: &Ledger,
     address: Address,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let mut balances = std::collections::BTreeMap::new();
+    let mut asset_ids = std::collections::BTreeSet::new();
     for (asset_id, metadata) in ledger.state().assets.metadata_entries() {
         if metadata.creator == address
             || metadata.mint_authority == Some(Authority::Address(address))
         {
-            balances.entry(asset_id).or_insert(0_u128);
+            asset_ids.insert(asset_id);
         }
     }
     for (_, utxo) in ledger.state().assets.utxos() {
         if utxo.owner != Authority::Address(address) || utxo.amount.is_zero() {
             continue;
         }
-        let balance = balances.entry(utxo.parent).or_insert(0_u128);
-        *balance = balance
-            .checked_add(utxo.amount.as_units())
-            .ok_or("asset balance overflow")?;
+        asset_ids.insert(utxo.parent);
     }
-    let mut response = Vec::with_capacity(balances.len());
-    for (asset_id, balance) in balances {
+    let mut response = Vec::with_capacity(asset_ids.len());
+    for asset_id in asset_ids {
         let metadata = ledger
             .state()
             .assets
             .metadata(asset_id)
             .ok_or("asset balance references missing metadata")?;
+        let mint = ledger.state().assets.supply(asset_id);
         let shares = account_asset_shares(ledger, asset_id, address);
         response.push(serde_json::json!({
             "asset_id": asset_id.to_string(),
             "name": metadata.name,
             "symbol": metadata.symbol,
             "decimals": metadata.decimals,
-            "balance": balance.to_string(),
+            "max_supply": metadata.max_supply.to_string(),
+            "mint": mint.to_string(),
             "shares": shares,
         }));
     }
@@ -754,14 +754,14 @@ fn account_asset_shares(
         .state()
         .assets
         .utxos()
-        .filter(|(_, share)| {
-            share.parent == asset_id && share.owner == Authority::Address(address)
+        .filter(|(_, share)| share.parent == asset_id && share.owner == Authority::Address(address))
+        .map(|(share_id, share)| {
+            serde_json::json!({
+                "share_id": share_id.to_string(),
+                "amount": share.amount.to_string(),
+                "owner": asset_owner_response(share.owner),
+            })
         })
-        .map(|(share_id, share)| serde_json::json!({
-            "share_id": share_id.to_string(),
-            "amount": share.amount.to_string(),
-            "owner": asset_owner_response(share.owner),
-        }))
         .collect()
 }
 
@@ -990,7 +990,7 @@ fn asset_owner_response(owner: Authority<Address>) -> serde_json::Value {
         }),
         Authority::Extension(program) => serde_json::json!({
             "type": "program",
-            "extension_id": hex::encode(program.as_bytes()),
+            "extension_id": program.to_string(),
         }),
     }
 }
@@ -1000,7 +1000,7 @@ fn extension_transaction_response(
     miner: Address,
 ) -> serde_json::Value {
     let base = serde_json::json!({
-        "extension_id": hex::encode(transaction.call.extension_id().as_bytes()),
+        "extension_id": transaction.call.extension_id().to_string(),
         "payload_size": transaction.call.payload().len(),
         "fee_sender": xparq::crypto::address_to_string(&transaction.fee.intent.sender),
         "fee_outputs": public_outputs_response(
@@ -1020,7 +1020,7 @@ fn extension_transaction_response(
             .expect("extension response is an object");
         object.insert(
             "deployed_extension_id".into(),
-            serde_json::json!(hex::encode(call.extension_id().as_bytes())),
+            serde_json::json!(call.extension_id().to_string()),
         );
         object.insert("wasm_name".into(), serde_json::json!(call.name));
         object.insert(
@@ -1070,7 +1070,7 @@ fn public_outputs_response(
                 ),
                 Recipient::Burn => (None, "burn", "state_burn"),
                 Recipient::Extension(extension) => (
-                    Some(hex::encode(extension.as_bytes())),
+                    Some(extension.to_string()),
                     "extension",
                     "extension_deposit",
                 ),
@@ -1372,15 +1372,7 @@ fn wasm_nonce_response(
 
 fn wasm_extension_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
     let text = route.trim_start_matches("/wasm/");
-    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("invalid WASM extension id".into());
-    }
-    let decoded = hex::decode(text).map_err(|_| "invalid WASM extension id")?;
-    let extension_id = xparq::extension::ExtensionHash::from_bytes(
-        decoded
-            .try_into()
-            .map_err(|_| "invalid WASM extension id")?,
-    );
+    let extension_id = parse_extension_id(text)?;
     let namespace = ledger
         .state()
         .extensions
@@ -1390,7 +1382,7 @@ fn wasm_extension_response(ledger: &Ledger, route: &str) -> Result<serde_json::V
         .ok_or("WASM extension was not found")?;
     let tip_height = ledger.tip_height().map_or(0, |height| height.0);
     Ok(serde_json::json!({
-        "extension_id": hex::encode(package.manifest.extension_id.as_bytes()),
+        "extension_id": package.manifest.extension_id.to_string(),
         "name": package.manifest.name,
         "code_hash": hex::encode(package.manifest.code_hash),
         "abi_version": package.manifest.abi_version,
@@ -1414,20 +1406,16 @@ fn wasm_app_nonce_response(ledger: &Ledger, route: &str) -> Result<serde_json::V
     let nonce = xparq::extension::wasm_app_nonce(&namespace, address)
         .map_err(|error| format!("read WASM application nonce: {error:?}"))?;
     Ok(serde_json::json!({
-        "extension_id": extension,
+        "extension_id": extension_id.to_string(),
         "address": xparq::crypto::address_to_string(&address),
         "nonce": nonce,
     }))
 }
 
 fn parse_extension_id(value: &str) -> Result<xparq::common::ExtensionHash, String> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("invalid WASM extension id".into());
-    }
-    let bytes = hex::decode(value).map_err(|_| "invalid WASM extension id")?;
-    Ok(xparq::common::ExtensionHash::from_bytes(
-        bytes.try_into().map_err(|_| "invalid WASM extension id")?,
-    ))
+    value
+        .parse()
+        .map_err(|_| "invalid extension ID; expected extension:<64 lowercase hex>".into())
 }
 
 fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
@@ -1471,7 +1459,7 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
         let balance = ledger.state().assets.extension_balance(asset_id, extension);
         return Ok(serde_json::json!({
             "asset_id": asset_id.to_string(),
-            "extension_id": hex::encode(extension.as_bytes()),
+            "extension_id": extension.to_string(),
             "balance": balance.to_string(),
         }));
     }
@@ -1486,7 +1474,7 @@ fn asset_authority_response(authority: Option<Authority<Address>>) -> serde_json
         }),
         Some(Authority::Extension(extension_id)) => serde_json::json!({
             "type": "program",
-            "extension_id": hex::encode(extension_id.as_bytes()),
+            "extension_id": extension_id.to_string(),
         }),
         None => serde_json::Value::Null,
     }
@@ -3576,10 +3564,7 @@ fn inspect_extension_package(path: &str) -> Result<(), String> {
         .map_err(|error| format!("compile WASM extension `{path}`: {error}"))?;
     let manifest = extension.manifest();
     println!("name: {}", manifest.name);
-    println!(
-        "extension_id: {}",
-        hex::encode(manifest.extension_id.as_bytes())
-    );
+    println!("extension_id: {}", manifest.extension_id);
     println!("code_hash: {}", hex::encode(manifest.code_hash));
     println!("abi_version: {}", manifest.abi_version);
     println!("activation_height: {}", manifest.activation_height.0);
@@ -3614,10 +3599,7 @@ fn build_extension_package(args: &[String]) -> Result<(), String> {
         .write_new(package_path)
         .map_err(|error| format!("write WASM extension package `{package_path}`: {error}"))?;
     println!("package: {package_path}");
-    println!(
-        "extension_id: {}",
-        hex::encode(package.manifest.extension_id.as_bytes())
-    );
+    println!("extension_id: {}", package.manifest.extension_id);
     println!("code_hash: {}", hex::encode(package.manifest.code_hash));
     Ok(())
 }
@@ -3765,7 +3747,7 @@ mod tests {
     }
 
     #[test]
-    fn account_projection_lists_initial_creator_balance() {
+    fn account_projection_lists_asset_supply_and_creator_shares() {
         let seed = xparq::crypto::ProfileSigningSeed::new(
             xparq::crypto::SignatureProfile::MlDsa44,
             [0x61; 32],
@@ -3789,7 +3771,9 @@ mod tests {
         let assets = account_asset_balances(&ledger, authority).unwrap();
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0]["symbol"], "AUTH");
-        assert_eq!(assets[0]["balance"], "4");
+        assert_eq!(assets[0]["max_supply"], "10");
+        assert_eq!(assets[0]["mint"], "4");
+        assert!(assets[0].get("balance").is_none());
         assert_eq!(assets[0]["shares"].as_array().unwrap().len(), 1);
         assert_eq!(assets[0]["shares"][0]["amount"], "4");
         assert!(

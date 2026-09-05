@@ -1,54 +1,55 @@
 # Crate Consolidation and Repository History
 
-## Recommendation
+## Implemented workspace
 
-XPARQ should remain a Cargo workspace, but the protocol crates should eventually
-be consolidated into one library crate. A practical target is five packages:
+The workspace has five packages. Protocol crates have been moved into modules
+of the `kernel` package; `extension/bridge` is now `extension/src/bridge`.
 
-| Package | Responsibility |
-| --- | --- |
-| `xparq` | Canonical protocol types, coin and asset primitives, transactions, blocks, consensus, ledger, and genesis |
-| `xparq-crypto` | Cryptographic implementations, signature profiles, addresses, hashing, and Argon2id proof of work |
-| `xparq-extension` | WASM execution and its explicitly bounded host interface |
-| `xparq-node` | Storage, networking, RPC, mempool, and mining application |
-| `xparq-wallet` | Wallet library and wallet application |
+| Package | Directory | Responsibility |
+| --- | --- | --- |
+| `kernel` | `xparq/` | Canonical protocol types, coin and asset primitives, transactions, blocks, consensus, ledger, genesis |
+| `xparq-crypto` | `crypto/` | Cryptographic implementations and shared canonical encoding, hash, and scalar primitives |
+| `xparq-extension` | `extension/` | Extension contracts, WASM execution, bounded host interface, bridge primitives |
+| `xparq-node` | `runtime/` | Storage, networking, RPC, mempool, mining |
+| `xparq-wallet` | `wallet/` | Wallet library, keys, transaction construction, user interface |
 
-The current `common`, `coin`, `asset`, `transaction`, `blockchain`, `consensus`,
-`ledger`, `genesis`, and `xparq` crates form one tightly coupled protocol unit.
-They use the same release version, change together when canonical encoding or
-consensus changes, and are not useful as independently deployed products. They
-are the strongest candidates to become modules of the single `xparq` library.
+## Kernel and infrastructure boundaries
 
-Keep `xparq-crypto` separate initially. It has a distinct audit surface, heavy
-feature-controlled implementations, and locally vendored cryptographic
-dependencies. It can be merged later, but doing so provides less immediate
-value than consolidating the protocol graph.
+The kernel owns deterministic validity rules and in-memory ledger transitions.
+The node owns persistence and networking. For example, consensus validates PoW;
+the node runs the mining loop. Consensus does not depend on ledger storage.
+Node and wallet consume the public `xparq` API.
 
-Keep `xparq-extension` separate because WASM execution is a useful trust and
-dependency boundary. The small `extension/bridge` package should become an
-`extension::bridge` module unless it is intended for independent publication.
+Package dependencies point downwards:
 
-Keep the node and wallet separate from the protocol library. They have
-different security roles and dependency sets: the node owns networking and
-storage, while the wallet owns secret material and transaction construction.
-The `depend/` directory is vendored source and must remain outside the product
-workspace packages.
+```text
+node / wallet -> kernel -> extension -> crypto
+                   └----------------> crypto
+```
 
-## Why not one package for everything?
+The node also uses the wallet library in integration tests. Vendored sources
+under `depend/` remain outside workspace membership.
 
-Cargo can build a library plus `node` and `wallet` binaries from one package,
-so a literal single-package repository is possible. It would, however, unify
-wallet, server, database, networking, WASM, and cryptographic dependencies into
-one feature graph. That increases build coupling and makes trust boundaries
-less visible. One protocol crate inside a small workspace is the simpler and
-safer result.
+The `kernel` package retains the library name `xparq`. Workspace consumers use
+the `xparq` dependency alias with `package = "kernel"`, preserving Rust imports
+and feature forwarding through `xparq/...`. Cargo package selection uses
+`-p kernel`; the source directory remains `xparq/`.
 
-## Proposed module layout
+Shared definitions have one owner to avoid circular dependencies:
+
+- `crypto::primitives` owns canonical encoding, `CodecError`, domain hashing,
+  `Height`, and `Nonce`. Crypto and extensions can use them without depending
+  on the kernel.
+- `extension::protocol` owns extension envelopes, state capabilities, limits,
+  and commitments. WASM execution remains behind the extension host interface.
+- `xparq::common` owns `Authority`, `Input`, and `Output`, and re-exports the
+  lower-level definitions through the existing common API.
+
+## Protocol module layout
 
 ```text
 xparq/src/
 ├── common/
-├── crypto-facing APIs
 ├── coin/
 ├── asset/
 ├── transaction/
@@ -56,32 +57,108 @@ xparq/src/
 ├── consensus/
 ├── ledger/
 ├── genesis/
+├── bin/print_genesis_hash.rs
 └── lib.rs
 ```
 
-Module boundaries should remain explicit even after package boundaries are
-removed. In particular, the ledger applies consensus-approved transitions;
-consensus must not depend on ledger storage; and application crates must use
-the public `xparq` API rather than internal file paths.
+The existing public paths `xparq::block`, `xparq::codec`, `xparq::crypto`,
+`xparq::extension`, `xparq::consensus`, and `xparq::ledger` remain available.
+`xparq::blockchain` also exposes the block and chain module directly.
+The standalone `genesis/genesis.rs` draft was preserved at
+`xparq/src/genesis/genesis.rs`; as before, it is not compiled into the protocol.
 
-## Migration sequence
+## Package maintenance and deployment
 
-1. Normalize package metadata and keep the current workspace green.
-2. Move `common`, `coin`, and `asset` into `xparq` modules and preserve their
-   public re-exports.
-3. Move transaction and blockchain types, then consensus, ledger, and genesis.
-4. Replace inter-package dependencies with `crate::` module paths one layer at
-   a time.
-5. Merge `extension/bridge` into `xparq-extension` if it has no external users.
-6. Remove old package directories and workspace dependency aliases only after
-   all consumers compile against the consolidated API.
+One repository does not require deploying every application together. Packages
+can be maintained and checked individually; deployment distributes the affected
+application binaries. The workspace currently shares package versions through
+`workspace.package.version`, so separate deployment does not imply independent
+package versioning or a separate repository for each crate.
 
-Canonical Borsh encodings, hash domains, identifiers, genesis identity, and
-consensus results must not change merely because Rust modules move. Each phase
-should pass workspace checks, affected tests, serialization fixtures, genesis
-tests, ledger apply/rollback tests, reorg tests, and node/wallet integration
-tests. A deliberate encoding change requires an explicit chain reset or state
-migration decision.
+| Change | Build and deployment scope |
+| --- | --- |
+| Wallet UI or key management | Build and distribute `wallet`; check node compatibility if transaction construction changes |
+| Node RPC, P2P, or storage | Build and deploy `node`; check affected clients, peers, and database compatibility |
+| Kernel, crypto, or extension library | Rebuild each application that needs the change and deploy its updated binary |
+| Consensus rules, canonical encoding, or protocol hashes | Validate affected consumers and coordinate compatible node/wallet releases; determine whether state migration or a chain reset is required |
+
+`kernel`, `xparq-crypto`, and `xparq-extension` are compiled into their consuming
+applications. They are not standalone services or libraries that can be replaced
+inside a running node. Editing their source does not update an existing binary.
+The compiled extension host follows this rule; deploying a WASM program uses the
+separate protocol described in [WASM_EXTENSIONS.md](WASM_EXTENSIONS.md).
+
+For focused maintenance:
+
+```bash
+cargo check -p kernel --all-targets --locked
+cargo test -p kernel --locked
+cargo test -p xparq-crypto --locked
+cargo test -p xparq-extension --locked
+```
+
+Build either application independently:
+
+```bash
+cargo build --release -p xparq-node --locked
+cargo build --release -p xparq-wallet --locked
+```
+
+The resulting artifacts are `target/release/node` and `target/release/wallet`.
+Cargo builds the selected application's required dependencies automatically;
+building does not deploy or restart an application.
+
+After changing a shared API, run the all-target workspace check to catch affected
+consumers. Before releasing protocol changes, also run the relevant serialization,
+genesis, ledger apply/rollback, reorg, and node/wallet integration tests below.
+Package boundaries alone do not establish wire or consensus compatibility.
+
+## Compatibility and validation
+
+This is a package/module reorganization. Canonical Borsh encodings, hash
+domains, identifiers, genesis identity, and consensus rules are preserved.
+The move itself does not require a chain reset or database migration.
+External consumers of removed crates must use the corresponding `xparq`
+module; for example, `xparq_asset::AssetHash` becomes
+`xparq::asset::AssetHash`. The existing node and wallet API paths are retained.
+
+The genesis helper is now invoked with:
+
+```bash
+cargo run -p kernel --bin print_genesis_hash
+```
+
+Network features remain `mainnet` (default), `testnet`, and `devnet`;
+`sqisign-blockchain-test` enables `devnet`. Select one network at a time,
+using `--no-default-features` for an alternate network.
+
+Validation commands:
+
+```bash
+cargo fmt -p kernel -p xparq-crypto -p xparq-extension -- --check
+cargo check --workspace --all-targets --locked
+cargo test --workspace --locked
+cargo check --workspace --all-targets --no-default-features --features testnet --locked
+cargo check --workspace --all-targets --no-default-features --features devnet --locked
+```
+
+`xparq/tests/consolidation_compatibility.rs` freezes mainnet genesis bytes,
+genesis and chain-spec hashes, and asset/share identifiers captured before
+the move. Existing serialization, apply/rollback, reorg, wallet, and node
+integration tests remain part of the validation surface.
+
+The consolidation was validated with all-target workspace checks for mainnet,
+testnet, and devnet, formatting checks, and 117 passing workspace tests,
+including four multi-node integration tests. Network tests require permission
+to open localhost sockets. Public API documentation also builds; existing
+vendored dependency warnings and the private `ChainSpecIdentity` documentation
+link warning remain.
+
+Two stale test setups were corrected during validation: the profile reveal
+fixture now accounts for a consumed coin UTXO, and network tests build a fresh
+chain with the current schema instead of loading the old database fixture.
+The wallet gossip fixture funds its sender explicitly and includes canonical
+history burn and relay fees. These changes affect tests only.
 
 ## New repository versus old history
 

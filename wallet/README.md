@@ -42,17 +42,21 @@ new Coin UTXOs for state growth but do not erase historical transaction bytes.
 
 ## Native assets
 
-Asset quantities are integer `Unit` values. Registration derives a canonical
+Asset quantities are stored canonically as integer `Unit` values. Wallet input
+and output use the human denomination declared by `decimals`; for example,
+`1.25` with `decimals=8` becomes `125000000 Unit`. The wallet summary shows
+`max_supply` and total `mint`; ownership remains represented by the listed
+shares instead of a duplicate asset-level balance. Registration derives a canonical
 `asset:` identifier and atomically credits a nonzero initial mint to an
 `AssetShare` owned by the creator. Each share has a `share:` identifier, retains
 its parent `AssetHash`, and may be owned by an address or extension.
 
 ```bash
-./target/release/wallet asset-register --name "Gold Token" --symbol GOLD --decimals 2 --max-supply 1000000 --initial-mint 1000000
-./target/release/wallet asset-mint --asset ID --to ADDRESS --amount 500
-./target/release/wallet asset-transfer --asset ID --to ADDRESS --amount 25
-./target/release/wallet asset-deposit --asset ID --extension EXTENSION_ID --amount 25
-./target/release/wallet asset-burn --asset ID --amount 10
+./target/release/wallet asset-register --name "Gold Token" --symbol GOLD --decimals 2 --max-supply 10000 --initial-mint 1000
+./target/release/wallet asset-mint --asset ID --to ADDRESS --amount 5.50
+./target/release/wallet asset-transfer --asset ID --to ADDRESS --amount 2.25
+./target/release/wallet asset-deposit --asset ID --extension EXTENSION_ID --amount 2.25
+./target/release/wallet asset-burn --asset ID --amount 1
 ./target/release/wallet asset-info --asset ID
 ./target/release/wallet asset-balance --asset ID
 ```

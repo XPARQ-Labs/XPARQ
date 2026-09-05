@@ -3,6 +3,7 @@ pub mod agility;
 pub mod argon2;
 mod error;
 pub mod hash;
+pub mod primitives;
 pub mod profile;
 
 pub mod crypto {
@@ -23,5 +24,5 @@ pub use hash::*;
 pub use profile::*;
 
 pub mod block {
-    pub use xparq_common::{BlockHeight, Height};
+    pub use crate::primitives::{BlockHeight, Height};
 }

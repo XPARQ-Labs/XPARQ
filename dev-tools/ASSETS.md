@@ -8,8 +8,9 @@ rebuild their binaries.
 ## Create an asset
 
 The wallet must already contain enough XPQ to pay the normal size-based miner
-fee. Asset amounts are unsigned 128-bit integers expressed in base units.
-`decimals` is display metadata and does not change the integer sent on-chain.
+fee. CLI asset amounts use the human decimal denomination declared by
+`decimals`; the wallet converts them to exact unsigned 128-bit `Unit` values
+before signing.
 
 For a token named `Example Token`, symbol `EXT`, 8 decimals, a maximum supply
 of 100 million display tokens, and an initial mint of 1 million display tokens:
@@ -19,8 +20,8 @@ cargo run -p xparq-wallet -- asset-register \
   --name "Example Token" \
   --symbol EXT \
   --decimals 8 \
-  --max-supply 10000000000000000 \
-  --initial-mint 100000000000000 \
+  --max-supply 100000000 \
+  --initial-mint 1000000 \
   --wallet wallet.json \
   --rpc 127.0.0.1:6666
 ```
@@ -38,7 +39,8 @@ The accepted metadata is:
 - name: 1-64 printable ASCII characters;
 - symbol: 1-16 ASCII letters or digits, normalized to uppercase;
 - decimals: 0-18;
-- maximum supply and initial mint: positive `u128` base-unit integers;
+- maximum supply and initial mint: positive decimal amounts with no more than
+  the declared number of fractional digits;
 - initial mint: no greater than maximum supply.
 
 ## Query state
@@ -55,7 +57,7 @@ cargo run -p xparq-wallet -- asset-balance \
 ```
 
 To query another address, replace `--wallet wallet.json` with
-`--address 0x...`. The equivalent RPC routes are:
+`--address Qx...`. The equivalent RPC routes are:
 
 ```text
 GET /asset/{asset_id}
@@ -64,8 +66,9 @@ GET /asset/nonce/{address}
 GET /account/{address}
 ```
 
-The account response includes the address's asset IDs and balances. Exact
-`u128` values are JSON strings so clients do not lose integer precision.
+The account response includes asset metadata and the address-owned shares.
+Exact canonical `u128` values remain JSON strings so clients do not lose
+integer precision; the wallet formats them using asset decimals.
 
 ## Mint, transfer, and burn
 
@@ -74,15 +77,15 @@ Only the original mint authority may mint. Supply can never exceed
 
 ```bash
 cargo run -p xparq-wallet -- asset-mint \
-  --asset ASSET_ID --to 0xRECIPIENT --amount 500000000 \
+  --asset ASSET_ID --to QxRECIPIENT --amount 5 \
   --wallet wallet.json --rpc 127.0.0.1:6666
 
 cargo run -p xparq-wallet -- asset-transfer \
-  --asset ASSET_ID --to 0xRECIPIENT --amount 250000000 \
+  --asset ASSET_ID --to QxRECIPIENT --amount 2.5 \
   --wallet wallet.json --rpc 127.0.0.1:6666
 
 cargo run -p xparq-wallet -- asset-burn \
-  --asset ASSET_ID --amount 100000000 \
+  --asset ASSET_ID --amount 1 \
   --wallet wallet.json --rpc 127.0.0.1:6666
 ```
 

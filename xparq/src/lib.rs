@@ -1,47 +1,26 @@
+//! XPARQ protocol kernel: canonical types, validation, and state transitions.
+//! Networking, persistence, and wallet key management live in application crates.
+
+pub mod asset;
+pub mod blockchain;
+pub mod coin;
+pub mod common;
+pub mod consensus;
+pub mod genesis;
+pub mod ledger;
+pub mod transaction;
+
+/// Compatibility path for the public block API.
 pub mod block {
-    pub use xparq_blockchain::*;
+    pub use crate::blockchain::*;
 }
-
-pub mod asset {
-    pub use xparq_asset::*;
-}
-
 pub mod codec {
-    pub use xparq_blockchain::{block_bytes, block_header_bytes, block_header_hash, decode_block};
-    pub use xparq_common::{canonical_bytes, canonical_decode, canonical_deserialize};
+    pub use crate::blockchain::{block_bytes, block_header_bytes, block_header_hash, decode_block};
+    pub use crate::common::{canonical_bytes, canonical_decode, canonical_deserialize};
 }
-
-pub mod coin {
-    pub use xparq_coin::*;
-}
-
-pub mod common {
-    pub use xparq_common::*;
-}
-
-pub mod consensus {
-    pub use xparq_coin::{DECIMALS, XPQ, Zeno};
-    pub use xparq_consensus::*;
-}
-
 pub mod crypto {
     pub use xparq_crypto::*;
 }
-
-pub mod genesis {
-    pub use xparq_genesis::*;
-}
-
 pub mod extension {
     pub use xparq_extension::*;
-}
-
-pub mod ledger {
-    pub use xparq_blockchain::Chain;
-    pub use xparq_consensus::{ForkChoice, ForkChoiceError};
-    pub use xparq_ledger::*;
-}
-
-pub mod transaction {
-    pub use xparq_transaction::*;
 }

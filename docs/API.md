@@ -113,14 +113,18 @@ reveal-or-known account-key registry used by XPQ, plus an authorized
 XPQ miner-fee spend; both transitions commit or roll back together.
 Confirmed asset transaction responses decode the canonical payload and expose
 `asset_id`, signer, nonce, and the register/mint/burn/transfer action. Account
-responses include an `assets` array with ID, name, symbol, decimals, and exact
-decimal-string balance. Registration includes a nonzero initial mint credited
-atomically to the creator address; subsequent distribution uses asset transfer.
+responses include an `assets` array with ID, name, symbol, decimals,
+`max_supply`, total `mint`, and the account-owned `shares`. Ownership amounts
+exist on those shares rather than as a duplicate asset-level balance field.
+Registration includes a nonzero initial mint credited atomically to the creator
+address; subsequent distribution uses asset transfer.
 
 Permissionless WASM deployment also uses `POST /transaction`. Wallets obtain
 the signed deployment nonce from `GET /wasm/nonce/{address}` and can query the
 immutable manifest and automatic activation status from
 `GET /wasm/{extension_id}`.
+Extension IDs use the case-sensitive `extension:` prefix followed by exactly
+64 lowercase hexadecimal characters.
 
 Generic signed WASM application calls are active from genesis. Their nonce is
 scoped by extension and signer and is available from
@@ -132,7 +136,7 @@ including the first host-owned nonce entry; updating existing state is not
 charged again. The preview can become stale if another transaction changes the
 same state before inclusion, in which case the transaction must be rebuilt.
 
-WASM ABI version 2 supports native-value custody. A Coin output created with
+The WASM host API supports native-value custody. A Coin output created with
 `OutputTarget::Extension(extension_hash)` is owned by that extension, while an
 asset `TransferToExtension` credits its extension asset balance. During apply,
 the authenticated extension may emit `coin_transfer` or `asset_transfer` to
@@ -140,6 +144,14 @@ send its own holdings to an account. The ledger supplies the executing
 `ExtensionHash`; guest payloads cannot choose the debit authority. All effects,
 extension state, fees, Coin change, and asset balances commit or roll back as
 one transition.
+
+The `block_weight` field is the canonical serialized block size plus the
+consensus WASM execution reservation. Every WASM call reserves
+`ceil(manifest.fuel_limit / 4)` weight units, while host operations consume an
+additional 32 fuel plus 1 fuel per byte read, written, deleted, or passed to a
+native-value effect. The 5 MiB block limit applies to the combined weight.
+State access uses a write overlay over the existing namespace, so execution
+does not copy all extension state for each call.
 
 ## Compatibility
 

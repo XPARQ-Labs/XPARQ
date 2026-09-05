@@ -1,20 +1,6 @@
 [workspace]
 resolver = "3"
-members = [
-    "common",
-    "crypto",
-    "coin",
-    "transaction",
-    "blockchain",
-    "consensus",
-    "ledger",
-    "genesis",
-    "xparq",
-    "runtime",
-    "wallet",
-    "asset",
-    "extension",
-]
+members = ["xparq", "crypto", "extension", "runtime", "wallet"]
 exclude = [
     "depend",
 ]
@@ -31,53 +17,28 @@ debug = true
 
 [workspace.dependencies]
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc"], path = "depend/argon2/argon2" }
-axum = "0.8"
-axum-server = { version = "0.8", features = ["tls-rustls"] }
-async-trait = "0.1"
 bip39 = "2.2"
 borsh = { version = "1.5", features = ["derive"], path = "depend/traits/borsh" }
 chacha20 = { version = "0.10.1", default-features = false, features = ["rng", "zeroize"], path = "depend/sqisign/chacha20-0.10.1" }
-chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
-ctrlc = "3.4"
-futures-util = "0.3"
 getrandom = { version = "0.4.3", default-features = false }
 fn-dsa = { version = "0.4.0", default-features = false, path = "depend/fn-dsa/fn-dsa" }
 rand_core_06 = { package = "rand_core", version = "0.6.4", features = ["getrandom"] }
 hex = "0.4"
 igd-next = "0.16"
 redb = "4.2.0"
-libp2p = { version = "0.54", default-features = false, features = ["identify", "kad", "macros", "noise", "ping", "request-response", "tcp", "tokio", "yamux"] }
 ml_dsa = { package = "ml-dsa", version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "zeroize"], path = "depend/mldsa/ml-dsa" }
-prost = "0.14"
-protoc-bin-vendored = "3"
 serde = { version = "1", features = ["derive"], path = "depend/traits/serde" }
 serde_json = "1"
 sha3 = { version = "0.12.0", default-features = false, path = "depend/sha3/sha3" }
-socket2 = "0.6"
 sqisign_rs = { package = "xparq-sqisign", version = "0.1.0", path = "depend/sqisign/sqisign-rs" }
 static_assertions = { version = "1.1.0", path = "depend/utils/static_assertions" }
-tokio = { version = "1", features = ["full"] }
-time = { version = "0.3.55", features = ["formatting", "macros"] }
-tonic = "0.14"
-tonic-prost = "0.14"
-tonic-prost-build = "0.14"
-tower = { version = "0.5", features = ["limit"] }
-tower-http = { version = "0.6", features = ["cors", "limit", "timeout"] }
 wasmi = { version = "1.1.0", default-features = false, features = ["std", "extra-checks", "prefer-btree-collections"] }
 zeroize = { version = "1.9.0", features = ["alloc", "derive"], path = "depend/traits/zeroize" }
 rand_10 = { package = "rand", version = "0.10.2", features = ["sys_rng"], path = "depend/sqisign/rand-0.10" }
 
-xparq-common = { path = "common" }
 xparq-crypto = { path = "crypto", default-features = false }
-xparq-coin = { path = "coin", default-features = false }
-xparq-transaction = { path = "transaction", default-features = false }
-xparq-blockchain = { path = "blockchain", default-features = false }
-xparq-consensus = { path = "consensus", default-features = false }
-xparq-ledger = { path = "ledger", default-features = false }
-xparq-asset = { path = "asset" }
-xparq-bridge = { path = "extension/bridge" }
 xparq-extension = { path = "extension" }
-xparq = { path = "xparq", default-features = false }
+xparq = { package = "kernel", path = "xparq", default-features = false }
 
 [patch.crates-io]
 serde = { path = "depend/traits/serde" }

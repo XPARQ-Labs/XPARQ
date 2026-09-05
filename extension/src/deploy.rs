@@ -1,10 +1,11 @@
 //! Permissionless immutable WASM deployment protocol.
 
-use borsh::{BorshDeserialize, BorshSerialize};
-use xparq_common::{
+use crate::protocol::{
     Extension, ExtensionCall, ExtensionContext, ExtensionFailure, ExtensionHash,
-    ExtensionStateRead, ExtensionStateWrite, Height, canonical_bytes, domain_hash,
+    ExtensionStateRead, ExtensionStateWrite,
 };
+use borsh::{BorshDeserialize, BorshSerialize};
+use xparq_crypto::primitives::{Height, canonical_bytes, domain_hash};
 use xparq_crypto::{
     Address, ProfilePublicKey, ProfileSignature, ProfileSigningSeed,
     address_from_profile_public_key, profile_verify,
