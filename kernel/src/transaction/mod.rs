@@ -7,7 +7,7 @@ mod spend;
 
 pub use authorization::{
     AccountAuthorization, AccountIntent, AuthorizedAccountIntent, AuthorizedAssetTransaction,
-    AuthorizedExtensionTransaction, AuthorizedSpendTransaction, AuthorizedTransaction,
+    AuthorizedSpendTransaction, AuthorizedTransaction,
 };
 pub use error::{IntentError, TransactionEncodingError};
 pub use intent::{

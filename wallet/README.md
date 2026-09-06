@@ -11,7 +11,7 @@ cargo build --release --locked -p xparq-wallet
 
 The interactive menu supports wallet creation and restoration, balances,
 canonical history, UTXO tracking and consolidation, XPQ sends, native assets,
-WASM extensions, and block exploration.
+and block exploration.
 
 ## Security
 
@@ -49,27 +49,13 @@ and output use the human denomination declared by `decimals`; for example,
 shares instead of a duplicate asset-level balance. Registration derives a canonical
 `asset:` identifier and atomically credits a nonzero initial mint to an
 `AssetShare` owned by the creator. Each share has a `share:` identifier, retains
-its parent `AssetHash`, and may be owned by an address or extension.
+its parent `AssetHash`, and is owned by an address.
 
 ```bash
 ./target/release/wallet asset-register --name "Gold Token" --symbol GOLD --decimals 2 --max-supply 10000 --initial-mint 1000
 ./target/release/wallet asset-mint --asset ID --to ADDRESS --amount 5.50
 ./target/release/wallet asset-transfer --asset ID --to ADDRESS --amount 2.25
-./target/release/wallet asset-deposit --asset ID --extension EXTENSION_ID --amount 2.25
 ./target/release/wallet asset-burn --asset ID --amount 1
 ./target/release/wallet asset-info --asset ID
 ./target/release/wallet asset-balance --asset ID
 ```
-
-## WASM extensions
-
-```bash
-./target/release/wallet wasm-deploy --name example.state --wasm module.wasm
-./target/release/wallet wasm-info --extension ID
-./target/release/wallet wasm-call --extension ID --payload-file call.bin
-```
-
-Deployments are immutable and activate after the consensus delay. The wallet
-previews newly created persistent state and includes its exact protocol burn.
-Extension-owned coin and asset transfers are authenticated against the
-executing extension and apply atomically with extension state.

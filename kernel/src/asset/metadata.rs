@@ -1,4 +1,3 @@
-use crate::common::Authority;
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::Address;
 
@@ -15,7 +14,7 @@ pub struct AssetMetadata {
     pub decimals: u8,
     pub max_supply: Unit,
     pub creator: Address,
-    pub mint_authority: Option<Authority<Address>>,
+    pub mint_authority: Option<Address>,
 }
 
 impl AssetMetadata {
@@ -25,7 +24,7 @@ impl AssetMetadata {
         decimals: u8,
         max_supply: Unit,
         creator: Address,
-        mint_authority: Option<Authority<Address>>,
+        mint_authority: Option<Address>,
     ) -> Result<Self, AssetError> {
         let metadata = Self {
             name,

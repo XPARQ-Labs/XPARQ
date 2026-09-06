@@ -1,4 +1,4 @@
-use crate::common::{ExtensionCall, canonical_bytes, domain_hash};
+use crate::common::{canonical_bytes, domain_hash};
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{AccountSignature, Address, PublicKey, address_from_public_key, verify};
 
@@ -71,12 +71,6 @@ impl<T: AccountIntent> AuthorizedAccountIntent<T> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct AuthorizedExtensionTransaction {
-    pub call: ExtensionCall,
-    pub fee: AuthorizedAccountIntent<SpendIntent>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AuthorizedAssetTransaction {
     pub call: AuthorizedAccountIntent<AssetIntent>,
     pub payment: AuthorizedAccountIntent<SpendIntent>,
@@ -94,7 +88,6 @@ pub struct AuthorizedSpendTransaction {
 pub enum AuthorizedTransaction {
     Spend(Box<AuthorizedSpendTransaction>),
     Asset(Box<AuthorizedAssetTransaction>),
-    Extension(Box<AuthorizedExtensionTransaction>),
 }
 
 impl AuthorizedTransaction {
@@ -124,7 +117,6 @@ impl AuthorizedTransaction {
                     .map_err(|_| IntentError::InvalidAssetCall)?;
                 tx.payment.intent.validate()
             }
-            Self::Extension(tx) => tx.fee.intent.validate(),
         }
     }
 }
@@ -168,7 +160,7 @@ mod tests {
                 decimals: 8,
                 max_supply: crate::asset::Unit::from_units(1_000),
                 initial_mint: crate::asset::Unit::from_units(100),
-                mint_authority: Some(crate::common::Authority::Address(signer)),
+                mint_authority: Some(signer),
             },
             signer,
             0,
@@ -209,42 +201,4 @@ mod tests {
         assert_eq!(transaction.validate_structure(), Ok(()));
     }
 
-    #[test]
-    fn extension_transaction_tag_and_payload_round_trip_are_stable_after_native_asset() {
-        let call = ExtensionCall::new(
-            crate::common::ExtensionHash::derive("test-extension"),
-            b"canonical payload".to_vec(),
-        )
-        .unwrap();
-        let fee = AuthorizedAccountIntent {
-            intent: SpendIntent::coin(
-                Address::ZERO,
-                vec![crate::coin::CoinHash::from_bytes([9; 32])],
-                vec![crate::transaction::CoinOutput::block_miner(
-                    crate::coin::Zeno::from_zeno(1),
-                )],
-            )
-            .unwrap(),
-            authorization: AccountAuthorization::AccountKnown {
-                account: crypto::Signature::MlDsa44,
-                signature: AccountSignature {
-                    account: crypto::Signature::MlDsa44,
-                    bytes: vec![],
-                },
-            },
-        };
-        let transaction =
-            AuthorizedTransaction::Extension(Box::new(AuthorizedExtensionTransaction {
-                call,
-                fee,
-            }));
-        let encoded = borsh::to_vec(&transaction).unwrap();
-        // Tag 5 is reserved for the native Layer-1 Asset transaction.
-        assert_eq!(encoded[0], 2);
-        assert_eq!(
-            AuthorizedTransaction::try_from_slice(&encoded).unwrap(),
-            transaction
-        );
-        assert_eq!(transaction.validate_structure(), Ok(()));
-    }
 }

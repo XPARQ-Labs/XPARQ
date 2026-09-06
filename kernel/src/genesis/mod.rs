@@ -29,7 +29,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 ]);
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`] changes.
-pub const CHAIN_SPEC_VERSION: u32 = 5;
+pub const CHAIN_SPEC_VERSION: u32 = 6;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -62,21 +62,7 @@ struct ChainSpecIdentity<'a> {
     fork_choice_algorithm: &'a str,
     falcon_512_activation_height: u64,
     signature_profile_activation_height: u64,
-    extension_protocol: &'a str,
     native_asset_program: &'a str,
-    wasm_deploy_extension_id: [u8; 32],
-    wasm_deploy_activation_delay: u64,
-    wasm_abi_version: u32,
-    wasm_host_call_base_fuel: u64,
-    wasm_host_fuel_per_byte: u64,
-    wasm_fuel_per_block_weight: u64,
-}
-
-#[derive(BorshSerialize)]
-struct WasmChainSpecIdentity<'a> {
-    base_chain_spec_hash: [u8; HASH_SIZE],
-    protocol: &'a str,
-    manifests: &'a [extension::WasmExtensionManifest],
 }
 
 /// Domain-separated identity of every consensus parameter that nodes must agree on.
@@ -111,27 +97,9 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         fork_choice_algorithm: FORK_CHOICE_ALGORITHM,
         falcon_512_activation_height: FALCON_512_ACTIVATION_HEIGHT,
         signature_profile_activation_height: SIGNATURE_ACTIVATION_HEIGHT,
-        extension_protocol: "xparq-extension-permissionless-wasm-effects-v2",
         native_asset_program: "xparq-native-asset-program",
-        wasm_deploy_extension_id: *extension::wasm_deploy_extension_id().as_bytes(),
-        wasm_deploy_activation_delay: extension::WASM_DEPLOY_ACTIVATION_DELAY,
-        wasm_abi_version: extension::WASM_ABI_VERSION,
-        wasm_host_call_base_fuel: extension::WASM_HOST_CALL_BASE_FUEL,
-        wasm_host_fuel_per_byte: extension::WASM_HOST_FUEL_PER_BYTE,
-        wasm_fuel_per_block_weight: extension::WASM_FUEL_PER_BLOCK_WEIGHT,
     };
     let bytes = crate::common::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
-    let base_hash = domain_hash(HashDomain::ChainSpec, &bytes);
-    let manifests = extension::wasm_chain_spec_manifests();
-    if manifests.is_empty() {
-        return Ok(base_hash);
-    }
-    let wasm_identity = WasmChainSpecIdentity {
-        base_chain_spec_hash: base_hash.0,
-        protocol: "xparq-wasm-extension-abi",
-        manifests,
-    };
-    let bytes = crate::common::canonical_bytes(&wasm_identity).map_err(GenesisError::Encoding)?;
     Ok(domain_hash(HashDomain::ChainSpec, &bytes))
 }
 #[cfg(feature = "testnet")]

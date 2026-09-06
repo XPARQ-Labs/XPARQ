@@ -2,7 +2,7 @@
 
 XPARQ assets are ledger-based fungible tokens implemented directly by the
 Layer-1 ledger. Creating an asset is a permissionless native transaction: a developer does
-not need to submit a GitHub pull request, deploy WASM, or ask node operators to
+not need to submit a GitHub pull request or ask node operators to
 rebuild their binaries.
 
 ## Create an asset
@@ -105,5 +105,5 @@ represents an asset for which no further minting is authorized.
 The native model deliberately provides fixed metadata, one immutable mint
 authority, supply accounting, balances, mint, burn, and transfer. It does not
 yet support authority rotation, freezing, allowlists, royalties, token-specific
-hooks, or contract-controlled balances. Those policies belong in a future WASM
+hooks, or contract-controlled balances. Those policies belong in a future
 application model rather than being added as new core primitives.

@@ -4,7 +4,7 @@ use crate::asset::{
     ensure_unique_asset_inputs,
 };
 use crate::coin::{COIN_HASH_SIZE, Zeno};
-use crate::common::{Authority, ExtensionHash, canonical_bytes};
+use crate::common::canonical_bytes;
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{ADDRESS_SIZE, Address, HASH_SIZE};
 
@@ -29,7 +29,6 @@ impl ChainContext {
 pub enum Recipient {
     Address(Address),
     BlockMiner,
-    Extension(ExtensionHash),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
@@ -53,12 +52,6 @@ impl CoinOutput {
         }
     }
 
-    pub const fn extension(extension: ExtensionHash, amount: Zeno) -> Self {
-        Self {
-            output: Recipient::Extension(extension),
-            amount,
-        }
-    }
 }
 
 pub(crate) fn chain_bound_bytes<T: BorshSerialize>(
@@ -118,7 +111,7 @@ pub enum AssetInstruction {
         decimals: u8,
         max_supply: Unit,
         initial_mint: Unit,
-        mint_authority: Option<Authority<Address>>,
+        mint_authority: Option<Address>,
     },
 
     Mint {
@@ -249,7 +242,7 @@ impl AssetIntent {
 
                 let object = AssetShare {
                     parent: AssetHash::derive(self.signer, symbol),
-                    owner: Authority::Address(self.signer),
+                    owner: self.signer,
                     amount: *initial_mint,
                 };
 

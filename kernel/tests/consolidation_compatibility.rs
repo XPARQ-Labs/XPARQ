@@ -11,7 +11,7 @@ fn mainnet_genesis_is_unchanged_and_effect_rules_have_a_new_identity() {
             237, 239, 84, 225, 186, 104, 102, 129, 199, 140, 66, 159
         ]
     );
-    // Extension effect v3 and explicit coin burn separate this protocol from the old
+    // The current state-root and explicit coin burn separate this protocol from the old
     // chain spec, while preserving the frozen genesis block and native IDs.
     assert_eq!(genesis::CHAIN_SPEC_VERSION, 5);
     assert_eq!(

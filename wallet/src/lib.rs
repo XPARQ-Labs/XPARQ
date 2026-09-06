@@ -212,43 +212,6 @@ impl AccountWallet {
         )
     }
 
-    pub fn sign_wasm_deploy_call(
-        &self,
-        name: String,
-        module: Vec<u8>,
-        nonce: u64,
-    ) -> Result<kernel::common::ExtensionCall, String> {
-        let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
-        kernel::extension::WasmDeployCall::sign(
-            chain.genesis_hash,
-            name,
-            module,
-            nonce,
-            &self.signing_seed,
-        )
-        .and_then(kernel::extension::WasmDeployCall::into_extension_call)
-        .map_err(|error| format!("WASM deploy call signing failed: {error:?}"))
-    }
-
-    pub fn sign_wasm_app_call(
-        &self,
-        extension_id: kernel::common::ExtensionHash,
-        payload: Vec<u8>,
-        attached_coin: u64,
-        nonce: u64,
-    ) -> Result<kernel::common::ExtensionCall, String> {
-        let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
-        kernel::extension::WasmAppCall::sign(
-            chain.genesis_hash,
-            extension_id,
-            payload,
-            attached_coin,
-            nonce,
-            &self.signing_seed,
-        )
-        .and_then(|call| call.into_extension_call(extension_id))
-        .map_err(|error| format!("WASM application call signing failed: {error:?}"))
-    }
 }
 
 #[cfg(test)]

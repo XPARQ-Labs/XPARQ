@@ -25,8 +25,7 @@ pub const EMPTY_BLOCK_ARCHIVAL_BYTES: u64 = (3 * HASH_SIZE
 
 pub const COIN_UTXO_STATE_WEIGHT: u64 = (crate::coin::COIN_HASH_SIZE
     + core::mem::size_of::<u64>()
-    + 1
-    + crate::common::EXTENSION_HASH_SIZE) as u64;
+    + ADDRESS_SIZE) as u64;
 pub const EMISSION_UTXO_STATE_GROWTH_BURN: Zeno =
     Zeno::from_zeno(COIN_UTXO_STATE_WEIGHT * STATE_BURN_RATE_ZENO_PER_WEIGHT);
 pub const EMPTY_BLOCK_ARCHIVAL_BURN: Zeno =
@@ -57,7 +56,7 @@ pub struct StateTransitionWeight {
     /// growth but can never create a negative burn or refund.
     pub consumed_coin_utxos: u64,
     pub created_account_key_weight: u64,
-    pub extension_created_weight: u64,
+    pub created_state_weight: u64,
 }
 
 impl StateTransitionWeight {
@@ -68,7 +67,7 @@ impl StateTransitionWeight {
         let created = net_coin_utxos
             .checked_mul(COIN_UTXO_STATE_WEIGHT)
             .and_then(|weight| weight.checked_add(self.created_account_key_weight))
-            .and_then(|weight| weight.checked_add(self.extension_created_weight))
+            .and_then(|weight| weight.checked_add(self.created_state_weight))
             .ok_or(StateBurnError::WeightOverflow)?;
         let burn = created
             .checked_mul(STATE_BURN_RATE_ZENO_PER_WEIGHT)

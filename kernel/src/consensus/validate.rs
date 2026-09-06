@@ -3,7 +3,7 @@ mod pow;
 
 use crate::blockchain::{Block, BlockHeight, Header, Height, MAX_BLOCK_WEIGHT};
 use crate::coin::{CoinHash, Zeno};
-use crate::common::{ExtensionCall, ExtensionFailure, canonical_bytes};
+use crate::common::canonical_bytes;
 use crate::consensus::error::ConsensusError;
 use crate::consensus::fork::Work;
 use crate::crypto::{BlockHash, HASH_SIZE, Hash, PoWHash};
@@ -121,7 +121,6 @@ impl<T> AuthorizationValidated<T> {
 pub enum ValidatedTransaction {
     Spend(ValidatedSpendTransaction),
     Asset(ValidatedAssetTransaction),
-    Extension(ValidatedExtensionTransaction),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,17 +135,10 @@ pub struct ValidatedAssetTransaction {
     pub payment: AuthorizationValidated<SpendIntent>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatedExtensionTransaction {
-    pub call: ExtensionCall,
-    pub fee: AuthorizationValidated<SpendIntent>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoinInputState {
     pub amount: Zeno,
-    /// Account owner, or `None` when the coin is held by an extension.
-    pub owner: Option<Address>,
+    pub owner: Address,
 }
 
 /// Read-only canonical state required to validate transaction inputs.
@@ -169,13 +161,6 @@ pub trait TransactionStateView {
         Err(crate::asset::AssetError::UnknownAsset)
     }
 
-    fn extension_created_state_weight(
-        &self,
-        _call: &ExtensionCall,
-        _height: u64,
-    ) -> Result<u64, ExtensionFailure> {
-        Err(ExtensionFailure::UnknownExtension)
-    }
 }
 
 pub fn validate_transaction(
@@ -280,7 +265,7 @@ pub fn validate_transaction(
                             consumed_coin_utxos: u64::try_from(inputs.len())
                                 .map_err(|_| StateBurnError::WeightOverflow)?,
                             created_account_key_weight: key_weight,
-                            extension_created_weight: asset_weight,
+                            created_state_weight: asset_weight,
                             ..StateTransitionWeight::default()
                         },
                         canonical_transaction_weight,
@@ -323,7 +308,7 @@ pub fn validate_transaction(
                     consumed_coin_utxos: u64::try_from(payment_inputs.len())
                         .map_err(|_| StateBurnError::WeightOverflow)?,
                     created_account_key_weight: revealed_asset_account_key_weight(&call, &payment)?,
-                    extension_created_weight: asset_created_state_weight,
+                    created_state_weight: asset_created_state_weight,
                     ..StateTransitionWeight::default()
                 },
                 canonical_transaction_weight,
@@ -332,75 +317,6 @@ pub fn validate_transaction(
                 call,
                 payment,
             }))
-        }
-        AuthorizedTransaction::Extension(transaction) => {
-            let transaction = *transaction;
-            let fee = validate_account_intent_authorization(
-                transaction.fee,
-                chain,
-                current_height,
-                state,
-            )?;
-            let (fee_inputs, fee_outputs, fee_burn) = coin_parts(fee.intent())?;
-            if transaction.call.extension_id() != crate::extension::wasm_deploy_extension_id() {
-                let app = crate::extension::WasmAppCall::from_extension_call(&transaction.call)
-                    .map_err(TransactionConsensusError::Extension)?;
-                if app.signer != fee.intent().signer {
-                    return Err(TransactionConsensusError::Extension(
-                        ExtensionFailure::InvalidPayload,
-                    ));
-                }
-                let attached = fee_outputs.iter().try_fold(0_u64, |total, output| {
-                    if output.output
-                        == crate::transaction::Recipient::Extension(
-                            transaction.call.extension_id(),
-                        )
-                    {
-                        total.checked_add(output.amount.as_zeno()).ok_or(
-                            TransactionConsensusError::Extension(ExtensionFailure::InvalidState),
-                        )
-                    } else {
-                        Ok(total)
-                    }
-                })?;
-                if attached != app.attached_coin {
-                    return Err(TransactionConsensusError::Extension(
-                        ExtensionFailure::InvalidPayload,
-                    ));
-                }
-            }
-            validate_coin_inputs(
-                fee_inputs,
-                fee.intent().signer,
-                &fee_outputs
-                    .iter()
-                    .map(|output| output.amount)
-                    .collect::<Vec<_>>(),
-                fee_burn,
-                state,
-            )?;
-            validate_state_burn(
-                fee_burn,
-                StateTransitionWeight {
-                    created_coin_utxos: created_coin_output_count(fee_outputs)?,
-                    consumed_coin_utxos: u64::try_from(fee_inputs.len())
-                        .map_err(|_| StateBurnError::WeightOverflow)?,
-                    created_account_key_weight: revealed_account_key_weight(
-                        fee.revealed_account_key(),
-                    )?,
-                    extension_created_weight: state
-                        .extension_created_state_weight(&transaction.call, current_height)
-                        .map_err(TransactionConsensusError::Extension)?,
-                    ..StateTransitionWeight::default()
-                },
-                canonical_transaction_weight,
-            )?;
-            Ok(ValidatedTransaction::Extension(
-                ValidatedExtensionTransaction {
-                    call: transaction.call,
-                    fee,
-                },
-            ))
         }
     }
 }
@@ -569,7 +485,7 @@ fn validate_coin_inputs(
         let input = state
             .coin(*id)
             .ok_or(TransactionConsensusError::UtxoNotFound)?;
-        if input.owner != Some(owner) {
+        if input.owner != owner {
             return Err(TransactionConsensusError::OwnerMismatch);
         }
         input_total = input_total
@@ -611,7 +527,6 @@ pub enum TransactionConsensusError {
     ZenoOverflow,
     ValueMismatch,
     Asset(crate::asset::AssetError),
-    Extension(ExtensionFailure),
     StateBurn(StateBurnError),
 }
 
@@ -637,7 +552,6 @@ impl fmt::Display for TransactionConsensusError {
             Self::ZenoOverflow => formatter.write_str("transaction amount overflow"),
             Self::ValueMismatch => formatter.write_str("input value does not equal output value"),
             Self::Asset(error) => write!(formatter, "invalid native asset transaction: {error}"),
-            Self::Extension(error) => write!(formatter, "invalid extension transaction: {error:?}"),
             Self::StateBurn(error) => write!(formatter, "invalid state burn: {error}"),
         }
     }
@@ -665,7 +579,7 @@ mod transaction_tests {
         fn coin(&self, id: CoinHash) -> Option<CoinInputState> {
             (id == self.id).then_some(CoinInputState {
                 amount: self.amount,
-                owner: Some(self.owner),
+                owner: self.owner,
             })
         }
 

@@ -22,12 +22,12 @@ use kernel::{
     block::{Block, Emission, Height, Nonce},
     codec::{block_bytes, decode_block},
     coin::Zeno,
-    common::{Authority, canonical_bytes, canonical_decode},
+    common::{canonical_bytes, canonical_decode},
     consensus::{
         ReorgPlan, Work, apply_block, compare_chain_tips, expected_emission_for_height,
         expected_next_difficulty, new_pow_memory, validate_transaction,
     },
-    crypto::{Address, BlockHash, StateRoot, address_from_string},
+    crypto::{Address, BlockHash, address_from_string},
     genesis::{EXPECTED_GENESIS_HASH, chain_spec_hash, genesis_block},
     ledger::Ledger,
     transaction::{AuthorizedTransaction, CoinOutput, Recipient},
@@ -166,16 +166,10 @@ enum PeerSessionOutcome {
 }
 
 pub fn run(args: Vec<String>) -> Result<(), String> {
-    let (args, extension_packages) = extract_extension_packages(args)?;
-    initialize_extensions(&extension_packages)?;
     match args.first().map(String::as_str) {
         None => run_automatic(&[]),
         Some("run") => run_automatic(&args[1..]),
         Some("info") => print_network_info(),
-        Some("extension-check") => {
-            inspect_extension_package(args.get(1).ok_or("missing WASM extension package path")?)
-        }
-        Some("extension-package") => build_extension_package(&args[1..]),
         Some("check") => check_database(args.get(1).map(String::as_str)),
         Some("submit-block") => submit_block(
             args.get(1).map(String::as_str),
@@ -221,63 +215,6 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         }
         Some(command) => Err(format!("unknown command `{command}`")),
     }
-}
-
-fn extract_extension_packages(args: Vec<String>) -> Result<(Vec<String>, Vec<PathBuf>), String> {
-    let mut command_args = Vec::with_capacity(args.len());
-    let mut packages = Vec::new();
-    let mut args = args.into_iter();
-    while let Some(argument) = args.next() {
-        if argument == "--extension-package" {
-            let path = args
-                .next()
-                .ok_or("missing path after --extension-package")?;
-            packages.push(PathBuf::from(path));
-        } else if let Some(path) = argument.strip_prefix("--extension-package=") {
-            if path.is_empty() {
-                return Err("missing path after --extension-package=".into());
-            }
-            packages.push(PathBuf::from(path));
-        } else {
-            command_args.push(argument);
-        }
-    }
-    Ok((command_args, packages))
-}
-
-fn initialize_extensions(package_paths: &[PathBuf]) -> Result<(), String> {
-    let mut wasm_extensions = Vec::with_capacity(package_paths.len());
-    for path in package_paths {
-        let package = kernel::extension::WasmExtensionPackage::read(path)
-            .map_err(|error| format!("load WASM extension `{}`: {error}", path.display()))?;
-        let extension = package
-            .compile()
-            .map_err(|error| format!("compile WASM extension `{}`: {error}", path.display()))?;
-        wasm_extensions.push(extension);
-    }
-    wasm_extensions.sort_by_key(|extension| extension.manifest().extension_id);
-    kernel::extension::configure_wasm_chain_spec(
-        wasm_extensions
-            .iter()
-            .map(|extension| extension.manifest().clone())
-            .collect(),
-    )
-    .map_err(|error| format!("configure WASM chain specification: {error:?}"))?;
-
-    let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
-    let mut registry = kernel::extension::ExtensionRegistry::with_chain_id(chain.genesis_hash);
-    registry
-        .register(kernel::extension::WasmDeployExtension::new(
-            chain.genesis_hash,
-        ))
-        .map_err(|error| format!("register WASM deploy extension: {error:?}"))?;
-    for extension in wasm_extensions {
-        registry
-            .register(extension)
-            .map_err(|error| format!("register WASM extension: {error:?}"))?;
-    }
-    kernel::extension::initialize_production_registry(registry)
-        .map_err(|error| format!("initialize extension registry: {error:?}"))
 }
 
 fn run_automatic(args: &[String]) -> Result<(), String> {
@@ -503,10 +440,10 @@ fn candidate_block(
         transactions,
     )
     .map_err(|error| error.to_string())?;
-    let (extension_root, block_weight) = ledger
+    let (state_root, block_weight) = ledger
         .preview_block_commitments(&block)
         .map_err(|error| error.to_string())?;
-    block.set_state_root(StateRoot(*extension_root.as_bytes()));
+    block.set_state_root(state_root);
     block.set_block_weight(block_weight);
     Ok(block)
 }
@@ -591,7 +528,7 @@ fn account_response(
         .state()
         .utxos
         .iter()
-        .filter(|utxo| utxo.owner == Authority::Address(address))
+        .filter(|utxo| utxo.owner == address)
         .collect::<Vec<_>>();
     account_utxos.sort_by_key(|utxo| utxo.coin.utxo);
     for utxo in &account_utxos {
@@ -675,7 +612,7 @@ fn balance_response(
         .state()
         .utxos
         .iter()
-        .filter(|utxo| utxo.owner == Authority::Address(address))
+        .filter(|utxo| utxo.owner == address)
     {
         total = total
             .checked_add(utxo.coin.amount)
@@ -710,13 +647,13 @@ fn account_asset_balances(
     let mut asset_ids = std::collections::BTreeSet::new();
     for (asset_id, metadata) in ledger.state().assets.metadata_entries() {
         if metadata.creator == address
-            || metadata.mint_authority == Some(Authority::Address(address))
+            || metadata.mint_authority == Some(address)
         {
             asset_ids.insert(asset_id);
         }
     }
     for (_, utxo) in ledger.state().assets.utxos(&ledger.state().utxos) {
-        if utxo.owner != Authority::Address(address) || utxo.amount.is_zero() {
+        if utxo.owner != address || utxo.amount.is_zero() {
             continue;
         }
         asset_ids.insert(utxo.parent);
@@ -752,7 +689,7 @@ fn account_asset_shares(
         .state()
         .assets
         .utxos(&ledger.state().utxos)
-        .filter(|(_, share)| share.parent == asset_id && share.owner == Authority::Address(address))
+        .filter(|(_, share)| share.parent == asset_id && share.owner == address)
         .map(|(share_id, share)| {
             serde_json::json!({
                 "share_id": share_id.to_string(),
@@ -776,7 +713,7 @@ fn explorer_address_response(
         .state()
         .utxos
         .iter()
-        .filter(|utxo| utxo.owner == Authority::Address(address))
+        .filter(|utxo| utxo.owner == address)
     {
         total = total
             .checked_add(utxo.coin.amount)
@@ -854,11 +791,6 @@ fn address_transaction_activity(
             coin_outputs(&tx.payment.intent),
             coin_burn(&tx.payment.intent),
         ),
-        AuthorizedTransaction::Extension(tx) => (
-            Some(tx.fee.intent.signer),
-            coin_outputs(&tx.fee.intent),
-            coin_burn(&tx.fee.intent),
-        ),
     };
     let received = checked_output_sum(
         outputs
@@ -927,7 +859,6 @@ fn transaction_response(transaction: &AuthorizedTransaction, miner: Address) -> 
     match transaction {
         AuthorizedTransaction::Spend(tx) => spend_transaction_response(tx, miner),
         AuthorizedTransaction::Asset(tx) => asset_transaction_response(tx, miner),
-        AuthorizedTransaction::Extension(tx) => extension_transaction_response(tx, miner),
     }
 }
 
@@ -1009,66 +940,10 @@ fn asset_transaction_response(
 }
 
 fn asset_owner_response(owner: kernel::asset::AssetShareOwner) -> serde_json::Value {
-    match owner {
-        Authority::Address(address) => serde_json::json!({
-            "type": "account",
-            "address": kernel::crypto::address_to_string(&address),
-        }),
-        Authority::Extension(program) => serde_json::json!({
-            "type": "program",
-            "extension_id": program.to_string(),
-        }),
-    }
-}
-
-fn extension_transaction_response(
-    transaction: &kernel::transaction::AuthorizedExtensionTransaction,
-    miner: Address,
-) -> serde_json::Value {
-    let base = serde_json::json!({
-        "extension_id": transaction.call.extension_id().to_string(),
-        "payload_size": transaction.call.payload().len(),
-        "fee_sender": kernel::crypto::address_to_string(&transaction.fee.intent.signer),
-        "fee_outputs": public_outputs_response(
-            coin_outputs(&transaction.fee.intent),
-            miner,
-            Some(transaction.fee.intent.signer),
-        ),
-    });
-    if transaction.call.extension_id() == kernel::extension::wasm_deploy_extension_id() {
-        let Ok(call) = kernel::extension::WasmDeployCall::from_extension_call(&transaction.call)
-        else {
-            return base;
-        };
-        let mut response = base;
-        let object = response
-            .as_object_mut()
-            .expect("extension response is an object");
-        object.insert(
-            "deployed_extension_id".into(),
-            serde_json::json!(call.extension_id().to_string()),
-        );
-        object.insert("wasm_name".into(), serde_json::json!(call.name));
-        object.insert(
-            "wasm_code_hash".into(),
-            serde_json::json!(hex::encode(kernel::extension::wasm_code_hash(&call.module))),
-        );
-        object.insert(
-            "wasm_code_size".into(),
-            serde_json::json!(call.module.len()),
-        );
-        object.insert(
-            "signer".into(),
-            serde_json::json!(kernel::crypto::address_to_string(&call.signer)),
-        );
-        object.insert("nonce".into(), serde_json::json!(call.nonce));
-        object.insert(
-            "activation_delay_blocks".into(),
-            serde_json::json!(kernel::extension::WASM_DEPLOY_ACTIVATION_DELAY),
-        );
-        return response;
-    }
-    base
+    serde_json::json!({
+        "type": "account",
+        "address": kernel::crypto::address_to_string(&owner),
+    })
 }
 
 fn public_outputs_response(
@@ -1094,11 +969,6 @@ fn public_outputs_response(
                     "miner",
                     "miner_fee",
                 ),
-                Recipient::Extension(extension) => (
-                    Some(extension.to_string()),
-                    "extension",
-                    "extension_deposit",
-                ),
             };
             serde_json::json!({
                 "address": address,
@@ -1115,7 +985,6 @@ fn output_recipient(output: &CoinOutput, miner: Address) -> Option<Address> {
     match output.output {
         Recipient::Address(address) => Some(address),
         Recipient::BlockMiner => Some(miner),
-        Recipient::Extension(_) => None,
     }
 }
 
@@ -1136,7 +1005,6 @@ fn transaction_kind(transaction: &AuthorizedTransaction) -> &'static str {
             kernel::transaction::Spend::Asset { .. } => "asset-transfer",
         },
         AuthorizedTransaction::Asset(_) => "asset",
-        AuthorizedTransaction::Extension(_) => "extension",
     }
 }
 
@@ -1193,28 +1061,6 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             &serde_json::json!({"transaction_id": hex::encode(transaction_id)}),
         );
     }
-    if method == "POST" && route == "/extension/preview" {
-        let call: kernel::common::ExtensionCall = canonical_decode(&request.body)
-            .map_err(|error| format!("invalid extension call: {error}"))?;
-        let ledger = load_or_initialize(database)?;
-        let height = Height(ledger.tip_height().map_or(0, |tip| tip.0.saturating_add(1)));
-        let created_state_weight = ledger
-            .preview_extension_created_state_weight(&call, height)
-            .map_err(|error| error.to_string())?;
-        let state_burn = created_state_weight
-            .checked_mul(kernel::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT)
-            .ok_or("extension preview state burn overflow")?;
-        return write_http_response(
-            stream,
-            200,
-            &serde_json::json!({
-                "height": height.0,
-                "created_state_weight": created_state_weight,
-                "state_burn_rate_zeno_per_weight": kernel::consensus::STATE_BURN_RATE_ZENO_PER_WEIGHT,
-                "state_burn": state_burn,
-            }),
-        );
-    }
     if method != "GET" {
         return Err("unsupported RPC method".into());
     }
@@ -1253,12 +1099,6 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             asset_nonce_response(database, &ledger, address)?
         }
         route if route.starts_with("/asset/") => asset_response(&ledger, route)?,
-        route if route.starts_with("/wasm/nonce/") => {
-            let address = parse_address(route.trim_start_matches("/wasm/nonce/"))?;
-            wasm_nonce_response(database, &ledger, address)?
-        }
-        route if route.starts_with("/wasm-app/nonce/") => wasm_app_nonce_response(&ledger, route)?,
-        route if route.starts_with("/wasm/") => wasm_extension_response(&ledger, route)?,
         route if route.starts_with("/balance/") => {
             let address = route.trim_start_matches("/balance/");
             if address.is_empty() || address.contains(['/', '?', '#']) {
@@ -1367,101 +1207,6 @@ fn asset_nonce_response(
     }))
 }
 
-fn wasm_nonce_response(
-    database: &Path,
-    ledger: &Ledger,
-    address: Address,
-) -> Result<serde_json::Value, String> {
-    let mut state = ledger.state().clone();
-    let height = Height(
-        ledger
-            .tip_height()
-            .map_or(0, |height| height.0.saturating_add(1)),
-    );
-    let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
-    for transaction in read_mempool(database)? {
-        let validated = validate_transaction(transaction, chain, height.0, &state)
-            .map_err(|error| format!("validate pending WASM deploy nonce: {error}"))?;
-        state
-            .apply_validated_transaction(&validated, height, Address::ZERO, chain)
-            .map_err(|error| format!("apply pending WASM deploy nonce: {error}"))?;
-    }
-    let namespace = state
-        .extensions
-        .namespace(kernel::extension::wasm_deploy_extension_id());
-    let nonce = kernel::extension::wasm_deploy_nonce(&namespace, address)
-        .map_err(|error| format!("read WASM deploy nonce: {error:?}"))?;
-    Ok(serde_json::json!({
-        "address": kernel::crypto::address_to_string(&address),
-        "nonce": nonce,
-    }))
-}
-
-fn wasm_extension_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
-    let text = route.trim_start_matches("/wasm/");
-    let extension_id = parse_extension_id(text)?;
-    let namespace = ledger
-        .state()
-        .extensions
-        .namespace(kernel::extension::wasm_deploy_extension_id());
-    let package = kernel::extension::wasm_deployed_package(&namespace, extension_id)
-        .map_err(|error| format!("read WASM extension: {error:?}"))?
-        .ok_or("WASM extension was not found")?;
-    let mut coin_balance = Zeno::ZERO;
-    let mut coin_utxo_count = 0_u64;
-    for utxo in ledger
-        .state()
-        .utxos
-        .owned_by(Authority::Extension(extension_id))
-    {
-        coin_balance = coin_balance
-            .checked_add(utxo.coin.amount)
-            .ok_or("WASM extension coin balance overflow")?;
-        coin_utxo_count = coin_utxo_count
-            .checked_add(1)
-            .ok_or("WASM extension coin UTXO count overflow")?;
-    }
-    let tip_height = ledger.tip_height().map_or(0, |height| height.0);
-    Ok(serde_json::json!({
-        "extension_id": package.manifest.extension_id.to_string(),
-        "name": package.manifest.name,
-        "code_hash": hex::encode(package.manifest.code_hash),
-        "abi_version": package.manifest.abi_version,
-        "activation_height": package.manifest.activation_height.0,
-        "active": tip_height >= package.manifest.activation_height.0,
-        "fuel_limit": package.manifest.fuel_limit,
-        "memory_pages": package.manifest.memory_pages,
-        "code_size": package.module.len(),
-        "coin_balance": coin_balance.as_zeno(),
-        "coin_unit": "zeno",
-        "coin_utxo_count": coin_utxo_count,
-        "immutable": true,
-    }))
-}
-
-fn wasm_app_nonce_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
-    let value = route.trim_start_matches("/wasm-app/nonce/");
-    let (extension, address) = value
-        .split_once('/')
-        .ok_or("invalid WASM application nonce route")?;
-    let extension_id = parse_extension_id(extension)?;
-    let address = parse_address(address)?;
-    let namespace = ledger.state().extensions.namespace(extension_id);
-    let nonce = kernel::extension::wasm_app_nonce(&namespace, address)
-        .map_err(|error| format!("read WASM application nonce: {error:?}"))?;
-    Ok(serde_json::json!({
-        "extension_id": extension_id.to_string(),
-        "address": kernel::crypto::address_to_string(&address),
-        "nonce": nonce,
-    }))
-}
-
-fn parse_extension_id(value: &str) -> Result<kernel::common::ExtensionHash, String> {
-    value
-        .parse()
-        .map_err(|_| "invalid extension ID; expected extension:<64 lowercase hex>".into())
-}
-
 fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
     let path = route.trim_start_matches("/asset/");
     let parts = path.split('/').collect::<Vec<_>>();
@@ -1501,31 +1246,14 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
             "shares": account_asset_shares(ledger, asset_id, address),
         }));
     }
-    if parts.len() == 4 && parts[1] == "balance" && parts[2] == "extension" {
-        let extension = parse_extension_id(parts[3])?;
-        let balance =
-            ledger
-                .state()
-                .assets
-                .extension_balance(&ledger.state().utxos, asset_id, extension);
-        return Ok(serde_json::json!({
-            "asset_id": asset_id.to_string(),
-            "extension_id": extension.to_string(),
-            "balance": balance.to_string(),
-        }));
-    }
     Err("invalid asset route".into())
 }
 
-fn asset_authority_response(authority: Option<Authority<Address>>) -> serde_json::Value {
+fn asset_authority_response(authority: Option<Address>) -> serde_json::Value {
     match authority {
-        Some(Authority::Address(address)) => serde_json::json!({
+        Some(address) => serde_json::json!({
             "type": "account",
             "address": kernel::crypto::address_to_string(&address),
-        }),
-        Some(Authority::Extension(extension_id)) => serde_json::json!({
-            "type": "program",
-            "extension_id": extension_id.to_string(),
         }),
         None => serde_json::Value::Null,
     }
@@ -3217,11 +2945,6 @@ fn reserved_coin_inputs(
                 .intent
                 .coin_parts()
                 .map_or_else(Vec::new, |(inputs, _, _)| inputs.to_vec()),
-            AuthorizedTransaction::Extension(transaction) => transaction
-                .fee
-                .intent
-                .coin_parts()
-                .map_or_else(Vec::new, |(inputs, _, _)| inputs.to_vec()),
         })
         .collect()
 }
@@ -3294,9 +3017,6 @@ fn transaction_miner_fee(transaction: &AuthorizedTransaction) -> Result<u64, Str
         )),
         AuthorizedTransaction::Asset(transaction) => {
             fee_from_outputs(coin_outputs(&transaction.payment.intent))
-        }
-        AuthorizedTransaction::Extension(transaction) => {
-            fee_from_outputs(coin_outputs(&transaction.fee.intent))
         }
     }
 }
@@ -3629,57 +3349,9 @@ fn print_network_info() -> Result<(), String> {
     Ok(())
 }
 
-fn inspect_extension_package(path: &str) -> Result<(), String> {
-    let package = kernel::extension::WasmExtensionPackage::read(path)
-        .map_err(|error| format!("load WASM extension `{path}`: {error}"))?;
-    let extension = package
-        .compile()
-        .map_err(|error| format!("compile WASM extension `{path}`: {error}"))?;
-    let manifest = extension.manifest();
-    println!("name: {}", manifest.name);
-    println!("extension_id: {}", manifest.extension_id);
-    println!("code_hash: {}", hex::encode(manifest.code_hash));
-    println!("abi_version: {}", manifest.abi_version);
-    println!("activation_height: {}", manifest.activation_height.0);
-    println!("fuel_limit: {}", manifest.fuel_limit);
-    println!("memory_pages: {}", manifest.memory_pages);
-    Ok(())
-}
-
-fn build_extension_package(args: &[String]) -> Result<(), String> {
-    let wasm_path = args.first().ok_or("missing input WASM path")?;
-    let package_path = args.get(1).ok_or("missing output package path")?;
-    let name = args.get(2).ok_or("missing extension name")?;
-    let activation_height = args
-        .get(3)
-        .ok_or("missing extension activation height")?
-        .parse::<u64>()
-        .map_err(|_| "invalid extension activation height")?;
-    let metadata = fs::metadata(wasm_path)
-        .map_err(|error| format!("read WASM module metadata `{wasm_path}`: {error}"))?;
-    if metadata.len() > kernel::extension::WASM_CODE_MAX_SIZE as u64 {
-        return Err("WASM module exceeds the size limit".into());
-    }
-    let module =
-        fs::read(wasm_path).map_err(|error| format!("read WASM module `{wasm_path}`: {error}"))?;
-    let package = kernel::extension::WasmExtensionPackage::new(
-        name.clone(),
-        Height(activation_height),
-        module,
-    )
-    .map_err(|error| format!("build WASM extension package: {error}"))?;
-    package
-        .write_new(package_path)
-        .map_err(|error| format!("write WASM extension package `{package_path}`: {error}"))?;
-    println!("package: {package_path}");
-    println!("extension_id: {}", package.manifest.extension_id);
-    println!("code_hash: {}", hex::encode(package.manifest.code_hash));
-    Ok(())
-}
-
 fn print_help() {
     println!(
-        "node run [--extension-package PATH]... [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS]... [--miner ADDRESS] [--public-addr ADDRESS | --nat-traversal]\nnode extension-package <module.wasm> <output.xpqext> <name> <activation-height>\nnode extension-check <package-path>\nnode network [data-dir] [listen-address] [peer-address...]\nnode rpc [data-dir] [listen-address]\nnode p2p-listen [data-dir] [listen-address]\nnode peer [data-dir] <peer-address>\nnode info\nnode check [data-dir]\nnode account [data-dir] <address>\nnode mempool [data-dir]\nnode mine-block [data-dir] <miner-address>\nnode submit-transaction [data-dir] <transaction-hex>\nnode submit-block [data-dir] <block-hex>\nnode version"
+        "node run [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS]... [--miner ADDRESS] [--public-addr ADDRESS | --nat-traversal]\nnode network [data-dir] [listen-address] [peer-address...]\nnode rpc [data-dir] [listen-address]\nnode p2p-listen [data-dir] [listen-address]\nnode peer [data-dir] <peer-address>\nnode info\nnode check [data-dir]\nnode account [data-dir] <address>\nnode mempool [data-dir]\nnode mine-block [data-dir] <miner-address>\nnode submit-transaction [data-dir] <transaction-hex>\nnode submit-block [data-dir] <block-hex>\nnode version"
     );
 }
 
@@ -3744,10 +3416,6 @@ mod tests {
             "/asset/nonce/{address}",
             "/asset/{asset_id}",
             "/asset/{asset_id}/balance/{address}",
-            "/wasm/nonce/{address}",
-            "/wasm/{extension_id}",
-            "/wasm-app/nonce/{extension_id}/{address}",
-            "/extension/preview",
             "/explorer/address/{address}",
             "/explorer/transaction/{transaction_id}",
             "/transaction",
@@ -3777,7 +3445,7 @@ mod tests {
                 decimals: 8,
                 max_supply: kernel::asset::Unit::from_units(100_000_000_000_000_000_000_000),
                 initial_mint: kernel::asset::Unit::from_units(1_000_000),
-                mint_authority: Some(Authority::Address(signer)),
+                mint_authority: Some(signer),
             },
             signer,
             0,
@@ -3830,7 +3498,7 @@ mod tests {
                 decimals: 0,
                 max_supply: kernel::asset::Unit::from_units(10),
                 initial_mint: kernel::asset::Unit::from_units(4),
-                mint_authority: Some(Authority::Address(authority)),
+                mint_authority: Some(authority),
             },
             authority,
             0,

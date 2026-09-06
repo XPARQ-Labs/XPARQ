@@ -59,25 +59,6 @@
   signing seed to newly created or restored `wallet.json` files. Wallet loading
   verifies both values against the mnemonic and signature profile while
   remaining compatible with earlier profile wallet files that omit them.
-- Added `xparq-asset`, `xparq-bridge`, and the `xparq-extension` facade to the
-  root workspace. These crates expose optional asset/bridge primitives without
-  activating bridge behavior in consensus or granting ledger mutation access.
-- Added consensus-neutral core extension primitives: deterministic IDs, bounded
-  canonical payloads, ordered state-root commitments, state capabilities, and
-  validate/apply contracts. No asset, bridge, or DEX business primitive was
-  added to core.
-- Added the core extension state lifecycle with isolated namespaces, bounded
-  keys/values/entry counts, staged validate/apply, host-owned root computation,
-  deterministic aggregate roots, and reversible journals. Concrete runtime
-  registration and extension fee policy remain explicit activation boundaries.
-- Added the canonical `AuthorizedTransaction::Extension` envelope and wired it
-  through structural consensus validation, staged ledger application, block
-  journals, explorer decoding, snapshot/storage boundaries, and fail-closed
-  production registry lookup. Miners commit the deterministic post-extension
-  root in `block.header.state_root`, and block application rejects a mismatched
-  root before committing either ledger or chain state. The production registry
-  no longer owns the native Layer-1 asset protocol; extensions remain available
-  for developer infrastructure such as bridges and DEX applications.
 - Added signed canonical asset calls for permissionless registration, bounded
   supply, authority-only minting, owner burn/transfer, balances, and replay-safe
   account nonces. Each asset call carries an authorized XPQ payment; payment and
@@ -93,25 +74,10 @@
   Explorer transaction projections now decode asset calls and expose the asset
   ID and action. Account balance responses and the wallet balance screen list
   held assets plus assets controlled by the mint authority.
-- Added deterministic WASM extension ABI v1 using an interpreter with fuel,
-  fixed memory, bounded state snapshots, canonical Borsh packages, code-hash
-  identities, and read-only validation. Nodes can load reviewed `.xpqext`
-  packages with `--extension-package` without rebuilding; the ordered manifest
-  allowlist is committed into the effective chain-spec hash so peers and stored
-  databases fail closed when their WASM packages differ. Native-only nodes keep
-  the existing chain-spec identity.
-- Added immutable permissionless WASM deployment as an atomic signed extension
-  transaction. The node validates and stores bytecode in consensus state,
-  derives its ID from name and code hash, and activates it automatically 100
-  blocks after inclusion. Dynamic execution resolves code from ledger state, so
-  replay, snapshots, state roots, and reorg rollback do not depend on process
-  memory. Wallet deploy/info commands and WASM nonce/status RPCs are included.
-- Activated generic signed WASM application calls from genesis on the reset
-  chain. Calls bind the chain ID,
-  extension ID, payload, signer, and per-extension nonce. The wallet provides
-  `wasm-call`; node RPC exposes nonce and exact extension-state preview routes.
-  Starting at activation, deployment and application state burn covers every
-  newly persisted extension key and value, not only metadata.
+- Removed the extension crate, WASM execution, extension transactions, RPC and
+  wallet commands, and extension-owned Coin or asset-share state. Ownership and
+  asset mint authority are account-address-only. This advances the chain-spec
+  identity and requires a coordinated reset or migration.
 - Retired old Docker, tutorial, roadmap, whitepaper, and legacy fuzzing files
   because they described the removed architecture. Current behavior lives in
   the root, runtime, and wallet READMEs.

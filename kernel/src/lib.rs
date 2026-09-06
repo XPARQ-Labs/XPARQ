@@ -21,6 +21,3 @@ pub mod codec {
 pub mod crypto {
     pub use ::crypto::*;
 }
-pub mod extension {
-    pub use ::extension::*;
-}

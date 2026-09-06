@@ -1,7 +1,7 @@
 # XPARQ
 
 XPARQ is a Rust proof-of-work blockchain with an XPQ UTXO ledger, native
-Layer-1 assets, WASM extensions, a TCP peer-to-peer node, HTTP RPC, and an
+Layer-1 assets, a TCP peer-to-peer node, HTTP RPC, and an
 interactive wallet. Proof of work uses Argon2id, while canonical identifiers
 and protocol hashes use domain-separated SHA3-256 where defined by their
 respective modules.
@@ -10,26 +10,24 @@ The workspace targets Rust 1.90 and the Rust 2024 edition.
 
 ## Workspace
 
-The workspace contains five packages:
+The workspace contains four packages:
 
 | Directory | Package | Responsibility |
 | --- | --- | --- |
-| `xparq/` | `kernel` | Protocol kernel: coin, assets, transactions, blocks, consensus, ledger, genesis |
-| `crypto/` | `xparq-crypto` | Cryptography and shared encoding/hash/scalar primitives |
-| `extension/` | `xparq-extension` | Extension contracts, WASM execution, bridge primitives |
-| `runtime/` | `xparq-node` | Storage, RPC, mining, mempool, and P2P |
-| `wallet/` | `xparq-wallet` | Reusable wallet library and wallet application |
+| `kernel/` | `kernel` | Protocol kernel: coin, assets, transactions, blocks, consensus, ledger, genesis |
+| `crypto/` | `crypto` | Cryptography and shared encoding/hash/scalar primitives |
+| `runtime/` | `node` | Storage, RPC, mining, mempool, and P2P |
+| `wallet/` | `wallet` | Reusable wallet library and wallet application |
 
 `depend/` contains vendored dependency sources and is excluded from workspace
-membership. Protocol modules live under `xparq/src/`; the public
-`xparq::block`, `xparq::coin`, `xparq::asset`, and other existing facade paths
-remain available. See [`docs/CRATE_CONSOLIDATION.md`](docs/CRATE_CONSOLIDATION.md)
+membership. Protocol modules live under `kernel/src/`. See
+[`docs/CRATE_CONSOLIDATION.md`](docs/CRATE_CONSOLIDATION.md)
 for package boundaries and compatibility details.
 
 ## Build and test
 
 ```bash
-cargo build --release -p xparq-node -p xparq-wallet
+cargo build --release -p node -p wallet
 cargo check --workspace --all-targets
 cargo test --workspace
 ```
@@ -40,8 +38,8 @@ Maintenance can target one package, for example `cargo test -p kernel --locked`.
 Node and wallet can also be built and deployed separately:
 
 ```bash
-cargo build --release -p xparq-node --locked
-cargo build --release -p xparq-wallet --locked
+cargo build --release -p node --locked
+cargo build --release -p wallet --locked
 ```
 
 Shared library changes require rebuilding the applications that use them.
@@ -70,7 +68,7 @@ cumulative work and a deterministic hash tie-break.
 ```
 
 The wallet supports balance and history queries, XPQ sends, UTXO consolidation,
-native assets, WASM extensions, and block exploration. Consolidation is an
+native assets and block exploration. Consolidation is an
 ordinary self-transfer and remains subject to canonical archival burn and a
 miner fee.
 

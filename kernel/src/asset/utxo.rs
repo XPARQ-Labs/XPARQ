@@ -1,6 +1,6 @@
 use std::{fmt, str::FromStr};
 
-use crate::common::{Authority, canonical_bytes};
+use crate::common::canonical_bytes;
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::Address;
 
@@ -14,8 +14,7 @@ pub const ASSET_SHARE_HASH_PREFIX: &str = "share:";
 
 /// Owner of a native asset share UTXO.
 ///
-/// An asset share can be controlled by either an account address or an extension hash.
-pub type AssetShareOwner = Authority<Address>;
+pub type AssetShareOwner = Address;
 
 /// Unique identifier of one concrete asset share/UTXO.
 #[derive(
@@ -161,7 +160,7 @@ mod tests {
     #[test]
     fn asset_share_keeps_parent_amount_and_owner() {
         let parent = AssetHash::from_bytes([3; ASSET_HASH_SIZE]);
-        let owner = Authority::Address(Address([5; 20]));
+        let owner = Address([5; 20]);
         let share = AssetShare::new(parent, Unit::from_units(42), owner);
 
         assert_eq!(share.parent, parent);
