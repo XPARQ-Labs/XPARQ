@@ -234,6 +234,7 @@ impl AccountWallet {
         &self,
         extension_id: kernel::common::ExtensionHash,
         payload: Vec<u8>,
+        attached_coin: u64,
         nonce: u64,
     ) -> Result<kernel::common::ExtensionCall, String> {
         let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
@@ -241,6 +242,7 @@ impl AccountWallet {
             chain.genesis_hash,
             extension_id,
             payload,
+            attached_coin,
             nonce,
             &self.signing_seed,
         )

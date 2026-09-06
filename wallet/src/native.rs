@@ -275,7 +275,7 @@ fn asset_mint(args: &[String]) -> Result<(), String> {
         args,
         AssetInstruction::Mint {
             asset_id,
-            recipient: Authority::Address(address_option(args, "--to")?),
+            recipient: asset_recipient(args)?,
             amount: parse_asset_amount(args, "--amount", decimals)?,
         },
     )
@@ -294,7 +294,7 @@ fn asset_burn(args: &[String]) -> Result<(), String> {
 }
 
 fn asset_transfer(args: &[String]) -> Result<(), String> {
-    submit_asset_spend(args, Authority::Address(address_option(args, "--to")?))
+    submit_asset_spend(args, asset_recipient(args)?)
 }
 
 fn asset_deposit(args: &[String]) -> Result<(), String> {
@@ -304,6 +304,20 @@ fn asset_deposit(args: &[String]) -> Result<(), String> {
             option(args, "--extension").ok_or("missing --extension")?,
         )?),
     )
+}
+
+fn asset_recipient(args: &[String]) -> Result<kernel::asset::AssetShareOwner, String> {
+    let address = option(args, "--to")
+        .map(|value| address_from_string(value).map_err(|error| error.to_string()))
+        .transpose()?;
+    let extension = option(args, "--extension")
+        .map(parse_extension_id)
+        .transpose()?;
+    match (address, extension) {
+        (Some(address), None) => Ok(Authority::Address(address)),
+        (None, Some(extension)) => Ok(Authority::Extension(extension)),
+        _ => Err("provide exactly one of --to or --extension".into()),
+    }
 }
 
 fn submit_asset_spend(
@@ -568,6 +582,10 @@ fn wasm_call(args: &[String]) -> Result<(), String> {
         (None, None) => return Err("missing --payload-hex or --payload-file".into()),
     };
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
+    let deposit = option(args, "--deposit")
+        .map(parse_amount)
+        .transpose()?
+        .unwrap_or(Zeno::ZERO);
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let address = kernel::crypto::address_to_string(&wallet.address());
     let nonce = http_get_json::<AssetNonceResponse>(
@@ -575,19 +593,27 @@ fn wasm_call(args: &[String]) -> Result<(), String> {
         &format!("/wasm-app/nonce/{}/{}", extension_id, address),
     )?
     .nonce;
-    let call = wallet.0.sign_wasm_app_call(extension_id, payload, nonce)?;
+    let call = wallet
+        .0
+        .sign_wasm_app_call(extension_id, payload, deposit.as_zeno(), nonce)?;
     let extension_created_weight = preview_extension_created_weight(rpc, &call)?;
     let public_key_known = account_public_key_registered(rpc, &wallet);
     let transaction = automatic_fee_transaction(|fee, archival_burn| {
+        let required = fee
+            .checked_add(deposit.as_zeno())
+            .ok_or("WASM deposit amount overflow")?;
         let (inputs, _total, state_burn, change) = select_account_inputs_with_state_burn(
             rpc,
             &wallet,
-            fee,
-            1,
+            required,
+            1 + u64::from(!deposit.is_zero()),
             extension_created_weight,
             archival_burn,
         )?;
         let mut outputs = Vec::new();
+        if !deposit.is_zero() {
+            outputs.push(CoinOutput::extension(extension_id, deposit));
+        }
         if change > 0 {
             outputs.push(CoinOutput::new(wallet.address(), Zeno::from_zeno(change)));
         }
@@ -726,7 +752,9 @@ fn interactive_menu() -> Result<(), String> {
         println!("8. Consolidate XPQ UTXOs");
         println!("9. Block explorer");
         println!("10. Assets");
-        println!("11. Exit");
+        println!("11. Deploy WASM extension");
+        println!("12. WASM extension info");
+        println!("13. Exit");
 
         match prompt("Select")?.as_str() {
             "1" => {
@@ -760,10 +788,35 @@ fn interactive_menu() -> Result<(), String> {
             "8" => interactive_wallet_query(consolidate_coin_utxos)?,
             "9" => interactive_block_explorer()?,
             "10" => interactive_assets()?,
-            "11" | "exit" | "quit" => return Ok(()),
+            "11" => interactive_wasm_deploy()?,
+            "12" => interactive_wasm_info()?,
+            "13" | "exit" | "quit" => return Ok(()),
             choice => println!("Unknown selection `{choice}`"),
         }
     }
+}
+
+fn interactive_wasm_info() -> Result<(), String> {
+    let extension = prompt("Extension ID")?;
+    let rpc = prompt_default("Node RPC address", DEFAULT_RPC_ADDR)?;
+    wasm_info(&["--extension".into(), extension, "--rpc".into(), rpc])
+}
+
+fn interactive_wasm_deploy() -> Result<(), String> {
+    let name = prompt("Extension name")?;
+    let module = prompt("WASM module file")?;
+    let wallet = prompt_default("Wallet file", DEFAULT_WALLET_PATH)?;
+    let rpc = prompt_default("Node RPC address", DEFAULT_RPC_ADDR)?;
+    wasm_deploy(&[
+        "--name".into(),
+        name,
+        "--wasm".into(),
+        module,
+        "--wallet".into(),
+        wallet,
+        "--rpc".into(),
+        rpc,
+    ])
 }
 
 fn interactive_assets() -> Result<(), String> {
@@ -797,14 +850,14 @@ fn interactive_assets() -> Result<(), String> {
         "2" => {
             let mut args = interactive_asset_wallet_rpc()?;
             args.extend(["--asset".into(), prompt("Asset ID")?]);
-            args.extend(["--to".into(), prompt("Recipient address")?]);
+            args.extend(interactive_asset_recipient()?);
             args.extend(["--amount".into(), prompt("Asset amount")?]);
             asset_mint(&args)
         }
         "3" => {
             let mut args = interactive_asset_wallet_rpc()?;
             args.extend(["--asset".into(), prompt("Asset ID")?]);
-            args.extend(["--to".into(), prompt("Recipient address")?]);
+            args.extend(interactive_asset_recipient()?);
             args.extend(["--amount".into(), prompt("Asset amount")?]);
             asset_transfer(&args)
         }
@@ -839,6 +892,18 @@ fn interactive_assets() -> Result<(), String> {
     }
 }
 
+fn interactive_asset_recipient() -> Result<[String; 2], String> {
+    let recipient = prompt("Recipient address or extension ID")?;
+    let flag = if recipient.starts_with(kernel::common::EXTENSION_HASH_PREFIX) {
+        parse_extension_id(&recipient)?;
+        "--extension"
+    } else {
+        address_from_string(&recipient).map_err(|error| error.to_string())?;
+        "--to"
+    };
+    Ok([flag.into(), recipient])
+}
+
 fn interactive_asset_wallet_rpc() -> Result<Vec<String>, String> {
     Ok(vec![
         "--wallet".into(),
@@ -869,9 +934,17 @@ fn interactive_wallet_query(query: fn(&[String]) -> Result<(), String>) -> Resul
 
 fn interactive_spend() -> Result<(), String> {
     let rpc = prompt_default("Node RPC address", DEFAULT_RPC_ADDR)?;
+    let recipient = prompt("Recipient address or extension ID")?;
+    let recipient_flag = if recipient.starts_with(kernel::common::EXTENSION_HASH_PREFIX) {
+        parse_extension_id(&recipient)?;
+        "--extension"
+    } else {
+        address_from_string(&recipient).map_err(|error| error.to_string())?;
+        "--to"
+    };
     let mut args = vec![
-        "--to".into(),
-        prompt("Recipient address")?,
+        recipient_flag.into(),
+        recipient,
         "--amount".into(),
         prompt("XPQ amount")?,
         "--rpc".into(),
@@ -1568,11 +1641,6 @@ fn has_flag(args: &[String], name: &str) -> bool {
     args.iter().any(|argument| argument == name)
 }
 
-fn address_option(args: &[String], name: &str) -> Result<Address, String> {
-    address_from_string(option(args, name).ok_or_else(|| format!("missing {name}"))?)
-        .map_err(|error| format!("invalid {name}: {error}"))
-}
-
 fn parse_amount(value: &str) -> Result<Zeno, String> {
     let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
     if fraction.len() > DECIMALS as usize || whole.is_empty() {
@@ -1611,10 +1679,10 @@ fn print_help() {
         "wallet coin-deposit --extension EXTENSION_ID --amount XPQ [--rpc ADDRESS] [--wallet PATH] [--offline]"
     );
     println!(
-        "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply AMOUNT --initial-mint AMOUNT [--mint-program EXTENSION_ID | --fixed-supply] [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset ID --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset ID --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset ID --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-deposit --asset ID --extension EXTENSION_ID --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset ID [--rpc ADDRESS]\nwallet asset-balance --asset ID [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts use the human decimal denomination declared by asset metadata. For decimals=8, 1.25 is encoded canonically as 125000000 Unit. Registration atomically credits the initial mint to the signing creator address. Use asset-deposit to transfer assets into extension custody."
+        "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply AMOUNT --initial-mint AMOUNT [--mint-program EXTENSION_ID | --fixed-supply] [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset ID (--to ADDRESS | --extension EXTENSION_ID) --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset ID --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset ID (--to ADDRESS | --extension EXTENSION_ID) --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-deposit --asset ID --extension EXTENSION_ID --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset ID [--rpc ADDRESS]\nwallet asset-balance --asset ID [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts use the human decimal denomination declared by asset metadata. For decimals=8, 1.25 is encoded canonically as 125000000 Unit. Registration atomically credits the initial mint to the signing creator address."
     );
     println!(
-        "\nWASM commands:\nwallet wasm-deploy --name NAME --wasm MODULE [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet wasm-call --extension ID (--payload-hex HEX | --payload-file PATH) [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet wasm-info --extension ID [--rpc ADDRESS]\n\nWASM deploys are immutable and activate automatically after 100 blocks. Signed generic WASM calls and WASM persistent-state burn are active from genesis."
+        "\nWASM commands:\nwallet wasm-deploy --name NAME --wasm MODULE [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet wasm-call --extension ID (--payload-hex HEX | --payload-file PATH) [--deposit XPQ] [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet wasm-info --extension ID [--rpc ADDRESS]\n\nWASM deploys are immutable and activate automatically after 100 blocks. Signed generic WASM calls and WASM persistent-state burn are active from genesis. --deposit attaches coin atomically to the authenticated WASM call."
     );
 }
 
@@ -1645,6 +1713,28 @@ mod tests {
             format_asset_amount("125000000", 8, "TEST"),
             Ok("1.25000000 TEST".into())
         );
+    }
+
+    #[test]
+    fn asset_recipient_accepts_address_or_extension() {
+        let address = Address::ZERO;
+        let address_args = vec!["--to".into(), kernel::crypto::address_to_string(&address)];
+        assert_eq!(
+            asset_recipient(&address_args),
+            Ok(Authority::Address(address))
+        );
+
+        let extension = kernel::common::ExtensionHash::from_bytes([7; 32]);
+        let extension_args = vec!["--extension".into(), extension.to_string()];
+        assert_eq!(
+            asset_recipient(&extension_args),
+            Ok(Authority::Extension(extension))
+        );
+
+        assert!(asset_recipient(&[]).is_err());
+        let mut ambiguous = address_args;
+        ambiguous.extend(extension_args);
+        assert!(asset_recipient(&ambiguous).is_err());
     }
 
     #[test]

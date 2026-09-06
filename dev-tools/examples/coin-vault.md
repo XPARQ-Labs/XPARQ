@@ -26,6 +26,18 @@ cargo run -p wallet -- sign-spend \
   --rpc 127.0.0.1:6666
 ```
 
+Check that the deposit entered the vault:
+
+```bash
+cargo run -p wallet -- wasm-info \
+  --extension extension:EXTENSION_HASH \
+  --rpc 127.0.0.1:6666
+```
+
+The `coin_balance` field is the vault's total balance in zeno and
+`coin_utxo_count` is the number of coin outputs it owns. The example vault does
+not track balances per depositor.
+
 Calls use a small canonical binary payload:
 
 | Opcode | Recipient | Payload |

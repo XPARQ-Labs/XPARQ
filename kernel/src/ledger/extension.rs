@@ -625,7 +625,7 @@ mod tests {
             id,
             fail_apply: false,
         };
-        let context = ExtensionContext { height: Height(5) };
+        let context = ExtensionContext::system(Height(5) );
         let call = ExtensionCall::new(id, 7_u64.to_le_bytes().to_vec()).unwrap();
         let mut state = ExtensionStateSet::default();
         let mut registry = extension::ExtensionRegistry::new();
@@ -659,7 +659,7 @@ mod tests {
         let initial_root = state.state_root().unwrap();
 
         assert_eq!(
-            state.apply(&registry, ExtensionContext { height: Height(5) }, &call),
+            state.apply(&registry, ExtensionContext::system(Height(5) ), &call),
             Err(ExtensionFailure::InvalidState)
         );
         assert_eq!(state.get(id, b"counter").unwrap(), None);

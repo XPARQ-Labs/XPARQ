@@ -1407,6 +1407,20 @@ fn wasm_extension_response(ledger: &Ledger, route: &str) -> Result<serde_json::V
     let package = kernel::extension::wasm_deployed_package(&namespace, extension_id)
         .map_err(|error| format!("read WASM extension: {error:?}"))?
         .ok_or("WASM extension was not found")?;
+    let mut coin_balance = Zeno::ZERO;
+    let mut coin_utxo_count = 0_u64;
+    for utxo in ledger
+        .state()
+        .utxos
+        .owned_by(Authority::Extension(extension_id))
+    {
+        coin_balance = coin_balance
+            .checked_add(utxo.coin.amount)
+            .ok_or("WASM extension coin balance overflow")?;
+        coin_utxo_count = coin_utxo_count
+            .checked_add(1)
+            .ok_or("WASM extension coin UTXO count overflow")?;
+    }
     let tip_height = ledger.tip_height().map_or(0, |height| height.0);
     Ok(serde_json::json!({
         "extension_id": package.manifest.extension_id.to_string(),
@@ -1418,6 +1432,9 @@ fn wasm_extension_response(ledger: &Ledger, route: &str) -> Result<serde_json::V
         "fuel_limit": package.manifest.fuel_limit,
         "memory_pages": package.manifest.memory_pages,
         "code_size": package.module.len(),
+        "coin_balance": coin_balance.as_zeno(),
+        "coin_unit": "zeno",
+        "coin_utxo_count": coin_utxo_count,
         "immutable": true,
     }))
 }

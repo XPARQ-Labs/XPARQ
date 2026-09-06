@@ -177,7 +177,7 @@ impl LedgerState {
             }
             let applied = self.extensions.apply(
                 extension::production_registry(),
-                crate::common::ExtensionContext { height: _height },
+                crate::common::ExtensionContext::system(_height ),
                 &extension_transaction.call,
             );
             return match applied {

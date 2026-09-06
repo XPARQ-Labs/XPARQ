@@ -91,6 +91,7 @@ impl ExtensionRegistry {
         let app = crate::WasmAppCall::from_extension_call(call)?;
         app.verify(self.chain_id, call.extension_id(), state)?;
         let guest_call = ExtensionCall::new(call.extension_id(), app.payload)?;
+        let context = ExtensionContext::application(context.height, app.signer, app.attached_coin);
         let extension = &dynamic;
         if context.height < extension.activation_height() {
             return Err(ExtensionFailure::InactiveExtension);
@@ -118,6 +119,7 @@ impl ExtensionRegistry {
         let app = crate::WasmAppCall::from_extension_call(call)?;
         app.verify(self.chain_id, call.extension_id(), state)?;
         let guest_call = ExtensionCall::new(call.extension_id(), app.payload.clone())?;
+        let context = ExtensionContext::application(context.height, app.signer, app.attached_coin);
         let extension = &dynamic;
         if context.height < extension.activation_height() {
             return Err(ExtensionFailure::InactiveExtension);
@@ -232,20 +234,20 @@ mod tests {
         let call = ExtensionCall::new(id, b"valid".to_vec()).unwrap();
         let mut store = TestStore::default();
         assert_eq!(
-            registry.validate(ExtensionContext { height: Height(4) }, &call, &store),
+            registry.validate(ExtensionContext::system(Height(4) ), &call, &store),
             Err(ExtensionFailure::InactiveExtension)
         );
         registry
-            .validate(ExtensionContext { height: Height(5) }, &call, &store)
+            .validate(ExtensionContext::system(Height(5) ), &call, &store)
             .unwrap();
         registry
-            .apply(ExtensionContext { height: Height(5) }, &call, &mut store)
+            .apply(ExtensionContext::system(Height(5) ), &call, &mut store)
             .unwrap();
         assert_eq!(store.get(b"last-call").unwrap(), Some(b"valid".to_vec()));
 
         let unknown = ExtensionCall::new(ExtensionHash::derive("unknown"), vec![]).unwrap();
         assert_eq!(
-            registry.validate(ExtensionContext { height: Height(5) }, &unknown, &store),
+            registry.validate(ExtensionContext::system(Height(5) ), &unknown, &store),
             Err(ExtensionFailure::UnknownExtension)
         );
     }

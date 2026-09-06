@@ -2,7 +2,7 @@
   (import "xparq" "state_put"
     (func $state_put (param i32 i32 i32 i32) (result i32)))
 
-  ;; ABI v1 requires exactly 16 initial and 16 maximum 64-KiB pages.
+  ;; ABI v3 requires exactly 16 initial and 16 maximum 64-KiB pages.
   (memory (export "memory") 16 16)
   (data (i32.const 0) "value")
 

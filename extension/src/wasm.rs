@@ -21,7 +21,7 @@ use crypto::primitives::{Height, canonical_bytes, domain_hash};
 use crypto::{AccountSignature, Address, PublicKey, SigningSeed, address_from_public_key, verify};
 use wasmi::{Caller, CompilationMode, Config, Engine, ExternType, Linker, Memory, Module, Store};
 
-pub const WASM_ABI_VERSION: u32 = 3;
+pub const WASM_ABI_VERSION: u32 = 4;
 pub const WASM_CODE_MAX_SIZE: usize = 2 * 1024 * 1024;
 pub const WASM_PACKAGE_MAX_SIZE: usize = WASM_CODE_MAX_SIZE + 4096;
 pub const WASM_MEMORY_MAX_PAGES: u32 = 16;
@@ -50,6 +50,7 @@ const HOST_BUFFER_TOO_SMALL: i32 = -3;
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct WasmAppCall {
     pub payload: Vec<u8>,
+    pub attached_coin: u64,
     pub signer: Address,
     pub nonce: u64,
     pub public_key: PublicKey,
@@ -61,6 +62,7 @@ struct UnsignedWasmAppCall<'a> {
     chain_id: [u8; 32],
     extension_id: ExtensionHash,
     payload: &'a [u8],
+    attached_coin: u64,
     signer: Address,
     nonce: u64,
 }
@@ -74,15 +76,24 @@ impl WasmAppCall {
         chain_id: [u8; 32],
         extension_id: ExtensionHash,
         payload: Vec<u8>,
+        attached_coin: u64,
         nonce: u64,
         signing_seed: &SigningSeed,
     ) -> Result<Self, ExtensionFailure> {
         let public_key = signing_seed.public_key();
         let signer = address_from_public_key(&public_key);
-        let commitment = wasm_app_commitment(chain_id, extension_id, &payload, signer, nonce)?;
+        let commitment = wasm_app_commitment(
+            chain_id,
+            extension_id,
+            &payload,
+            attached_coin,
+            signer,
+            nonce,
+        )?;
         let signature = signing_seed.sign(&commitment);
         Ok(Self {
             payload,
+            attached_coin,
             signer,
             nonce,
             public_key,
@@ -116,6 +127,7 @@ impl WasmAppCall {
             chain_id,
             extension_id,
             &self.payload,
+            self.attached_coin,
             self.signer,
             self.nonce,
         )?;
@@ -150,6 +162,7 @@ fn wasm_app_commitment(
     chain_id: [u8; 32],
     extension_id: ExtensionHash,
     payload: &[u8],
+    attached_coin: u64,
     signer: Address,
     nonce: u64,
 ) -> Result<[u8; 32], ExtensionFailure> {
@@ -157,6 +170,7 @@ fn wasm_app_commitment(
         chain_id,
         extension_id,
         payload,
+        attached_coin,
         signer,
         nonce,
     })
@@ -328,6 +342,8 @@ impl WasmExtension {
             &self.engine,
             HostState {
                 base: state,
+                caller: context.caller,
+                attached_coin: context.attached_coin,
                 changes: BTreeMap::new(),
                 state_bytes,
                 failure: None,
@@ -479,6 +495,8 @@ fn validate_module_memory(module: &Module, pages: u32) -> Result<(), WasmExtensi
 
 struct HostState<'a> {
     base: &'a dyn ExtensionStateRead,
+    caller: Option<Address>,
+    attached_coin: u64,
     changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     state_bytes: usize,
     failure: Option<ExtensionFailure>,
@@ -543,6 +561,8 @@ impl HostState<'_> {
 }
 
 fn define_host_functions(linker: &mut Linker<HostState>) -> Result<(), wasmi::Error> {
+    linker.func_wrap("xparq", "caller", host_caller)?;
+    linker.func_wrap("xparq", "attached_coin", host_attached_coin)?;
     linker.func_wrap("xparq", "state_get", host_state_get)?;
     linker.func_wrap("xparq", "state_put", host_state_put)?;
     linker.func_wrap("xparq", "state_delete", host_state_delete)?;
@@ -557,6 +577,29 @@ fn define_host_functions(linker: &mut Linker<HostState>) -> Result<(), wasmi::Er
         host_coin_transfer_extension,
     )?;
     Ok(())
+}
+
+fn host_caller(mut caller: Caller<'_, HostState>, output_ptr: i32) -> i32 {
+    if charge_host_fuel(&mut caller, crypto::ADDRESS_SIZE).is_err() {
+        return fail(&mut caller, ExtensionFailure::InvalidState);
+    }
+    let Some(address) = caller.data().caller else {
+        return HOST_MISSING;
+    };
+    let Ok(offset) = usize::try_from(output_ptr) else {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    };
+    let Some(memory) = guest_memory(&caller) else {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    };
+    if memory.write(&mut caller, offset, &address.0).is_err() {
+        return fail(&mut caller, ExtensionFailure::StateAccess);
+    }
+    0
+}
+
+fn host_attached_coin(caller: Caller<'_, HostState>) -> i64 {
+    caller.data().attached_coin as i64
 }
 
 fn guest_memory<T>(caller: &Caller<'_, T>) -> Option<Memory> {
@@ -941,7 +984,7 @@ mod tests {
         );
         assert_eq!(
             extension.validate(
-                ExtensionContext { height: Height(0) },
+                ExtensionContext::system(Height(0) ),
                 &call(&extension, b""),
                 &LazyReadState {
                     value: vec![7; 20_000],
@@ -980,14 +1023,14 @@ mod tests {
         let extension_call = call(&extension, b"register");
         extension
             .validate(
-                ExtensionContext { height: Height(5) },
+                ExtensionContext::system(Height(5) ),
                 &extension_call,
                 &state,
             )
             .unwrap();
         extension
             .apply(
-                ExtensionContext { height: Height(5) },
+                ExtensionContext::system(Height(5) ),
                 &extension_call,
                 &mut state,
             )
@@ -1011,7 +1054,7 @@ mod tests {
         let state = MemoryState::default();
         assert_eq!(
             extension.validate(
-                ExtensionContext { height: Height(5) },
+                ExtensionContext::system(Height(5) ),
                 &call(&extension, b"payload"),
                 &state,
             ),
@@ -1037,7 +1080,7 @@ mod tests {
         let mut state = MemoryState::default();
         extension
             .apply(
-                ExtensionContext { height: Height(5) },
+                ExtensionContext::system(Height(5) ),
                 &call(&extension, b"mint"),
                 &mut state,
             )
@@ -1078,7 +1121,7 @@ mod tests {
         let mut state = MemoryState::default();
         extension
             .apply(
-                ExtensionContext { height: Height(5) },
+                ExtensionContext::system(Height(5) ),
                 &call(&extension, b"send"),
                 &mut state,
             )
@@ -1109,16 +1152,38 @@ mod tests {
     }
 
     #[test]
-    fn coin_vault_example_sends_to_address_and_extension() {
+    fn coin_vault_tracks_depositor_and_restricts_withdrawal_to_caller_balance() {
         let extension = compile(include_str!("../../dev-tools/examples/coin-vault.wat"));
         let mut state = MemoryState::default();
+        let depositor = Address([0x11; 20]);
+        let other = Address([0x12; 20]);
+
+        extension
+            .apply(
+                ExtensionContext::application(Height(5), depositor, 20),
+                &call(&extension, &[0]),
+                &mut state,
+            )
+            .unwrap();
+        assert_eq!(
+            state.entries.get(&[&[b'b'][..], &depositor.0].concat()),
+            Some(&20_u64.to_le_bytes().to_vec())
+        );
 
         let mut address_payload = vec![1];
         address_payload.extend_from_slice(&[0x21; 20]);
         address_payload.extend_from_slice(&9_u64.to_le_bytes());
+        assert_eq!(
+            extension.validate(
+                ExtensionContext::application(Height(5), other, 0),
+                &call(&extension, &address_payload),
+                &state,
+            ),
+            Err(ExtensionFailure::InvalidState)
+        );
         extension
             .apply(
-                ExtensionContext { height: Height(5) },
+                ExtensionContext::application(Height(5), depositor, 0),
                 &call(&extension, &address_payload),
                 &mut state,
             )
@@ -1126,10 +1191,10 @@ mod tests {
 
         let mut extension_payload = vec![2];
         extension_payload.extend_from_slice(&[0x22; 32]);
-        extension_payload.extend_from_slice(&7_u64.to_le_bytes());
+        extension_payload.extend_from_slice(&11_u64.to_le_bytes());
         extension
             .apply(
-                ExtensionContext { height: Height(5) },
+                ExtensionContext::application(Height(5), depositor, 0),
                 &call(&extension, &extension_payload),
                 &mut state,
             )
@@ -1144,9 +1209,13 @@ mod tests {
                 },
                 ExtensionEffect::TransferCoin {
                     recipient: CoinRecipient::Extension([0x22; 32]),
-                    amount: 7,
+                    amount: 11,
                 },
             ]
+        );
+        assert_eq!(
+            state.entries.get(&[&[b'b'][..], &depositor.0].concat()),
+            Some(&0_u64.to_le_bytes().to_vec())
         );
     }
 
@@ -1185,7 +1254,7 @@ mod tests {
         );
         assert_eq!(
             extension.validate(
-                ExtensionContext { height: Height(5) },
+                ExtensionContext::system(Height(5) ),
                 &call(&extension, b"payload"),
                 &MemoryState::default(),
             ),

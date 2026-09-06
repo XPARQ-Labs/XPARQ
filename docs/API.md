@@ -121,8 +121,8 @@ address; subsequent distribution uses asset transfer.
 
 Permissionless WASM deployment also uses `POST /transaction`. Wallets obtain
 the signed deployment nonce from `GET /wasm/nonce/{address}` and can query the
-immutable manifest and automatic activation status from
-`GET /wasm/{extension_id}`.
+immutable manifest, automatic activation status, aggregate coin balance in
+zeno, and owned coin UTXO count from `GET /wasm/{extension_id}`.
 Extension IDs use the case-sensitive `extension:` prefix followed by exactly
 64 lowercase hexadecimal characters.
 

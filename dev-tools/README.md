@@ -6,7 +6,7 @@ repository currently exposes two different extension models:
 | Model | Current status | Node rebuild required? | Best suited for |
 | --- | --- | --- | --- |
 | Native Layer-1 assets | Usable end-to-end | No | Fungible assets with fixed metadata and an optional mint authority |
-| WASM extension ABI v1 | Experimental | No for permissionless deployment | Deterministic application state and custom validation logic |
+| WASM extension ABI v3 | Experimental | No for permissionless deployment | Deterministic application state and native-value custody |
 
 Start with [ASSETS.md](ASSETS.md) to create, mint, burn, transfer, and query an
 asset. No source-code pull request or governance vote is required.
@@ -27,14 +27,14 @@ events, contract upgrades, or inter-extension calls.
 Build the node and wallet from the repository root:
 
 ```bash
-cargo build -p xparq-node -p xparq-wallet
+cargo build -p node -p wallet
 ```
 
 Run the node and open the interactive wallet in separate terminals:
 
 ```bash
-cargo run -p xparq-node -- run --data ./data/xparq
-cargo run -p xparq-wallet -- menu
+cargo run -p node -- run --data ./data/xparq
+cargo run -p wallet -- menu
 ```
 
 ## What is ready today?

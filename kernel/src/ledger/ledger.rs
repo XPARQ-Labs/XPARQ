@@ -346,9 +346,7 @@ impl LedgerState {
         self.extensions
             .execution_weight(
                 extension::production_registry(),
-                ExtensionContext {
-                    height: crate::common::Height(height),
-                },
+                ExtensionContext::system(crate::common::Height(height)),
                 call,
             )
             .map_err(extension_error)
@@ -361,9 +359,7 @@ impl LedgerState {
     ) -> Result<u64, ExtensionFailure> {
         let preview = self.extensions.preview_created_state_weight(
             extension::production_registry(),
-            ExtensionContext {
-                height: crate::common::Height(height),
-            },
+            ExtensionContext::system(crate::common::Height(height)),
             call,
         )?;
         let mut total = preview.created_state_weight;

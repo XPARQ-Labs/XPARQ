@@ -9,7 +9,7 @@ use std::fmt;
 use std::io::{Error as IoError, ErrorKind, Read};
 use std::str::FromStr;
 
-use crypto::primitives::{Height, domain_hash};
+use crypto::{Address, primitives::{Height, domain_hash}};
 
 pub const EXTENSION_HASH_SIZE: usize = 32;
 pub const EXTENSION_HASH_PREFIX: &str = "extension:";
@@ -209,6 +209,20 @@ pub enum ExtensionEffect {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExtensionContext {
     pub height: Height,
+    /// Authenticated application caller. Native/system calls have no caller.
+    pub caller: Option<Address>,
+    /// Native coin atomically attached to this call, in zeno.
+    pub attached_coin: u64,
+}
+
+impl ExtensionContext {
+    pub const fn system(height: Height) -> Self {
+        Self { height, caller: None, attached_coin: 0 }
+    }
+
+    pub const fn application(height: Height, caller: Address, attached_coin: u64) -> Self {
+        Self { height, caller: Some(caller), attached_coin }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

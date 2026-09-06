@@ -23,9 +23,9 @@ deployment walkthrough are documented in
 
 ```bash
 wat2wasm dev-tools/examples/state-value.wat -o module.wasm
-cargo run -p xparq-node -- extension-package \
+cargo run -p node -- extension-package \
   module.wasm module.xpqext example.state 1000
-cargo run -p xparq-node -- extension-check module.xpqext
+cargo run -p node -- extension-check module.xpqext
 ```
 
 The `.xpqext` package is useful for inspection and operator-configured chains.
@@ -36,7 +36,7 @@ delay instead.
 ## Deploy permissionlessly
 
 ```bash
-cargo run -p xparq-wallet -- wasm-deploy \
+cargo run -p wallet -- wasm-deploy \
   --name example.state \
   --wasm module.wasm \
   --wallet wallet.json \
@@ -47,7 +47,7 @@ The wallet prints the derived extension ID. Query deployment and activation
 state with:
 
 ```bash
-cargo run -p xparq-wallet -- wasm-info \
+cargo run -p wallet -- wasm-info \
   --extension EXTENSION_ID \
   --rpc 127.0.0.1:6666
 ```
@@ -78,7 +78,7 @@ persistent-state burn are active from genesis. A deployed module can be called
 after its own fixed 100-block activation delay:
 
 ```bash
-cargo run -p xparq-wallet -- wasm-call \
+cargo run -p wallet -- wasm-call \
   --extension EXTENSION_ID \
   --payload-hex 68656c6c6f \
   --wallet wallet.json \
@@ -94,4 +94,4 @@ output and normal miner fee.
 The generic transport is now usable, but application developers still need to
 define and document their own canonical payload schema. Events/indexing,
 application-specific RPC, SDK ergonomics, and optional upgrade or pause policy
-remain higher-level developer tooling rather than part of ABI v1.
+remain higher-level developer tooling rather than part of ABI v3.

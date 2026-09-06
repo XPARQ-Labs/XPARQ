@@ -342,6 +342,33 @@ pub fn validate_transaction(
                 state,
             )?;
             let (fee_inputs, fee_outputs, fee_burn) = coin_parts(fee.intent())?;
+            if transaction.call.extension_id() != crate::extension::wasm_deploy_extension_id() {
+                let app = crate::extension::WasmAppCall::from_extension_call(&transaction.call)
+                    .map_err(TransactionConsensusError::Extension)?;
+                if app.signer != fee.intent().signer {
+                    return Err(TransactionConsensusError::Extension(
+                        ExtensionFailure::InvalidPayload,
+                    ));
+                }
+                let attached = fee_outputs.iter().try_fold(0_u64, |total, output| {
+                    if output.output
+                        == crate::transaction::Recipient::Extension(
+                            transaction.call.extension_id(),
+                        )
+                    {
+                        total.checked_add(output.amount.as_zeno()).ok_or(
+                            TransactionConsensusError::Extension(ExtensionFailure::InvalidState),
+                        )
+                    } else {
+                        Ok(total)
+                    }
+                })?;
+                if attached != app.attached_coin {
+                    return Err(TransactionConsensusError::Extension(
+                        ExtensionFailure::InvalidPayload,
+                    ));
+                }
+            }
             validate_coin_inputs(
                 fee_inputs,
                 fee.intent().signer,

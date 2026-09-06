@@ -99,9 +99,9 @@
     },
     "/wasm/{extension_id}": {
       "get": {
-        "tags": ["WASM Extensions"], "summary": "Get an on-chain WASM extension manifest and activation status", "operationId": "getWasmExtension",
+        "tags": ["WASM Extensions"], "summary": "Get an on-chain WASM extension manifest, activation status, and coin balance", "operationId": "getWasmExtension",
         "parameters": [{ "$ref": "#/components/parameters/ExtensionId" }],
-        "responses": { "200": { "description": "Immutable on-chain WASM extension metadata" }, "400": { "$ref": "#/components/responses/BadRequest" } }
+        "responses": { "200": { "description": "Immutable on-chain WASM extension metadata with aggregate coin balance and UTXO count" }, "400": { "$ref": "#/components/responses/BadRequest" } }
       }
     },
     "/wasm-app/nonce/{extension_id}/{address}": {

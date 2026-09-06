@@ -325,27 +325,21 @@ mod tests {
         let deployed_at = Height(10);
         registry
             .validate(
-                ExtensionContext {
-                    height: deployed_at,
-                },
+                ExtensionContext::system(deployed_at),
                 &deploy_call,
                 &state,
             )
             .unwrap();
         registry
             .apply(
-                ExtensionContext {
-                    height: deployed_at,
-                },
+                ExtensionContext::system(deployed_at),
                 &deploy_call,
                 &mut state,
             )
             .unwrap();
         assert_eq!(
             registry.validate(
-                ExtensionContext {
-                    height: deployed_at
-                },
+                ExtensionContext::system(deployed_at),
                 &deploy_call,
                 &state
             ),
@@ -354,15 +348,13 @@ mod tests {
 
         state.current = dynamic_id;
         assert_eq!(WASM_APP_CALL_ACTIVATION_HEIGHT, Height(0));
-        let app_call = WasmAppCall::sign(chain_id, dynamic_id, b"signed".to_vec(), 0, &seed)
+        let app_call = WasmAppCall::sign(chain_id, dynamic_id, b"signed".to_vec(), 0, 0, &seed)
             .unwrap()
             .into_extension_call(dynamic_id)
             .unwrap();
         assert_eq!(
             registry.validate(
-                ExtensionContext {
-                    height: Height(109)
-                },
+                ExtensionContext::system(Height(109)),
                 &app_call,
                 &state
             ),
@@ -371,9 +363,7 @@ mod tests {
         let legacy_call = ExtensionCall::new(dynamic_id, b"legacy".to_vec()).unwrap();
         assert_eq!(
             registry.validate(
-                ExtensionContext {
-                    height: Height(110)
-                },
+                ExtensionContext::system(Height(110)),
                 &legacy_call,
                 &state,
             ),
@@ -382,18 +372,14 @@ mod tests {
 
         registry
             .validate(
-                ExtensionContext {
-                    height: Height(110),
-                },
+                ExtensionContext::system(Height(110)),
                 &app_call,
                 &state,
             )
             .unwrap();
         registry
             .apply(
-                ExtensionContext {
-                    height: Height(110),
-                },
+                ExtensionContext::system(Height(110)),
                 &app_call,
                 &mut state,
             )
@@ -401,9 +387,7 @@ mod tests {
         assert_eq!(wasm_app_nonce(&state, signer).unwrap(), 1);
         assert_eq!(
             registry.validate(
-                ExtensionContext {
-                    height: Height(110)
-                },
+                ExtensionContext::system(Height(110)),
                 &app_call,
                 &state,
             ),
