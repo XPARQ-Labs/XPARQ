@@ -247,14 +247,14 @@ fn validated_extension_applies_and_rolls_back_with_fee_output_at_index_zero() {
     let mut size = 1;
     let transaction = loop {
         let burn = state_burn + size;
-        let intent = SpendIntent::coin(
+        let intent = SpendIntent::coin_with_burn(
             sender,
             vec![input],
             vec![
                 CoinOutput::new(sender, Zeno::from_zeno(100_000 - burn - size)),
-                CoinOutput::burn(Zeno::from_zeno(burn)),
                 CoinOutput::block_miner(Zeno::from_zeno(size)),
             ],
+            Zeno::from_zeno(burn),
         )
         .unwrap();
         let signature = seed.sign(intent.commitment(chain).unwrap().as_bytes());

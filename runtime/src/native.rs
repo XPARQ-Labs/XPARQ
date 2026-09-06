@@ -843,21 +843,21 @@ fn address_transaction_activity(
     let (sender, outputs, extra_sent) = match transaction {
         AuthorizedTransaction::Spend(tx) => {
             let coin = tx.payment.as_ref().unwrap_or(&tx.spend);
-            let (_, outputs) = coin
+            let (_, outputs, burn) = coin
                 .intent
                 .coin_parts()
                 .ok_or("spend payment is not coin")?;
-            (Some(coin.intent.signer), outputs, Zeno::from_zeno(0))
+            (Some(coin.intent.signer), outputs, burn)
         }
         AuthorizedTransaction::Asset(tx) => (
             Some(tx.payment.intent.signer),
             coin_outputs(&tx.payment.intent),
-            Zeno::from_zeno(0),
+            coin_burn(&tx.payment.intent),
         ),
         AuthorizedTransaction::Extension(tx) => (
             Some(tx.fee.intent.signer),
             coin_outputs(&tx.fee.intent),
-            Zeno::from_zeno(0),
+            coin_burn(&tx.fee.intent),
         ),
     };
     let received = checked_output_sum(
@@ -932,7 +932,11 @@ fn transaction_response(transaction: &AuthorizedTransaction, miner: Address) -> 
 }
 
 fn coin_outputs(intent: &kernel::transaction::SpendIntent) -> &[CoinOutput] {
-    intent.coin_parts().map_or(&[], |(_, outputs)| outputs)
+    intent.coin_parts().map_or(&[], |(_, outputs, _)| outputs)
+}
+
+fn coin_burn(intent: &kernel::transaction::SpendIntent) -> Zeno {
+    intent.coin_parts().map_or(Zeno::ZERO, |(_, _, burn)| burn)
 }
 
 fn spend_transaction_response(
@@ -940,10 +944,15 @@ fn spend_transaction_response(
     miner: Address,
 ) -> serde_json::Value {
     match &transaction.spend.intent.spend {
-        kernel::transaction::Spend::Coin { inputs, outputs } => serde_json::json!({
+        kernel::transaction::Spend::Coin {
+            inputs,
+            outputs,
+            burn,
+        } => serde_json::json!({
             "type": "coin", "signer": kernel::crypto::address_to_string(&transaction.spend.intent.signer),
             "inputs": inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "outputs": public_outputs_response(outputs, miner, Some(transaction.spend.intent.signer)),
+            "burn": burn.as_zeno(),
         }),
         kernel::transaction::Spend::Asset {
             asset,
@@ -1085,7 +1094,6 @@ fn public_outputs_response(
                     "miner",
                     "miner_fee",
                 ),
-                Recipient::Burn => (None, "burn", "state_burn"),
                 Recipient::Extension(extension) => (
                     Some(extension.to_string()),
                     "extension",
@@ -1107,7 +1115,6 @@ fn output_recipient(output: &CoinOutput, miner: Address) -> Option<Address> {
     match output.output {
         Recipient::Address(address) => Some(address),
         Recipient::BlockMiner => Some(miner),
-        Recipient::Burn => None,
         Recipient::Extension(_) => None,
     }
 }
@@ -3187,17 +3194,17 @@ fn reserved_coin_inputs(
                 .unwrap_or(&transaction.spend)
                 .intent
                 .coin_parts()
-                .map_or_else(Vec::new, |(inputs, _)| inputs.to_vec()),
+                .map_or_else(Vec::new, |(inputs, _, _)| inputs.to_vec()),
             AuthorizedTransaction::Asset(transaction) => transaction
                 .payment
                 .intent
                 .coin_parts()
-                .map_or_else(Vec::new, |(inputs, _)| inputs.to_vec()),
+                .map_or_else(Vec::new, |(inputs, _, _)| inputs.to_vec()),
             AuthorizedTransaction::Extension(transaction) => transaction
                 .fee
                 .intent
                 .coin_parts()
-                .map_or_else(Vec::new, |(inputs, _)| inputs.to_vec()),
+                .map_or_else(Vec::new, |(inputs, _, _)| inputs.to_vec()),
         })
         .collect()
 }
@@ -3774,6 +3781,7 @@ mod tests {
                     spend: kernel::transaction::Spend::Coin {
                         inputs: vec![],
                         outputs: vec![],
+                        burn: Zeno::ZERO,
                     },
                 },
                 authorization: kernel::transaction::AccountAuthorization::AccountKnown {

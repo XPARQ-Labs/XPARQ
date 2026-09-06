@@ -452,6 +452,21 @@ impl LedgerState {
                         .checked_add(weight)
                         .ok_or(ExtensionFailure::StateEntryLimit)?;
                 }
+                crate::common::ExtensionEffect::BurnCoin { amount } => {
+                    preview_program_coin_burn(&mut utxos, call.extension_id(), amount)?;
+                }
+                crate::common::ExtensionEffect::BurnAsset { asset_id, amount } => {
+                    assets
+                        .apply_program_burn(
+                            &mut utxos,
+                            call.extension_id(),
+                            crate::asset::AssetHash::from_bytes(asset_id),
+                            crate::asset::Unit::from_units(amount),
+                            [0; 32],
+                            execution_nonce,
+                        )
+                        .map_err(|_| ExtensionFailure::InvalidState)?;
+                }
             }
         }
         Ok(total)
@@ -522,6 +537,50 @@ fn preview_program_coin_transfer(
     }
 
     Ok(outputs * crate::consensus::COIN_UTXO_STATE_WEIGHT)
+}
+
+fn preview_program_coin_burn(
+    utxos: &mut crate::ledger::UtxoSet,
+    program: crate::common::ExtensionHash,
+    amount: u64,
+) -> Result<(), ExtensionFailure> {
+    if amount == 0 {
+        return Err(ExtensionFailure::InvalidState);
+    }
+    let owner = Authority::Extension(program);
+    let mut selected = Vec::new();
+    let mut held = 0_u64;
+    for utxo in utxos.owned_by(owner) {
+        selected.push(utxo.coin.utxo);
+        held = held
+            .checked_add(utxo.coin.amount.as_zeno())
+            .ok_or(ExtensionFailure::InvalidState)?;
+        if held >= amount {
+            break;
+        }
+    }
+    if held < amount {
+        return Err(ExtensionFailure::InvalidState);
+    }
+    for id in &selected {
+        utxos
+            .consume(id)
+            .map_err(|_| ExtensionFailure::InvalidState)?;
+    }
+    let change = held - amount;
+    if change != 0 {
+        let change_id = selected
+            .first()
+            .copied()
+            .ok_or(ExtensionFailure::InvalidState)?;
+        utxos
+            .insert(CoinUtxo {
+                coin: Coin::new(change_id, crate::coin::Zeno::from_zeno(change)),
+                owner,
+            })
+            .map_err(|_| ExtensionFailure::InvalidState)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

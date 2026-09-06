@@ -1,6 +1,6 @@
 # WASM extensions
 
-XPARQ WASM extension ABI v1 executes deterministic WebAssembly through the
+XPARQ WASM extension ABI v3 executes deterministic WebAssembly through the
 core extension lifecycle. It does not provide WASI, files, sockets, clocks,
 randomness, floating point, or direct ledger access.
 
@@ -27,13 +27,19 @@ The module may import these functions from module `xparq`:
 state_get(key_ptr: i32, key_len: i32, output_ptr: i32, output_capacity: i32) -> i32
 state_put(key_ptr: i32, key_len: i32, value_ptr: i32, value_len: i32) -> i32
 state_delete(key_ptr: i32, key_len: i32) -> i32
+coin_transfer(address_ptr: i32, amount: i64) -> i32
+coin_transfer_extension(extension_ptr: i32, amount: i64) -> i32
+coin_burn(amount: i64) -> i32
+asset_mint(asset_ptr: i32, address_ptr: i32, amount_ptr: i32) -> i32
+asset_transfer(asset_ptr: i32, address_ptr: i32, amount_ptr: i32) -> i32
+asset_burn(asset_ptr: i32, amount_ptr: i32) -> i32
 ```
 
 `state_get` returns the value length, `-1` when absent, `-2` on host failure,
 or `-3` when the output buffer is too small. State writes are allowed only from
 `xparq_apply`; attempting a write during validation rejects the call.
 
-ABI v1 limits module code to 2 MiB, linear memory to 16 fixed 64-KiB pages,
+ABI v3 limits module code to 2 MiB, linear memory to 16 fixed 64-KiB pages,
 fuel to 10,000,000, keys to 256 bytes, individual values to 1 MiB, and the
 WASM-visible state snapshot to 16 MiB.
 

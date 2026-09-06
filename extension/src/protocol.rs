@@ -197,6 +197,13 @@ pub enum ExtensionEffect {
         recipient: CoinRecipient,
         amount: u64,
     },
+    BurnCoin {
+        amount: u64,
+    },
+    BurnAsset {
+        asset_id: [u8; 32],
+        amount: u128,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

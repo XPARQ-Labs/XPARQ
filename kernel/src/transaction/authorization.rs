@@ -86,7 +86,7 @@ pub struct AuthorizedAssetTransaction {
 pub struct AuthorizedSpendTransaction {
     pub spend: AuthorizedAccountIntent<SpendIntent>,
     /// Asset transfers pay their protocol/miner cost with a separate coin spend.
-    /// Coin transfers carry their own miner and burn outputs and leave this empty.
+    /// Coin transfers carry their own miner outputs and explicit burn action and leave this empty.
     pub payment: Option<AuthorizedAccountIntent<SpendIntent>>,
 }
 

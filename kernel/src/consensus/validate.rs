@@ -200,7 +200,11 @@ pub fn validate_transaction(
                 state,
             )?;
             match &validated.intent().spend {
-                Spend::Coin { inputs, outputs } => {
+                Spend::Coin {
+                    inputs,
+                    outputs,
+                    burn,
+                } => {
                     if transaction.payment.is_some() {
                         return Err(TransactionConsensusError::Intent(
                             IntentError::InvalidAssetCall,
@@ -213,10 +217,11 @@ pub fn validate_transaction(
                             .iter()
                             .map(|output| output.amount)
                             .collect::<Vec<_>>(),
+                        *burn,
                         state,
                     )?;
                     validate_state_burn(
-                        outputs,
+                        *burn,
                         StateTransitionWeight {
                             created_coin_utxos: created_coin_output_count(outputs)?,
                             consumed_coin_utxos: u64::try_from(inputs.len())
@@ -245,11 +250,12 @@ pub fn validate_transaction(
                         current_height,
                         state,
                     )?;
-                    let (inputs, outputs) = coin_parts(payment.intent())?;
+                    let (inputs, outputs, burn) = coin_parts(payment.intent())?;
                     validate_coin_inputs(
                         inputs,
                         payment.intent().signer,
                         &outputs.iter().map(|o| o.amount).collect::<Vec<_>>(),
+                        burn,
                         state,
                     )?;
                     let asset_weight = state
@@ -268,7 +274,7 @@ pub fn validate_transaction(
                             .ok_or(StateBurnError::WeightOverflow)?
                     };
                     validate_state_burn(
-                        outputs,
+                        burn,
                         StateTransitionWeight {
                             created_coin_utxos: created_coin_output_count(outputs)?,
                             consumed_coin_utxos: u64::try_from(inputs.len())
@@ -299,7 +305,7 @@ pub fn validate_transaction(
                 current_height,
                 state,
             )?;
-            let (payment_inputs, payment_outputs) = coin_parts(payment.intent())?;
+            let (payment_inputs, payment_outputs, payment_burn) = coin_parts(payment.intent())?;
             validate_coin_inputs(
                 payment_inputs,
                 payment.intent().signer,
@@ -307,10 +313,11 @@ pub fn validate_transaction(
                     .iter()
                     .map(|output| output.amount)
                     .collect::<Vec<_>>(),
+                payment_burn,
                 state,
             )?;
             validate_state_burn(
-                payment_outputs,
+                payment_burn,
                 StateTransitionWeight {
                     created_coin_utxos: created_coin_output_count(payment_outputs)?,
                     consumed_coin_utxos: u64::try_from(payment_inputs.len())
@@ -334,7 +341,7 @@ pub fn validate_transaction(
                 current_height,
                 state,
             )?;
-            let (fee_inputs, fee_outputs) = coin_parts(fee.intent())?;
+            let (fee_inputs, fee_outputs, fee_burn) = coin_parts(fee.intent())?;
             validate_coin_inputs(
                 fee_inputs,
                 fee.intent().signer,
@@ -342,10 +349,11 @@ pub fn validate_transaction(
                     .iter()
                     .map(|output| output.amount)
                     .collect::<Vec<_>>(),
+                fee_burn,
                 state,
             )?;
             validate_state_burn(
-                fee_outputs,
+                fee_burn,
                 StateTransitionWeight {
                     created_coin_utxos: created_coin_output_count(fee_outputs)?,
                     consumed_coin_utxos: u64::try_from(fee_inputs.len())
@@ -401,20 +409,20 @@ fn revealed_asset_account_key_weight(
 
 fn coin_parts(
     intent: &SpendIntent,
-) -> Result<(&[CoinHash], &[crate::transaction::CoinOutput]), TransactionConsensusError> {
+) -> Result<(&[CoinHash], &[crate::transaction::CoinOutput], Zeno), TransactionConsensusError> {
     intent.coin_parts().ok_or(TransactionConsensusError::Intent(
         IntentError::InvalidAssetCall,
     ))
 }
 
 fn validate_state_burn(
-    outputs: &[crate::transaction::CoinOutput],
+    burn: Zeno,
     transition: StateTransitionWeight,
     canonical_transaction_weight: u64,
 ) -> Result<(), TransactionConsensusError> {
     let required =
         ProtocolBurn::for_transaction(transition, canonical_transaction_weight)?.total()?;
-    validate_exact_burn(outputs, required)?;
+    validate_exact_burn(burn, required)?;
     Ok(())
 }
 
@@ -525,6 +533,7 @@ fn validate_coin_inputs(
     inputs: &[CoinHash],
     owner: Address,
     outputs: &[Zeno],
+    burn: Zeno,
     state: &impl TransactionStateView,
 ) -> Result<(), TransactionConsensusError> {
     ensure_unique_coin_ids(inputs.iter().copied())?;
@@ -540,7 +549,7 @@ fn validate_coin_inputs(
             .checked_add(input.amount)
             .ok_or(TransactionConsensusError::ZenoOverflow)?;
     }
-    let output_total = outputs.iter().try_fold(Zeno::from_zeno(0), |sum, amount| {
+    let output_total = outputs.iter().try_fold(burn, |sum, amount| {
         sum.checked_add(*amount)
             .ok_or(TransactionConsensusError::ZenoOverflow)
     })?;
@@ -650,13 +659,14 @@ mod transaction_tests {
         let chain = ChainContext::new([28; 32]);
         let mut state_burn = ledger_burn;
         let transaction = loop {
-            let intent = SpendIntent::coin(
+            let intent = SpendIntent::coin_with_burn(
                 sender,
                 vec![id],
-                vec![
-                    crate::transaction::CoinOutput::new(sender, Zeno::from_zeno(10)),
-                    crate::transaction::CoinOutput::burn(Zeno::from_zeno(state_burn)),
-                ],
+                vec![crate::transaction::CoinOutput::new(
+                    sender,
+                    Zeno::from_zeno(10),
+                )],
+                Zeno::from_zeno(state_burn),
             )
             .unwrap();
             let signature = signing.sign(intent.commitment(chain).unwrap().as_bytes());

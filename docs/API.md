@@ -57,19 +57,19 @@ does not already exist; a signer's first asset call creates its nonce entry.
 Updating an existing supply, balance, or nonce entry is not charged as state
 creation, and deleting an entry does not grant a refund.
 The canonical ledger stores a checked `total_burned` accumulator. It increases
-when a burn output is applied, decreases on rollback or reorg, persists in the
+when an explicit coin burn action is applied, decreases on rollback or reorg, persists in the
 database and snapshots, and is exposed by `GET /status` in zeno.
 Block explorer responses distinguish the gross `subsidy`, `state_burn`, and
 net `miner_emission`.
 
 Block responses keep `transactions` as the non-emission transaction count and
 also expose `transaction_ids` plus `transaction_details`. Each detail contains
-the transaction ID, type, canonical byte size, and decoded transaction outputs,
-including miner fee and state-burn outputs where applicable.
+the transaction ID, type, canonical byte size, decoded transaction outputs, and
+the explicit burn amount where applicable.
 
 Explorer transaction outputs expose the canonical target as `type` (`address`,
-`miner`, or `burn`), the integer `amount`, and `unit: "zeno"`. The derived
-`role` is `recipient`, `change`, `miner_fee`, or `state_burn`. `change` means an
+`miner`, or `extension`), the integer `amount`, and `unit: "zeno"`. The derived
+`role` is `recipient`, `change`, `miner_fee`, or `extension_deposit`. `change` means an
 address output returns to the declared transaction sender; it is an explorer
 interpretation and does not add a Change primitive to consensus.
 
@@ -140,8 +140,9 @@ The WASM host API supports native-value custody. A Coin output created with
 `OutputTarget::Extension(extension_hash)` is owned by that extension, while an
 asset `TransferToExtension` credits its extension asset balance. During apply,
 the authenticated extension may emit `coin_transfer` to an account,
-`coin_transfer_extension` to another extension, or `asset_transfer` to send
-its own holdings. The ledger supplies the executing
+`coin_transfer_extension` to another extension, `coin_burn` to burn coin,
+`asset_transfer` to send asset shares, or `asset_burn` to burn asset shares.
+The ledger supplies the executing
 `ExtensionHash`; guest payloads cannot choose the debit authority. All effects,
 extension state, fees, Coin change, and asset balances commit or roll back as
 one transition.

@@ -355,12 +355,14 @@ fn submit_asset_spend(
             fee_outputs.push(CoinOutput::new(wallet.address(), Zeno::from_zeno(change)));
         }
         fee_outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
-        if state_burn > 0 {
-            fee_outputs.push(CoinOutput::burn(Zeno::from_zeno(state_burn)));
-        }
         let payment = wallet.sign_onchain_spend(
-            SpendIntent::coin(wallet.address(), coin_inputs, fee_outputs)
-                .map_err(|e| e.to_string())?,
+            SpendIntent::coin_with_burn(
+                wallet.address(),
+                coin_inputs,
+                fee_outputs,
+                Zeno::from_zeno(state_burn),
+            )
+            .map_err(|e| e.to_string())?,
             public_key_known,
         )?;
         Ok(AuthorizedTransaction::Spend(Box::new(
@@ -473,11 +475,13 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
             outputs.push(CoinOutput::new(wallet.address(), Zeno::from_zeno(change)));
         }
         outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
-        if state_burn > 0 {
-            outputs.push(CoinOutput::burn(Zeno::from_zeno(state_burn)));
-        }
-        let fee_intent = SpendIntent::coin(wallet.address(), inputs, outputs)
-            .map_err(|error| error.to_string())?;
+        let fee_intent = SpendIntent::coin_with_burn(
+            wallet.address(),
+            inputs,
+            outputs,
+            Zeno::from_zeno(state_burn),
+        )
+        .map_err(|error| error.to_string())?;
         let fee = wallet.sign_onchain_spend(fee_intent, public_key_known)?;
         Ok(AuthorizedTransaction::Asset(Box::new(
             AuthorizedAssetTransaction {
@@ -524,11 +528,13 @@ fn wasm_deploy(args: &[String]) -> Result<(), String> {
             outputs.push(CoinOutput::new(wallet.address(), Zeno::from_zeno(change)));
         }
         outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
-        if state_burn > 0 {
-            outputs.push(CoinOutput::burn(Zeno::from_zeno(state_burn)));
-        }
-        let fee_intent = SpendIntent::coin(wallet.address(), inputs, outputs)
-            .map_err(|error| error.to_string())?;
+        let fee_intent = SpendIntent::coin_with_burn(
+            wallet.address(),
+            inputs,
+            outputs,
+            Zeno::from_zeno(state_burn),
+        )
+        .map_err(|error| error.to_string())?;
         let fee = wallet.sign_onchain_spend(fee_intent, public_key_known)?;
         Ok(AuthorizedTransaction::Extension(Box::new(
             AuthorizedExtensionTransaction {
@@ -586,11 +592,13 @@ fn wasm_call(args: &[String]) -> Result<(), String> {
             outputs.push(CoinOutput::new(wallet.address(), Zeno::from_zeno(change)));
         }
         outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
-        if state_burn > 0 {
-            outputs.push(CoinOutput::burn(Zeno::from_zeno(state_burn)));
-        }
-        let fee_intent = SpendIntent::coin(wallet.address(), inputs, outputs)
-            .map_err(|error| error.to_string())?;
+        let fee_intent = SpendIntent::coin_with_burn(
+            wallet.address(),
+            inputs,
+            outputs,
+            Zeno::from_zeno(state_burn),
+        )
+        .map_err(|error| error.to_string())?;
         let fee = wallet.sign_onchain_spend(fee_intent, public_key_known)?;
         Ok(AuthorizedTransaction::Extension(Box::new(
             AuthorizedExtensionTransaction {
@@ -1165,11 +1173,13 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
             outputs.push(CoinOutput::new(change_address, Zeno::from_zeno(change)));
         }
         outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
-        if state_burn > 0 {
-            outputs.push(CoinOutput::burn(Zeno::from_zeno(state_burn)));
-        }
-        let intent = SpendIntent::coin(wallet.address(), selected, outputs)
-            .map_err(|error| error.to_string())?;
+        let intent = SpendIntent::coin_with_burn(
+            wallet.address(),
+            selected,
+            outputs,
+            Zeno::from_zeno(state_burn),
+        )
+        .map_err(|error| error.to_string())?;
         let signed = wallet.sign_onchain_spend(intent, known)?;
         Ok(AuthorizedTransaction::Spend(Box::new(
             AuthorizedSpendTransaction {
@@ -1230,15 +1240,17 @@ fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
             .and_then(|amount| amount.checked_sub(protocol_burn))
             .filter(|amount| *amount > 0)
             .ok_or("UTXO total is insufficient for consolidation fee and protocol burn")?;
-        let mut outputs = vec![
+        let outputs = vec![
             CoinOutput::new(wallet.address(), Zeno::from_zeno(consolidated)),
             CoinOutput::block_miner(Zeno::from_zeno(fee)),
         ];
-        if protocol_burn > 0 {
-            outputs.push(CoinOutput::burn(Zeno::from_zeno(protocol_burn)));
-        }
-        let intent = SpendIntent::coin(wallet.address(), inputs.clone(), outputs)
-            .map_err(|error| error.to_string())?;
+        let intent = SpendIntent::coin_with_burn(
+            wallet.address(),
+            inputs.clone(),
+            outputs,
+            Zeno::from_zeno(protocol_burn),
+        )
+        .map_err(|error| error.to_string())?;
         let signed = wallet.sign_onchain_spend(intent, public_key_known)?;
         Ok(AuthorizedTransaction::Spend(Box::new(
             AuthorizedSpendTransaction {

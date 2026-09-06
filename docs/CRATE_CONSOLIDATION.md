@@ -20,9 +20,10 @@ commands no longer require manual `--input` arguments.
 
 Coin ownership uses the semantic alias `CoinOwner` (`Authority<Address>`) in the ledger. An address spends with
 an account signature; an extension spends only from its authenticated execution
-context. Both authority variants may receive coin outputs. WASM ABI v2 exposes
+context. Both authority variants may receive coin outputs. WASM ABI v3 exposes
 `coin_transfer` for an address recipient and `coin_transfer_extension` for an
-extension recipient.
+extension recipient. Burn is an explicit action rather than a synthetic
+recipient; extensions use `coin_burn` and `asset_burn` for their own holdings.
 
 Asset share ownership uses the matching semantic alias `AssetShareOwner`
 (`Authority<Address>`), covering shares controlled by an address or an extension hash.

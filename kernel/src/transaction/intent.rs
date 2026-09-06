@@ -29,7 +29,6 @@ impl ChainContext {
 pub enum Recipient {
     Address(Address),
     BlockMiner,
-    Burn,
     Extension(ExtensionHash),
 }
 
@@ -50,13 +49,6 @@ impl CoinOutput {
     pub const fn block_miner(amount: Zeno) -> Self {
         Self {
             output: Recipient::BlockMiner,
-            amount,
-        }
-    }
-
-    pub const fn burn(amount: Zeno) -> Self {
-        Self {
-            output: Recipient::Burn,
             amount,
         }
     }
@@ -93,14 +85,6 @@ pub(crate) fn validate_public_outputs(
         > 1
     {
         return Err(IntentError::InvalidMinerOutput);
-    }
-    if outputs
-        .iter()
-        .filter(|output| output.output == Recipient::Burn)
-        .count()
-        > 1
-    {
-        return Err(IntentError::InvalidBurnOutput);
     }
     Ok(())
 }

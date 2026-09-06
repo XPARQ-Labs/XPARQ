@@ -734,6 +734,82 @@ impl AssetState {
         Ok(weight)
     }
 
+    /// Burns asset shares controlled by the trusted executing extension.
+    pub fn apply_program_burn(
+        &mut self,
+        utxos: &mut UtxoSet,
+        program: ExtensionHash,
+        asset_id: AssetHash,
+        amount: Unit,
+        execution_origin: [u8; 32],
+        execution_nonce: u64,
+    ) -> Result<AssetRollbackJournal, AssetError> {
+        ensure_nonzero_asset_amount(amount)?;
+        self.metadata(asset_id).ok_or(AssetError::UnknownAsset)?;
+
+        let owner = Authority::Extension(program);
+        let mut inputs = Vec::new();
+        let mut total = Unit::ZERO;
+        for (id, share) in utxos.assets() {
+            if share.parent == asset_id && share.owner == owner {
+                inputs.push(id);
+                total = total
+                    .checked_add(share.amount)
+                    .ok_or(AssetError::BalanceOverflow)?;
+                if total >= amount {
+                    break;
+                }
+            }
+        }
+        if total < amount {
+            return Err(AssetError::InsufficientBalance);
+        }
+        let supply = self
+            .supply(asset_id)
+            .checked_sub(amount)
+            .ok_or(AssetError::SupplyOverflow)?;
+
+        let change = total.checked_sub(amount).ok_or(AssetError::InvalidAmount)?;
+        let commitment = asset_domain_hash(
+            b"XPARQ Native Asset Burn",
+            &[&canonical_bytes(&(
+                execution_origin,
+                program,
+                asset_id,
+                &inputs,
+                amount,
+                execution_nonce,
+            ))
+            .map_err(|_| AssetError::Encoding)?],
+        );
+        let change_id = AssetShareHash::derive(asset_id, commitment, 0);
+        if !change.is_zero() && utxos.asset(change_id).is_some() {
+            return Err(AssetError::ShareAlreadyExists);
+        }
+
+        let mut journal = AssetRollbackJournal::default();
+        journal
+            .supplies
+            .push((asset_id, self.supplies.get(&asset_id).copied()));
+        for input in inputs {
+            journal.utxos.push((input, utxos.asset(input).copied()));
+            utxos.remove_asset(input);
+        }
+        if !change.is_zero() {
+            journal.utxos.push((change_id, None));
+            utxos.insert_asset(
+                change_id,
+                AssetShare {
+                    parent: asset_id,
+                    owner,
+                    amount: change,
+                },
+            );
+        }
+        self.supplies.insert(asset_id, supply);
+        Ok(journal)
+    }
+
     pub fn rollback(&mut self, utxos: &mut UtxoSet, journal: AssetRollbackJournal) {
         restore_map(&mut self.metadata, journal.metadata);
 
@@ -1037,6 +1113,62 @@ mod tests {
         assert_eq!(utxos.len(), 2);
         assert_eq!(utxos.get(&coin_id).unwrap().coin.amount.as_zeno(), 5);
         assert_eq!(utxos.asset(share_id).unwrap().amount, Unit::from_units(7));
+    }
+
+    #[test]
+    fn extension_asset_burn_reduces_supply_and_rolls_back() {
+        let program = ExtensionHash::derive("test.asset.burner");
+        let asset_id = AssetHash::from_bytes([0x51; 32]);
+        let share_id = AssetShareHash::from_bytes([0x52; 32]);
+        let mut assets = AssetState::default();
+        assets.metadata.insert(
+            asset_id,
+            AssetMetadata::new(
+                "Burnable".into(),
+                "BRN".into(),
+                0,
+                Unit::from_units(10),
+                Address::ZERO,
+                Some(Authority::Extension(program)),
+            )
+            .unwrap(),
+        );
+        assets.supplies.insert(asset_id, Unit::from_units(10));
+        let mut utxos = UtxoSet::default();
+        utxos.insert_asset(
+            share_id,
+            AssetShare::new(
+                asset_id,
+                Unit::from_units(10),
+                Authority::Extension(program),
+            ),
+        );
+
+        let journal = assets
+            .apply_program_burn(
+                &mut utxos,
+                program,
+                asset_id,
+                Unit::from_units(4),
+                [0x53; 32],
+                0,
+            )
+            .unwrap();
+        assert_eq!(assets.supply(asset_id), Unit::from_units(6));
+        assert_eq!(
+            utxos
+                .assets()
+                .filter(|(_, share)| share.parent == asset_id)
+                .map(|(_, share)| share.amount)
+                .fold(Unit::ZERO, |total, amount| total
+                    .checked_add(amount)
+                    .unwrap()),
+            Unit::from_units(6)
+        );
+
+        assets.rollback(&mut utxos, journal);
+        assert_eq!(assets.supply(asset_id), Unit::from_units(10));
+        assert_eq!(utxos.asset(share_id).unwrap().amount, Unit::from_units(10));
     }
 
     #[test]

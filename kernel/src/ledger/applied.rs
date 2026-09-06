@@ -360,6 +360,27 @@ impl LedgerState {
                         &mut coins,
                     )
                     .map(|()| None),
+                ExtensionEffect::BurnCoin { amount } => self
+                    .apply_program_coin_burn(
+                        program,
+                        Zeno::from_zeno(amount),
+                        SpendCommitment::from_bytes(execution_origin),
+                        index,
+                        &mut coins,
+                    )
+                    .map(|()| None),
+                ExtensionEffect::BurnAsset { asset_id, amount } => self
+                    .assets
+                    .apply_program_burn(
+                        &mut self.utxos,
+                        program,
+                        crate::asset::AssetHash::from_bytes(asset_id),
+                        Unit::from_units(amount),
+                        execution_origin,
+                        execution_nonce,
+                    )
+                    .map(Some)
+                    .map_err(SpendStateError::Asset),
             };
             match result {
                 Ok(Some(journal)) => journals.push(journal),
@@ -452,6 +473,49 @@ impl LedgerState {
         Ok(())
     }
 
+    fn apply_program_coin_burn(
+        &mut self,
+        program: ExtensionHash,
+        amount: Zeno,
+        commitment: SpendCommitment,
+        effect_index: usize,
+        journal: &mut UtxoRollbackJournal,
+    ) -> Result<(), SpendStateError> {
+        if amount.is_zero() {
+            return Err(SpendStateError::InvalidExtensionAmount);
+        }
+        let owner = Authority::Extension(program);
+        let mut selected = Vec::new();
+        let mut total = Zeno::ZERO;
+        for utxo in self.utxos.owned_by(owner) {
+            selected.push(utxo.coin.utxo);
+            total = total
+                .checked_add(utxo.coin.amount)
+                .ok_or(SpendStateError::AmountOverflow)?;
+            if total.as_zeno() >= amount.as_zeno() {
+                break;
+            }
+        }
+        if total.as_zeno() < amount.as_zeno() {
+            return Err(SpendStateError::InsufficientExtensionCoin);
+        }
+        for id in selected {
+            journal.record_consumed(self.utxos.consume(&id)?);
+        }
+        let change = total
+            .checked_sub(amount)
+            .ok_or(SpendStateError::AmountOverflow)?;
+        if !change.is_zero() {
+            let change_id = extension_change_id(commitment, effect_index)?;
+            self.utxos.insert(CoinUtxo {
+                coin: Coin::new(change_id, change),
+                owner,
+            })?;
+            journal.created_coin_ids.push(change_id);
+        }
+        self.record_protocol_burn(amount, journal)
+    }
+
     fn apply_onchain_spend_with_commitment(
         &mut self,
         intent: &SpendIntent,
@@ -460,16 +524,14 @@ impl LedgerState {
     ) -> Result<UtxoRollbackJournal, SpendStateError> {
         let mut journal = UtxoRollbackJournal::default();
         let result = (|| {
-            let (inputs, outputs) = intent.coin_parts().ok_or(SpendStateError::Asset(
+            let (inputs, outputs, burn) = intent.coin_parts().ok_or(SpendStateError::Asset(
                 crate::asset::AssetError::InvalidProgram,
             ))?;
             for id in inputs {
                 journal.consumed_coins.push(self.utxos.consume(id)?);
             }
             for (index, output) in outputs.iter().enumerate() {
-                let Some(owner) = resolve_target(output.output, block_miner) else {
-                    continue;
-                };
+                let owner = resolve_target(output.output, block_miner);
                 let id = account_output_id(commitment, index)?;
                 self.utxos.insert(CoinUtxo {
                     coin: Coin::new(id, output.amount),
@@ -477,7 +539,7 @@ impl LedgerState {
                 })?;
                 journal.created_coin_ids.push(id);
             }
-            self.record_burn_outputs(outputs, &mut journal)?;
+            self.record_protocol_burn(burn, &mut journal)?;
             Ok(())
         })();
         self.finish_transition(journal, result)
@@ -498,21 +560,6 @@ impl LedgerState {
             self.account_keys.remove_account(&address)?;
         }
         Ok(())
-    }
-
-    fn record_burn_outputs(
-        &mut self,
-        outputs: &[crate::transaction::CoinOutput],
-        journal: &mut UtxoRollbackJournal,
-    ) -> Result<(), SpendStateError> {
-        let burned = outputs
-            .iter()
-            .filter(|output| output.output == Recipient::Burn)
-            .try_fold(Zeno::from_zeno(0), |total, output| {
-                total.checked_add(output.amount)
-            })
-            .ok_or(SpendStateError::BurnOverflow)?;
-        self.record_protocol_burn(burned, journal)
     }
 
     pub(crate) fn record_protocol_burn(
@@ -565,12 +612,11 @@ fn revealed_account_key(
     }
 }
 
-fn resolve_target(target: Recipient, block_miner: Address) -> Option<CoinOwner> {
+fn resolve_target(target: Recipient, block_miner: Address) -> CoinOwner {
     match target {
-        Recipient::Address(address) => Some(Authority::Address(address)),
-        Recipient::BlockMiner => Some(Authority::Address(block_miner)),
-        Recipient::Burn => None,
-        Recipient::Extension(extension) => Some(Authority::Extension(extension)),
+        Recipient::Address(address) => Authority::Address(address),
+        Recipient::BlockMiner => Authority::Address(block_miner),
+        Recipient::Extension(extension) => Authority::Extension(extension),
     }
 }
 
@@ -791,6 +837,45 @@ mod tests {
         assert_eq!(
             state.utxos.get(&deposit_id).unwrap().coin.amount.as_zeno(),
             25
+        );
+    }
+
+    #[test]
+    fn extension_coin_burn_is_atomic_and_restores_on_rollback() {
+        let program = ExtensionHash::derive("test.coin.burner");
+        let deposit_id = CoinHash::from_bytes([0x41; CoinHash::SIZE]);
+        let mut state = LedgerState::default();
+        state
+            .utxos
+            .insert(CoinUtxo {
+                coin: Coin::new(deposit_id, Zeno::from_zeno(25)),
+                owner: Authority::Extension(program),
+            })
+            .unwrap();
+
+        let (_, journal) = state
+            .apply_extension_effects(
+                program,
+                SpendCommitment::from_bytes([0x42; 32]),
+                vec![ExtensionEffect::BurnCoin { amount: 5 }],
+                [0; 32],
+            )
+            .unwrap();
+        assert_eq!(state.total_burned, Zeno::from_zeno(5));
+        assert_eq!(
+            state
+                .utxos
+                .owned_by(Authority::Extension(program))
+                .map(|utxo| utxo.coin.amount.as_zeno())
+                .sum::<u64>(),
+            20
+        );
+
+        state.rollback(journal).unwrap();
+        assert_eq!(state.total_burned, Zeno::ZERO);
+        assert_eq!(
+            state.utxos.get(&deposit_id).unwrap().coin.amount,
+            Zeno::from_zeno(25)
         );
     }
 }

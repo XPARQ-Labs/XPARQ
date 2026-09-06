@@ -1,6 +1,6 @@
 # WASM extension development
 
-WASM ABI v1 lets an extension validate an opaque payload and update its own
+WASM ABI v3 lets an extension validate an opaque payload and update its own
 isolated key-value state deterministically. Permissionless deployment does not
 require governance or a node rebuild: after validation, the immutable module
 activates automatically 100 blocks after its deployment block.
@@ -15,6 +15,11 @@ ABI and fixed 16-page memory required by XPARQ. It accepts a non-empty payload
 and stores that payload under the key `value` during apply. It is intentionally
 minimal and intended for small test payloads; production allocators must check
 that every host copy fits the fixed linear memory and all state limits.
+
+[`examples/coin-vault.wat`](examples/coin-vault.wat) demonstrates native coin
+custody and transfers to addresses or other extensions. Its payload format and
+deployment walkthrough are documented in
+[`examples/coin-vault.md`](examples/coin-vault.md).
 
 ```bash
 wat2wasm dev-tools/examples/state-value.wat -o module.wasm

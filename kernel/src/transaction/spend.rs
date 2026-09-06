@@ -7,7 +7,7 @@ use crate::asset::{
     AssetHash, AssetShareHash, AssetShareOutput, ensure_nonzero_asset_amount,
     ensure_unique_asset_inputs,
 };
-use crate::coin::CoinHash;
+use crate::coin::{CoinHash, Zeno};
 use crate::common::domain_hash;
 use crate::transaction::{ChainContext, CoinOutput, IntentError, SpendCommitment};
 
@@ -19,6 +19,7 @@ pub enum Spend {
     Coin {
         inputs: Vec<CoinHash>,
         outputs: Vec<CoinOutput>,
+        burn: Zeno,
     },
     Asset {
         asset: AssetHash,
@@ -39,9 +40,22 @@ impl SpendIntent {
         inputs: Vec<CoinHash>,
         outputs: Vec<CoinOutput>,
     ) -> Result<Self, IntentError> {
+        Self::coin_with_burn(signer, inputs, outputs, Zeno::ZERO)
+    }
+
+    pub fn coin_with_burn(
+        signer: Address,
+        inputs: Vec<CoinHash>,
+        outputs: Vec<CoinOutput>,
+        burn: Zeno,
+    ) -> Result<Self, IntentError> {
         let intent = Self {
             signer,
-            spend: Spend::Coin { inputs, outputs },
+            spend: Spend::Coin {
+                inputs,
+                outputs,
+                burn,
+            },
         };
         intent.validate()?;
         Ok(intent)
@@ -67,7 +81,9 @@ impl SpendIntent {
 
     pub fn validate(&self) -> Result<(), IntentError> {
         match &self.spend {
-            Spend::Coin { inputs, outputs } => {
+            Spend::Coin {
+                inputs, outputs, ..
+            } => {
                 if inputs.is_empty() {
                     return Err(IntentError::EmptyInputs);
                 }
@@ -105,9 +121,13 @@ impl SpendIntent {
         )))
     }
 
-    pub fn coin_parts(&self) -> Option<(&[CoinHash], &[CoinOutput])> {
+    pub fn coin_parts(&self) -> Option<(&[CoinHash], &[CoinOutput], Zeno)> {
         match &self.spend {
-            Spend::Coin { inputs, outputs } => Some((inputs, outputs)),
+            Spend::Coin {
+                inputs,
+                outputs,
+                burn,
+            } => Some((inputs, outputs, *burn)),
             Spend::Asset { .. } => None,
         }
     }
