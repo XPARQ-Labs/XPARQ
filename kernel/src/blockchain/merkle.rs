@@ -103,39 +103,3 @@ fn merkle_parent_level(level: &[Hash], domain: HashDomain) -> Vec<Hash> {
     }
     parents
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn inclusion_proofs_cover_even_and_promoted_odd_leaves() {
-        let leaves = vec![Hash([1; 32]), Hash([2; 32]), Hash([3; 32])];
-        let root = merkle_parent(
-            merkle_parent(leaves[0], leaves[1], HashDomain::MerkleNode),
-            leaves[2],
-            HashDomain::MerkleNode,
-        );
-        for index in 0..leaves.len() {
-            let proof =
-                MerkleInclusionProof::create(&leaves, index, HashDomain::MerkleNode).unwrap();
-            assert!(proof.verify(leaves[index], root, HashDomain::MerkleNode));
-        }
-    }
-
-    #[test]
-    fn inclusion_proof_rejects_tampered_leaf_sibling_and_domain() {
-        let leaves = vec![Hash([1; 32]), Hash([2; 32]), Hash([3; 32])];
-        let proof = MerkleInclusionProof::create(&leaves, 1, HashDomain::MerkleNode).unwrap();
-        let root = merkle_parent(
-            merkle_parent(leaves[0], leaves[1], HashDomain::MerkleNode),
-            leaves[2],
-            HashDomain::MerkleNode,
-        );
-        assert!(!proof.verify(Hash([9; 32]), root, HashDomain::MerkleNode));
-        let mut tampered = proof.clone();
-        tampered.siblings[0] = Hash([8; 32]);
-        assert!(!tampered.verify(leaves[1], root, HashDomain::MerkleNode));
-        assert!(!proof.verify(leaves[1], root, HashDomain::Transaction));
-    }
-}

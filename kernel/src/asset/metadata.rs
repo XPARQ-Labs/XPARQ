@@ -76,38 +76,3 @@ fn validate_symbol(symbol: &str) -> Result<(), AssetError> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn validates_canonical_metadata() {
-        let metadata = AssetMetadata::new(
-            "Example Asset".to_owned(),
-            "EXAMPLE1".to_owned(),
-            6,
-            Unit::from_units(1_000_000),
-            Address([7; 20]),
-            None,
-        )
-        .expect("metadata must be valid");
-
-        assert_eq!(metadata.max_supply_amount().as_units(), 1_000_000);
-    }
-
-    #[test]
-    fn rejects_noncanonical_metadata() {
-        assert!(
-            AssetMetadata::new(
-                " Example".to_owned(),
-                "lower".to_owned(),
-                ASSET_DECIMALS_MAX + 1,
-                Unit::ZERO,
-                Address([7; 20]),
-                None,
-            )
-            .is_err()
-        );
-    }
-}

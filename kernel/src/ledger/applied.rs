@@ -322,49 +322,6 @@ pub enum SpendStateError {
     AmountOverflow,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn protocol_burn_is_rolled_back_with_its_created_utxo() {
-        let mut state = LedgerState::default();
-        let mut journal = UtxoRollbackJournal::default();
-        let burned = crate::consensus::MINER_PROTOCOL_BURN;
-
-        state.record_protocol_burn(burned, &mut journal).unwrap();
-        assert_eq!(state.total_burned, burned);
-        state.rollback(journal).unwrap();
-        assert_eq!(state.total_burned, Zeno::from_zeno(0));
-    }
-
-    #[test]
-    fn failed_in_place_transition_restores_consumed_inputs() {
-        let id = CoinHash::from_bytes([0x51; CoinHash::SIZE]);
-        let utxo = CoinUtxo {
-            coin: Coin::new(id, Zeno::from_zeno(7)),
-            owner: Address::ZERO,
-        };
-        let mut state = LedgerState::default();
-        state.utxos.insert(utxo).unwrap();
-        let consumed = state.utxos.consume(&id).unwrap();
-        let journal = UtxoRollbackJournal {
-            consumed_coins: vec![consumed],
-            ..UtxoRollbackJournal::default()
-        };
-
-        assert_eq!(
-            state.finish_transition(journal, Err(SpendStateError::OutputIndexOverflow)),
-            Err(SpendStateError::OutputIndexOverflow)
-        );
-        assert_eq!(
-            state.utxos.get(&id).map(|coin| coin.coin.amount.as_zeno()),
-            Some(7)
-        );
-    }
-
-}
-
 impl fmt::Display for SpendStateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

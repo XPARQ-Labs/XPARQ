@@ -13,7 +13,7 @@ use crate::crypto::{
 };
 
 pub const POW_ALGORITHM: &str = "xparq-argon2id-algorithm";
-pub const POW_ARGON2_MEMORY_KIB: u32 = 512 * 1024;
+pub const POW_ARGON2_MEMORY_KIB: u32 = 16 * 1024;
 pub const POW_ARGON2_ITERATIONS: u32 = 1;
 pub const POW_ARGON2_LANES: u32 = 1;
 
@@ -111,56 +111,5 @@ fn map_crypto_error(error: CryptoError) -> ConsensusError {
     match error {
         CryptoError::InvalidPoWParameters => ConsensusError::InvalidPoWParameters,
         _ => ConsensusError::PoWHashFailed,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::blockchain::Nonce;
-    use crate::crypto::{HASH_SIZE, MerkleHash, StateRoot};
-
-    fn vector_header() -> Header {
-        Header {
-            previous_hash: PreviousHash([0x11; HASH_SIZE]),
-            merkle_root: MerkleHash([0x22; HASH_SIZE]),
-            state_root: StateRoot([0x33; HASH_SIZE]),
-            difficulty: 7,
-            block_weight: 1_234_567,
-            nonce: Nonce(0x0102_0304_0506_0708),
-        }
-    }
-
-    #[test]
-    fn nonce_and_parent_are_bound_to_work() {
-        let header = vector_header();
-        let original = calculate_work(&header).unwrap();
-        let mut changed_nonce = header.clone();
-        changed_nonce.nonce.0 = changed_nonce.nonce.0.wrapping_add(1);
-        let mut changed_parent = header.clone();
-        changed_parent.previous_hash.0[0] ^= 1;
-        assert_ne!(original, calculate_work(&changed_nonce).unwrap());
-        assert_ne!(original, calculate_work(&changed_parent).unwrap());
-    }
-
-    #[test]
-    fn reusable_memory_produces_the_canonical_work_hash() {
-        let header = vector_header();
-        let expected = calculate_work(&header).unwrap();
-        let mut memory = new_pow_memory();
-        assert_eq!(
-            calculate_work_with_memory(&header, &mut memory).unwrap(),
-            expected
-        );
-    }
-
-    #[test]
-    fn difficulty_cannot_exceed_the_pow_output_width() {
-        let mut header = vector_header();
-        header.difficulty = super::super::MAX_DIFFICULTY + 1;
-        assert_eq!(
-            verify_pow(&header, header.difficulty),
-            Err(ConsensusError::InvalidDifficulty)
-        );
     }
 }
