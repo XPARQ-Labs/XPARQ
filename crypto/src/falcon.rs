@@ -143,7 +143,7 @@ pub fn keypair_from_seed(
     level: FalconLevel,
     seed: &[u8; 32],
 ) -> Result<FalconKeyPair, FalconError> {
-    generate_keypair_with_rng(level, &mut SeedRng::new(*seed))
+    generate_keypair_with_rng(level, &mut SeedRng::new(level, *seed))
 }
 
 fn generate_keypair_with_rng(
@@ -171,15 +171,20 @@ fn generate_keypair_with_rng(
 #[derive(Zeroize, ZeroizeOnDrop)]
 struct SeedRng {
     seed: [u8; 32],
+
+    #[zeroize(skip)]
+    level: FalconLevel,
+
     counter: u64,
     block: [u8; 32],
     offset: usize,
 }
 
 impl SeedRng {
-    fn new(seed: [u8; 32]) -> Self {
+    fn new(level: FalconLevel, seed: [u8; 32]) -> Self {
         Self {
             seed,
+            level,
             counter: 0,
             block: [0; 32],
             offset: 32,
@@ -188,9 +193,12 @@ impl SeedRng {
 
     fn refill(&mut self) {
         let mut hash = Sha3_256::new();
-        hash.update(b"XPARQ Falcon-512 deterministic keygen v1");
+
+        hash.update(b"XPARQ Falcon deterministic keygen");
+        hash.update(self.level.logn().to_le_bytes());
         hash.update(self.seed);
         hash.update(self.counter.to_le_bytes());
+
         self.block.copy_from_slice(&hash.finalize());
         self.counter = self.counter.wrapping_add(1);
         self.offset = 0;

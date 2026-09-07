@@ -23,7 +23,7 @@ impl fmt::Display for CryptoError {
                 #[cfg(feature = "sqisign-blockchain-test")]
                 return f.write_str("signature bytes are not valid SQIsign Level 5 encoding");
                 #[cfg(not(feature = "sqisign-blockchain-test"))]
-                f.write_str("signature bytes are not valid ML-DSA-44 encoding")
+                f.write_str("signature bytes are not valid Signature encoding")
             }
             CryptoError::InvalidPoWParameters => {
                 f.write_str("proof-of-work hash parameters are invalid")

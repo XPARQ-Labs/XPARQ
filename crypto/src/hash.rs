@@ -224,6 +224,8 @@ pub enum HashDomain {
     ProtocolState,
     PoWSeed,
     PoWSalt,
+    Address,
+    AddressChecksum,
     Raw,
 }
 
@@ -247,6 +249,8 @@ impl HashDomain {
             HashDomain::ProtocolState => b"XPARQ_HASH_PROTOCOL_STATE",
             HashDomain::PoWSeed => b"XPARQ_POW_SEED",
             HashDomain::PoWSalt => b"XPARQ_POW_SALT",
+            HashDomain::Address => b"XPARQ_HASH_ADDRESS",
+            HashDomain::AddressChecksum => b"XPARQ_HASH_ADDRESS_CHECKSUM",
             HashDomain::Raw => b"XPARQ_HASH_RAW",
         }
     }

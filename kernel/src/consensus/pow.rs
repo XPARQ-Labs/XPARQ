@@ -37,6 +37,7 @@ pub fn pow_salt(previous_hash: &PreviousHash) -> Hash {
 pub fn calculate_work(header: &Header) -> Result<PoWHash, ConsensusError> {
     let seed = pow_seed(header)?;
     let salt = pow_salt(&header.previous_hash);
+
     argon2id_pow_hash(
         &seed.0,
         &salt.0,
@@ -56,10 +57,10 @@ pub fn calculate_work_with_memory(
 ) -> Result<PoWHash, ConsensusError> {
     let seed = pow_seed(header)?;
     let salt = pow_salt(&header.previous_hash);
+
     argon2id_pow_hash_with_memory(
         &seed.0,
         &salt.0,
-        POW_ARGON2_MEMORY_KIB,
         POW_ARGON2_ITERATIONS,
         POW_ARGON2_LANES,
         memory,
@@ -69,7 +70,10 @@ pub fn calculate_work_with_memory(
 
 /// Verifies claimed difficulty and memory-hard work using the one canonical
 /// construction shared by block admission, header sync, and mining.
-pub fn verify_pow(header: &Header, expected_difficulty: u32) -> Result<(), ConsensusError> {
+pub fn verify_pow(
+    header: &Header,
+    expected_difficulty: u32,
+) -> Result<(), ConsensusError> {
     validate_pow_claim(header, expected_difficulty)?;
     verify_pow_hash(calculate_work(header)?, expected_difficulty)
 }
@@ -83,23 +87,32 @@ pub fn verify_pow_with_memory(
     memory: &mut PoWMemory,
 ) -> Result<(), ConsensusError> {
     validate_pow_claim(header, expected_difficulty)?;
+
     verify_pow_hash(
         calculate_work_with_memory(header, memory)?,
         expected_difficulty,
     )
 }
 
-fn validate_pow_claim(header: &Header, expected_difficulty: u32) -> Result<(), ConsensusError> {
+fn validate_pow_claim(
+    header: &Header,
+    expected_difficulty: u32,
+) -> Result<(), ConsensusError> {
     if !(super::MIN_DIFFICULTY..=super::MAX_DIFFICULTY).contains(&expected_difficulty) {
         return Err(ConsensusError::InvalidDifficulty);
     }
+
     if header.difficulty != expected_difficulty {
         return Err(ConsensusError::UnexpectedDifficulty);
     }
+
     Ok(())
 }
 
-fn verify_pow_hash(hash: PoWHash, expected_difficulty: u32) -> Result<(), ConsensusError> {
+fn verify_pow_hash(
+    hash: PoWHash,
+    expected_difficulty: u32,
+) -> Result<(), ConsensusError> {
     if hash_meets_difficulty(&hash, expected_difficulty) {
         Ok(())
     } else {
