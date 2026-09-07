@@ -2,7 +2,7 @@
 
 use std::{error::Error, fmt};
 
-use crate::blockchain::{Block, MAX_BLOCK_WEIGHT, Nonce};
+use crate::blockchain::{Block, MAX_BLOCK_SIZE, Nonce};
 use crate::consensus::{
     BLOCK_EMISSION_STEP, COIN_UTXO_STATE_WEIGHT, DIFFICULTY_START, EMPTY_BLOCK_ARCHIVAL_BYTES,
     MAX_BLOCK_EMISSION, MAX_DIFFICULTY, MIN_BLOCK_EMISSION, MIN_DIFFICULTY, POW_ALGORITHM,
@@ -29,7 +29,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 ]);
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`] changes.
-pub const CHAIN_SPEC_VERSION: u32 = 6;
+pub const CHAIN_SPEC_VERSION: u32 = 1;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -55,7 +55,7 @@ struct ChainSpecIdentity<'a> {
     state_burn_rate_zeno_per_weight: u64,
     block_state_weight: u64,
     coin_utxo_state_weight: u64,
-    max_block_weight: u64,
+    max_block_size: u64,
     address_size: u32,
     address_encoding: &'a str,
     hash_size: u32,
@@ -90,7 +90,7 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         state_burn_rate_zeno_per_weight: STATE_BURN_RATE_ZENO_PER_WEIGHT,
         block_state_weight: EMPTY_BLOCK_ARCHIVAL_BYTES,
         coin_utxo_state_weight: COIN_UTXO_STATE_WEIGHT,
-        max_block_weight: MAX_BLOCK_WEIGHT as u64,
+        max_block_size: MAX_BLOCK_SIZE as u64,
         address_size: ADDRESS_SIZE as u32,
         address_encoding: "xparq-0x-sha3-checksum",
         hash_size: HASH_SIZE as u32,

@@ -1,7 +1,7 @@
 #[path = "pow.rs"]
 mod pow;
 
-use crate::blockchain::{Block, BlockHeight, Header, Height, MAX_BLOCK_WEIGHT};
+use crate::blockchain::{Block, BlockHeight, Header, Height, MAX_BLOCK_SIZE};
 use crate::coin::{CoinHash, Zeno};
 use crate::common::canonical_bytes;
 use crate::consensus::error::ConsensusError;
@@ -853,7 +853,7 @@ pub fn verify_header_chain(
     let mut pow_memory = (headers.len() > 1).then(crate::consensus::new_pow_memory);
     for current in &headers[1..] {
         if current.header.block_weight == 0
-            || current.header.block_weight as usize > MAX_BLOCK_WEIGHT
+            || current.header.block_weight as usize > MAX_BLOCK_SIZE
         {
             return Err(HeaderChainError::InvalidHeaderChain(
                 crate::consensus::fork::ForkChoiceError::InvalidHeader,
@@ -997,7 +997,7 @@ fn verify_header_chain_extension_inner(
     let mut recent = state.recent_headers.clone();
     for chain_header in headers {
         let header = &chain_header.header;
-        if header.block_weight == 0 || header.block_weight as usize > MAX_BLOCK_WEIGHT {
+        if header.block_weight == 0 || header.block_weight as usize > MAX_BLOCK_SIZE {
             return Err(HeaderChainError::InvalidHeaderChain(
                 crate::consensus::fork::ForkChoiceError::InvalidHeader,
             ));

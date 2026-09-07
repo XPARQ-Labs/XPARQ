@@ -1,5 +1,5 @@
 use crate::blockchain::Block;
-use crate::blockchain::{Height, MAX_BLOCK_WEIGHT};
+use crate::blockchain::{Height, MAX_BLOCK_SIZE};
 use crate::consensus::{
     Consensus, GENESIS_DIFFICULTY, MAX_DIFFICULTY, MIN_DIFFICULTY, expected_difficulty_for_height,
 };
@@ -111,7 +111,7 @@ impl ForkChoice {
         }
         if !block.is_genesis()
             && (block.header.block_weight == 0
-                || block.header.block_weight as usize > MAX_BLOCK_WEIGHT)
+                || block.header.block_weight as usize > MAX_BLOCK_SIZE)
         {
             return Err(ForkChoiceError::InvalidHeader);
         }

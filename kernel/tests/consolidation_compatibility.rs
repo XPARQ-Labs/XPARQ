@@ -13,12 +13,12 @@ fn mainnet_genesis_is_unchanged_and_effect_rules_have_a_new_identity() {
     );
     // The current state-root and explicit coin burn separate this protocol from the old
     // chain spec, while preserving the frozen genesis block and native IDs.
-    assert_eq!(genesis::CHAIN_SPEC_VERSION, 5);
+    assert_eq!(genesis::CHAIN_SPEC_VERSION, 6);
     assert_eq!(
         genesis::chain_spec_hash().unwrap().0,
         [
-            5, 243, 95, 11, 83, 124, 12, 102, 59, 233, 51, 12, 21, 168, 198, 40, 50, 90, 6, 228, 5,
-            94, 11, 220, 47, 221, 146, 132, 219, 25, 28, 253
+            41, 171, 225, 111, 57, 18, 23, 181, 45, 167, 129, 115, 99, 107, 228, 148, 16, 76,
+            207, 223, 138, 9, 65, 70, 149, 205, 226, 0, 92, 179, 41, 39
         ]
     );
     assert_ne!(

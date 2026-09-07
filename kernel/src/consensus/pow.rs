@@ -13,7 +13,7 @@ use crate::crypto::{
 };
 
 pub const POW_ALGORITHM: &str = "xparq-argon2id-algorithm";
-pub const POW_ARGON2_MEMORY_KIB: u32 = 16 * 1024;
+pub const POW_ARGON2_MEMORY_KIB: u32 = 128 * 1024;
 pub const POW_ARGON2_ITERATIONS: u32 = 1;
 pub const POW_ARGON2_LANES: u32 = 1;
 

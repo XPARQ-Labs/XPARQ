@@ -1,4 +1,4 @@
-use crate::blockchain::block::{Block, Header, MAX_BLOCK_WEIGHT};
+use crate::blockchain::block::{Block, Header, MAX_BLOCK_SIZE};
 use crate::common::CodecError;
 use crypto::BlockHash;
 
@@ -20,7 +20,7 @@ pub fn block_header_hash(header: &Header) -> Result<BlockHash, CodecError> {
 }
 
 pub fn decode_block(bytes: &[u8]) -> Result<Block, CodecError> {
-    if bytes.len() > MAX_BLOCK_WEIGHT {
+    if bytes.len() > MAX_BLOCK_SIZE {
         return Err(CodecError::InvalidBlock);
     }
     let block: Block = canonical_deserialize(bytes)?;

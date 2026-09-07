@@ -80,19 +80,19 @@ pub struct CoinHash([u8; COIN_HASH_SIZE]);
 impl CoinHash {
     pub const SIZE: usize = COIN_HASH_SIZE;
 
-    pub fn from_emission_origin(origin: &[u8; COIN_HASH_SIZE]) -> Self {
+    pub fn from_emission_origin(origin: &[u8; 32]) -> Self {
         Self::derive(&[EMISSION_DOMAIN, origin])
     }
 
-    pub fn from_output(commitment: &[u8; COIN_HASH_SIZE], index: u32) -> Self {
+    pub fn from_output(commitment: &[u8; 32], index: u32) -> Self {
         Self::from_tagged_output(b"output", commitment, index)
     }
 
-    pub fn from_change(commitment: &[u8; COIN_HASH_SIZE], index: u32) -> Self {
+    pub fn from_change(commitment: &[u8; 32], index: u32) -> Self {
         Self::from_tagged_output(b"change", commitment, index)
     }
 
-    fn from_tagged_output(tag: &[u8], commitment: &[u8; COIN_HASH_SIZE], index: u32) -> Self {
+    fn from_tagged_output(tag: &[u8], commitment: &[u8; 32], index: u32) -> Self {
         Self::derive(&[
             TRANSACTION_OUTPUT_DOMAIN,
             tag,

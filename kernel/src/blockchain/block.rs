@@ -20,7 +20,7 @@ pub type BlockBody = Body;
 pub type BlockHeight = Height;
 pub type BlockNonce = Nonce;
 
-pub const MAX_BLOCK_WEIGHT: usize = 5 * 1024 * 1024;
+pub const MAX_BLOCK_SIZE: usize = 2 * 1024 * 1024;
 /// Difficulty permanently assigned to height zero. Production difficulty
 /// tuning begins after genesis and must not alter the genesis hash.
 pub const GENESIS_BLOCK_DIFFICULTY: u32 = 1;
@@ -197,8 +197,8 @@ impl Block {
         }
 
         let serialized_weight = self.weight()?;
-        if serialized_weight > MAX_BLOCK_WEIGHT
-            || self.header.block_weight as usize > MAX_BLOCK_WEIGHT
+        if serialized_weight > MAX_BLOCK_SIZE
+            || self.header.block_weight as usize > MAX_BLOCK_SIZE
         {
             return Err(BlockError::BlockTooHeavy);
         }

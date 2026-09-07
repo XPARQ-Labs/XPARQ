@@ -61,22 +61,41 @@ impl fmt::Display for Unit {
     }
 }
 
+pub const ASSET_HASH_SIZE: usize = 32;
+pub const ASSET_HASH_PREFIX: &str = "asset:";
+
 #[derive(
-    BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
+    BorshSerialize,
+    BorshDeserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
 )]
-pub struct AssetHash([u8; 32]);
+pub struct AssetHash([u8; ASSET_HASH_SIZE]);
 
 impl AssetHash {
     pub fn derive(authority: Address, symbol: &str) -> Self {
-        Self(derive_asset_hash(&[&authority.0, symbol.as_bytes()]))
+        Self(derive_asset_hash(&[
+            &authority.0,
+            symbol.as_bytes(),
+        ]))
     }
 
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub const fn from_bytes(bytes: [u8; ASSET_HASH_SIZE]) -> Self {
         Self(bytes)
     }
 
-    pub const fn as_bytes(&self) -> &[u8; 32] {
+    pub const fn as_bytes(&self) -> &[u8; ASSET_HASH_SIZE] {
         &self.0
+    }
+
+    pub const fn into_bytes(self) -> [u8; ASSET_HASH_SIZE] {
+        self.0
     }
 }
 
@@ -106,9 +125,6 @@ impl Asset {
     }
 }
 
-pub const ASSET_HASH_SIZE: usize = 32;
-pub const ASSET_HASH_PREFIX: &str = "asset:";
-
 pub(crate) fn derive_asset_hash(fields: &[&[u8]]) -> [u8; ASSET_HASH_SIZE] {
     asset_domain_hash(ASSET_HASH_CONTEXT, fields)
 }
@@ -127,9 +143,11 @@ pub(crate) fn format_hash(
     formatter: &mut fmt::Formatter<'_>,
 ) -> fmt::Result {
     formatter.write_str(prefix)?;
+
     for byte in bytes {
         write!(formatter, "{byte:02x}")?;
     }
+
     Ok(())
 }
 
@@ -138,6 +156,7 @@ pub(crate) fn parse_hash(
     value: &str,
 ) -> Result<[u8; ASSET_HASH_SIZE], AssetHashParseError> {
     let encoded = value.strip_prefix(prefix).ok_or(AssetHashParseError)?;
+
     if encoded.len() != ASSET_HASH_SIZE * 2
         || !encoded
             .bytes()
@@ -146,12 +165,15 @@ pub(crate) fn parse_hash(
         return Err(AssetHashParseError);
     }
 
-    let mut bytes = [0; ASSET_HASH_SIZE];
+    let mut bytes = [0u8; ASSET_HASH_SIZE];
+
     for (index, byte) in bytes.iter_mut().enumerate() {
         let offset = index * 2;
+
         *byte = (hex_nibble(encoded.as_bytes()[offset]).ok_or(AssetHashParseError)? << 4)
             | hex_nibble(encoded.as_bytes()[offset + 1]).ok_or(AssetHashParseError)?;
     }
+
     Ok(bytes)
 }
 

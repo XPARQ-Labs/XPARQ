@@ -13,7 +13,7 @@ use crate::coin::Zeno;
 use crate::consensus::validate::{MAX_DIFFICULTY, MIN_DIFFICULTY};
 
 pub const WBDA_WINDOW: usize = 10_000;
-pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 2 * 1024 * 1024;
+pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 1 * 1024 * 1024;
 pub const WBDA_LOW_UTILIZATION_PPM: u64 = 400_000;
 pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 600_000;
 pub const WBDA_DIFFICULTY_STEP: u32 = 1;

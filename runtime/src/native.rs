@@ -34,8 +34,8 @@ use kernel::{
 };
 
 const NODE_ID_FILE: &str = "node-id";
-const MAX_STORED_BLOCK_SIZE: usize = kernel::block::MAX_BLOCK_WEIGHT + 1024;
-const MAX_STORED_TRANSACTION_SIZE: usize = kernel::block::MAX_BLOCK_WEIGHT;
+const MAX_STORED_BLOCK_SIZE: usize = kernel::block::MAX_BLOCK_SIZE + 1024;
+const MAX_STORED_TRANSACTION_SIZE: usize = kernel::block::MAX_BLOCK_SIZE;
 const MAX_STORED_MEMPOOL_SIZE: u64 = 64 * 1024 * 1024;
 const MAX_RPC_HEADER_SIZE: usize = 16 * 1024;
 const MAX_ACCOUNT_UTXOS_PER_PAGE: usize = 1_000;
@@ -410,7 +410,7 @@ fn select_block_transactions(
         let mut candidate = selected.clone();
         candidate.push(transaction.clone());
         let block = candidate_block(ledger, miner, candidate.clone())?;
-        if block.block_weight() as usize > kernel::block::MAX_BLOCK_WEIGHT {
+        if block.block_weight() as usize > kernel::block::MAX_BLOCK_SIZE {
             break;
         }
         selected = candidate;
@@ -2618,7 +2618,7 @@ fn reconcile_mempool(
         let Ok(encoded) = canonical_bytes(&transaction) else {
             continue;
         };
-        if encoded.len() > kernel::block::MAX_BLOCK_WEIGHT {
+        if encoded.len() > kernel::block::MAX_BLOCK_SIZE {
             continue;
         }
         if !meets_minimum_relay_fee(&transaction, encoded.len()) {
@@ -2962,7 +2962,7 @@ fn validate_mempool(ledger: &Ledger, transactions: &[AuthorizedTransaction]) -> 
     let mut state = ledger.state().clone();
     for transaction in transactions {
         let encoded = canonical_bytes(transaction).map_err(|error| error.to_string())?;
-        if encoded.len() > kernel::block::MAX_BLOCK_WEIGHT {
+        if encoded.len() > kernel::block::MAX_BLOCK_SIZE {
             return Err("transaction cannot fit in a block".into());
         }
         let required_fee = minimum_relay_fee(encoded.len())?;
@@ -3547,7 +3547,10 @@ mod tests {
         let miner = Address([5; 20]);
         let intent = kernel::transaction::SpendIntent::coin(
             sender.address,
-            vec![kernel::coin::CoinHash::from_bytes([6; 32])],
+            vec![kernel::coin::CoinHash::from_bytes([
+                6;
+                kernel::coin::CoinHash::SIZE
+            ])],
             vec![
                 CoinOutput::new(recipient, Zeno::from_zeno(10)),
                 CoinOutput::new(sender.address, Zeno::from_zeno(5)),
