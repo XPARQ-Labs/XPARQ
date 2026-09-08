@@ -29,7 +29,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 ]);
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`] changes.
-pub const CHAIN_SPEC_VERSION: u32 = 1;
+pub const CHAIN_SPEC_VERSION: u32 = 6;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -69,7 +69,7 @@ struct ChainSpecIdentity<'a> {
 pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
     let identity = ChainSpecIdentity {
         version: CHAIN_SPEC_VERSION,
-        genesis_hash: EXPECTED_GENESIS_HASH.0,
+        genesis_hash: EXPECTED_GENESIS_HASH.into_bytes(),
         pow_algorithm: POW_ALGORITHM,
         pow_memory_kib: POW_ARGON2_MEMORY_KIB,
         pow_iterations: POW_ARGON2_ITERATIONS,
@@ -131,7 +131,7 @@ pub fn genesis_hash() -> Result<BlockHash, GenesisError> {
 }
 
 pub fn chain_context() -> Result<ChainContext, GenesisError> {
-    Ok(ChainContext::new(genesis_hash()?.0))
+    Ok(ChainContext::new(genesis_hash()?.into_bytes()))
 }
 
 pub fn genesis_ledger() -> Result<Ledger, GenesisError> {

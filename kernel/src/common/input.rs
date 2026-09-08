@@ -6,7 +6,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
 )]
-pub enum Input<CoinHash, AssetShareHash> {
-    Coin(CoinHash),
-    Asset(AssetShareHash),
+pub enum Input<CoinId, Share> {
+    Coin(CoinId),
+    Asset(Share),
 }

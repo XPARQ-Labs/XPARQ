@@ -41,9 +41,8 @@ pub fn argon2id_pow_hash_with_memory(
     lanes: u32,
     memory: &mut PoWMemory,
 ) -> Result<PoWHash, CryptoError> {
-
-    let memory_kib = u32::try_from(memory.blocks.len())
-        .map_err(|_| CryptoError::InvalidPoWParameters)?;
+    let memory_kib =
+        u32::try_from(memory.blocks.len()).map_err(|_| CryptoError::InvalidPoWParameters)?;
 
     let params = ::argon2::Params::new(memory_kib, iterations, lanes, Some(POW_HASH_SIZE))
         .map_err(|_| CryptoError::InvalidPoWParameters)?;

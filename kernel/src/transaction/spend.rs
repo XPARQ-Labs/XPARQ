@@ -1,30 +1,60 @@
 use std::collections::BTreeSet;
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use crypto::Address;
 
-use crate::asset::{
-    AssetHash, AssetShareHash, AssetShareOutput, ensure_nonzero_asset_amount,
-    ensure_unique_asset_inputs,
+use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
+
+use crate::native::asset::{
+    Asset, Output as AssetOutput, Share, ensure_nonzero_asset_amount, ensure_unique_asset_inputs,
 };
-use crate::coin::{CoinHash, Zeno};
-use crate::common::domain_hash;
-use crate::transaction::{ChainContext, CoinOutput, IntentError, SpendCommitment};
+use crate::native::coin::{Output as CoinOutput, XPQ, Zeno};
+use crate::transaction::IntentError;
 
-const SPEND_INTENT_COMMITMENT_CONTEXT: &[u8] = b"XPARQ SpendIntent v2";
+/// Genesis identity supplied by consensus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
+pub struct ChainContext {
+    pub genesis_hash: [u8; HASH_SIZE],
+}
 
-/// A user-authorized transfer. Register, mint, and burn remain native asset operations.
+impl ChainContext {
+    pub const fn new(genesis_hash: [u8; HASH_SIZE]) -> Self {
+        Self { genesis_hash }
+    }
+}
+
+/// Canonical commitment signed by an account for a spend intent.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
+)]
+pub struct SpendCommitment([u8; HASH_SIZE]);
+
+impl SpendCommitment {
+    pub const fn from_bytes(bytes: [u8; HASH_SIZE]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; HASH_SIZE] {
+        &self.0
+    }
+
+    pub const fn into_bytes(self) -> [u8; HASH_SIZE] {
+        self.0
+    }
+}
+
+/// A user-authorized transfer.
+///
+/// Register, mint, and burn remain native asset operations.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Spend {
     Coin {
-        inputs: Vec<CoinHash>,
+        inputs: Vec<XPQ>,
         outputs: Vec<CoinOutput>,
-        burn: Zeno,
     },
     Asset {
-        asset: AssetHash,
-        inputs: Vec<AssetShareHash>,
-        outputs: Vec<AssetShareOutput>,
+        asset: Asset,
+        inputs: Vec<Share>,
+        outputs: Vec<AssetOutput>,
     },
 }
 
@@ -37,25 +67,12 @@ pub struct SpendIntent {
 impl SpendIntent {
     pub fn coin(
         signer: Address,
-        inputs: Vec<CoinHash>,
+        inputs: Vec<XPQ>,
         outputs: Vec<CoinOutput>,
-    ) -> Result<Self, IntentError> {
-        Self::coin_with_burn(signer, inputs, outputs, Zeno::ZERO)
-    }
-
-    pub fn coin_with_burn(
-        signer: Address,
-        inputs: Vec<CoinHash>,
-        outputs: Vec<CoinOutput>,
-        burn: Zeno,
     ) -> Result<Self, IntentError> {
         let intent = Self {
             signer,
-            spend: Spend::Coin {
-                inputs,
-                outputs,
-                burn,
-            },
+            spend: Spend::Coin { inputs, outputs },
         };
         intent.validate()?;
         Ok(intent)
@@ -63,9 +80,9 @@ impl SpendIntent {
 
     pub fn asset(
         signer: Address,
-        asset: AssetHash,
-        inputs: Vec<AssetShareHash>,
-        outputs: Vec<AssetShareOutput>,
+        asset: Asset,
+        inputs: Vec<Share>,
+        outputs: Vec<AssetOutput>,
     ) -> Result<Self, IntentError> {
         let intent = Self {
             signer,
@@ -81,29 +98,42 @@ impl SpendIntent {
 
     pub fn validate(&self) -> Result<(), IntentError> {
         match &self.spend {
-            Spend::Coin {
+            Spend::Coin { inputs, outputs } => {
+                if inputs.is_empty() {
+                    return Err(IntentError::EmptyInputs);
+                }
+                if outputs.is_empty() {
+                    return Err(IntentError::EmptyOutputs);
+                }
+
+                let mut unique = BTreeSet::new();
+                if inputs.iter().any(|id| !unique.insert(*id)) {
+                    return Err(IntentError::DuplicateInput);
+                }
+
+                if outputs.iter().any(|output| output.amount == Zeno::ZERO) {
+                    return Err(IntentError::ZeroAmount);
+                }
+
+                Ok(())
+            }
+            Spend::Asset {
                 inputs, outputs, ..
             } => {
                 if inputs.is_empty() {
                     return Err(IntentError::EmptyInputs);
                 }
-                let mut unique = BTreeSet::new();
-                if inputs.iter().any(|id| !unique.insert(*id)) {
-                    return Err(IntentError::DuplicateInput);
+                if outputs.is_empty() {
+                    return Err(IntentError::EmptyOutputs);
                 }
-                super::intent::validate_public_outputs(outputs, false)
-            }
-            Spend::Asset {
-                inputs, outputs, ..
-            } => {
+
                 ensure_unique_asset_inputs(inputs).map_err(|_| IntentError::InvalidAssetCall)?;
-                if inputs.is_empty() || outputs.is_empty() {
-                    return Err(IntentError::InvalidAssetCall);
-                }
+
                 for output in outputs {
                     ensure_nonzero_asset_amount(output.amount)
                         .map_err(|_| IntentError::InvalidAssetCall)?;
                 }
+
                 Ok(())
             }
         }
@@ -111,28 +141,24 @@ impl SpendIntent {
 
     pub fn signing_bytes(&self, chain: ChainContext) -> Result<Vec<u8>, IntentError> {
         self.validate()?;
-        super::intent::chain_bound_bytes(chain, self)
+        canonical_bytes(&(chain.genesis_hash, self)).map_err(|_| IntentError::Encoding)
     }
 
     pub fn commitment(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
-        Ok(SpendCommitment::from_bytes(domain_hash(
-            SPEND_INTENT_COMMITMENT_CONTEXT,
-            &[&self.signing_bytes(chain)?],
-        )))
+        let bytes = self.signing_bytes(chain)?;
+        Ok(SpendCommitment::from_bytes(
+            domain(HashDomain::SpendIntent, &bytes).into_bytes(),
+        ))
     }
 
-    pub fn coin_parts(&self) -> Option<(&[CoinHash], &[CoinOutput], Zeno)> {
+    pub fn coin_parts(&self) -> Option<(&[XPQ], &[CoinOutput])> {
         match &self.spend {
-            Spend::Coin {
-                inputs,
-                outputs,
-                burn,
-            } => Some((inputs, outputs, *burn)),
+            Spend::Coin { inputs, outputs } => Some((inputs, outputs)),
             Spend::Asset { .. } => None,
         }
     }
 
-    pub fn asset_parts(&self) -> Option<(AssetHash, &[AssetShareHash], &[AssetShareOutput])> {
+    pub fn asset_parts(&self) -> Option<(Asset, &[Share], &[AssetOutput])> {
         match &self.spend {
             Spend::Asset {
                 asset,

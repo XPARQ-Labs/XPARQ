@@ -1,10 +1,9 @@
-use crate::blockchain::BlockError;
-pub use crate::common::CodecError;
-use crate::consensus::EmissionError;
-pub use crypto::CryptoError;
-use std::{error::Error, fmt};
+use std::{error::Error as StdError, fmt};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use crate::blockchain::BlockError;
+use crate::consensus::EmissionError;
+
+#[derive(Debug)]
 pub enum ConsensusError {
     InvalidBlock(BlockError),
     InvalidEmission(EmissionError),
@@ -17,46 +16,41 @@ pub enum ConsensusError {
     GenesisRequired,
     WrongGenesis,
     InsufficientPoW,
-    Serialization(CodecError),
+    Serialization,
 }
 
 impl fmt::Display for ConsensusError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConsensusError::InvalidBlock(error) => write!(f, "invalid block: {error}"),
-            ConsensusError::InvalidEmission(error) => write!(f, "invalid emission: {error}"),
-            ConsensusError::InvalidDifficulty => f.write_str("difficulty is outside allowed range"),
-            ConsensusError::UnexpectedDifficulty => {
+            Self::InvalidBlock(error) => write!(f, "invalid block: {error}"),
+            Self::InvalidEmission(error) => write!(f, "invalid emission: {error}"),
+            Self::InvalidDifficulty => f.write_str("difficulty is outside allowed range"),
+            Self::UnexpectedDifficulty => {
                 f.write_str("block difficulty does not match expected difficulty")
             }
-            ConsensusError::InvalidPoWParameters => {
-                f.write_str("proof-of-work parameters are invalid")
-            }
-            ConsensusError::PoWHashFailed => f.write_str("proof-of-work hash failed"),
-            ConsensusError::InvalidHeight => f.write_str("block height does not extend tip"),
-            ConsensusError::InvalidPreviousHash => {
-                f.write_str("block previous hash does not match tip")
-            }
-            ConsensusError::GenesisRequired => {
+            Self::InvalidPoWParameters => f.write_str("proof-of-work parameters are invalid"),
+            Self::PoWHashFailed => f.write_str("proof-of-work hash failed"),
+            Self::InvalidHeight => f.write_str("block height does not extend tip"),
+            Self::InvalidPreviousHash => f.write_str("block previous hash does not match tip"),
+            Self::GenesisRequired => {
                 f.write_str("canonical chain must be initialized through validated genesis")
             }
-            ConsensusError::WrongGenesis => {
+            Self::WrongGenesis => {
                 f.write_str("genesis block does not match configured chain identity")
             }
-            ConsensusError::InsufficientPoW => {
+            Self::InsufficientPoW => {
                 f.write_str("block hash does not satisfy proof-of-work difficulty")
             }
-            ConsensusError::Serialization(error) => write!(f, "consensus encoding failed: {error}"),
+            Self::Serialization => f.write_str("consensus encoding failed"),
         }
     }
 }
 
-impl Error for ConsensusError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
+impl StdError for ConsensusError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             Self::InvalidBlock(error) => Some(error),
             Self::InvalidEmission(error) => Some(error),
-            Self::Serialization(error) => Some(error),
             _ => None,
         }
     }
@@ -71,11 +65,5 @@ impl From<EmissionError> for ConsensusError {
 impl From<BlockError> for ConsensusError {
     fn from(error: BlockError) -> Self {
         Self::InvalidBlock(error)
-    }
-}
-
-impl From<CodecError> for ConsensusError {
-    fn from(error: CodecError) -> Self {
-        Self::Serialization(error)
     }
 }

@@ -5,7 +5,7 @@
 fn mainnet_genesis_is_unchanged_and_effect_rules_have_a_new_identity() {
     use kernel::{codec, genesis};
     assert_eq!(
-        genesis::genesis_hash().unwrap().0,
+        genesis::genesis_hash().unwrap().into_bytes(),
         [
             101, 64, 118, 68, 54, 86, 64, 225, 100, 102, 49, 159, 182, 7, 174, 208, 84, 59, 30, 75,
             237, 239, 84, 225, 186, 104, 102, 129, 199, 140, 66, 159
@@ -15,14 +15,14 @@ fn mainnet_genesis_is_unchanged_and_effect_rules_have_a_new_identity() {
     // chain spec, while preserving the frozen genesis block and native IDs.
     assert_eq!(genesis::CHAIN_SPEC_VERSION, 6);
     assert_eq!(
-        genesis::chain_spec_hash().unwrap().0,
+        genesis::chain_spec_hash().unwrap().into_bytes(),
         [
-            41, 171, 225, 111, 57, 18, 23, 181, 45, 167, 129, 115, 99, 107, 228, 148, 16, 76,
-            207, 223, 138, 9, 65, 70, 149, 205, 226, 0, 92, 179, 41, 39
+            112, 156, 28, 51, 63, 0, 118, 178, 190, 57, 59, 175, 178, 166, 248, 120, 185, 81, 180,
+            89, 79, 236, 184, 229, 246, 130, 112, 63, 252, 128, 215, 22
         ]
     );
     assert_ne!(
-        genesis::chain_spec_hash().unwrap().0,
+        genesis::chain_spec_hash().unwrap().into_bytes(),
         [
             166, 191, 246, 35, 4, 125, 100, 134, 53, 253, 52, 62, 165, 243, 91, 247, 90, 255, 55,
             241, 236, 179, 25, 8, 168, 155, 66, 92, 154, 68, 94, 218
@@ -42,18 +42,29 @@ fn mainnet_genesis_is_unchanged_and_effect_rules_have_a_new_identity() {
 }
 
 #[test]
-fn asset_and_share_ids_are_unchanged() {
+fn native_asset_and_share_ids_are_frozen() {
     use kernel::{
-        asset::{AssetHash, AssetShareHash},
         crypto::Address,
+        native::asset::{Asset, AssetMetadata, Share, Unit},
     };
-    let parent = AssetHash::derive(Address([7; 20]), "TEST");
+    let parent = Asset::derive(
+        &AssetMetadata::new(
+            "Test Asset".into(),
+            "TEST".into(),
+            6,
+            Unit::from_units(1_000_000),
+            Address([7; 20]),
+            Address([7; 20]),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         parent.to_string(),
-        "asset:7dc45da03fd526fdc16bb2a31db1778de16c7ad7f17dcef000611f878508c5ff"
+        "asset:40db0d5be4a57edb2d3c7ce96fc4d600ff37c65042dd9793191bdefce60dd659"
     );
     assert_eq!(
-        AssetShareHash::derive(parent, [9; 32], 3).to_string(),
-        "share:69c51154490a408dbcf67cf9836ca189f6f74cd16289be28376aeac892e3b0c8"
+        Share::derive(parent, [9; 32], 3).to_string(),
+        "share:baed600776659b95bf8c4ca0b8b225dd633b42a20cd9db1acce2e0b262a90aa4"
     );
 }

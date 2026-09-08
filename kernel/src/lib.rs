@@ -1,13 +1,12 @@
 //! XPARQ protocol kernel: canonical types, validation, and state transitions.
 //! Networking, persistence, and wallet key management live in application crates.
 
-pub mod asset;
 pub mod blockchain;
-pub mod coin;
 pub mod common;
 pub mod consensus;
 pub mod genesis;
 pub mod ledger;
+pub mod native;
 pub mod transaction;
 
 /// Compatibility path for the public block API.

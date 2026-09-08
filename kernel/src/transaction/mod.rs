@@ -1,16 +1,16 @@
-//! Canonical transaction intents, authorization envelopes, and identifiers.
+//! Canonical transaction intents, authorization envelopes, and Commit/Reveal transactions.
 
+mod asset;
 mod authorization;
+mod commit;
 mod error;
-mod intent;
 mod spend;
 
+pub use asset::{AssetInstruction, AssetIntent};
 pub use authorization::{
     AccountAuthorization, AccountIntent, AuthorizedAccountIntent, AuthorizedAssetTransaction,
     AuthorizedSpendTransaction, AuthorizedTransaction,
 };
+pub use commit::{CommitTransaction, RevealTransaction, Transaction, TransactionCommitment};
 pub use error::{IntentError, TransactionEncodingError};
-pub use intent::{
-    AssetInstruction, AssetIntent, ChainContext, CoinOutput, Recipient, SpendCommitment,
-};
-pub use spend::{Spend, SpendIntent};
+pub use spend::{ChainContext, Spend, SpendCommitment, SpendIntent};

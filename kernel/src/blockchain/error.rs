@@ -1,6 +1,6 @@
 pub use crate::common::CodecError;
-use std::error::Error;
-use std::fmt;
+
+use std::{error::Error as StdError, fmt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockError {
@@ -19,30 +19,24 @@ pub enum BlockError {
 impl fmt::Display for BlockError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BlockError::MissingEmission => f.write_str("non-genesis block must contain Emission"),
-            BlockError::UnexpectedEmission => {
-                f.write_str("genesis block must not contain Emission")
+            Self::MissingEmission => f.write_str("non-genesis block must contain emission"),
+            Self::UnexpectedEmission => f.write_str("genesis block must not contain emission"),
+            Self::BlockTooHeavy => f.write_str("block serialized weight exceeds limit"),
+            Self::InvalidTransaction => f.write_str("block contains an invalid transaction"),
+            Self::DuplicateTransaction => f.write_str("block contains a duplicate transaction"),
+            Self::InvalidEmission => f.write_str("block emission is invalid"),
+            Self::InvalidMerkleRoot => f.write_str("block merkle root does not match transactions"),
+            Self::InvalidStateRoot => f.write_str("block state root does not match ledger"),
+            Self::InvalidBlockWeight => {
+                f.write_str("block header weight does not cover canonical block size")
             }
-            BlockError::BlockTooHeavy => f.write_str("block serialized weight exceeds limit"),
-            BlockError::InvalidTransaction => f.write_str("block contains an invalid transaction"),
-            BlockError::DuplicateTransaction => {
-                f.write_str("block contains a duplicate transaction")
-            }
-            BlockError::InvalidEmission => f.write_str("block Emission is invalid"),
-            BlockError::InvalidMerkleRoot => {
-                f.write_str("block merkle root does not match transactions")
-            }
-            BlockError::InvalidStateRoot => f.write_str("block state root does not match ledger"),
-            BlockError::InvalidBlockWeight => {
-                f.write_str("block header weight does not match canonical block size")
-            }
-            BlockError::Serialization(error) => write!(f, "block encoding failed: {error}"),
+            Self::Serialization(error) => write!(f, "block encoding failed: {error}"),
         }
     }
 }
 
-impl Error for BlockError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
+impl StdError for BlockError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             Self::Serialization(error) => Some(error),
             _ => None,
@@ -56,7 +50,7 @@ impl From<CodecError> for BlockError {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChainError {
     DuplicateBlock,
     InvalidHeight,
@@ -77,7 +71,14 @@ impl fmt::Display for ChainError {
     }
 }
 
-impl Error for ChainError {}
+impl StdError for ChainError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Serialization(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<CodecError> for ChainError {
     fn from(error: CodecError) -> Self {

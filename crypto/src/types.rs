@@ -1,3 +1,5 @@
+//! Scalar protocol types shared below the kernel boundary.
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 

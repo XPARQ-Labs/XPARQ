@@ -1,13 +1,14 @@
-use crate::common::{canonical_bytes, domain_hash};
 use borsh::{BorshDeserialize, BorshSerialize};
-use crypto::{AccountSignature, Address, PublicKey, address_from_public_key, verify};
+
+use crypto::{
+    AccountSignature, Address, HASH_SIZE, HashDomain, PublicKey, address_from_public_key,
+    canonical_bytes, domain, verify,
+};
 
 use crate::transaction::{
     AssetIntent, ChainContext, IntentError, Spend, SpendCommitment, SpendIntent,
     TransactionEncodingError,
 };
-
-const TRANSACTION_ID_CONTEXT: &str = "XPARQ Transaction ID";
 
 pub trait AccountIntent {
     fn sender(&self) -> Address;
@@ -20,7 +21,7 @@ impl AccountIntent for SpendIntent {
     }
 
     fn commitment(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
-        self.commitment(chain)
+        SpendIntent::commitment(self, chain)
     }
 }
 
@@ -37,13 +38,14 @@ impl AccountIntent for AssetIntent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-// Boxing a variant would change the frozen canonical transaction encoding.
 #[allow(clippy::large_enum_variant)]
 pub enum AccountAuthorization {
+    /// First use of an account reveals the full public key.
     AccountReveal {
         public_key: PublicKey,
         signature: AccountSignature,
     },
+    /// Later uses refer to the signature profile already registered for the account.
     AccountKnown {
         account: crypto::Signature,
         signature: AccountSignature,
@@ -59,6 +61,7 @@ pub struct AuthorizedAccountIntent<T> {
 impl<T: AccountIntent> AuthorizedAccountIntent<T> {
     pub fn verify_revealed_signature(&self, chain: ChainContext) -> Result<bool, IntentError> {
         let commitment = self.intent.commitment(chain)?;
+
         match &self.authorization {
             AccountAuthorization::AccountReveal {
                 public_key,
@@ -79,8 +82,8 @@ pub struct AuthorizedAssetTransaction {
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AuthorizedSpendTransaction {
     pub spend: AuthorizedAccountIntent<SpendIntent>,
-    /// Asset transfers pay their protocol/miner cost with a separate coin spend.
-    /// Coin transfers carry their own miner outputs and explicit burn action and leave this empty.
+    /// Asset transfers pay their XPQ protocol/miner cost with a separate coin spend.
+    /// Native coin transfers leave this empty.
     pub payment: Option<AuthorizedAccountIntent<SpendIntent>>,
 }
 
@@ -91,15 +94,18 @@ pub enum AuthorizedTransaction {
 }
 
 impl AuthorizedTransaction {
-    pub fn id(&self) -> Result<[u8; 32], TransactionEncodingError> {
-        let bytes = canonical_bytes(self).map_err(TransactionEncodingError::Encoding)?;
-        Ok(domain_hash(TRANSACTION_ID_CONTEXT.as_bytes(), &[&bytes]))
+    pub fn id(&self) -> Result<[u8; HASH_SIZE], TransactionEncodingError> {
+        // Tag 0 separates an authorized payload ID from the outer Commit/Reveal transaction ID.
+        let bytes =
+            canonical_bytes(&(0_u8, self)).map_err(|_| TransactionEncodingError::Encoding)?;
+        Ok(domain(HashDomain::Transaction, &bytes).into_bytes())
     }
 
     pub fn validate_structure(&self) -> Result<(), IntentError> {
         match self {
             Self::Spend(tx) => {
                 tx.spend.intent.validate()?;
+
                 match (&tx.spend.intent.spend, &tx.payment) {
                     (Spend::Coin { .. }, None) => Ok(()),
                     (Spend::Asset { .. }, Some(payment))
@@ -115,6 +121,11 @@ impl AuthorizedTransaction {
                     .intent
                     .validate_structure()
                     .map_err(|_| IntentError::InvalidAssetCall)?;
+
+                if !matches!(tx.payment.intent.spend, Spend::Coin { .. }) {
+                    return Err(IntentError::InvalidAssetCall);
+                }
+
                 tx.payment.intent.validate()
             }
         }

@@ -9,10 +9,13 @@ use std::{
 };
 
 use kernel::{
-    coin::{CoinHash, Zeno},
     common::canonical_bytes,
     crypto::{Signature, SigningSeed, address_from_public_key, address_to_string},
-    transaction::{AuthorizedTransaction, CoinOutput, SpendIntent},
+    native::coin::{Output as CoinOutput, XPQ, Zeno},
+    transaction::{
+        AuthorizedTransaction, CommitTransaction, RevealTransaction, SpendIntent, Transaction,
+        TransactionCommitment,
+    },
 };
 use serde_json::Value;
 use wallet::{AccountWallet, account_wallet_from_bip39_mnemonic, encode_bip39_mnemonic};
@@ -127,7 +130,7 @@ fn http_get(rpc: &str, route: &str) -> Result<Value, String> {
     serde_json::from_slice(body).map_err(|error| error.to_string())
 }
 
-fn post_transaction(rpc: &str, transaction: &AuthorizedTransaction) -> Value {
+fn post_transaction(rpc: &str, transaction: &Transaction) -> Value {
     let body = canonical_bytes(transaction).unwrap();
     let mut stream = TcpStream::connect(rpc).unwrap();
     stream
@@ -314,7 +317,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
         .iter()
         .find(|utxo| !utxo["reserved"].as_bool().unwrap_or(false))
         .expect("available miner reward is missing");
-    let input_id: CoinHash = input["id"].as_str().unwrap().parse().unwrap();
+    let input_id: XPQ = input["id"].as_str().unwrap().parse().unwrap();
     let input_amount = input["amount"].as_u64().unwrap();
     let sent = Zeno::from_zeno(1);
     let state_burn = kernel::consensus::StateTransitionWeight {
@@ -330,7 +333,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     let mut archival_bytes = 0;
     let transaction = loop {
         let burn = state_burn.as_zeno() + archival_bytes;
-        let intent = SpendIntent::coin_with_burn(
+        let intent = SpendIntent::coin(
             sender.address,
             vec![input_id],
             vec![
@@ -341,7 +344,6 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
                 ),
                 CoinOutput::block_miner(Zeno::from_zeno(archival_bytes.max(1))),
             ],
-            Zeno::from_zeno(burn),
         )
         .unwrap();
         let transaction = AuthorizedTransaction::Spend(Box::new(
@@ -350,16 +352,22 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
                 payment: None,
             },
         ));
-        let required = canonical_bytes(&transaction).unwrap().len() as u64;
+        let reveal = Transaction::Reveal(Box::new(RevealTransaction::new(transaction.clone())));
+        let required = canonical_bytes(&reveal).unwrap().len() as u64;
         if required == archival_bytes {
             break transaction;
         }
         archival_bytes = required;
     };
-    let submitted = post_transaction(&a_rpc, &transaction);
+    let chain = kernel::genesis::chain_context().unwrap();
+    let commitment = TransactionCommitment::derive(chain, &transaction).unwrap();
+    let commit = Transaction::Commit(CommitTransaction::new(commitment));
+    let reveal = Transaction::Reveal(Box::new(RevealTransaction::new(transaction)));
+    post_transaction(&a_rpc, &commit);
+    let submitted = post_transaction(&a_rpc, &reveal);
     assert_eq!(
         submitted["transaction_id"],
-        hex::encode(transaction.id().unwrap())
+        hex::encode(reveal.id().unwrap())
     );
 
     wait_for_status(&c_rpc, |_| {

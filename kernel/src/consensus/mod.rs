@@ -1,15 +1,27 @@
-pub mod apply;
+//! XPARQ consensus rules.
+//!
+//! Consensus is intentionally split by responsibility:
+//! - block: canonical block admission/application
+//! - transaction: Commit/Reveal + authorization/value validation
+//! - policy: WBDA, emission, and protocol burn
+//! - pow: Argon2id proof of work
+//! - fork: fork choice and reorganization planning
+//! - header: header-only synchronization validation
+
+mod block;
 mod error;
-pub mod fork;
-pub mod reorg;
-pub mod state_burn;
-pub mod validate;
+mod fork;
+mod header;
+mod policy;
+mod pow;
+mod transaction;
 
-pub use apply::*;
-pub use error::ConsensusError;
+pub use block::*;
+pub use error::*;
 pub use fork::*;
-pub use reorg::*;
-pub use state_burn::*;
-pub use validate::*;
+pub use header::*;
+pub use policy::*;
+pub use pow::*;
+pub use transaction::*;
 
-pub use crate::coin::{DECIMALS, XPQ, Zeno};
+pub use crate::native::coin::{DECIMALS, XPQ, Zeno};

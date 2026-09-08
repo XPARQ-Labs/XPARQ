@@ -1,13 +1,15 @@
-use crate::blockchain::{Block, BlockHeight, Header, Height};
-use borsh::{BorshDeserialize, BorshSerialize};
-use crypto::{BlockHash, HASH_SIZE, Hash};
 use std::collections::BTreeMap;
+
+use borsh::{BorshDeserialize, BorshSerialize};
+use crypto::{BlockHash, PreviousHash};
+
+use crate::blockchain::{Block, ChainError, Header, Height};
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Chain {
-    headers: BTreeMap<BlockHeight, Header>,
-    blocks: BTreeMap<BlockHeight, Block>,
-    tip_height: Option<BlockHeight>,
+    headers: BTreeMap<Height, Header>,
+    blocks: BTreeMap<Height, Block>,
+    tip_height: Option<Height>,
     tip_hash: Option<BlockHash>,
 }
 
@@ -18,16 +20,19 @@ impl Chain {
 
     pub fn insert_block(&mut self, block: Block) -> Result<(), ChainError> {
         self.validate_next_block(&block)?;
+
         let height = block.height();
         let hash = block.hash()?;
+
         self.headers.insert(height, block.header.clone());
         self.blocks.insert(height, block);
         self.tip_height = Some(height);
         self.tip_hash = Some(hash);
+
         Ok(())
     }
 
-    pub fn block(&self, height: &BlockHeight) -> Option<&Block> {
+    pub fn block(&self, height: &Height) -> Option<&Block> {
         self.blocks.get(height)
     }
 
@@ -35,11 +40,11 @@ impl Chain {
         self.tip_height.is_some()
     }
 
-    pub fn header(&self, height: &BlockHeight) -> Option<&Header> {
+    pub fn header(&self, height: &Height) -> Option<&Header> {
         self.headers.get(height)
     }
 
-    pub fn chain_headers(&self) -> Vec<(BlockHeight, Header)> {
+    pub fn chain_headers(&self) -> Vec<(Height, Header)> {
         self.headers
             .iter()
             .map(|(height, header)| (*height, header.clone()))
@@ -50,11 +55,11 @@ impl Chain {
         self.blocks.values()
     }
 
-    pub fn tip_height(&self) -> Option<BlockHeight> {
+    pub const fn tip_height(&self) -> Option<Height> {
         self.tip_height
     }
 
-    pub fn tip_hash(&self) -> Option<BlockHash> {
+    pub const fn tip_hash(&self) -> Option<BlockHash> {
         self.tip_hash
     }
 
@@ -62,9 +67,10 @@ impl Chain {
         if self.headers.contains_key(&block.height()) {
             return Err(ChainError::DuplicateBlock);
         }
+
         match (self.tip_height, self.tip_hash) {
             (None, None) => {
-                if block.height() != Height(0) || block.previous_hash() != Hash([0; HASH_SIZE]) {
+                if block.height() != Height(0) || block.previous_hash() != PreviousHash::ZERO {
                     return Err(ChainError::InvalidHeight);
                 }
             }
@@ -72,12 +78,14 @@ impl Chain {
                 if block.height().0 != tip_height.0.saturating_add(1) {
                     return Err(ChainError::InvalidHeight);
                 }
-                if block.previous_hash() != tip_hash {
+
+                if BlockHash(block.previous_hash().0) != tip_hash {
                     return Err(ChainError::InvalidParent);
                 }
             }
             _ => return Err(ChainError::InvalidParent),
         }
+
         Ok(())
     }
 
@@ -85,17 +93,18 @@ impl Chain {
         if self.tip_hash != Some(expected_hash) {
             return Err(ChainError::InvalidParent);
         }
+
         let height = self.tip_height.ok_or(ChainError::InvalidHeight)?;
         let block = self.blocks.remove(&height).ok_or(ChainError::MissingBody)?;
         self.headers.remove(&height);
+
         let previous_height = height.0.checked_sub(1).map(Height);
         self.tip_height = previous_height;
         self.tip_hash = match previous_height.and_then(|previous| self.headers.get(&previous)) {
             Some(previous) => Some(previous.hash()?),
             None => None,
         };
+
         Ok(block)
     }
 }
-
-pub use crate::blockchain::error::ChainError;

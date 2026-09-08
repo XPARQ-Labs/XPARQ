@@ -1,18 +1,17 @@
 //! XPARQ proof-of-work construction.
-//!
-//! Block identity remains a cheap domain-separated SHA3 header hash. This
-//! module alone owns the memory-hard work construction used by miners and
-//! validators.
 
 use crate::blockchain::Header;
 use crate::blockchain::codec::block_header_bytes;
-use crate::consensus::error::{ConsensusError, CryptoError};
-use crate::crypto::argon2::{argon2id_pow_hash, argon2id_pow_hash_with_memory};
-use crate::crypto::{
-    Hash, HashDomain, PoWHash, PoWMemory, PreviousHash, domain_hash, hash_meets_difficulty,
+use crate::consensus::{ConsensusError, MAX_DIFFICULTY, MIN_DIFFICULTY};
+
+use crypto::argon2::{argon2id_pow_hash, argon2id_pow_hash_with_memory};
+use crypto::{
+    CryptoError, Hash, HashDomain, PoWHash, PoWMemory, PreviousHash, domain, hash_meets_difficulty,
 };
 
 pub const POW_ALGORITHM: &str = "xparq-argon2id-algorithm";
+
+// Consensus parameters. Do not change on an existing chain without a hard fork.
 pub const POW_ARGON2_MEMORY_KIB: u32 = 128 * 1024;
 pub const POW_ARGON2_ITERATIONS: u32 = 1;
 pub const POW_ARGON2_LANES: u32 = 1;
@@ -21,19 +20,15 @@ pub fn new_pow_memory() -> PoWMemory {
     PoWMemory::new(POW_ARGON2_MEMORY_KIB)
 }
 
-/// Derives the fixed-size Argon2id input from the complete canonical header.
-/// The header includes the nonce, so miners vary only `header.nonce`.
 pub fn pow_seed(header: &Header) -> Result<Hash, ConsensusError> {
     let bytes = block_header_bytes(header).map_err(|_| ConsensusError::PoWHashFailed)?;
-    Ok(domain_hash(HashDomain::PoWSeed, &bytes))
+    Ok(domain(HashDomain::PoWSeed, &bytes))
 }
 
-/// Derives a deterministic salt from the parent being extended.
 pub fn pow_salt(previous_hash: &PreviousHash) -> Hash {
-    domain_hash(HashDomain::PoWSalt, &previous_hash.0)
+    domain(HashDomain::PoWSalt, previous_hash.as_bytes())
 }
 
-/// Calculates the active network's 256-bit Argon2id proof-of-work hash.
 pub fn calculate_work(header: &Header) -> Result<PoWHash, ConsensusError> {
     let seed = pow_seed(header)?;
     let salt = pow_salt(&header.previous_hash);
@@ -48,9 +43,6 @@ pub fn calculate_work(header: &Header) -> Result<PoWHash, ConsensusError> {
     .map_err(map_crypto_error)
 }
 
-/// Calculates proof of work using caller-owned Argon2id memory.
-///
-/// Miners should retain the memory across nonce attempts.
 pub fn calculate_work_with_memory(
     header: &Header,
     memory: &mut PoWMemory,
@@ -68,51 +60,34 @@ pub fn calculate_work_with_memory(
     .map_err(map_crypto_error)
 }
 
-/// Verifies claimed difficulty and memory-hard work using the one canonical
-/// construction shared by block admission, header sync, and mining.
-pub fn verify_pow(
-    header: &Header,
-    expected_difficulty: u32,
-) -> Result<(), ConsensusError> {
+pub fn verify_pow(header: &Header, expected_difficulty: u32) -> Result<(), ConsensusError> {
     validate_pow_claim(header, expected_difficulty)?;
     verify_pow_hash(calculate_work(header)?, expected_difficulty)
 }
 
-/// Verifies proof of work using caller-owned Argon2id memory.
-///
-/// Batch validators should retain one allocation for the complete batch.
 pub fn verify_pow_with_memory(
     header: &Header,
     expected_difficulty: u32,
     memory: &mut PoWMemory,
 ) -> Result<(), ConsensusError> {
     validate_pow_claim(header, expected_difficulty)?;
-
     verify_pow_hash(
         calculate_work_with_memory(header, memory)?,
         expected_difficulty,
     )
 }
 
-fn validate_pow_claim(
-    header: &Header,
-    expected_difficulty: u32,
-) -> Result<(), ConsensusError> {
-    if !(super::MIN_DIFFICULTY..=super::MAX_DIFFICULTY).contains(&expected_difficulty) {
+fn validate_pow_claim(header: &Header, expected_difficulty: u32) -> Result<(), ConsensusError> {
+    if !(MIN_DIFFICULTY..=MAX_DIFFICULTY).contains(&expected_difficulty) {
         return Err(ConsensusError::InvalidDifficulty);
     }
-
     if header.difficulty != expected_difficulty {
         return Err(ConsensusError::UnexpectedDifficulty);
     }
-
     Ok(())
 }
 
-fn verify_pow_hash(
-    hash: PoWHash,
-    expected_difficulty: u32,
-) -> Result<(), ConsensusError> {
+fn verify_pow_hash(hash: PoWHash, expected_difficulty: u32) -> Result<(), ConsensusError> {
     if hash_meets_difficulty(&hash, expected_difficulty) {
         Ok(())
     } else {

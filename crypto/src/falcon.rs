@@ -1,9 +1,3 @@
-//! Falcon-512 and Falcon-1024 primitives used by account signatures.
-//!
-//! Key generation, signing, and verification use the vendored `fn-dsa` backend.
-//! Both parameter sets are used by transaction authorization. Changes to their
-//! encodings or verification behavior require protocol compatibility review.
-
 use borsh::{BorshDeserialize, BorshSerialize};
 use fn_dsa::{
     DOMAIN_NONE, FN_DSA_LOGN_512, FN_DSA_LOGN_1024, HASH_ID_RAW, KeyPairGenerator,

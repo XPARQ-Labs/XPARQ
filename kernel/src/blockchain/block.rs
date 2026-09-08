@@ -1,42 +1,42 @@
-#[path = "merkle.rs"]
-pub mod merkle;
-
-use crate::blockchain::codec::{
-    HashDomain, block_bytes, block_header_hash, canonical_bytes, domain_hash,
+use std::{
+    collections::HashSet,
+    io::{Error as IoError, ErrorKind, Read},
 };
-pub use crate::blockchain::error::BlockError;
-use crate::coin::Zeno;
-pub use crate::common::{Height, Nonce};
-#[cfg(test)]
-use crate::crypto::HASH_SIZE;
-use crate::crypto::{Address, BlockHash, Hash, MerkleHash, PreviousHash, StateRoot};
-use crate::transaction::AuthorizedTransaction;
-use borsh::{BorshDeserialize, BorshSerialize};
-use std::collections::HashSet;
-use std::io::{Error as IoError, ErrorKind, Read};
 
-pub type BlockHeader = Header;
-pub type BlockBody = Body;
-pub type BlockHeight = Height;
-pub type BlockNonce = Nonce;
+use borsh::{BorshDeserialize, BorshSerialize};
+use crypto::{
+    Address, BlockHash, HASH_SIZE, Hash, HashDomain, MerkleHash, PreviousHash, StateRoot,
+    canonical_bytes, domain,
+};
+
+use crate::native::coin::Zeno;
+use crate::transaction::Transaction;
+
+pub use crate::common::{BlockHeight, BlockNonce, Height, Nonce};
+
+use crate::blockchain::error::{BlockError, CodecError};
+use crate::blockchain::merkle::{MerkleInclusionProof, merkle_root};
 
 pub const MAX_BLOCK_SIZE: usize = 2 * 1024 * 1024;
-/// Difficulty permanently assigned to height zero. Production difficulty
-/// tuning begins after genesis and must not alter the genesis hash.
 pub const GENESIS_BLOCK_DIFFICULTY: u32 = 1;
+
+// The smallest canonical outer transaction is a Commit enum tag plus one hash.
+const MIN_TRANSACTION_BYTES: usize = 1 + HASH_SIZE;
+const MAX_BLOCK_TRANSACTIONS: usize = MAX_BLOCK_SIZE / MIN_TRANSACTION_BYTES;
+
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Header {
     pub previous_hash: PreviousHash,
     pub merkle_root: MerkleHash,
     pub state_root: StateRoot,
     pub difficulty: u32,
-    /// Canonical serialized block size plus consensus execution reservation.
+    /// Canonical serialized block size plus any ledger execution reservation.
     pub block_weight: u32,
     pub nonce: Nonce,
 }
 
 impl Header {
-    pub fn new(
+    pub const fn new(
         previous_hash: PreviousHash,
         merkle_root: MerkleHash,
         state_root: StateRoot,
@@ -54,7 +54,7 @@ impl Header {
         }
     }
 
-    pub fn hash(&self) -> Result<BlockHash, crate::blockchain::error::CodecError> {
+    pub fn hash(&self) -> Result<BlockHash, CodecError> {
         block_header_hash(self)
     }
 }
@@ -62,7 +62,7 @@ impl Header {
 #[derive(BorshSerialize, Clone, Debug, PartialEq, Eq)]
 pub struct Body {
     pub emission: Option<Emission>,
-    pub transactions: Vec<AuthorizedTransaction>,
+    pub transactions: Vec<Transaction>,
 }
 
 #[derive(BorshSerialize, Clone, Debug, PartialEq, Eq)]
@@ -72,20 +72,15 @@ pub struct Block {
     pub body: Body,
 }
 
-static_assertions::const_assert!(
-    std::mem::size_of::<AuthorizedTransaction>() <= 2 * std::mem::size_of::<usize>()
-);
-
-// This trait implementation performs bounded decoding only. Untrusted block
-// bytes must enter through `crate::blockchain::decode_block`, which also validates all
-// deterministic block-local invariants.
+// Bounded decoding avoids trusting a serialized Vec length before the block-size
+// limit and block-local invariants have been checked.
 impl BorshDeserialize for Block {
     fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
         let header = Header::deserialize_reader(reader)?;
         let height = Height::deserialize_reader(reader)?;
         let emission = Option::<Emission>::deserialize_reader(reader)?;
-
         let transactions = deserialize_block_transactions(reader)?;
+
         Ok(Self {
             header,
             height,
@@ -97,35 +92,41 @@ impl BorshDeserialize for Block {
     }
 }
 
-fn deserialize_block_transactions<R>(reader: &mut R) -> std::io::Result<Vec<AuthorizedTransaction>>
-where
-    R: Read,
-{
+fn deserialize_block_transactions<R: Read>(reader: &mut R) -> std::io::Result<Vec<Transaction>> {
     let length = u32::deserialize_reader(reader)? as usize;
-    let mut values = Vec::new();
-    values
-        .try_reserve(length.min(64))
-        .map_err(|_| IoError::new(ErrorKind::OutOfMemory, "block section allocation failed"))?;
-    for _ in 0..length {
-        values.push(AuthorizedTransaction::deserialize_reader(reader)?);
+    if length > MAX_BLOCK_TRANSACTIONS {
+        return Err(IoError::new(
+            ErrorKind::InvalidData,
+            "block transaction count exceeds canonical bound",
+        ));
     }
-    Ok(values)
+
+    let mut transactions = Vec::new();
+    transactions
+        .try_reserve(length.min(64))
+        .map_err(|_| IoError::new(ErrorKind::OutOfMemory, "block allocation failed"))?;
+
+    for _ in 0..length {
+        transactions.push(Transaction::deserialize_reader(reader)?);
+    }
+
+    Ok(transactions)
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Emission {
-    // rename Emission
     pub to: Address,
     pub subsidy: Zeno,
 }
 
 impl Emission {
-    pub fn new(to: Address, subsidy: Zeno) -> Self {
+    pub const fn new(to: Address, subsidy: Zeno) -> Self {
         Self { to, subsidy }
     }
 
-    pub fn hash(&self) -> Result<Hash, crate::blockchain::error::CodecError> {
-        Ok(domain_hash(HashDomain::Emission, &canonical_bytes(self)?))
+    pub fn hash(&self) -> Result<Hash, CodecError> {
+        let bytes = canonical_bytes(self).map_err(|_| CodecError::EncodeFailed)?;
+        Ok(domain(HashDomain::Emission, &bytes))
     }
 }
 
@@ -134,16 +135,16 @@ impl Block {
         self.body.emission.as_ref()
     }
 
-    /// Compatibility accessor for network crates migrating to Emission naming.
+    pub fn transactions(&self) -> &[Transaction] {
+        &self.body.transactions
+    }
+
+    /// Compatibility accessor retained for callers that still use coinbase naming.
     pub fn coinbase(&self) -> Option<&Emission> {
         self.emission()
     }
 
-    pub fn transactions(&self) -> &[AuthorizedTransaction] {
-        &self.body.transactions
-    }
-
-    pub fn genesis() -> Result<Self, crate::blockchain::error::CodecError> {
+    pub fn genesis() -> Result<Self, CodecError> {
         Self::from_protocol_transactions(
             Height(0),
             PreviousHash::ZERO,
@@ -154,7 +155,6 @@ impl Block {
         )
     }
 
-    /// Constructs a block from one consensus-ordered protocol transaction list.
     #[allow(clippy::too_many_arguments)]
     pub fn from_protocol_transactions(
         height: Height,
@@ -162,24 +162,34 @@ impl Block {
         difficulty: u32,
         nonce: Nonce,
         emission: Option<Emission>,
-        transactions: Vec<AuthorizedTransaction>,
-    ) -> Result<Self, crate::blockchain::error::CodecError> {
+        transactions: Vec<Transaction>,
+    ) -> Result<Self, CodecError> {
         let previous_hash = previous_hash.into();
         let merkle_root = calculate_merkle_root(emission.as_ref(), &transactions)?;
-        let state_root = StateRoot::ZERO;
+
         let mut block = Self {
-            header: Header::new(previous_hash, merkle_root, state_root, difficulty, 0, nonce),
+            header: Header::new(
+                previous_hash,
+                merkle_root,
+                StateRoot::ZERO,
+                difficulty,
+                0,
+                nonce,
+            ),
             height,
             body: Body {
                 emission,
                 transactions,
             },
         };
+
         block.refresh_block_weight()?;
         Ok(block)
     }
 
-    /// Validates deterministic block-local rules only.
+    /// Validates only deterministic rules that depend on the block itself.
+    /// Commit existence, Reveal matching, signatures, values, state burn, and
+    /// state root execution remain consensus/ledger responsibilities.
     pub fn validate_structure(&self) -> Result<(), BlockError> {
         if self.is_genesis() {
             if self.body.emission.is_some() {
@@ -197,8 +207,7 @@ impl Block {
         }
 
         let serialized_weight = self.weight()?;
-        if serialized_weight > MAX_BLOCK_SIZE
-            || self.header.block_weight as usize > MAX_BLOCK_SIZE
+        if serialized_weight > MAX_BLOCK_SIZE || self.header.block_weight as usize > MAX_BLOCK_SIZE
         {
             return Err(BlockError::BlockTooHeavy);
         }
@@ -206,9 +215,10 @@ impl Block {
             return Err(BlockError::InvalidBlockWeight);
         }
 
-        if !signed_transactions_are_structurally_valid(&self.body.transactions) {
+        if !transactions_are_structurally_valid(&self.body.transactions) {
             return Err(BlockError::InvalidTransaction);
         }
+
         if self.header.merkle_root
             != calculate_merkle_root(self.body.emission.as_ref(), &self.body.transactions)?
         {
@@ -218,30 +228,27 @@ impl Block {
         Ok(())
     }
 
-    pub fn hash(&self) -> Result<BlockHash, crate::blockchain::error::CodecError> {
+    pub fn hash(&self) -> Result<BlockHash, CodecError> {
         self.header.hash()
     }
 
-    pub fn height(&self) -> Height {
+    pub const fn height(&self) -> Height {
         self.height
     }
 
-    pub fn previous_hash(&self) -> PreviousHash {
+    pub const fn previous_hash(&self) -> PreviousHash {
         self.header.previous_hash
     }
 
-    /// Returns the emission recipient for mined blocks. Genesis has no miner
-    /// and therefore resolves to the zero address for compatibility with
-    /// indexing and display code.
     pub fn miner_address(&self) -> Address {
         self.body
             .emission
             .as_ref()
             .map(|emission| emission.to)
-            .unwrap_or(Address([0; crate::crypto::ADDRESS_SIZE]))
+            .unwrap_or(Address([0; crypto::ADDRESS_SIZE]))
     }
 
-    pub fn state_root(&self) -> StateRoot {
+    pub const fn state_root(&self) -> StateRoot {
         self.header.state_root
     }
 
@@ -249,17 +256,15 @@ impl Block {
         self.header.state_root = state_root.into();
     }
 
-    /// Sets the consensus weight after state-dependent execution reservations
-    /// have been calculated by the ledger.
     pub fn set_block_weight(&mut self, block_weight: u32) {
         self.header.block_weight = block_weight;
     }
 
-    pub fn difficulty(&self) -> u32 {
+    pub const fn difficulty(&self) -> u32 {
         self.header.difficulty
     }
 
-    pub fn block_weight(&self) -> u32 {
+    pub const fn block_weight(&self) -> u32 {
         self.header.block_weight
     }
 
@@ -271,131 +276,143 @@ impl Block {
         self.height.0 == 0
     }
 
-    pub fn serialized_size(&self) -> Result<usize, crate::blockchain::error::CodecError> {
+    pub fn serialized_size(&self) -> Result<usize, CodecError> {
         Ok(self.to_bytes()?.len())
     }
 
-    pub fn weight(&self) -> Result<usize, crate::blockchain::error::CodecError> {
+    pub fn weight(&self) -> Result<usize, CodecError> {
         self.serialized_size()
     }
 
-    pub fn refresh_block_weight(&mut self) -> Result<(), crate::blockchain::error::CodecError> {
+    pub fn refresh_block_weight(&mut self) -> Result<(), CodecError> {
         self.header.block_weight = 0;
         let weight = self.weight()?;
-        self.header.block_weight = u32::try_from(weight)
-            .map_err(|_| crate::blockchain::error::CodecError::EncodeFailed)?;
+        self.header.block_weight = u32::try_from(weight).map_err(|_| CodecError::EncodeFailed)?;
         Ok(())
     }
 
-    pub fn to_bytes(&self) -> Result<Vec<u8>, crate::blockchain::error::CodecError> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CodecError> {
         block_bytes(self)
     }
 
-    pub fn calculate_merkle_root(
-        &self,
-    ) -> Result<MerkleHash, crate::blockchain::error::CodecError> {
+    pub fn calculate_merkle_root(&self) -> Result<MerkleHash, CodecError> {
         calculate_merkle_root(self.body.emission.as_ref(), &self.body.transactions)
     }
 
+    pub fn transaction_inclusion_proof(
+        &self,
+        transaction_index: usize,
+    ) -> Result<MerkleInclusionProof, CodecError> {
+        if transaction_index >= self.body.transactions.len() {
+            return Err(CodecError::InvalidBlock);
+        }
+
+        let leaves = merkle_leaves(self.body.emission.as_ref(), &self.body.transactions)?;
+        let leaf_index = usize::from(self.body.emission.is_some()) + transaction_index;
+
+        MerkleInclusionProof::create(&leaves, leaf_index, HashDomain::MerkleNode)
+            .ok_or(CodecError::InvalidBlock)
+    }
+
+    /// Backward-compatible plural name used by older callers.
     pub fn transaction_inclusion_proofs(
         &self,
         transaction_index: usize,
-    ) -> Result<
-        crate::blockchain::block::merkle::MerkleInclusionProof,
-        crate::blockchain::error::CodecError,
-    > {
-        if transaction_index >= self.body.transactions.len() {
-            return Err(crate::blockchain::error::CodecError::InvalidBlock);
-        }
-        let mut transaction_leaves = Vec::with_capacity(
-            usize::from(self.body.emission.is_some()) + self.body.transactions.len(),
-        );
-        if let Some(emission) = &self.body.emission {
-            transaction_leaves.push(emission.hash()?);
-        }
-        transaction_leaves.extend(
-            self.body
-                .transactions
-                .iter()
-                .map(|transaction| {
-                    transaction
-                        .id()
-                        .map(Hash)
-                        .map_err(|_| crate::blockchain::error::CodecError::EncodeFailed)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        );
-        let leaf_index = usize::from(self.body.emission.is_some()) + transaction_index;
-        crate::blockchain::block::merkle::MerkleInclusionProof::create(
-            &transaction_leaves,
-            leaf_index,
-            HashDomain::MerkleNode,
-        )
-        .ok_or(crate::blockchain::error::CodecError::InvalidBlock)
+    ) -> Result<MerkleInclusionProof, CodecError> {
+        self.transaction_inclusion_proof(transaction_index)
     }
 
-    pub fn refresh_merkle_root(&mut self) -> Result<(), crate::blockchain::error::CodecError> {
+    pub fn refresh_merkle_root(&mut self) -> Result<(), CodecError> {
         self.refresh_commitments()
     }
 
-    pub fn refresh_commitments(&mut self) -> Result<(), crate::blockchain::error::CodecError> {
+    pub fn refresh_commitments(&mut self) -> Result<(), CodecError> {
         self.header.merkle_root = self.calculate_merkle_root()?;
         self.refresh_block_weight()?;
         Ok(())
     }
 
-    pub fn push_transaction(
-        &mut self,
-        transaction: AuthorizedTransaction,
-    ) -> Result<(), crate::blockchain::error::CodecError> {
+    pub fn push_transaction(&mut self, transaction: Transaction) -> Result<(), CodecError> {
         self.body.transactions.push(transaction);
-        self.refresh_merkle_root()
+        self.refresh_commitments()
     }
+}
+
+fn merkle_leaves(
+    emission: Option<&Emission>,
+    transactions: &[Transaction],
+) -> Result<Vec<Hash>, CodecError> {
+    let mut leaves = Vec::with_capacity(usize::from(emission.is_some()) + transactions.len());
+
+    if let Some(emission) = emission {
+        leaves.push(emission.hash()?);
+    }
+
+    for transaction in transactions {
+        leaves.push(Hash(
+            transaction.id().map_err(|_| CodecError::EncodeFailed)?,
+        ));
+    }
+
+    Ok(leaves)
 }
 
 fn calculate_merkle_root(
     emission: Option<&Emission>,
-    transactions: &[AuthorizedTransaction],
-) -> Result<MerkleHash, crate::blockchain::error::CodecError> {
+    transactions: &[Transaction],
+) -> Result<MerkleHash, CodecError> {
     if emission.is_none() && transactions.is_empty() {
         return Ok(MerkleHash::ZERO);
     }
 
-    let mut hashes = Vec::with_capacity(usize::from(emission.is_some()) + transactions.len());
-    if let Some(emission) = emission {
-        hashes.push(emission.hash()?);
-    }
-    for transaction in transactions {
-        hashes.push(Hash(
-            transaction
-                .id()
-                .map_err(|_| crate::blockchain::error::CodecError::EncodeFailed)?,
-        ));
-    }
-
-    crate::blockchain::block::merkle::merkle_root(&hashes, HashDomain::MerkleNode)
-        .map(|root| MerkleHash(root.0))
-        .ok_or(crate::blockchain::error::CodecError::InvalidBlock)
+    let leaves = merkle_leaves(emission, transactions)?;
+    merkle_root(&leaves, HashDomain::MerkleNode)
+        .map(|root| MerkleHash(root.into_bytes()))
+        .ok_or(CodecError::InvalidBlock)
 }
 
-fn has_duplicate_transactions(
-    transactions: &[AuthorizedTransaction],
-) -> Result<bool, crate::blockchain::error::CodecError> {
+fn has_duplicate_transactions(transactions: &[Transaction]) -> Result<bool, CodecError> {
     let mut seen = HashSet::with_capacity(transactions.len());
+
     for transaction in transactions {
-        if !seen.insert(Hash(
-            transaction
-                .id()
-                .map_err(|_| crate::blockchain::error::CodecError::EncodeFailed)?,
-        )) {
+        let id = Hash(transaction.id().map_err(|_| CodecError::EncodeFailed)?);
+        if !seen.insert(id) {
             return Ok(true);
         }
     }
+
     Ok(false)
 }
 
-fn signed_transactions_are_structurally_valid(transactions: &[AuthorizedTransaction]) -> bool {
-    transactions
-        .iter()
-        .all(|tx| tx.validate_structure().is_ok())
+fn transactions_are_structurally_valid(transactions: &[Transaction]) -> bool {
+    transactions.iter().all(|transaction| match transaction {
+        Transaction::Commit(_) => true,
+        Transaction::Reveal(reveal) => reveal.validate_structure().is_ok(),
+    })
+}
+
+pub fn block_header_bytes(header: &Header) -> Result<Vec<u8>, CodecError> {
+    canonical_bytes(header).map_err(|_| CodecError::EncodeFailed)
+}
+
+pub fn block_bytes(block: &Block) -> Result<Vec<u8>, CodecError> {
+    canonical_bytes(block).map_err(|_| CodecError::EncodeFailed)
+}
+
+pub fn block_header_hash(header: &Header) -> Result<BlockHash, CodecError> {
+    Ok(BlockHash(
+        domain(HashDomain::Header, &block_header_bytes(header)?).into_bytes(),
+    ))
+}
+
+pub fn decode_block(bytes: &[u8]) -> Result<Block, CodecError> {
+    if bytes.len() > MAX_BLOCK_SIZE {
+        return Err(CodecError::InvalidBlock);
+    }
+
+    let block = Block::try_from_slice(bytes).map_err(|_| CodecError::InvalidBlock)?;
+    block
+        .validate_structure()
+        .map_err(|_| CodecError::InvalidBlock)?;
+    Ok(block)
 }

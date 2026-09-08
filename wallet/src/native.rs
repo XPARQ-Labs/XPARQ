@@ -6,15 +6,16 @@ use std::{
     str::FromStr,
 };
 
-use kernel::asset::AssetHash;
+use kernel::native::asset::Asset;
+use kernel::native::coin::Output as CoinOutput;
 use kernel::transaction::AssetInstruction;
 use kernel::{
     codec::canonical_bytes,
     consensus::{DECIMALS, StateTransitionWeight, XPQ, Zeno, account_key_state_weight},
     crypto::{Address, Signature, address_from_string},
     transaction::{
-        AuthorizedAssetTransaction, AuthorizedSpendTransaction,
-        AuthorizedTransaction, CoinOutput, SpendIntent,
+        AuthorizedAssetTransaction, AuthorizedSpendTransaction, AuthorizedTransaction,
+        CommitTransaction, RevealTransaction, SpendIntent, Transaction, TransactionCommitment,
     },
 };
 use serde::Deserialize;
@@ -197,12 +198,23 @@ fn asset_register(args: &[String]) -> Result<(), String> {
     let max_supply = parse_asset_amount(args, "--max-supply", decimals)?;
     let initial_mint = parse_asset_amount(args, "--initial-mint", decimals)?;
     let authority = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?.address();
-    let asset_id = AssetHash::derive(authority, &symbol);
     let mint_authority = if has_flag(args, "--fixed-supply") {
-        None
+        Address::ZERO
     } else {
-        Some(authority)
+        authority
     };
+    let asset_id = Asset::derive(
+        &kernel::native::asset::AssetMetadata::new(
+            name.clone(),
+            symbol.clone(),
+            decimals,
+            max_supply,
+            mint_authority,
+            authority,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
     submit_asset_instruction(
         args,
         AssetInstruction::Register {
@@ -221,14 +233,14 @@ fn asset_register(args: &[String]) -> Result<(), String> {
 fn normalize_asset_name(name: &str) -> Result<String, String> {
     let normalized = name.trim().to_string();
     if normalized.is_empty()
-        || normalized.len() > kernel::asset::ASSET_NAME_MAX_LEN
+        || normalized.len() > kernel::native::asset::ASSET_NAME_MAX_LEN
         || !normalized
             .bytes()
             .all(|byte| byte == b' ' || byte.is_ascii_graphic())
     {
         return Err(format!(
             "invalid token name; use 1-{} printable ASCII characters",
-            kernel::asset::ASSET_NAME_MAX_LEN
+            kernel::native::asset::ASSET_NAME_MAX_LEN
         ));
     }
     Ok(normalized)
@@ -237,14 +249,14 @@ fn normalize_asset_name(name: &str) -> Result<String, String> {
 fn normalize_asset_symbol(symbol: &str) -> Result<String, String> {
     let normalized = symbol.to_ascii_uppercase();
     if normalized.is_empty()
-        || normalized.len() > kernel::asset::ASSET_SYMBOL_MAX_LEN
+        || normalized.len() > kernel::native::asset::ASSET_SYMBOL_MAX_LEN
         || !normalized
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
     {
         return Err(format!(
             "invalid token symbol; use 1-{} ASCII letters A-Z or digits",
-            kernel::asset::ASSET_SYMBOL_MAX_LEN
+            kernel::native::asset::ASSET_SYMBOL_MAX_LEN
         ));
     }
     Ok(normalized)
@@ -279,26 +291,23 @@ fn asset_transfer(args: &[String]) -> Result<(), String> {
     submit_asset_spend(args, asset_recipient(args)?)
 }
 
-fn asset_recipient(args: &[String]) -> Result<kernel::asset::AssetShareOwner, String> {
+fn asset_recipient(args: &[String]) -> Result<Address, String> {
     address_from_string(option(args, "--to").ok_or("missing --to")?)
         .map_err(|error| error.to_string())
 }
 
-fn submit_asset_spend(
-    args: &[String],
-    recipient: kernel::asset::AssetShareOwner,
-) -> Result<(), String> {
+fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String> {
     reject_manual_fee(args)?;
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let asset = parse_asset_id(args)?;
     let amount = parse_asset_amount(args, "--amount", asset_decimals(args, asset)?)?;
     let (inputs, total) = select_asset_inputs(rpc, wallet.address(), asset, amount.as_units())?;
-    let mut outputs = vec![kernel::asset::AssetShareOutput { recipient, amount }];
+    let mut outputs = vec![kernel::native::asset::Output { recipient, amount }];
     if total > amount.as_units() {
-        outputs.push(kernel::asset::AssetShareOutput {
+        outputs.push(kernel::native::asset::Output {
             recipient: wallet.address(),
-            amount: kernel::asset::Unit::from_units(total - amount.as_units()),
+            amount: kernel::native::asset::Unit::from_units(total - amount.as_units()),
         });
     }
     let public_key_known = account_public_key_registered(rpc, &wallet);
@@ -308,19 +317,18 @@ fn submit_asset_spend(
         public_key_known,
     )?;
     let asset_weight = outputs.iter().try_fold(0_u64, |weight, output| {
-        kernel::asset::checked_asset_entry_weight(
+        kernel::native::asset::checked_asset_entry_weight(
             weight,
             32,
-            &kernel::asset::AssetShare {
+            &kernel::native::asset::AssetShare {
                 parent: asset,
-                owner: output.recipient,
                 amount: output.amount,
             },
         )
         .map_err(|e| format!("calculate asset state weight: {e:?}"))
     })?;
     let transaction = automatic_fee_transaction(|fee, archival_burn| {
-        let (coin_inputs, _, state_burn, change) = select_account_inputs_with_state_burn(
+        let (coin_inputs, _, _state_burn, change) = select_account_inputs_with_state_burn(
             rpc,
             &wallet,
             fee,
@@ -334,13 +342,8 @@ fn submit_asset_spend(
         }
         fee_outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
         let payment = wallet.sign_onchain_spend(
-            SpendIntent::coin_with_burn(
-                wallet.address(),
-                coin_inputs,
-                fee_outputs,
-                Zeno::from_zeno(state_burn),
-            )
-            .map_err(|e| e.to_string())?,
+            SpendIntent::coin(wallet.address(), coin_inputs, fee_outputs)
+                .map_err(|e| e.to_string())?,
             public_key_known,
         )?;
         Ok(AuthorizedTransaction::Spend(Box::new(
@@ -356,9 +359,9 @@ fn submit_asset_spend(
 fn select_asset_inputs(
     rpc: &str,
     owner: Address,
-    asset: AssetHash,
+    asset: Asset,
     required: u128,
-) -> Result<(Vec<kernel::asset::AssetShareHash>, u128), String> {
+) -> Result<(Vec<kernel::native::asset::Share>, u128), String> {
     let address = kernel::crypto::address_to_string(&owner);
     let balance: BalanceResponse = http_get_json(rpc, &format!("/balance/{address}"))?;
     let entry = balance
@@ -440,7 +443,7 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
         .created_state_weight_from_presence(nonce > 0)
         .map_err(|error| format!("calculate asset state weight: {error:?}"))?;
     let transaction = automatic_fee_transaction(|fee, archival_burn| {
-        let (inputs, _total, state_burn, change) = select_account_inputs_with_state_burn(
+        let (inputs, _total, _state_burn, change) = select_account_inputs_with_state_burn(
             rpc,
             &wallet,
             fee,
@@ -453,13 +456,8 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
             outputs.push(CoinOutput::new(wallet.address(), Zeno::from_zeno(change)));
         }
         outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
-        let fee_intent = SpendIntent::coin_with_burn(
-            wallet.address(),
-            inputs,
-            outputs,
-            Zeno::from_zeno(state_burn),
-        )
-        .map_err(|error| error.to_string())?;
+        let fee_intent = SpendIntent::coin(wallet.address(), inputs, outputs)
+            .map_err(|error| error.to_string())?;
         let fee = wallet.sign_onchain_spend(fee_intent, public_key_known)?;
         Ok(AuthorizedTransaction::Asset(Box::new(
             AuthorizedAssetTransaction {
@@ -471,14 +469,14 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
     submit_or_print_transaction(args, &transaction)
 }
 
-fn parse_asset_id(args: &[String]) -> Result<AssetHash, String> {
+fn parse_asset_id(args: &[String]) -> Result<Asset, String> {
     option(args, "--asset")
         .ok_or_else(|| "missing --asset".to_string())?
-        .parse::<AssetHash>()
+        .parse::<Asset>()
         .map_err(|_| "invalid --asset id".to_string())
 }
 
-fn asset_decimals(args: &[String], asset_id: AssetHash) -> Result<u8, String> {
+fn asset_decimals(args: &[String], asset_id: Asset) -> Result<u8, String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     Ok(http_get_json::<AssetMetadataResponse>(rpc, &format!("/asset/{asset_id}"))?.decimals)
 }
@@ -487,10 +485,10 @@ fn parse_asset_amount(
     args: &[String],
     option_name: &str,
     decimals: u8,
-) -> Result<kernel::asset::Unit, String> {
+) -> Result<kernel::native::asset::Unit, String> {
     let value = option(args, option_name).ok_or_else(|| format!("missing {option_name}"))?;
     parse_asset_display_amount(value, decimals)
-        .map(kernel::asset::Unit::from_units)
+        .map(kernel::native::asset::Unit::from_units)
         .map_err(|error| format!("invalid {option_name}: {error}"))
 }
 
@@ -954,7 +952,7 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
     let amount = parse_amount(option(args, "--amount").ok_or("missing --amount")?)?;
     let inputs = repeated_options(args, "--input")
         .into_iter()
-        .map(kernel::coin::CoinHash::from_str)
+        .map(kernel::native::coin::XPQ::from_str)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "invalid --input coin id".to_string())?;
     let wallet = load_wallet(path)?;
@@ -972,7 +970,7 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
             .as_zeno()
             .checked_add(fee)
             .ok_or("transaction amount plus fee overflow")?;
-        let (selected, change, state_burn, change_address) = if inputs.is_empty() {
+        let (selected, change, _state_burn, change_address) = if inputs.is_empty() {
             let (selected, _total, state_burn, change) =
                 select_account_inputs_with_state_burn(rpc, &wallet, required, 2, 0, archival_burn)?;
             (selected, change, state_burn, wallet.address())
@@ -1007,13 +1005,8 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
             outputs.push(CoinOutput::new(change_address, Zeno::from_zeno(change)));
         }
         outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
-        let intent = SpendIntent::coin_with_burn(
-            wallet.address(),
-            selected,
-            outputs,
-            Zeno::from_zeno(state_burn),
-        )
-        .map_err(|error| error.to_string())?;
+        let intent = SpendIntent::coin(wallet.address(), selected, outputs)
+            .map_err(|error| error.to_string())?;
         let signed = wallet.sign_onchain_spend(intent, known)?;
         Ok(AuthorizedTransaction::Spend(Box::new(
             AuthorizedSpendTransaction {
@@ -1044,7 +1037,7 @@ fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
     let inputs = candidates
         .iter()
         .map(|utxo| {
-            kernel::coin::CoinHash::from_str(&utxo.id)
+            kernel::native::coin::XPQ::from_str(&utxo.id)
                 .map_err(|_| "node returned an invalid coin id".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1078,13 +1071,8 @@ fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
             CoinOutput::new(wallet.address(), Zeno::from_zeno(consolidated)),
             CoinOutput::block_miner(Zeno::from_zeno(fee)),
         ];
-        let intent = SpendIntent::coin_with_burn(
-            wallet.address(),
-            inputs.clone(),
-            outputs,
-            Zeno::from_zeno(protocol_burn),
-        )
-        .map_err(|error| error.to_string())?;
+        let intent = SpendIntent::coin(wallet.address(), inputs.clone(), outputs)
+            .map_err(|error| error.to_string())?;
         let signed = wallet.sign_onchain_spend(intent, public_key_known)?;
         Ok(AuthorizedTransaction::Spend(Box::new(
             AuthorizedSpendTransaction {
@@ -1120,7 +1108,7 @@ fn select_account_inputs_with_state_burn(
     created_coin_without_change: u64,
     created_state_weight: u64,
     archival_burn: u64,
-) -> Result<(Vec<kernel::coin::CoinHash>, u64, u64, u64), String> {
+) -> Result<(Vec<kernel::native::coin::XPQ>, u64, u64, u64), String> {
     let created_account_key_weight =
         wallet.new_account_key_weight(account_public_key_registered(rpc, wallet))?;
     let candidates = account_input_candidates(rpc, wallet)?;
@@ -1128,7 +1116,7 @@ fn select_account_inputs_with_state_burn(
     let mut total = 0_u64;
     for utxo in candidates {
         selected.push(
-            kernel::coin::CoinHash::from_str(&utxo.id)
+            kernel::native::coin::XPQ::from_str(&utxo.id)
                 .map_err(|_| "node returned an invalid coin id".to_string())?,
         );
         total = total
@@ -1267,9 +1255,11 @@ fn automatic_fee_transaction(
     let mut archival_burn = 0_u64;
     for _ in 0..MAX_FEE_CONVERGENCE_ROUNDS {
         let transaction = build(fee, archival_burn)?;
-        let size = canonical_bytes(&transaction)
-            .map_err(|error| error.to_string())?
-            .len();
+        let size = canonical_bytes(&Transaction::Reveal(Box::new(RevealTransaction::new(
+            transaction.clone(),
+        ))))
+        .map_err(|error| error.to_string())?
+        .len();
         let required = u64::try_from(size)
             .ok()
             .and_then(|size| size.checked_mul(AUTOMATIC_FEE_ZENO_PER_BYTE))
@@ -1287,16 +1277,29 @@ fn submit_or_print_transaction(
     args: &[String],
     transaction: &AuthorizedTransaction,
 ) -> Result<(), String> {
-    let bytes = canonical_bytes(transaction).map_err(|error| error.to_string())?;
+    let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
+    let commitment =
+        TransactionCommitment::derive(chain, transaction).map_err(|error| error.to_string())?;
+    let commit = Transaction::Commit(CommitTransaction::new(commitment));
+    let reveal = Transaction::Reveal(Box::new(RevealTransaction::new(transaction.clone())));
+    let commit_bytes = canonical_bytes(&commit).map_err(|error| error.to_string())?;
+    let reveal_bytes = canonical_bytes(&reveal).map_err(|error| error.to_string())?;
     if has_flag(args, "--offline") {
-        println!("{}", hex::encode(&bytes));
-        eprintln!("transaction_size_bytes: {}", bytes.len());
+        println!("commit: {}", hex::encode(&commit_bytes));
+        println!("reveal: {}", hex::encode(&reveal_bytes));
+        eprintln!("commit_size_bytes: {}", commit_bytes.len());
+        eprintln!("reveal_size_bytes: {}", reveal_bytes.len());
         return Ok(());
     }
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    let response: SubmitTransactionResponse = http_post_bytes(rpc, "/transaction", &bytes)?;
-    println!("transaction_id: {}", response.transaction_id);
-    println!("transaction_size_bytes: {}", bytes.len());
+    let commit_response: SubmitTransactionResponse =
+        http_post_bytes(rpc, "/transaction", &commit_bytes)?;
+    let reveal_response: SubmitTransactionResponse =
+        http_post_bytes(rpc, "/transaction", &reveal_bytes)?;
+    println!("commit_transaction_id: {}", commit_response.transaction_id);
+    println!("reveal_transaction_id: {}", reveal_response.transaction_id);
+    println!("commit_size_bytes: {}", commit_bytes.len());
+    println!("reveal_size_bytes: {}", reveal_bytes.len());
     Ok(())
 }
 
@@ -1457,7 +1460,7 @@ mod tests {
         let args = vec!["--amount".into(), "1000000000000000.00000000".into()];
         assert_eq!(
             parse_asset_amount(&args, "--amount", 8),
-            Ok(kernel::asset::Unit::from_units(
+            Ok(kernel::native::asset::Unit::from_units(
                 100_000_000_000_000_000_000_000_u128
             ))
         );
