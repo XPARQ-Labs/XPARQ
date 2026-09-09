@@ -89,5 +89,5 @@ Borsh bytes, not JSON.
   explicit database migration or chain reset.
 
 The canonical repository is
-[`XPARQ-Labs/XPARQ-2`](https://github.com/XPARQ-Labs/XPARQ-2). Existing commit
+[`XPARQ-Labs/XPARQ-2`](https://github.com/XPARQ-Labs/XPARQ). Existing commit
 history is intentionally retained; see the consolidation document for details.
