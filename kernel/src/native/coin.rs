@@ -3,8 +3,6 @@ use crypto::{Address, HASH_SIZE, Hash, HashDomain, HashParseError, domain, forma
 use std::{fmt, str::FromStr};
 
 pub const DECIMALS: u8 = 6;
-pub const COIN_PREFIX: &str = "XPQ:";
-
 #[derive(
     Debug,
     Clone,
@@ -112,7 +110,7 @@ impl From<XPARQCoin> for Hash {
 
 impl fmt::Display for XPARQCoin {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        format(COIN_PREFIX, &self.0, formatter)
+        format("", &self.0, formatter)
     }
 }
 
@@ -120,7 +118,22 @@ impl FromStr for XPARQCoin {
     type Err = HashParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        parse(COIN_PREFIX, value).map(Self)
+        parse("", value).map(Self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coin_id_text_is_unprefixed_hex() {
+        let coin = XPARQCoin::from_bytes([0xab; HASH_SIZE]);
+        let encoded = "ab".repeat(HASH_SIZE);
+
+        assert_eq!(coin.to_string(), encoded);
+        assert_eq!(encoded.parse::<XPARQCoin>(), Ok(coin));
+        assert!(format!("XPQ:{encoded}").parse::<XPARQCoin>().is_err());
     }
 }
 

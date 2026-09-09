@@ -18,6 +18,5 @@ sqisign-blockchain-test = ["devnet"]
 
 [dependencies]
 borsh.workspace = true
-sha3.workspace = true
 static_assertions.workspace = true
 crypto.workspace = true

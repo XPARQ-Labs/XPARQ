@@ -18,12 +18,12 @@ pub enum AssetInstruction {
         mint_authority: Address,
     },
     Mint {
-        asset_id: Asset,
+        asset: Asset,
         recipient: Address,
         amount: Unit,
     },
     Burn {
-        asset_id: Asset,
+        asset: Asset,
         inputs: Vec<Share>,
     },
 }
@@ -44,7 +44,7 @@ impl AssetIntent {
         }
     }
 
-    pub fn asset_id(&self) -> Result<Asset, AssetError> {
+    pub fn asset(&self) -> Result<Asset, AssetError> {
         match &self.instruction {
             AssetInstruction::Register {
                 name,
@@ -64,8 +64,8 @@ impl AssetIntent {
                 )?;
                 Asset::derive(&metadata)
             }
-            AssetInstruction::Mint { asset_id, .. } | AssetInstruction::Burn { asset_id, .. } => {
-                Ok(*asset_id)
+            AssetInstruction::Mint { asset, .. } | AssetInstruction::Burn { asset, .. } => {
+                Ok(*asset)
             }
         }
     }
@@ -160,13 +160,13 @@ impl AssetIntent {
                 )?;
             }
             AssetInstruction::Mint {
-                asset_id, amount, ..
+                asset, amount, ..
             } => {
                 weight = checked_entry_weight(
                     weight,
                     HASH_SIZE,
                     &AssetShare {
-                        parent: *asset_id,
+                        parent: *asset,
                         amount: *amount,
                     },
                 )?;

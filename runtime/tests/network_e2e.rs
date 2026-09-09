@@ -9,13 +9,9 @@ use std::{
 };
 
 use kernel::{
-    common::canonical_bytes,
-    crypto::{Signature, SigningSeed, address_from_public_key, address_to_string},
+    crypto::{Signature, SigningSeed, address_from_public_key, address_to_string, canonical_bytes},
     native::coin::{Output as CoinOutput, XPQ, Zeno},
-    transaction::{
-        AuthorizedTransaction, CommitTransaction, RevealTransaction, SpendIntent, Transaction,
-        TransactionCommitment,
-    },
+    transaction::{AuthorizedTransaction, SpendIntent, Transaction},
 };
 use serde_json::Value;
 use wallet::{AccountWallet, account_wallet_from_bip39_mnemonic, encode_bip39_mnemonic};
@@ -297,13 +293,13 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     let b_rpc = free_address();
     let c_p2p = free_address();
     let c_rpc = free_address();
-    mine(&a, 1);
+    mine(&a, 2);
     let mut a_node = start_node(&a, &a_p2p, &a_rpc, &[], None);
-    wait_for_status(&a_rpc, |status| status["tip_height"] == 1);
+    wait_for_status(&a_rpc, |status| status["tip_height"] == 2);
     let b_node = start_node(&b, &b_p2p, &b_rpc, &[&a_p2p], None);
-    wait_for_status(&b_rpc, |status| status["tip_height"] == 1);
+    wait_for_status(&b_rpc, |status| status["tip_height"] == 2);
     let mut c_node = start_node(&c, &c_p2p, &c_rpc, &[&b_p2p], None);
-    wait_for_status(&c_rpc, |status| status["tip_height"] == 1);
+    wait_for_status(&c_rpc, |status| status["tip_height"] == 2);
 
     let sender = sender_wallet();
     let sender_address = address_to_string(&sender.address);
@@ -311,11 +307,14 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     let recipient = address_from_public_key(&recipient_keys.public_key());
     let recipient_address = address_to_string(&recipient);
     let sender_account = account(&a_rpc, &sender_address).unwrap();
-    let input = sender_account["utxos"]
+    let available = sender_account["utxos"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|utxo| !utxo["reserved"].as_bool().unwrap_or(false))
+        .filter(|utxo| !utxo["reserved"].as_bool().unwrap_or(false))
+        .collect::<Vec<_>>();
+    let input = available
+        .first()
         .expect("available miner reward is missing");
     let input_id: XPQ = input["id"].as_str().unwrap().parse().unwrap();
     let input_amount = input["amount"].as_u64().unwrap();
@@ -352,22 +351,16 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
                 payment: None,
             },
         ));
-        let reveal = Transaction::Reveal(Box::new(RevealTransaction::new(transaction.clone())));
-        let required = canonical_bytes(&reveal).unwrap().len() as u64;
+        let required = canonical_bytes(&transaction).unwrap().len() as u64;
         if required == archival_bytes {
             break transaction;
         }
         archival_bytes = required;
     };
-    let chain = kernel::genesis::chain_context().unwrap();
-    let commitment = TransactionCommitment::derive(chain, &transaction).unwrap();
-    let commit = Transaction::Commit(CommitTransaction::new(commitment));
-    let reveal = Transaction::Reveal(Box::new(RevealTransaction::new(transaction)));
-    post_transaction(&a_rpc, &commit);
-    let submitted = post_transaction(&a_rpc, &reveal);
+    let submitted = post_transaction(&a_rpc, &transaction);
     assert_eq!(
         submitted["transaction_id"],
-        hex::encode(reveal.id().unwrap())
+        hex::encode(transaction.id().unwrap())
     );
 
     wait_for_status(&c_rpc, |_| {

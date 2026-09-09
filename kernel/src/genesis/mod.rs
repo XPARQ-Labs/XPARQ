@@ -29,7 +29,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 ]);
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`] changes.
-pub const CHAIN_SPEC_VERSION: u32 = 6;
+pub const CHAIN_SPEC_VERSION: u32 = 1;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -63,6 +63,7 @@ struct ChainSpecIdentity<'a> {
     falcon_512_activation_height: u64,
     signature_profile_activation_height: u64,
     native_asset_program: &'a str,
+    transaction_format: &'a str,
 }
 
 /// Domain-separated identity of every consensus parameter that nodes must agree on.
@@ -98,8 +99,9 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         falcon_512_activation_height: FALCON_512_ACTIVATION_HEIGHT,
         signature_profile_activation_height: SIGNATURE_ACTIVATION_HEIGHT,
         native_asset_program: "xparq-native-asset-program",
+        transaction_format: "direct-authorized-v1",
     };
-    let bytes = crate::common::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
+    let bytes = crypto::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
     Ok(domain_hash(HashDomain::ChainSpec, &bytes))
 }
 #[cfg(feature = "testnet")]
@@ -152,7 +154,7 @@ pub fn create_genesis_ledger() -> Result<Ledger, GenesisError> {
 
 #[derive(Debug)]
 pub enum GenesisError {
-    Encoding(crate::common::CodecError),
+    Encoding(crypto::CodecError),
     HashMismatch,
     Ledger(LedgerError),
 }

@@ -248,7 +248,6 @@ pub enum HashDomain {
     Share,
     Output,
     Emission,
-    XPQEmission,
     Raw,
 }
 
@@ -278,7 +277,7 @@ impl HashDomain {
             HashDomain::Asset => b"XPARQ_ASSET",
             HashDomain::Share => b"XPARQ_ASSET_SHARE",
             HashDomain::Output => b"XPARQ_COIN_OUTPUT",
-            HashDomain::Emission | HashDomain::XPQEmission => b"XPARQ_COIN_EMISSION",
+            HashDomain::Emission => b"XPARQ_COIN_EMISSION",
             HashDomain::Raw => b"XPARQ_HASH_RAW",
         }
     }

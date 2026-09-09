@@ -95,9 +95,7 @@ pub enum AuthorizedTransaction {
 
 impl AuthorizedTransaction {
     pub fn id(&self) -> Result<[u8; HASH_SIZE], TransactionEncodingError> {
-        // Tag 0 separates an authorized payload ID from the outer Commit/Reveal transaction ID.
-        let bytes =
-            canonical_bytes(&(0_u8, self)).map_err(|_| TransactionEncodingError::Encoding)?;
+        let bytes = canonical_bytes(self).map_err(|_| TransactionEncodingError::Encoding)?;
         Ok(domain(HashDomain::Transaction, &bytes).into_bytes())
     }
 

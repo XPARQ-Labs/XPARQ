@@ -24,7 +24,7 @@
       "AssetId": { "name": "asset_id", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/AssetId" } }
     },
     "schemas": {
-      "AssetId": { "type": "string", "pattern": "^asset:[0-9a-f]{64}$" }
+      "AssetId": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
     }
   }
 }

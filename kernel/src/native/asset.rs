@@ -7,9 +7,6 @@ pub const ASSET_NAME_MAX_LEN: usize = 64;
 pub const ASSET_SYMBOL_MAX_LEN: usize = 16;
 pub const ASSET_DECIMALS_MAX: u8 = 18;
 
-pub const ASSET_PREFIX: &str = "asset:";
-pub const SHARE_PREFIX: &str = "share:";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AssetError {
     InvalidAmount,
@@ -230,7 +227,7 @@ impl From<Asset> for Hash {
 
 impl fmt::Display for Asset {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        format(ASSET_PREFIX, &self.0, formatter)
+        format("", &self.0, formatter)
     }
 }
 
@@ -238,7 +235,7 @@ impl FromStr for Asset {
     type Err = HashParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        parse(ASSET_PREFIX, value).map(Self)
+        parse("", value).map(Self)
     }
 }
 
@@ -306,7 +303,7 @@ impl From<Share> for Hash {
 
 impl fmt::Display for Share {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        format(SHARE_PREFIX, &self.0, formatter)
+        format("", &self.0, formatter)
     }
 }
 
@@ -314,7 +311,26 @@ impl FromStr for Share {
     type Err = HashParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        parse(SHARE_PREFIX, value).map(Self)
+        parse("", value).map(Self)
+    }
+}
+
+#[cfg(test)]
+mod identifier_tests {
+    use super::*;
+
+    #[test]
+    fn asset_and_share_text_are_unprefixed_hex() {
+        let encoded = "cd".repeat(HASH_SIZE);
+        let asset = Asset::from_bytes([0xcd; HASH_SIZE]);
+        let share = Share::from_bytes([0xcd; HASH_SIZE]);
+
+        assert_eq!(asset.to_string(), encoded);
+        assert_eq!(share.to_string(), encoded);
+        assert_eq!(encoded.parse::<Asset>(), Ok(asset));
+        assert_eq!(encoded.parse::<Share>(), Ok(share));
+        assert!(format!("asset:{encoded}").parse::<Asset>().is_err());
+        assert!(format!("share:{encoded}").parse::<Share>().is_err());
     }
 }
 

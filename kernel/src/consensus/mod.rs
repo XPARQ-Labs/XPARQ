@@ -2,7 +2,7 @@
 //!
 //! Consensus is intentionally split by responsibility:
 //! - block: canonical block admission/application
-//! - transaction: Commit/Reveal + authorization/value validation
+//! - transaction: direct authorization/value validation
 //! - policy: WBDA, emission, and protocol burn
 //! - pow: Argon2id proof of work
 //! - fork: fork choice and reorganization planning

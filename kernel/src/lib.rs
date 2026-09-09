@@ -2,7 +2,6 @@
 //! Networking, persistence, and wallet key management live in application crates.
 
 pub mod blockchain;
-pub mod common;
 pub mod consensus;
 pub mod genesis;
 pub mod ledger;
@@ -15,7 +14,7 @@ pub mod block {
 }
 pub mod codec {
     pub use crate::blockchain::{block_bytes, block_header_bytes, block_header_hash, decode_block};
-    pub use crate::common::{canonical_bytes, canonical_decode, canonical_deserialize};
+    pub use ::crypto::{canonical_bytes, canonical_decode, canonical_deserialize};
 }
 pub mod crypto {
     pub use ::crypto::*;

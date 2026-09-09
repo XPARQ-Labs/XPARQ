@@ -21,12 +21,11 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use kernel::{
     block::{Block, Emission, Height, Nonce},
     codec::{block_bytes, decode_block},
-    common::{canonical_bytes, canonical_decode},
     consensus::{
         ReorgPlan, Work, apply_block, compare_chain_tips, expected_emission_for_height,
         expected_next_difficulty, new_pow_memory, validate_transaction,
     },
-    crypto::{Address, BlockHash, address_from_string},
+    crypto::{Address, BlockHash, address_from_string, canonical_bytes, canonical_decode},
     genesis::{EXPECTED_GENESIS_HASH, chain_spec_hash, genesis_block},
     ledger::Ledger,
     native::coin::{Output as CoinOutput, Recipient, Zeno},
@@ -157,7 +156,7 @@ struct GossipInventory {
     tip_hash: [u8; 32],
     cumulative_work: [u64; 8],
     cumulative_weight: u64,
-    transaction_ids: Vec<[u8; 32]>,
+    txhash: Vec<[u8; 32]>,
 }
 
 enum PeerSessionOutcome {
@@ -482,8 +481,8 @@ fn submit_transaction(path: Option<&str>, encoded: &str) -> Result<(), String> {
     }
     let transaction: Transaction =
         canonical_decode(&bytes).map_err(|error| format!("invalid transaction: {error}"))?;
-    let transaction_id = insert_mempool_transaction(&database, transaction, false)?;
-    println!("accepted transaction={}", hex::encode(transaction_id));
+    let txhash = insert_mempool_transaction(&database, transaction, false)?;
+    println!("accepted transaction={}", hex::encode(txhash));
     Ok(())
 }
 
@@ -567,7 +566,7 @@ fn account_response(
         .iter()
         .map(|(id, amount)| (*id, *amount, reserved.contains(id)))
         .collect::<Vec<_>>();
-    let utxo_snapshot_bytes = kernel::common::canonical_bytes(&(
+    let utxo_snapshot_bytes = kernel::crypto::canonical_bytes(&(
         address,
         registered_signature_account,
         utxo_snapshot_entries,
@@ -638,29 +637,29 @@ fn account_asset_balances(
     ledger: &Ledger,
     address: Address,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let mut asset_ids = std::collections::BTreeSet::new();
-    for (asset_id, metadata) in ledger.state().assets.metadata_entries() {
+    let mut assets = std::collections::BTreeSet::new();
+    for (asset, metadata) in ledger.state().assets.metadata_entries() {
         if metadata.creator == address || metadata.mint_authority == address {
-            asset_ids.insert(asset_id);
+            assets.insert(asset);
         }
     }
     for (id, utxo) in ledger.state().assets.utxos(&ledger.state().utxos) {
         if ledger.state().share_recipient(id) != Some(address) || utxo.amount.is_zero() {
             continue;
         }
-        asset_ids.insert(utxo.parent);
+        assets.insert(utxo.parent);
     }
-    let mut response = Vec::with_capacity(asset_ids.len());
-    for asset_id in asset_ids {
+    let mut response = Vec::with_capacity(assets.len());
+    for asset in assets {
         let metadata = ledger
             .state()
             .assets
-            .metadata(asset_id)
+            .metadata(asset)
             .ok_or("asset balance references missing metadata")?;
-        let mint = ledger.state().assets.supply(asset_id);
-        let shares = account_asset_shares(ledger, asset_id, address);
+        let mint = ledger.state().assets.supply(asset);
+        let shares = account_asset_shares(ledger, asset, address);
         response.push(serde_json::json!({
-            "asset_id": asset_id.to_string(),
+            "asset": asset.to_string(),
             "name": metadata.name,
             "symbol": metadata.symbol,
             "decimals": metadata.decimals,
@@ -674,7 +673,7 @@ fn account_asset_balances(
 
 fn account_asset_shares(
     ledger: &Ledger,
-    asset_id: kernel::native::asset::Asset,
+    asset: kernel::native::asset::Asset,
     address: Address,
 ) -> Vec<serde_json::Value> {
     ledger
@@ -682,7 +681,7 @@ fn account_asset_shares(
         .assets
         .utxos(&ledger.state().utxos)
         .filter(|(id, share)| {
-            share.parent == asset_id && ledger.state().share_recipient(*id) == Some(address)
+            share.parent == asset && ledger.state().share_recipient(*id) == Some(address)
         })
         .map(|(share_id, share)| {
             serde_json::json!({
@@ -734,7 +733,7 @@ fn explorer_address_response(
                 activities.push(serde_json::json!({
                     "height": block.height().0,
                     "block_hash": block_hash,
-                    "transaction_id": serde_json::Value::Null,
+                    "txhash": serde_json::Value::Null,
                     "type": "emission",
                     "direction": "in",
                     "amount": miner_emission.as_zeno(),
@@ -770,9 +769,7 @@ fn address_transaction_activity(
     address: Address,
     block: &Block,
 ) -> Result<Option<serde_json::Value>, String> {
-    let Some(authorized) = revealed_payload(transaction) else {
-        return Ok(None);
-    };
+    let authorized = transaction;
     let miner = block.miner_address();
     let (sender, outputs, extra_sent) = match authorized {
         AuthorizedTransaction::Spend(tx) => {
@@ -820,7 +817,7 @@ fn address_transaction_activity(
     Ok(Some(serde_json::json!({
         "height": block.height().0,
         "block_hash": hex::encode(block.hash().map_err(|error| error.to_string())?.0),
-        "transaction_id": hex::encode(transaction.id().map_err(|error| error.to_string())?),
+        "txhash": hex::encode(transaction.id().map_err(|error| error.to_string())?),
         "type": transaction_kind(transaction),
         "direction": direction,
         "amount": amount.as_zeno(),
@@ -830,21 +827,32 @@ fn address_transaction_activity(
 
 fn explorer_transaction_response(
     ledger: &Ledger,
-    transaction_id: [u8; 32],
+    txhash: [u8; 32],
 ) -> Result<serde_json::Value, String> {
     let tip_height = ledger.tip_height().map_or(0, |height| height.0);
     for block in ledger.chain.blocks() {
-        for transaction in block.transactions() {
-            if transaction.id().map_err(|error| error.to_string())? == transaction_id {
+        let burns = ledger
+            .transaction_protocol_burns(block.height())
+            .ok_or("transaction execution receipts are missing")?;
+        for (index, transaction) in block.transactions().iter().enumerate() {
+            if transaction.id().map_err(|error| error.to_string())? == txhash {
+                let protocol_burn = burns
+                    .get(index)
+                    .copied()
+                    .ok_or("transaction execution receipt is missing")?;
                 return Ok(serde_json::json!({
-                    "transaction_id": hex::encode(transaction_id),
+                    "txhash": hex::encode(txhash),
                     "type": transaction_kind(transaction),
                     "status": "confirmed",
                     "height": block.height().0,
                     "block_hash": hex::encode(block.hash().map_err(|error| error.to_string())?.0),
                     "confirmations": tip_height.saturating_sub(block.height().0).saturating_add(1),
                     "size_bytes": canonical_bytes(transaction).map_err(|error| error.to_string())?.len(),
-                    "transaction": transaction_response(transaction, block.miner_address()),
+                    "transaction": transaction_response(
+                        transaction,
+                        block.miner_address(),
+                        protocol_burn,
+                    ),
                 }));
             }
         }
@@ -852,16 +860,18 @@ fn explorer_transaction_response(
     Err("transaction was not found in the canonical chain".into())
 }
 
-fn transaction_response(transaction: &Transaction, miner: Address) -> serde_json::Value {
+fn transaction_response(
+    transaction: &Transaction,
+    miner: Address,
+    protocol_burn: Zeno,
+) -> serde_json::Value {
     match transaction {
-        Transaction::Commit(tx) => serde_json::json!({
-            "type": "commit",
-            "commitment": hex::encode(tx.commitment.as_bytes()),
-        }),
-        Transaction::Reveal(tx) => match &tx.transaction {
-            AuthorizedTransaction::Spend(spend) => spend_transaction_response(spend, miner),
-            AuthorizedTransaction::Asset(asset) => asset_transaction_response(asset, miner),
-        },
+        AuthorizedTransaction::Spend(spend) => {
+            spend_transaction_response(spend, miner, protocol_burn)
+        }
+        AuthorizedTransaction::Asset(asset) => {
+            asset_transaction_response(asset, miner, protocol_burn)
+        }
     }
 }
 
@@ -876,26 +886,32 @@ fn coin_burn(_intent: &kernel::transaction::SpendIntent) -> Zeno {
 fn spend_transaction_response(
     transaction: &kernel::transaction::AuthorizedSpendTransaction,
     miner: Address,
+    protocol_burn: Zeno,
 ) -> serde_json::Value {
     match &transaction.spend.intent.spend {
         kernel::transaction::Spend::Coin { inputs, outputs } => serde_json::json!({
             "type": "coin", "signer": kernel::crypto::address_to_string(&transaction.spend.intent.signer),
             "inputs": inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "outputs": public_outputs_response(outputs, miner, Some(transaction.spend.intent.signer)),
-            "burn": null,
+            "miner_fee": miner_fee_from_outputs(outputs).unwrap_or(0),
+            "protocol_burn": protocol_burn.as_zeno(),
         }),
         kernel::transaction::Spend::Asset {
             asset,
             inputs,
             outputs,
         } => serde_json::json!({
-            "type": "asset", "asset_id": asset.to_string(),
+            "type": "asset", "asset": asset.to_string(),
             "signer": kernel::crypto::address_to_string(&transaction.spend.intent.signer),
             "inputs": inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "outputs": outputs.iter().map(|output| serde_json::json!({
                 "owner": asset_owner_response(output.recipient), "amount": output.amount.to_string(),
             })).collect::<Vec<_>>(),
             "payment_outputs": transaction.payment.as_ref().map(|payment| public_outputs_response(coin_outputs(&payment.intent), miner, Some(payment.intent.signer))),
+            "miner_fee": transaction.payment.as_ref()
+                .map(|payment| miner_fee_from_outputs(coin_outputs(&payment.intent)).unwrap_or(0))
+                .unwrap_or(0),
+            "protocol_burn": protocol_burn.as_zeno(),
         }),
     }
 }
@@ -903,6 +919,7 @@ fn spend_transaction_response(
 fn asset_transaction_response(
     transaction: &kernel::transaction::AuthorizedAssetTransaction,
     miner: Address,
+    protocol_burn: Zeno,
 ) -> serde_json::Value {
     let call = &transaction.call.intent;
     let instruction = match &call.instruction {
@@ -929,12 +946,14 @@ fn asset_transaction_response(
         }
     };
     serde_json::json!({
-        "asset_id": call.asset_id().map(|id| id.to_string()).unwrap_or_else(|_| "invalid".into()),
+        "asset": call.asset().map(|id| id.to_string()).unwrap_or_else(|_| "invalid".into()),
         "signer": kernel::crypto::address_to_string(&call.signer),
         "nonce": call.nonce,
         "asset_instruction": instruction,
         "payment_sender": kernel::crypto::address_to_string(&transaction.payment.intent.signer),
         "payment_outputs": public_outputs_response(coin_outputs(&transaction.payment.intent), miner, Some(transaction.payment.intent.signer)),
+        "miner_fee": miner_fee_from_outputs(coin_outputs(&transaction.payment.intent)).unwrap_or(0),
+        "protocol_burn": protocol_burn.as_zeno(),
     })
 }
 
@@ -999,32 +1018,22 @@ fn checked_output_sum(amounts: impl IntoIterator<Item = Zeno>) -> Result<Zeno, S
 
 fn transaction_kind(transaction: &Transaction) -> &'static str {
     match transaction {
-        Transaction::Commit(_) => "commit",
-        Transaction::Reveal(tx) => match &tx.transaction {
-            AuthorizedTransaction::Spend(spend) => match spend.spend.intent.spend {
-                kernel::transaction::Spend::Coin { .. } => "reveal-transfer",
-                kernel::transaction::Spend::Asset { .. } => "reveal-asset-transfer",
-            },
-            AuthorizedTransaction::Asset(_) => "reveal-asset",
+        AuthorizedTransaction::Spend(spend) => match spend.spend.intent.spend {
+            kernel::transaction::Spend::Coin { .. } => "transfer",
+            kernel::transaction::Spend::Asset { .. } => "asset-transfer",
         },
+        AuthorizedTransaction::Asset(_) => "asset",
     }
 }
 
-fn revealed_payload(transaction: &Transaction) -> Option<&AuthorizedTransaction> {
-    match transaction {
-        Transaction::Commit(_) => None,
-        Transaction::Reveal(reveal) => Some(&reveal.transaction),
-    }
-}
-
-fn parse_transaction_id(value: &str) -> Result<[u8; 32], String> {
+fn parse_txhash(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64 || value.contains(['/', '?', '#']) {
-        return Err("transaction ID must be 64 hexadecimal characters".into());
+        return Err("Tx Hash must be 64 hexadecimal characters".into());
     }
-    let bytes = hex::decode(value).map_err(|_| "transaction ID is not valid hexadecimal")?;
+    let bytes = hex::decode(value).map_err(|_| "Tx Hash is not valid hexadecimal")?;
     bytes
         .try_into()
-        .map_err(|_| "transaction ID must be 32 bytes".to_string())
+        .map_err(|_| "Tx Hash must be 32 bytes".to_string())
 }
 
 fn serve_rpc(path: Option<&str>, listen: &str) -> Result<(), String> {
@@ -1063,11 +1072,11 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
     if method == "POST" && route == "/transaction" {
         let transaction: Transaction = canonical_decode(&request.body)
             .map_err(|error| format!("invalid submitted transaction: {error}"))?;
-        let transaction_id = insert_mempool_transaction(database, transaction, false)?;
+        let txhash = insert_mempool_transaction(database, transaction, false)?;
         return write_http_response(
             stream,
             200,
-            &serde_json::json!({"transaction_id": hex::encode(transaction_id)}),
+            &serde_json::json!({"txhash": hex::encode(txhash)}),
         );
     }
     if method != "GET" {
@@ -1121,6 +1130,7 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
                 .parse::<u64>()
                 .map_err(|_| "invalid block height")?;
             block_response(
+                &ledger,
                 ledger
                     .chain
                     .block(&Height(height))
@@ -1182,8 +1192,8 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             )?
         }
         route if route.starts_with("/explorer/transaction/") => {
-            let transaction_id = route.trim_start_matches("/explorer/transaction/");
-            explorer_transaction_response(&ledger, parse_transaction_id(transaction_id)?)?
+            let txhash = route.trim_start_matches("/explorer/transaction/");
+            explorer_transaction_response(&ledger, parse_txhash(txhash)?)?
         }
         _ => return Err("unknown RPC route".into()),
     };
@@ -1219,7 +1229,7 @@ fn asset_nonce_response(
 fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
     let path = route.trim_start_matches("/asset/");
     let parts = path.split('/').collect::<Vec<_>>();
-    let asset_id = parts
+    let asset = parts
         .first()
         .ok_or("missing asset id")?
         .parse::<kernel::native::asset::Asset>()
@@ -1228,11 +1238,11 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
         let metadata = ledger
             .state()
             .assets
-            .metadata(asset_id)
+            .metadata(asset)
             .ok_or("asset was not found")?;
-        let supply = ledger.state().assets.supply(asset_id);
+        let supply = ledger.state().assets.supply(asset);
         return Ok(serde_json::json!({
-            "asset_id": asset_id.to_string(),
+            "asset": asset.to_string(),
             "name": metadata.name,
             "symbol": metadata.symbol,
             "decimals": metadata.decimals,
@@ -1249,7 +1259,7 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
             .assets
             .utxos(&ledger.state().utxos)
             .filter(|(id, share)| {
-                share.parent == asset_id && ledger.state().share_recipient(*id) == Some(address)
+                share.parent == asset && ledger.state().share_recipient(*id) == Some(address)
             })
             .try_fold(kernel::native::asset::Unit::ZERO, |total, (_, share)| {
                 total
@@ -1257,10 +1267,10 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
                     .ok_or("asset balance overflow")
             })?;
         return Ok(serde_json::json!({
-            "asset_id": asset_id.to_string(),
+            "asset": asset.to_string(),
             "address": kernel::crypto::address_to_string(&address),
             "balance": balance.to_string(),
-            "shares": account_asset_shares(ledger, asset_id, address),
+            "shares": account_asset_shares(ledger, asset, address),
         }));
     }
     Err("invalid asset route".into())
@@ -1389,12 +1399,12 @@ fn latest_blocks_response(ledger: &Ledger) -> Result<serde_json::Value, String> 
         .blocks()
         .rev()
         .take(20)
-        .map(block_response)
+        .map(|block| block_response(ledger, block))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(serde_json::json!({ "blocks": blocks }))
 }
 
-fn block_response(block: &Block) -> Result<serde_json::Value, String> {
+fn block_response(ledger: &Ledger, block: &Block) -> Result<serde_json::Value, String> {
     let gross_subsidy = block
         .emission()
         .map_or(Zeno::from_zeno(0), |emission| emission.subsidy);
@@ -1406,25 +1416,33 @@ fn block_response(block: &Block) -> Result<serde_json::Value, String> {
     let miner_emission = gross_subsidy
         .checked_sub(state_burn)
         .ok_or("block emission is below its created-state burn")?;
+    let burns = ledger
+        .transaction_protocol_burns(block.height())
+        .ok_or("transaction execution receipts are missing")?;
     let transaction_details = block
         .transactions()
         .iter()
-        .map(|transaction| {
+        .zip(burns)
+        .map(|(transaction, protocol_burn)| {
             Ok(serde_json::json!({
-                "transaction_id": hex::encode(
+                "txhash": hex::encode(
                     transaction.id().map_err(|error| error.to_string())?
                 ),
                 "type": transaction_kind(transaction),
                 "size_bytes": canonical_bytes(transaction)
                     .map_err(|error| error.to_string())?
                     .len(),
-                "transaction": transaction_response(transaction, block.miner_address()),
+                "transaction": transaction_response(
+                    transaction,
+                    block.miner_address(),
+                    protocol_burn,
+                ),
             }))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let transaction_ids = transaction_details
+    let txhash = transaction_details
         .iter()
-        .filter_map(|transaction| transaction.get("transaction_id").cloned())
+        .filter_map(|transaction| transaction.get("txhash").cloned())
         .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "height": block.height().0,
@@ -1434,7 +1452,7 @@ fn block_response(block: &Block) -> Result<serde_json::Value, String> {
         "block_weight": block.block_weight(),
         "nonce": block.header.nonce.0,
         "transactions": block.transaction_count(),
-        "transaction_ids": transaction_ids,
+        "txhash": txhash,
         "transaction_details": transaction_details,
         "miner": kernel::crypto::address_to_string(&block.miner_address()),
         "subsidy": gross_subsidy.as_zeno(),
@@ -1818,7 +1836,7 @@ fn serve_block_requests(
                 }
                 let requested: [u8; 32] = body
                     .try_into()
-                    .map_err(|_| "invalid requested transaction ID")?;
+                    .map_err(|_| "invalid requested Tx Hash")?;
                 let transaction = read_mempool(database)?
                     .into_iter()
                     .find(|transaction| transaction.id().ok() == Some(requested))
@@ -1896,7 +1914,7 @@ fn gossip_inventory(database: &Path) -> Result<GossipInventory, String> {
     let start = transactions
         .len()
         .saturating_sub(MAX_GOSSIP_INVENTORY_ITEMS);
-    let transaction_ids = transactions[start..]
+    let txhash = transactions[start..]
         .iter()
         .map(|transaction| transaction.id().map_err(|error| error.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1905,7 +1923,7 @@ fn gossip_inventory(database: &Path) -> Result<GossipInventory, String> {
         tip_hash,
         cumulative_work: state.cumulative_work.to_be_limbs(),
         cumulative_weight: state.cumulative_weight,
-        transaction_ids,
+        txhash,
     })
 }
 
@@ -1944,7 +1962,7 @@ fn decode_gossip_inventory(bytes: &[u8]) -> Result<GossipInventory, String> {
     }
     let inventory: GossipInventory =
         canonical_decode(bytes).map_err(|error| format!("decode gossip inventory: {error}"))?;
-    if inventory.transaction_ids.len() > MAX_GOSSIP_INVENTORY_ITEMS {
+    if inventory.txhash.len() > MAX_GOSSIP_INVENTORY_ITEMS {
         return Err("gossip inventory item count exceeds limit".into());
     }
     Ok(inventory)
@@ -2089,19 +2107,19 @@ fn exchange_gossip_transactions(
 ) -> Result<(), String> {
     let local = gossip_inventory(database)?;
     let local_ids = local
-        .transaction_ids
+        .txhash
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
-    for transaction_id in remote
-        .transaction_ids
+    for txhash in remote
+        .txhash
         .iter()
-        .filter(|transaction_id| !local_ids.contains(*transaction_id))
+        .filter(|txhash| !local_ids.contains(*txhash))
         .take(MAX_RELAY_ITEMS_PER_SESSION)
     {
         let mut request = Vec::with_capacity(33);
         request.push(GET_TRANSACTION_MESSAGE);
-        request.extend_from_slice(transaction_id);
+        request.extend_from_slice(txhash);
         write_frame(stream, &request)?;
         let response = read_frame(stream, 1 + MAX_STORED_TRANSACTION_SIZE)?;
         if response.first() != Some(&TRANSACTION_MESSAGE) {
@@ -2109,14 +2127,14 @@ fn exchange_gossip_transactions(
         }
         let transaction: Transaction = canonical_decode(&response[1..])
             .map_err(|error| format!("invalid gossip transaction: {error}"))?;
-        if transaction.id().map_err(|error| error.to_string())? != *transaction_id {
+        if transaction.id().map_err(|error| error.to_string())? != *txhash {
             return Err("gossip transaction body does not match announced ID".into());
         }
         accept_relayed_transaction(database, &response[1..])?;
     }
 
     let remote_ids = remote
-        .transaction_ids
+        .txhash
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
@@ -2125,7 +2143,7 @@ fn exchange_gossip_transactions(
         .filter(|transaction| {
             transaction
                 .id()
-                .is_ok_and(|transaction_id| !remote_ids.contains(&transaction_id))
+                .is_ok_and(|txhash| !remote_ids.contains(&txhash))
         })
         .take(MAX_RELAY_ITEMS_PER_SESSION)
     {
@@ -2248,15 +2266,15 @@ fn insert_mempool_transaction(
     let _mutation = state_mutation_lock()?
         .lock()
         .map_err(|_| "state mutation lock is poisoned")?;
-    let transaction_id = transaction.id().map_err(|error| error.to_string())?;
+    let txhash = transaction.id().map_err(|error| error.to_string())?;
     let ledger = load_or_initialize(database)?;
     let mut transactions = read_mempool(database)?;
     if transactions
         .iter()
-        .any(|existing| existing.id().ok() == Some(transaction_id))
+        .any(|existing| existing.id().ok() == Some(txhash))
     {
         return if duplicate_is_ok {
-            Ok(transaction_id)
+            Ok(txhash)
         } else {
             Err("transaction is already in mempool".into())
         };
@@ -2265,7 +2283,7 @@ fn insert_mempool_transaction(
     validate_mempool(&ledger, &transactions)?;
     write_mempool(database, &transactions)?;
     notify_gossip();
-    Ok(transaction_id)
+    Ok(txhash)
 }
 
 fn accept_relayed_block(database: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -2562,7 +2580,7 @@ fn synchronize_blocks(
         .rev()
         .flat_map(|block| block.transactions().iter().cloned())
         .collect::<Vec<_>>();
-    let disconnected_transaction_ids = disconnected_transactions
+    let disconnected_txhash = disconnected_transactions
         .iter()
         .map(|transaction| transaction.id().map_err(|error| error.to_string()))
         .collect::<Result<BTreeSet<_>, _>>()?;
@@ -2589,7 +2607,7 @@ fn synchronize_blocks(
     let requeued_transactions = mempool
         .iter()
         .filter_map(|transaction| transaction.id().ok())
-        .filter(|transaction_id| disconnected_transaction_ids.contains(transaction_id))
+        .filter(|txhash| disconnected_txhash.contains(txhash))
         .count();
     persist_chain_and_mempool(database, &staged, &mempool)?;
     update_ledger_cache(database, &staged)?;
@@ -2600,7 +2618,7 @@ fn synchronize_blocks(
     if disconnected_blocks > 0 {
         println!(
             "reorg: disconnected_blocks={disconnected_blocks} disconnected_transactions={} requeued_transactions={requeued_transactions}",
-            disconnected_transaction_ids.len(),
+            disconnected_txhash.len(),
         );
     }
     Ok(count)
@@ -2626,10 +2644,10 @@ fn reconcile_mempool(
         if retained.len() >= MAX_MEMPOOL_TRANSACTIONS {
             break;
         }
-        let Ok(transaction_id) = transaction.id() else {
+        let Ok(txhash) = transaction.id() else {
             continue;
         };
-        if included.contains(&transaction_id) || !seen.insert(transaction_id) {
+        if included.contains(&txhash) || !seen.insert(txhash) {
             continue;
         }
         let Ok(encoded) = canonical_bytes(&transaction) else {
@@ -2947,7 +2965,6 @@ fn format_work(limbs: [u64; 8]) -> String {
 fn reserved_coin_inputs(transactions: &[Transaction]) -> BTreeSet<kernel::native::coin::XPQ> {
     transactions
         .iter()
-        .filter_map(revealed_payload)
         .flat_map(|transaction| match transaction {
             AuthorizedTransaction::Spend(transaction) => transaction
                 .payment
@@ -2981,10 +2998,7 @@ fn validate_mempool(ledger: &Ledger, transactions: &[Transaction]) -> Result<(),
         if encoded.len() > kernel::block::MAX_BLOCK_SIZE {
             return Err("transaction cannot fit in a block".into());
         }
-        let required_fee = match transaction {
-            Transaction::Commit(_) => 0,
-            Transaction::Reveal(_) => minimum_relay_fee(encoded.len())?,
-        };
+        let required_fee = minimum_relay_fee(encoded.len())?;
         let paid_fee = transaction_miner_fee(transaction)?;
         if paid_fee < required_fee {
             return Err(format!(
@@ -3009,31 +3023,14 @@ fn minimum_relay_fee(encoded_size: usize) -> Result<u64, String> {
 }
 
 fn meets_minimum_relay_fee(transaction: &Transaction, encoded_size: usize) -> bool {
-    if matches!(transaction, Transaction::Commit(_)) {
-        return true;
-    }
     minimum_relay_fee(encoded_size)
         .and_then(|required| transaction_miner_fee(transaction).map(|paid| paid >= required))
         .unwrap_or(false)
 }
 
 fn transaction_miner_fee(transaction: &Transaction) -> Result<u64, String> {
-    fn fee_from_outputs(outputs: &[CoinOutput]) -> Result<u64, String> {
-        let mut fees = outputs
-            .iter()
-            .filter(|output| output.output == Recipient::BlockMiner);
-        let fee = fees.next().map_or(0, |output| output.amount.as_zeno());
-        if fees.next().is_some() {
-            return Err("transaction has multiple block-miner fee outputs".into());
-        }
-        Ok(fee)
-    }
-
-    let Some(transaction) = revealed_payload(transaction) else {
-        return Ok(0);
-    };
     match transaction {
-        AuthorizedTransaction::Spend(transaction) => fee_from_outputs(coin_outputs(
+        AuthorizedTransaction::Spend(transaction) => miner_fee_from_outputs(coin_outputs(
             &transaction
                 .payment
                 .as_ref()
@@ -3041,9 +3038,20 @@ fn transaction_miner_fee(transaction: &Transaction) -> Result<u64, String> {
                 .intent,
         )),
         AuthorizedTransaction::Asset(transaction) => {
-            fee_from_outputs(coin_outputs(&transaction.payment.intent))
+            miner_fee_from_outputs(coin_outputs(&transaction.payment.intent))
         }
     }
+}
+
+fn miner_fee_from_outputs(outputs: &[CoinOutput]) -> Result<u64, String> {
+    let mut fees = outputs
+        .iter()
+        .filter(|output| output.output == Recipient::BlockMiner);
+    let fee = fees.next().map_or(0, |output| output.amount.as_zeno());
+    if fees.next().is_some() {
+        return Err("transaction has multiple block-miner fee outputs".into());
+    }
+    Ok(fee)
 }
 
 fn read_mempool(path: &Path) -> Result<Vec<Transaction>, String> {
@@ -3439,10 +3447,10 @@ mod tests {
             "/balance/{address}",
             "/account/{address}",
             "/asset/nonce/{address}",
-            "/asset/{asset_id}",
-            "/asset/{asset_id}/balance/{address}",
+            "/asset/{asset}",
+            "/asset/{asset}/balance/{address}",
             "/explorer/address/{address}",
-            "/explorer/transaction/{transaction_id}",
+            "/explorer/transaction/{txhash}",
             "/transaction",
         ] {
             assert!(
@@ -3458,7 +3466,7 @@ mod tests {
     }
 
     #[test]
-    fn asset_transaction_projection_exposes_asset_id_and_action() {
+    fn asset_transaction_projection_exposes_asset_and_action() {
         let chain = kernel::genesis::chain_context().unwrap();
         let seed = kernel::crypto::SigningSeed::new(kernel::crypto::Signature::MlDsa44, [0x51; 32]);
         let public_key = seed.public_key();
@@ -3478,7 +3486,7 @@ mod tests {
             0,
         );
         let signature = seed.sign(&asset_call.commitment(chain.genesis_hash).unwrap());
-        let asset_id = asset_call.asset_id().unwrap().to_string();
+        let asset = asset_call.asset().unwrap().to_string();
         let transaction = kernel::transaction::AuthorizedAssetTransaction {
             call: kernel::transaction::AuthorizedAccountIntent {
                 intent: asset_call,
@@ -3504,13 +3512,25 @@ mod tests {
                 },
             },
         };
-        let response = asset_transaction_response(&transaction, Address::ZERO);
-        assert_eq!(response["asset_id"], asset_id);
+        let response =
+            asset_transaction_response(&transaction, Address::ZERO, Zeno::from_zeno(4_782));
+        assert_eq!(response["asset"], asset);
         assert_eq!(response["asset_instruction"]["type"], "register");
+        assert_eq!(response["miner_fee"], 0);
+        assert_eq!(response["protocol_burn"], 4_782);
         assert_eq!(
             response["asset_instruction"]["max_supply"],
             "100000000000000000000000"
         );
+    }
+
+    #[test]
+    fn explorer_miner_fee_uses_block_miner_output() {
+        let outputs = vec![CoinOutput {
+            output: Recipient::BlockMiner,
+            amount: Zeno::from_zeno(2_284),
+        }];
+        assert_eq!(miner_fee_from_outputs(&outputs).unwrap(), 2_284);
     }
 
     #[test]
@@ -3545,10 +3565,8 @@ mod tests {
         assert_eq!(assets[0]["shares"].as_array().unwrap().len(), 1);
         assert_eq!(assets[0]["shares"][0]["amount"], "4");
         assert!(
-            assets[0]["shares"][0]["share_id"]
-                .as_str()
-                .unwrap()
-                .starts_with("share:")
+            assets[0]["shares"][0]["share_id"].as_str().unwrap().len()
+                == kernel::crypto::HASH_SIZE * 2
         );
     }
 
@@ -3588,9 +3606,6 @@ mod tests {
                 payment: None,
             },
         ));
-        let transaction = Transaction::Reveal(Box::new(
-            kernel::transaction::RevealTransaction::new(transaction),
-        ));
         let genesis = genesis_block().unwrap();
         let block = Block::from_protocol_transactions(
             Height(1),
@@ -3622,7 +3637,7 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            parse_transaction_id(&hex::encode(transaction.id().unwrap())).unwrap(),
+            parse_txhash(&hex::encode(transaction.id().unwrap())).unwrap(),
             transaction.id().unwrap()
         );
     }
@@ -3725,7 +3740,7 @@ mod tests {
             tip_hash: [3; 32],
             cumulative_work: Work::pow2(7).to_be_limbs(),
             cumulative_weight: 123,
-            transaction_ids: vec![[4; 32], [5; 32]],
+            txhash: vec![[4; 32], [5; 32]],
         };
         let encoded = canonical_bytes(&inventory).unwrap();
         let decoded = decode_gossip_inventory(&encoded).unwrap();
@@ -3733,7 +3748,7 @@ mod tests {
         assert_eq!(decoded.tip_hash, inventory.tip_hash);
         assert_eq!(decoded.cumulative_work, inventory.cumulative_work);
         assert_eq!(decoded.cumulative_weight, inventory.cumulative_weight);
-        assert_eq!(decoded.transaction_ids, inventory.transaction_ids);
+        assert_eq!(decoded.txhash, inventory.txhash);
 
         let mut oversized = encoded;
         oversized[112..116]
@@ -3752,7 +3767,7 @@ mod tests {
             tip_hash,
             cumulative_work: Work::from_be_limbs(work).to_be_limbs(),
             cumulative_weight: weight,
-            transaction_ids: Vec::new(),
+            txhash: Vec::new(),
         };
         let weaker = inventory([0, 0, 0, 0, 0, 0, 0, 7], 999, [1; 32]);
         let stronger = inventory([0, 0, 0, 0, 0, 0, 0, 8], 1, [9; 32]);

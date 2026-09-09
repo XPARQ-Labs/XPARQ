@@ -2,7 +2,7 @@
 //!
 //! This module owns block encoding, block-local structural validation, Merkle
 //! commitments, and the canonical linear chain container. State-dependent
-//! Commit/Reveal validation belongs to `consensus` + `ledger`.
+//! Direct transaction validation belongs to `consensus` + `ledger`.
 
 pub mod block;
 pub mod chain;

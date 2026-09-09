@@ -15,7 +15,7 @@ use crypto::{
 // WBDA
 // -----------------------------------------------------------------------------
 
-pub const WBDA_WINDOW: usize = 10_000;
+pub const WBDA_WINDOW: usize = 50_000;
 pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 1 * 1024 * 1024;
 pub const WBDA_LOW_UTILIZATION_PPM: u64 = 400_000;
 pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 600_000;
@@ -262,7 +262,7 @@ pub(crate) fn authorize_emission(
     ))
     .map_err(|_| EmissionError::Serialization)?;
 
-    let origin = domain(HashDomain::XPQEmission, &bytes);
+    let origin = domain(HashDomain::Emission, &bytes);
 
     Ok(ValidatedEmission {
         recipient: emission.to,

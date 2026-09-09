@@ -32,7 +32,7 @@ Signed transactions are submitted automatically to `/transaction`. Use
 ```
 
 Without explicit inputs, the wallet selects available `/account/{address}`
-UTXOs and creates change. Consolidation spends all available XPQ UTXOs into one
+UTXOs and creates change. Consolidation merges the selected XPQ UTXOs into one
 self-owned output. Consensus validates it as an ordinary transaction, so its
 canonical bytes still incur archival burn and a miner fee.
 
@@ -47,8 +47,8 @@ and output use the human denomination declared by `decimals`; for example,
 `1.25` with `decimals=8` becomes `125000000 Unit`. The wallet summary shows
 `max_supply` and total `mint`; ownership remains represented by the listed
 shares instead of a duplicate asset-level balance. Registration derives a canonical
-`asset:` identifier and atomically credits a nonzero initial mint to an
-`AssetShare` owned by the creator. Each share has a `share:` identifier, retains
+asset identifier and atomically credits a nonzero initial mint to an
+`AssetShare` owned by the creator. Each share has a hexadecimal identifier, retains
 its parent `AssetHash`, and is owned by an address.
 
 ```bash

@@ -5,14 +5,14 @@ use std::{
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{
-    Address, BlockHash, HASH_SIZE, Hash, HashDomain, MerkleHash, PreviousHash, StateRoot,
+    Address, BlockHash, Hash, HashDomain, MerkleHash, PreviousHash, StateRoot,
     canonical_bytes, domain,
 };
 
 use crate::native::coin::Zeno;
 use crate::transaction::Transaction;
 
-pub use crate::common::{BlockHeight, BlockNonce, Height, Nonce};
+pub use crypto::{BlockHeight, BlockNonce, Height, Nonce};
 
 use crate::blockchain::error::{BlockError, CodecError};
 use crate::blockchain::merkle::{MerkleInclusionProof, merkle_root};
@@ -20,8 +20,9 @@ use crate::blockchain::merkle::{MerkleInclusionProof, merkle_root};
 pub const MAX_BLOCK_SIZE: usize = 2 * 1024 * 1024;
 pub const GENESIS_BLOCK_DIFFICULTY: u32 = 1;
 
-// The smallest canonical outer transaction is a Commit enum tag plus one hash.
-const MIN_TRANSACTION_BYTES: usize = 1 + HASH_SIZE;
+// Lower bound for a direct coin transaction with one input, one block-miner
+// output, and an empty known-account signature byte vector.
+const MIN_TRANSACTION_BYTES: usize = 79;
 const MAX_BLOCK_TRANSACTIONS: usize = MAX_BLOCK_SIZE / MIN_TRANSACTION_BYTES;
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -188,8 +189,8 @@ impl Block {
     }
 
     /// Validates only deterministic rules that depend on the block itself.
-    /// Commit existence, Reveal matching, signatures, values, state burn, and
-    /// state root execution remain consensus/ledger responsibilities.
+    /// Signatures, values, state burn, and state root execution remain
+    /// consensus/ledger responsibilities.
     pub fn validate_structure(&self) -> Result<(), BlockError> {
         if self.is_genesis() {
             if self.body.emission.is_some() {
@@ -385,10 +386,9 @@ fn has_duplicate_transactions(transactions: &[Transaction]) -> Result<bool, Code
 }
 
 fn transactions_are_structurally_valid(transactions: &[Transaction]) -> bool {
-    transactions.iter().all(|transaction| match transaction {
-        Transaction::Commit(_) => true,
-        Transaction::Reveal(reveal) => reveal.validate_structure().is_ok(),
-    })
+    transactions
+        .iter()
+        .all(|transaction| transaction.validate_structure().is_ok())
 }
 
 pub fn block_header_bytes(header: &Header) -> Result<Vec<u8>, CodecError> {

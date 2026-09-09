@@ -51,6 +51,25 @@ impl Ledger {
         self.state.application_state_root()
     }
 
+    pub fn transaction_protocol_burns(
+        &self,
+        height: Height,
+    ) -> Option<Vec<crate::native::coin::Zeno>> {
+        let block = self.chain.block(&height)?;
+        let journals = self.journals.get(&height)?;
+        let offset = usize::from(block.emission().is_some());
+        let transaction_journals = journals.get(offset..)?;
+        if transaction_journals.len() != block.transactions().len() {
+            return None;
+        }
+        Some(
+            transaction_journals
+                .iter()
+                .map(StateRollbackJournal::protocol_burn)
+                .collect(),
+        )
+    }
+
     pub fn preview_block_state_root(&self, block: &Block) -> Result<StateRoot, LedgerError> {
         self.preview_block_commitments(block).map(|(root, _)| root)
     }
@@ -284,10 +303,6 @@ impl TransactionStateView for LedgerState {
         self.assets.share_recipients.get(&id).copied()
     }
 
-    fn pending_commitment(&self, commitment: crate::transaction::TransactionCommitment) -> bool {
-        self.pending_commitments.contains(&commitment)
-    }
-
     fn account_public_key(&self, address: Address) -> Option<PublicKey> {
         self.account_keys.get_account(&address).cloned()
     }
@@ -331,7 +346,6 @@ impl LedgerState {
             && self.assets.is_empty()
             && self.utxos.is_empty()
             && self.total_burned.is_zero()
-            && self.pending_commitments.is_empty()
             && self.coin_recipients.is_empty()
         {
             return Ok(StateRoot::ZERO);
@@ -342,7 +356,6 @@ impl LedgerState {
             &self.utxos,
             &self.assets,
             self.total_burned,
-            &self.pending_commitments,
             &self.coin_recipients,
         ))?;
 
@@ -455,8 +468,8 @@ impl From<ChainError> for LedgerError {
     }
 }
 
-impl From<crate::common::CodecError> for LedgerError {
-    fn from(_error: crate::common::CodecError) -> Self {
+impl From<crypto::CodecError> for LedgerError {
+    fn from(_error: crypto::CodecError) -> Self {
         Self::Consensus(ConsensusError::Serialization)
     }
 }

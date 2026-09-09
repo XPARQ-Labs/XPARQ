@@ -1,4 +1,4 @@
-pub use crate::common::CodecError;
+pub use crypto::CodecError;
 
 use std::{error::Error as StdError, fmt};
 

@@ -30,38 +30,11 @@ impl LedgerState {
     pub fn apply_validated_transaction(
         &mut self,
         transaction: &ValidatedTransaction,
-        _height: crate::common::Height,
+        _height: crypto::Height,
         block_miner: Address,
         chain: crate::transaction::ChainContext,
     ) -> Result<StateRollbackJournal, StateError> {
-        match transaction {
-            ValidatedTransaction::Commit(commit) => {
-                if !self.pending_commitments.insert(commit.commitment) {
-                    return Err(StateError::InvalidTransaction);
-                }
-                Ok(StateRollbackJournal::Commit(commit.commitment))
-            }
-            ValidatedTransaction::Reveal(reveal) => {
-                if !self.pending_commitments.remove(&reveal.commitment) {
-                    return Err(StateError::InvalidTransaction);
-                }
-
-                match self.apply_validated_authorized_transaction(
-                    &reveal.transaction,
-                    chain,
-                    block_miner,
-                ) {
-                    Ok(journal) => Ok(StateRollbackJournal::Reveal {
-                        commitment: reveal.commitment,
-                        transaction: Box::new(journal),
-                    }),
-                    Err(error) => {
-                        self.pending_commitments.insert(reveal.commitment);
-                        Err(error)
-                    }
-                }
-            }
-        }
+        self.apply_validated_authorized_transaction(transaction, chain, block_miner)
     }
 
     fn apply_validated_authorized_transaction(
@@ -78,7 +51,7 @@ impl LedgerState {
                 let mut payment_journal =
                     self.apply_validated_onchain_spend(payment, block_miner)?;
 
-                let (asset_id, inputs, outputs) = transaction
+                let (asset, inputs, outputs) = transaction
                     .spend
                     .intent()
                     .asset_parts()
@@ -87,7 +60,7 @@ impl LedgerState {
                 let asset_journal = match self.assets.apply_user_transfer(
                     &mut self.utxos,
                     transaction.spend.intent().signer,
-                    asset_id,
+                    asset,
                     inputs,
                     outputs,
                     transaction.spend.commitment().into_bytes(),
@@ -336,17 +309,17 @@ impl AssetState {
                     *mint_authority,
                 )?;
 
-                let asset_id = Asset::derive(&metadata)?;
+                let asset = Asset::derive(&metadata)?;
 
-                let share_id = Share::derive(asset_id, commitment, 0);
+                let share_id = Share::derive(asset, commitment, 0);
 
                 journal
                     .metadata
-                    .push((asset_id, self.metadata.get(&asset_id).cloned()));
+                    .push((asset, self.metadata.get(&asset).cloned()));
 
                 journal
                     .supplies
-                    .push((asset_id, self.supplies.get(&asset_id).copied()));
+                    .push((asset, self.supplies.get(&asset).copied()));
 
                 journal
                     .utxos
@@ -355,15 +328,15 @@ impl AssetState {
                     .recipients
                     .push((share_id, self.share_recipients.get(&share_id).copied()));
 
-                self.metadata.insert(asset_id, metadata);
+                self.metadata.insert(asset, metadata);
 
-                self.supplies.insert(asset_id, *initial_mint);
+                self.supplies.insert(asset, *initial_mint);
 
                 utxos
                     .insert_asset(
                         share_id,
                         AssetShare {
-                            parent: asset_id,
+                            parent: asset,
                             amount: *initial_mint,
                         },
                     )
@@ -375,20 +348,20 @@ impl AssetState {
             // Mint new share.
             //
             AssetInstruction::Mint {
-                asset_id,
+                asset,
                 recipient,
                 amount,
             } => {
-                let share_id = Share::derive(*asset_id, commitment, 0);
+                let share_id = Share::derive(*asset, commitment, 0);
 
                 let supply = self
-                    .supply(*asset_id)
+                    .supply(*asset)
                     .checked_add(*amount)
                     .ok_or(AssetError::SupplyOverflow)?;
 
                 journal
                     .supplies
-                    .push((*asset_id, self.supplies.get(asset_id).copied()));
+                    .push((*asset, self.supplies.get(asset).copied()));
 
                 journal
                     .utxos
@@ -397,7 +370,7 @@ impl AssetState {
                     .recipients
                     .push((share_id, self.share_recipients.get(&share_id).copied()));
 
-                self.supplies.insert(*asset_id, supply);
+                self.supplies.insert(*asset, supply);
 
                 //
                 // Recipient remains inside the transaction
@@ -407,7 +380,7 @@ impl AssetState {
                     .insert_asset(
                         share_id,
                         AssetShare {
-                            parent: *asset_id,
+                            parent: *asset,
                             amount: *amount,
                         },
                     )
@@ -418,17 +391,17 @@ impl AssetState {
             //
             // Burn existing shares.
             //
-            AssetInstruction::Burn { asset_id, inputs } => {
-                let total = self.validate_inputs(utxos, *asset_id, inputs)?;
+            AssetInstruction::Burn { asset, inputs } => {
+                let total = self.validate_inputs(utxos, *asset, inputs)?;
 
                 let supply = self
-                    .supply(*asset_id)
+                    .supply(*asset)
                     .checked_sub(total)
                     .ok_or(AssetError::SupplyOverflow)?;
 
                 journal
                     .supplies
-                    .push((*asset_id, self.supplies.get(asset_id).copied()));
+                    .push((*asset, self.supplies.get(asset).copied()));
 
                 for input in inputs {
                     journal.utxos.push((*input, utxos.asset(input).copied()));
@@ -441,7 +414,7 @@ impl AssetState {
                         .map_err(|_| AssetError::UnknownObject)?;
                 }
 
-                self.supplies.insert(*asset_id, supply);
+                self.supplies.insert(*asset, supply);
             }
         }
 
@@ -459,14 +432,14 @@ impl AssetState {
         &mut self,
         utxos: &mut utxo::UtxoSet,
         _signer: Address,
-        asset_id: Asset,
+        asset: Asset,
         inputs: &[Share],
         outputs: &[AssetOutput],
         commitment: [u8; HASH_SIZE],
     ) -> Result<AssetRollbackJournal, AssetError> {
-        self.metadata(asset_id).ok_or(AssetError::UnknownAsset)?;
+        self.metadata(asset).ok_or(AssetError::UnknownAsset)?;
 
-        let input_total = self.validate_inputs(utxos, asset_id, inputs)?;
+        let input_total = self.validate_inputs(utxos, asset, inputs)?;
 
         let output_total = outputs_total(outputs)?;
 
@@ -480,7 +453,7 @@ impl AssetState {
         for index in 0..outputs.len() {
             let index = u32::try_from(index).map_err(|_| AssetError::InvalidProgram)?;
 
-            let id = Share::derive(asset_id, commitment, index);
+            let id = Share::derive(asset, commitment, index);
 
             if utxos.asset(&id).is_some() {
                 return Err(AssetError::ShareAlreadyExists);
@@ -509,7 +482,7 @@ impl AssetState {
         for (index, output) in outputs.iter().enumerate() {
             let index = u32::try_from(index).map_err(|_| AssetError::InvalidProgram)?;
 
-            let id = Share::derive(asset_id, commitment, index);
+            let id = Share::derive(asset, commitment, index);
 
             journal.utxos.push((id, utxos.asset(&id).copied()));
             journal
@@ -523,7 +496,7 @@ impl AssetState {
                 .insert_asset(
                     id,
                     AssetShare {
-                        parent: asset_id,
+                        parent: asset,
                         amount: output.amount,
                     },
                 )
@@ -579,24 +552,24 @@ impl AssetState {
             }
 
             AssetInstruction::Mint {
-                asset_id, amount, ..
+                asset, amount, ..
             } => {
-                let metadata = self.metadata(*asset_id).ok_or(AssetError::UnknownAsset)?;
+                let metadata = self.metadata(*asset).ok_or(AssetError::UnknownAsset)?;
 
                 if metadata.mint_authority != call.signer {
                     return Err(AssetError::Unauthorized);
                 }
 
-                self.supply(*asset_id)
+                self.supply(*asset)
                     .checked_add(*amount)
                     .filter(|supply| *supply <= metadata.max_supply)
                     .ok_or(AssetError::SupplyOverflow)?;
             }
 
-            AssetInstruction::Burn { asset_id, inputs } => {
-                self.metadata(*asset_id).ok_or(AssetError::UnknownAsset)?;
+            AssetInstruction::Burn { asset, inputs } => {
+                self.metadata(*asset).ok_or(AssetError::UnknownAsset)?;
 
-                self.validate_inputs(utxos, *asset_id, inputs)?;
+                self.validate_inputs(utxos, *asset, inputs)?;
             }
         }
 
@@ -606,7 +579,7 @@ impl AssetState {
     fn validate_inputs(
         &self,
         utxos: &utxo::UtxoSet,
-        asset_id: Asset,
+        asset: Asset,
         inputs: &[Share],
     ) -> Result<Unit, AssetError> {
         if inputs.is_empty() {
@@ -620,7 +593,7 @@ impl AssetState {
         for input in inputs {
             let share = self.utxo(utxos, *input).ok_or(AssetError::UnknownObject)?;
 
-            if share.parent != asset_id {
+            if share.parent != asset {
                 return Err(AssetError::AssetMismatch);
             }
 
@@ -642,13 +615,13 @@ impl AssetState {
         &self,
         utxos: &utxo::UtxoSet,
         _signer: Address,
-        asset_id: Asset,
+        asset: Asset,
         inputs: &[Share],
         outputs: &[AssetOutput],
     ) -> Result<u64, AssetError> {
-        self.metadata(asset_id).ok_or(AssetError::UnknownAsset)?;
+        self.metadata(asset).ok_or(AssetError::UnknownAsset)?;
 
-        let input_total = self.validate_inputs(utxos, asset_id, inputs)?;
+        let input_total = self.validate_inputs(utxos, asset, inputs)?;
 
         if input_total != outputs_total(outputs)? {
             return Err(AssetError::InvalidAmount);
@@ -659,7 +632,7 @@ impl AssetState {
                 weight,
                 HASH_SIZE,
                 &AssetShare {
-                    parent: asset_id,
+                    parent: asset,
                     amount: output.amount,
                 },
             )
@@ -677,24 +650,6 @@ impl LedgerState {
         journal: StateRollbackJournal,
     ) -> Result<(), StateError> {
         match journal {
-            StateRollbackJournal::Commit(commitment) => {
-                if !self.pending_commitments.remove(&commitment) {
-                    return Err(StateError::InvalidTransaction);
-                }
-                Ok(())
-            }
-
-            StateRollbackJournal::Reveal {
-                commitment,
-                transaction,
-            } => {
-                self.rollback_state(*transaction)?;
-                if !self.pending_commitments.insert(commitment) {
-                    return Err(StateError::InvalidTransaction);
-                }
-                Ok(())
-            }
-
             StateRollbackJournal::Spend(journal) => self.rollback_spend(journal),
 
             StateRollbackJournal::AssetWithPayment { asset, payment }

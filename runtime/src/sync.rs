@@ -1,7 +1,7 @@
 use std::{error::Error, fmt};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use kernel::{common::canonical_decode, consensus::HeaderAtHeight};
+use kernel::{consensus::HeaderAtHeight, crypto::canonical_decode};
 
 /// Keep verified-header batches small enough that Argon2id validation finishes
 /// before the peer session read timeout and naturally provides regular

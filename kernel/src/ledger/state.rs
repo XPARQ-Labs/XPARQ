@@ -3,10 +3,9 @@
 use super::{account, utxo};
 use crate::native::asset::{Asset, AssetMetadata, AssetShare, Share, Unit};
 use crate::native::coin::{XPQ, Zeno};
-use crate::transaction::TransactionCommitment;
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::Address;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct LedgerState {
@@ -14,7 +13,6 @@ pub struct LedgerState {
     pub utxos: utxo::UtxoSet,
     pub assets: AssetState,
     pub total_burned: Zeno,
-    pub(crate) pending_commitments: BTreeSet<TransactionCommitment>,
     pub(crate) coin_recipients: BTreeMap<XPQ, Address>,
 }
 
@@ -90,11 +88,6 @@ pub struct AssetRollbackJournal {
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq)]
 pub enum StateRollbackJournal {
-    Commit(TransactionCommitment),
-    Reveal {
-        commitment: TransactionCommitment,
-        transaction: Box<StateRollbackJournal>,
-    },
     Spend(SpendRollbackJournal),
     AssetWithPayment {
         asset: AssetRollbackJournal,
@@ -104,4 +97,14 @@ pub enum StateRollbackJournal {
         asset: AssetRollbackJournal,
         payment: SpendRollbackJournal,
     },
+}
+
+impl StateRollbackJournal {
+    pub const fn protocol_burn(&self) -> Zeno {
+        match self {
+            Self::Spend(journal) => journal.burned,
+            Self::AssetWithPayment { payment, .. }
+            | Self::AssetSpendWithPayment { payment, .. } => payment.burned,
+        }
+    }
 }

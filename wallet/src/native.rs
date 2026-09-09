@@ -15,7 +15,7 @@ use kernel::{
     crypto::{Address, Signature, address_from_string},
     transaction::{
         AuthorizedAssetTransaction, AuthorizedSpendTransaction, AuthorizedTransaction,
-        CommitTransaction, RevealTransaction, SpendIntent, Transaction, TransactionCommitment,
+        SpendIntent,
     },
 };
 use serde::Deserialize;
@@ -87,7 +87,7 @@ struct NodeBurnResponse {
 
 #[derive(Deserialize)]
 struct AccountAssetBalance {
-    asset_id: String,
+    asset: String,
     name: String,
     symbol: String,
     decimals: u8,
@@ -129,7 +129,7 @@ struct AddressHistoryResponse {
 struct AddressActivity {
     height: u64,
     block_hash: String,
-    transaction_id: Option<String>,
+    txhash: Option<String>,
     #[serde(rename = "type")]
     activity_type: String,
     direction: String,
@@ -147,7 +147,7 @@ fn utxo_status(utxo: &AccountUtxo) -> &'static str {
 
 #[derive(Deserialize)]
 struct SubmitTransactionResponse {
-    transaction_id: String,
+    txhash: String,
 }
 
 #[derive(Deserialize)]
@@ -203,7 +203,7 @@ fn asset_register(args: &[String]) -> Result<(), String> {
     } else {
         authority
     };
-    let asset_id = Asset::derive(
+    let asset = Asset::derive(
         &kernel::native::asset::AssetMetadata::new(
             name.clone(),
             symbol.clone(),
@@ -226,7 +226,7 @@ fn asset_register(args: &[String]) -> Result<(), String> {
             mint_authority,
         },
     )?;
-    println!("asset_id: {asset_id}");
+    println!("asset: {asset}");
     Ok(())
 }
 
@@ -239,7 +239,7 @@ fn normalize_asset_name(name: &str) -> Result<String, String> {
             .all(|byte| byte == b' ' || byte.is_ascii_graphic())
     {
         return Err(format!(
-            "invalid token name; use 1-{} printable ASCII characters",
+            "invalid asset name; use 1-{} printable ASCII characters",
             kernel::native::asset::ASSET_NAME_MAX_LEN
         ));
     }
@@ -255,7 +255,7 @@ fn normalize_asset_symbol(symbol: &str) -> Result<String, String> {
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
     {
         return Err(format!(
-            "invalid token symbol; use 1-{} ASCII letters A-Z or digits",
+            "invalid asset symbol; use 1-{} ASCII letters A-Z or digits",
             kernel::native::asset::ASSET_SYMBOL_MAX_LEN
         ));
     }
@@ -263,12 +263,12 @@ fn normalize_asset_symbol(symbol: &str) -> Result<String, String> {
 }
 
 fn asset_mint(args: &[String]) -> Result<(), String> {
-    let asset_id = parse_asset_id(args)?;
-    let decimals = asset_decimals(args, asset_id)?;
+    let asset = parse_asset(args)?;
+    let decimals = asset_decimals(args, asset)?;
     submit_asset_instruction(
         args,
         AssetInstruction::Mint {
-            asset_id,
+            asset,
             recipient: asset_recipient(args)?,
             amount: parse_asset_amount(args, "--amount", decimals)?,
         },
@@ -278,13 +278,13 @@ fn asset_mint(args: &[String]) -> Result<(), String> {
 fn asset_burn(args: &[String]) -> Result<(), String> {
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    let asset_id = parse_asset_id(args)?;
-    let amount = parse_asset_amount(args, "--amount", asset_decimals(args, asset_id)?)?;
-    let (inputs, total) = select_asset_inputs(rpc, wallet.address(), asset_id, amount.as_units())?;
+    let asset = parse_asset(args)?;
+    let amount = parse_asset_amount(args, "--amount", asset_decimals(args, asset)?)?;
+    let (inputs, total) = select_asset_inputs(rpc, wallet.address(), asset, amount.as_units())?;
     if total != amount.as_units() {
         return Err("asset burn amount must exactly match selectable shares; transfer first to split a share".into());
     }
-    submit_asset_instruction(args, AssetInstruction::Burn { asset_id, inputs })
+    submit_asset_instruction(args, AssetInstruction::Burn { asset, inputs })
 }
 
 fn asset_transfer(args: &[String]) -> Result<(), String> {
@@ -300,7 +300,7 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
     reject_manual_fee(args)?;
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    let asset = parse_asset_id(args)?;
+    let asset = parse_asset(args)?;
     let amount = parse_asset_amount(args, "--amount", asset_decimals(args, asset)?)?;
     let (inputs, total) = select_asset_inputs(rpc, wallet.address(), asset, amount.as_units())?;
     let mut outputs = vec![kernel::native::asset::Output { recipient, amount }];
@@ -367,7 +367,7 @@ fn select_asset_inputs(
     let entry = balance
         .assets
         .into_iter()
-        .find(|entry| entry.asset_id == asset.to_string())
+        .find(|entry| entry.asset == asset.to_string())
         .ok_or("wallet has no shares for this asset")?;
     let mut inputs = Vec::new();
     let mut total = 0_u128;
@@ -399,7 +399,7 @@ fn select_asset_inputs(
 fn asset_info(args: &[String]) -> Result<(), String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let response: serde_json::Value =
-        http_get_json(rpc, &format!("/asset/{}", parse_asset_id(args)?))?;
+        http_get_json(rpc, &format!("/asset/{}", parse_asset(args)?))?;
     println!(
         "{}",
         serde_json::to_string_pretty(&response).map_err(|error| error.to_string())?
@@ -417,7 +417,7 @@ fn asset_balance(args: &[String]) -> Result<(), String> {
         rpc,
         &format!(
             "/asset/{}/balance/{}",
-            parse_asset_id(args)?,
+            parse_asset(args)?,
             kernel::crypto::address_to_string(&address)
         ),
     )?;
@@ -469,16 +469,16 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
     submit_or_print_transaction(args, &transaction)
 }
 
-fn parse_asset_id(args: &[String]) -> Result<Asset, String> {
+fn parse_asset(args: &[String]) -> Result<Asset, String> {
     option(args, "--asset")
         .ok_or_else(|| "missing --asset".to_string())?
         .parse::<Asset>()
         .map_err(|_| "invalid --asset id".to_string())
 }
 
-fn asset_decimals(args: &[String], asset_id: Asset) -> Result<u8, String> {
+fn asset_decimals(args: &[String], asset: Asset) -> Result<u8, String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    Ok(http_get_json::<AssetMetadataResponse>(rpc, &format!("/asset/{asset_id}"))?.decimals)
+    Ok(http_get_json::<AssetMetadataResponse>(rpc, &format!("/asset/{asset}"))?.decimals)
 }
 
 fn parse_asset_amount(
@@ -601,23 +601,23 @@ fn interactive_menu() -> Result<(), String> {
 
 fn interactive_assets() -> Result<(), String> {
     println!();
-    println!("kernel Assets");
-    println!("1. Create asset");
-    println!("2. Mint asset");
-    println!("3. Transfer asset");
-    println!("4. Burn asset");
-    println!("5. Asset info");
-    println!("6. Asset balance");
+    println!("XPARQ Assets");
+    println!("1. Create");
+    println!("2. Mint");
+    println!("3. Transfer");
+    println!("4. Burn");
+    println!("5. Info");
+    println!("6. Balance");
     println!("7. Back");
 
     match prompt("Select")?.as_str() {
         "1" => {
             let wallet_rpc_args = interactive_asset_wallet_rpc()?;
-            let name = prompt("Token name")?;
-            let symbol = prompt("Token symbol")?;
+            let name = prompt("Asset Name")?;
+            let symbol = prompt("Asset Symbol")?;
             let decimals = prompt_default("Decimals", "0")?;
-            let max_supply = prompt("Maximum supply")?;
-            let mint_amount = prompt("Initial mint")?;
+            let max_supply = prompt("Maximum Supply")?;
+            let mint_amount = prompt("Initial Mint")?;
 
             let mut register_args = wallet_rpc_args.clone();
             register_args.extend(["--name".into(), name]);
@@ -629,28 +629,28 @@ fn interactive_assets() -> Result<(), String> {
         }
         "2" => {
             let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--asset".into(), prompt("Asset ID")?]);
+            args.extend(["--asset".into(), prompt("Asset Hash")?]);
             args.extend(interactive_asset_recipient()?);
             args.extend(["--amount".into(), prompt("Asset amount")?]);
             asset_mint(&args)
         }
         "3" => {
             let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--asset".into(), prompt("Asset ID")?]);
+            args.extend(["--asset".into(), prompt("Asset Hash")?]);
             args.extend(interactive_asset_recipient()?);
             args.extend(["--amount".into(), prompt("Asset amount")?]);
             asset_transfer(&args)
         }
         "4" => {
             let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--asset".into(), prompt("Asset ID")?]);
+            args.extend(["--asset".into(), prompt("Asset Hash")?]);
             args.extend(["--amount".into(), prompt("Asset amount")?]);
             asset_burn(&args)
         }
         "5" => {
             let args = vec![
                 "--asset".into(),
-                prompt("Asset ID")?,
+                prompt("Asset Hash")?,
                 "--rpc".into(),
                 prompt_default("Node RPC address", DEFAULT_RPC_ADDR)?,
             ];
@@ -728,7 +728,7 @@ fn interactive_spend() -> Result<(), String> {
 fn interactive_block_explorer() -> Result<(), String> {
     let rpc = prompt_default("Node RPC address", DEFAULT_RPC_ADDR)?;
     println!("1. Address activity");
-    println!("2. Transaction by ID");
+    println!("2. Transaction by Hash");
     println!("3. Latest blocks");
     println!("4. Block by height");
     let response: serde_json::Value = match prompt("Select")?.as_str() {
@@ -738,13 +738,13 @@ fn interactive_block_explorer() -> Result<(), String> {
             http_get_json(&rpc, &format!("/explorer/address/{address}"))?
         }
         "2" => {
-            let transaction_id = prompt("Transaction ID")?;
-            if transaction_id.len() != 64
-                || !transaction_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            let txhash = prompt("Tx Hash")?;
+            if txhash.len() != 64
+                || !txhash.bytes().all(|byte| byte.is_ascii_hexdigit())
             {
-                return Err("transaction ID must be 64 hexadecimal characters".into());
+                return Err("Tx Hash must be 64 hexadecimal characters".into());
             }
-            http_get_json(&rpc, &format!("/explorer/transaction/{transaction_id}"))?
+            http_get_json(&rpc, &format!("/explorer/transaction/{txhash}"))?
         }
         "3" => http_get_json(&rpc, "/blocks/latest")?,
         "4" => {
@@ -855,8 +855,8 @@ fn print_balance(args: &[String]) -> Result<(), String> {
         let max_supply = format_asset_amount(&asset.max_supply, asset.decimals, &asset.symbol)?;
         let mint = format_asset_amount(&asset.mint, asset.decimals, &asset.symbol)?;
         println!(
-            "- asset_id={} name={} symbol={} decimals={} max_supply={} mint={} shares={}",
-            asset.asset_id,
+            "- asset={} name={} symbol={} decimals={} max_supply={} mint={} shares={}",
+            asset.asset,
             asset.name,
             asset.symbol,
             asset.decimals,
@@ -891,7 +891,7 @@ fn print_history(args: &[String]) -> Result<(), String> {
     let emission_count = history.emission_count;
     history
         .activities
-        .retain(|activity| activity.transaction_id.is_some());
+        .retain(|activity| activity.txhash.is_some());
     println!("transactions: {}", history.activity_count);
     println!("emissions hidden: {emission_count}");
     if history.activities.is_empty() {
@@ -911,7 +911,7 @@ fn print_history(args: &[String]) -> Result<(), String> {
             activity.activity_type,
             format_amount(activity.amount),
             activity.size_bytes.unwrap_or(0),
-            activity.transaction_id.as_deref().unwrap_or("emission"),
+            activity.txhash.as_deref().unwrap_or("emission"),
             activity.block_hash,
         );
     }
@@ -1255,11 +1255,9 @@ fn automatic_fee_transaction(
     let mut archival_burn = 0_u64;
     for _ in 0..MAX_FEE_CONVERGENCE_ROUNDS {
         let transaction = build(fee, archival_burn)?;
-        let size = canonical_bytes(&Transaction::Reveal(Box::new(RevealTransaction::new(
-            transaction.clone(),
-        ))))
-        .map_err(|error| error.to_string())?
-        .len();
+        let size = canonical_bytes(&transaction)
+            .map_err(|error| error.to_string())?
+            .len();
         let required = u64::try_from(size)
             .ok()
             .and_then(|size| size.checked_mul(AUTOMATIC_FEE_ZENO_PER_BYTE))
@@ -1277,29 +1275,17 @@ fn submit_or_print_transaction(
     args: &[String],
     transaction: &AuthorizedTransaction,
 ) -> Result<(), String> {
-    let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
-    let commitment =
-        TransactionCommitment::derive(chain, transaction).map_err(|error| error.to_string())?;
-    let commit = Transaction::Commit(CommitTransaction::new(commitment));
-    let reveal = Transaction::Reveal(Box::new(RevealTransaction::new(transaction.clone())));
-    let commit_bytes = canonical_bytes(&commit).map_err(|error| error.to_string())?;
-    let reveal_bytes = canonical_bytes(&reveal).map_err(|error| error.to_string())?;
+    let transaction_bytes = canonical_bytes(transaction).map_err(|error| error.to_string())?;
     if has_flag(args, "--offline") {
-        println!("commit: {}", hex::encode(&commit_bytes));
-        println!("reveal: {}", hex::encode(&reveal_bytes));
-        eprintln!("commit_size_bytes: {}", commit_bytes.len());
-        eprintln!("reveal_size_bytes: {}", reveal_bytes.len());
+        println!("transaction: {}", hex::encode(&transaction_bytes));
+        eprintln!("txsize: {}", transaction_bytes.len());
         return Ok(());
     }
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    let commit_response: SubmitTransactionResponse =
-        http_post_bytes(rpc, "/transaction", &commit_bytes)?;
-    let reveal_response: SubmitTransactionResponse =
-        http_post_bytes(rpc, "/transaction", &reveal_bytes)?;
-    println!("commit_transaction_id: {}", commit_response.transaction_id);
-    println!("reveal_transaction_id: {}", reveal_response.transaction_id);
-    println!("commit_size_bytes: {}", commit_bytes.len());
-    println!("reveal_size_bytes: {}", reveal_bytes.len());
+    let response: SubmitTransactionResponse =
+        http_post_bytes(rpc, "/transaction", &transaction_bytes)?;
+    println!("txhash: {}", response.txhash);
+    println!("txsize: {}", transaction_bytes.len());
     Ok(())
 }
 
@@ -1437,10 +1423,10 @@ fn format_amount(units: u64) -> String {
 
 fn print_help() {
     println!(
-        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--account account]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--account ACCOUNT]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet consolidate [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet version\n\nAll signature accounts are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 zeno per canonical transaction byte; manual --miner fee input is not supported. Consolidation spends all available XPQ UTXOs into one self-owned output and remains subject to archival burn and miner fee. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs.\nRunning without a command opens the interactive menu.\nWithout --input, spend selects active XPQ inputs and calculates change through node RPC."
+        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--account account]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--account ACCOUNT]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet consolidate [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet version\n\nAll signature accounts are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 zeno per canonical transaction byte; manual --miner fee input is not supported. Consolidation merges selected XPQ UTXOs into one self-owned output and remains subject to archival burn and miner fee. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs.\nRunning without a command opens the interactive menu.\nWithout --input, spend selects active XPQ inputs and calculates change through node RPC."
     );
     println!(
-        "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply AMOUNT --initial-mint AMOUNT [--fixed-supply] [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset ID --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset ID --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset ID --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset ID [--rpc ADDRESS]\nwallet asset-balance --asset ID [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts use the human decimal denomination declared by asset metadata. For decimals=8, 1.25 is encoded canonically as 125000000 Unit. Registration atomically credits the initial mint to the signing creator address."
+        "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply AMOUNT --initial-mint AMOUNT [--fixed-supply] [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset Hash --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset Hash --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset Hash --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset Hash [--rpc ADDRESS]\nwallet asset-balance --asset Hash [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts use the human decimal denomination declared by asset metadata. For decimals=8, 1.25 is encoded canonically as 125000000 Unit. Registration atomically credits the initial mint to the signing creator address."
     );
 }
 
@@ -1451,11 +1437,11 @@ mod tests {
     #[test]
     fn asset_symbol_is_normalized_and_rejects_non_ascii_punctuation() {
         assert_eq!(
-            normalize_asset_name(" Test Token "),
-            Ok("Test Token".into())
+            normalize_asset_name(" Test Asset "),
+            Ok("Test Asset".into())
         );
         assert_eq!(normalize_asset_symbol("test"), Ok("TEST".into()));
-        assert!(normalize_asset_symbol("test-token").is_err());
+        assert!(normalize_asset_symbol("test-asset").is_err());
         assert!(normalize_asset_symbol("").is_err());
         let args = vec!["--amount".into(), "1000000000000000.00000000".into()];
         assert_eq!(
@@ -1502,13 +1488,13 @@ mod tests {
             assert!(request.ends_with(&[1, 2, 3, 4]));
             stream
                 .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 85\r\nConnection: close\r\n\r\n{\"transaction_id\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 85\r\nConnection: close\r\n\r\n{\"txhash\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",
                 )
                 .unwrap();
         });
         let response: SubmitTransactionResponse =
             http_post_bytes(&address.to_string(), "/transaction", &[1, 2, 3, 4]).unwrap();
-        assert_eq!(response.transaction_id, "0".repeat(64));
+        assert_eq!(response.txhash, "0".repeat(64));
         server.join().unwrap();
     }
 

@@ -10,7 +10,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
-repository = "https://github.com/XPARQ-Labs/XPARQ-2"
+repository = "https://github.com/XPARQ-Labs/XPARQ"
 
 [profile.bench]
 debug = true

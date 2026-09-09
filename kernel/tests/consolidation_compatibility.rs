@@ -13,12 +13,12 @@ fn mainnet_genesis_is_unchanged_and_effect_rules_have_a_new_identity() {
     );
     // The current state-root and explicit coin burn separate this protocol from the old
     // chain spec, while preserving the frozen genesis block and native IDs.
-    assert_eq!(genesis::CHAIN_SPEC_VERSION, 6);
+    assert_eq!(genesis::CHAIN_SPEC_VERSION, 1);
     assert_eq!(
         genesis::chain_spec_hash().unwrap().into_bytes(),
         [
-            112, 156, 28, 51, 63, 0, 118, 178, 190, 57, 59, 175, 178, 166, 248, 120, 185, 81, 180,
-            89, 79, 236, 184, 229, 246, 130, 112, 63, 252, 128, 215, 22
+            9, 138, 121, 13, 242, 233, 133, 97, 135, 44, 136, 90, 180, 239, 237, 61, 177, 224,
+            196, 90, 67, 53, 222, 75, 242, 58, 201, 26, 99, 155, 79, 4
         ]
     );
     assert_ne!(
@@ -61,10 +61,10 @@ fn native_asset_and_share_ids_are_frozen() {
     .unwrap();
     assert_eq!(
         parent.to_string(),
-        "asset:40db0d5be4a57edb2d3c7ce96fc4d600ff37c65042dd9793191bdefce60dd659"
+        "40db0d5be4a57edb2d3c7ce96fc4d600ff37c65042dd9793191bdefce60dd659"
     );
     assert_eq!(
         Share::derive(parent, [9; 32], 3).to_string(),
-        "share:baed600776659b95bf8c4ca0b8b225dd633b42a20cd9db1acce2e0b262a90aa4"
+        "baed600776659b95bf8c4ca0b8b225dd633b42a20cd9db1acce2e0b262a90aa4"
     );
 }

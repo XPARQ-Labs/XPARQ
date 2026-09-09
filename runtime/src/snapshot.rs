@@ -3,8 +3,7 @@ use std::path::Path;
 use borsh::{BorshDeserialize, BorshSerialize};
 use kernel::{
     block::{Block, Height},
-    common::{canonical_bytes, canonical_decode},
-    crypto::{BlockHash, hash_bytes},
+    crypto::{BlockHash, canonical_bytes, canonical_decode, hash_bytes},
     genesis::{EXPECTED_GENESIS_HASH, chain_spec_hash},
     ledger::Ledger,
 };
@@ -12,7 +11,7 @@ use kernel::{
 pub const SNAPSHOT_INTERVAL: u64 = 1_000;
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"XPQSNAP1";
-const SNAPSHOT_VERSION: u32 = 2;
+const SNAPSHOT_VERSION: u32 = 1;
 const CHECKSUM_SIZE: usize = 32;
 
 #[derive(BorshSerialize, BorshDeserialize)]

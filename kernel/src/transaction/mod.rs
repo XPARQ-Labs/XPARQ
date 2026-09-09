@@ -1,8 +1,7 @@
-//! Canonical transaction intents, authorization envelopes, and Commit/Reveal transactions.
+//! Canonical transaction intents and direct authorization envelopes.
 
 mod asset;
 mod authorization;
-mod commit;
 mod error;
 mod spend;
 
@@ -11,6 +10,8 @@ pub use authorization::{
     AccountAuthorization, AccountIntent, AuthorizedAccountIntent, AuthorizedAssetTransaction,
     AuthorizedSpendTransaction, AuthorizedTransaction,
 };
-pub use commit::{CommitTransaction, RevealTransaction, Transaction, TransactionCommitment};
 pub use error::{IntentError, TransactionEncodingError};
 pub use spend::{ChainContext, Spend, SpendCommitment, SpendIntent};
+
+/// Canonical directly authorized on-chain transaction.
+pub type Transaction = AuthorizedTransaction;

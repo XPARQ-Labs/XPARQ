@@ -1,4 +1,4 @@
-//! Transaction consensus: Commit/Reveal, authorization, ownership, value conservation,
+//! Transaction consensus: authorization, ownership, value conservation,
 //! and protocol burn.
 
 use std::{collections::BTreeSet, error::Error as StdError, fmt};
@@ -13,8 +13,8 @@ use crate::native::asset::{AssetError, Share};
 use crate::native::coin::{Output as CoinOutput, XPQ, Zeno};
 use crate::transaction::{
     AccountAuthorization, AccountIntent, AssetInstruction, AssetIntent, AuthorizedAccountIntent,
-    AuthorizedTransaction, ChainContext, IntentError, RevealTransaction, Spend, SpendCommitment,
-    SpendIntent, Transaction as OnChainTransaction, TransactionCommitment,
+    AuthorizedTransaction, ChainContext, IntentError, Spend, SpendCommitment, SpendIntent,
+    Transaction as OnChainTransaction,
 };
 
 pub trait ConsensusIntent: Clone {
@@ -93,30 +93,14 @@ impl<T> AuthorizationValidated<T> {
     }
 }
 
-/// Validated outer on-chain transaction.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ValidatedTransaction {
-    Commit(ValidatedCommitTransaction),
-    Reveal(ValidatedRevealTransaction),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ValidatedCommitTransaction {
-    pub commitment: TransactionCommitment,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatedRevealTransaction {
-    pub commitment: TransactionCommitment,
-    pub transaction: ValidatedAuthorizedTransaction,
-}
-
-/// Validated payload inside a Reveal transaction.
+/// Validated direct on-chain transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidatedAuthorizedTransaction {
     Spend(ValidatedSpendTransaction),
     Asset(ValidatedAssetTransaction),
 }
+
+pub type ValidatedTransaction = ValidatedAuthorizedTransaction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedSpendTransaction {
@@ -139,7 +123,7 @@ pub struct CoinInputState {
 ///
 /// `coin_recipient` and `share_recipient` do NOT require owner fields in UTXO
 /// state. They may be resolved by a deterministic origin index reconstructed
-/// from canonical Reveal transactions.
+/// from canonical direct transactions.
 pub trait TransactionStateView {
     fn coin(&self, id: XPQ) -> Option<CoinInputState>;
 
@@ -148,9 +132,6 @@ pub trait TransactionStateView {
     fn share_recipient(&self, id: Share) -> Option<Address>;
 
     fn account_public_key(&self, address: Address) -> Option<PublicKey>;
-
-    /// True only for a canonical Commit that has not yet been consumed by Reveal.
-    fn pending_commitment(&self, commitment: TransactionCommitment) -> bool;
 
     fn asset_spend_created_state_weight(&self, _intent: &SpendIntent) -> Result<u64, AssetError> {
         Err(AssetError::UnknownAsset)
@@ -165,10 +146,7 @@ pub trait TransactionStateView {
     }
 }
 
-/// Validate an outer Commit/Reveal transaction.
-///
-/// Commit only establishes a pending commitment. Reveal must match an existing
-/// pending commitment and then passes through full payload validation.
+/// Validate one directly authorized on-chain transaction.
 pub fn validate_transaction(
     transaction: OnChainTransaction,
     chain: ChainContext,
@@ -182,56 +160,23 @@ pub fn validate_transaction(
     )
     .map_err(|_| TransactionConsensusError::Burn(BurnError::WeightOverflow))?;
 
-    match transaction {
-        OnChainTransaction::Commit(commit) => {
-            if state.pending_commitment(commit.commitment) {
-                return Err(TransactionConsensusError::DuplicateCommitment);
-            }
-
-            Ok(ValidatedTransaction::Commit(ValidatedCommitTransaction {
-                commitment: commit.commitment,
-            }))
-        }
-
-        OnChainTransaction::Reveal(reveal) => {
-            let reveal = *reveal;
-
-            reveal
-                .validate_structure()
-                .map_err(TransactionConsensusError::Intent)?;
-
-            let commitment = reveal
-                .commitment(chain)
-                .map_err(|_| TransactionConsensusError::InvalidReveal)?;
-
-            if !state.pending_commitment(commitment) {
-                return Err(TransactionConsensusError::UnknownCommitment);
-            }
-
-            let validated = validate_authorized_transaction(
-                reveal,
-                chain,
-                current_height,
-                canonical_transaction_weight,
-                state,
-            )?;
-
-            Ok(ValidatedTransaction::Reveal(ValidatedRevealTransaction {
-                commitment,
-                transaction: validated,
-            }))
-        }
-    }
+    validate_authorized_transaction(
+        transaction,
+        chain,
+        current_height,
+        canonical_transaction_weight,
+        state,
+    )
 }
 
 fn validate_authorized_transaction(
-    reveal: RevealTransaction,
+    transaction: AuthorizedTransaction,
     chain: ChainContext,
     current_height: u64,
     canonical_transaction_weight: u64,
     state: &impl TransactionStateView,
 ) -> Result<ValidatedAuthorizedTransaction, TransactionConsensusError> {
-    match reveal.transaction {
+    match transaction {
         AuthorizedTransaction::Spend(transaction) => {
             let transaction = *transaction;
 
@@ -644,9 +589,6 @@ pub enum TransactionConsensusError {
     ValueMismatch,
     Asset(AssetError),
     Burn(BurnError),
-    DuplicateCommitment,
-    UnknownCommitment,
-    InvalidReveal,
 }
 
 impl fmt::Display for TransactionConsensusError {
@@ -673,15 +615,6 @@ impl fmt::Display for TransactionConsensusError {
             }
             Self::Asset(error) => write!(formatter, "invalid native asset transaction: {error}"),
             Self::Burn(error) => write!(formatter, "invalid protocol burn: {error}"),
-            Self::DuplicateCommitment => {
-                formatter.write_str("transaction commitment already exists")
-            }
-            Self::UnknownCommitment => {
-                formatter.write_str("reveal has no matching pending commitment")
-            }
-            Self::InvalidReveal => {
-                formatter.write_str("reveal does not reproduce a valid commitment")
-            }
         }
     }
 }
@@ -697,32 +630,21 @@ impl From<BurnError> for TransactionConsensusError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::{LedgerState, StateError};
+    use crate::ledger::LedgerState;
     use crate::native::coin::Output as CoinOutput;
-    use crate::transaction::{Spend, TransactionCommitment};
+    use crate::transaction::Spend;
 
     #[test]
-    fn commit_reveal_application_and_rollback_are_atomic() {
+    fn direct_spend_application_and_rollback_are_atomic() {
         let owner = Address([7; crypto::ADDRESS_SIZE]);
         let recipient = Address([9; crypto::ADDRESS_SIZE]);
         let input = XPQ::from_bytes([3; crypto::HASH_SIZE]);
-        let commitment = TransactionCommitment::from_bytes([4; crypto::HASH_SIZE]);
         let spend_commitment = SpendCommitment::from_bytes([5; crypto::HASH_SIZE]);
         let chain = ChainContext::new([1; crypto::HASH_SIZE]);
 
         let mut state = LedgerState::default();
         state.utxos.insert_coin(input, Zeno::from_zeno(10)).unwrap();
         state.coin_recipients.insert(input, owner);
-
-        let commit = ValidatedTransaction::Commit(ValidatedCommitTransaction { commitment });
-        let commit_journal = state
-            .apply_validated_transaction(&commit, crate::common::Height(1), owner, chain)
-            .unwrap();
-        assert!(state.pending_commitments.contains(&commitment));
-        assert_eq!(
-            state.apply_validated_transaction(&commit, crate::common::Height(1), owner, chain),
-            Err(StateError::InvalidTransaction)
-        );
 
         let intent = SpendIntent {
             signer: owner,
@@ -731,36 +653,28 @@ mod tests {
                 outputs: vec![CoinOutput::new(recipient, Zeno::from_zeno(9))],
             },
         };
-        let reveal = ValidatedTransaction::Reveal(ValidatedRevealTransaction {
-            commitment,
-            transaction: ValidatedAuthorizedTransaction::Spend(ValidatedSpendTransaction {
-                spend: AuthorizationValidated {
-                    intent,
-                    commitment: spend_commitment,
-                    revealed_account_key: None,
-                },
-                payment: None,
-            }),
+        let transaction = ValidatedTransaction::Spend(ValidatedSpendTransaction {
+            spend: AuthorizationValidated {
+                intent,
+                commitment: spend_commitment,
+                revealed_account_key: None,
+            },
+            payment: None,
         });
 
-        let reveal_journal = state
-            .apply_validated_transaction(&reveal, crate::common::Height(2), owner, chain)
+        let journal = state
+            .apply_validated_transaction(&transaction, crypto::Height(1), owner, chain)
             .unwrap();
         let output = XPQ::from_output(spend_commitment.as_bytes(), 0);
-        assert!(!state.pending_commitments.contains(&commitment));
         assert_eq!(state.utxos.coin(&input), None);
         assert_eq!(state.utxos.coin(&output), Some(Zeno::from_zeno(9)));
         assert_eq!(state.coin_recipients.get(&output), Some(&recipient));
         assert_eq!(state.total_burned, Zeno::ONE);
 
-        state.rollback_state(reveal_journal).unwrap();
-        assert!(state.pending_commitments.contains(&commitment));
+        state.rollback_state(journal).unwrap();
         assert_eq!(state.utxos.coin(&input), Some(Zeno::from_zeno(10)));
         assert_eq!(state.coin_recipients.get(&input), Some(&owner));
         assert_eq!(state.utxos.coin(&output), None);
         assert_eq!(state.total_burned, Zeno::ZERO);
-
-        state.rollback_state(commit_journal).unwrap();
-        assert!(!state.pending_commitments.contains(&commitment));
     }
 }
