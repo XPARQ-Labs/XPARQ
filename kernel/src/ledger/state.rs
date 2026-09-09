@@ -1,7 +1,9 @@
 //! Canonical ledger state and rollback journal types.
 
 use super::{account, utxo};
-use crate::native::asset::{Asset, AssetMetadata, AssetShare, Share, Unit};
+use crate::native::asset::{
+    Asset, AssetMetadata, AssetShare, MintCapability, MintCapabilityId, Share, Unit,
+};
 use crate::native::coin::{XPQ, Zeno};
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::Address;
@@ -34,7 +36,6 @@ impl LedgerState {
 pub struct AssetState {
     pub(crate) metadata: BTreeMap<Asset, AssetMetadata>,
     pub(crate) supplies: BTreeMap<Asset, Unit>,
-    pub(crate) nonces: BTreeMap<Address, u64>,
     pub(crate) share_recipients: BTreeMap<Share, Address>,
 }
 
@@ -42,7 +43,6 @@ impl AssetState {
     pub fn is_empty(&self) -> bool {
         self.metadata.is_empty()
             && self.supplies.is_empty()
-            && self.nonces.is_empty()
             && self.share_recipients.is_empty()
     }
     pub fn metadata(&self, id: Asset) -> Option<&AssetMetadata> {
@@ -54,9 +54,6 @@ impl AssetState {
     pub fn supply(&self, id: Asset) -> Unit {
         self.supplies.get(&id).copied().unwrap_or(Unit::ZERO)
     }
-    pub fn nonce(&self, owner: Address) -> u64 {
-        self.nonces.get(&owner).copied().unwrap_or(0)
-    }
     pub fn utxo<'a>(&self, utxos: &'a utxo::UtxoSet, id: Share) -> Option<&'a AssetShare> {
         utxos.asset(&id)
     }
@@ -65,6 +62,17 @@ impl AssetState {
         utxos: &'a utxo::UtxoSet,
     ) -> impl Iterator<Item = (Share, &'a AssetShare)> + 'a {
         utxos.assets()
+    }
+
+    pub fn mint_capability(
+        &self,
+        utxos: &utxo::UtxoSet,
+        asset: Asset,
+    ) -> Option<(MintCapabilityId, MintCapability)> {
+        utxos
+            .mint_capabilities()
+            .find(|(_, capability)| capability.asset == asset)
+            .map(|(id, capability)| (id, *capability))
     }
 }
 
@@ -83,7 +91,7 @@ pub struct AssetRollbackJournal {
     pub(crate) supplies: Vec<(Asset, Option<Unit>)>,
     pub(crate) utxos: Vec<(Share, Option<AssetShare>)>,
     pub(crate) recipients: Vec<(Share, Option<Address>)>,
-    pub(crate) nonces: Vec<(Address, Option<u64>)>,
+    pub(crate) capabilities: Vec<(MintCapabilityId, Option<MintCapability>)>,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq)]

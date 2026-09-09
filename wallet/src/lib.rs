@@ -203,11 +203,10 @@ impl AccountWallet {
     pub fn sign_asset_intent(
         &self,
         action: kernel::transaction::AssetInstruction,
-        nonce: u64,
         public_key_known: bool,
     ) -> Result<AuthorizedAccountIntent<kernel::transaction::AssetIntent>, String> {
         self.sign_account_intent(
-            kernel::transaction::AssetIntent::new(action, self.address, nonce),
+            kernel::transaction::AssetIntent::new(action, self.address),
             public_key_known,
         )
     }

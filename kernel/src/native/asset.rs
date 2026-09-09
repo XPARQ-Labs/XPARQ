@@ -289,6 +289,50 @@ impl Share {
     }
 }
 
+/// Unique identifier of the single-use authority UTXO that permits one Mint.
+#[derive(
+    BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+pub struct MintCapabilityId(Hash);
+
+impl MintCapabilityId {
+    pub fn derive(asset: Asset, commitment: [u8; HASH_SIZE]) -> Self {
+        let mut bytes = [0_u8; HASH_SIZE * 2];
+        bytes[..HASH_SIZE].copy_from_slice(asset.as_bytes());
+        bytes[HASH_SIZE..].copy_from_slice(&commitment);
+        Self(domain(HashDomain::MintCapability, &bytes))
+    }
+
+    pub const fn from_bytes(bytes: [u8; HASH_SIZE]) -> Self {
+        Self(Hash::from_bytes(bytes))
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; HASH_SIZE] {
+        self.0.as_bytes()
+    }
+}
+
+impl fmt::Display for MintCapabilityId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format("", &self.0, formatter)
+    }
+}
+
+impl FromStr for MintCapabilityId {
+    type Err = HashParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse("", value).map(Self)
+    }
+}
+
+/// Single-use mint authority carried in the canonical UTXO set.
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MintCapability {
+    pub asset: Asset,
+    pub authority: Address,
+}
+
 impl From<Hash> for Share {
     fn from(hash: Hash) -> Self {
         Self(hash)

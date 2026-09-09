@@ -1,10 +1,10 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crypto::{ADDRESS_SIZE, Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
+use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
 
 use crate::native::asset::{
-    Asset, AssetError, AssetMetadata, AssetShare, Share, Unit, ensure_nonzero_asset_amount,
-    ensure_unique_asset_inputs,
+    Asset, AssetError, AssetMetadata, AssetShare, MintCapability, MintCapabilityId, Share, Unit,
+    ensure_nonzero_asset_amount, ensure_unique_asset_inputs,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -19,6 +19,7 @@ pub enum AssetInstruction {
     },
     Mint {
         asset: Asset,
+        capability: MintCapabilityId,
         recipient: Address,
         amount: Unit,
     },
@@ -32,16 +33,11 @@ pub enum AssetInstruction {
 pub struct AssetIntent {
     pub instruction: AssetInstruction,
     pub signer: Address,
-    pub nonce: u64,
 }
 
 impl AssetIntent {
-    pub const fn new(instruction: AssetInstruction, signer: Address, nonce: u64) -> Self {
-        Self {
-            instruction,
-            signer,
-            nonce,
-        }
+    pub const fn new(instruction: AssetInstruction, signer: Address) -> Self {
+        Self { instruction, signer }
     }
 
     pub fn asset(&self) -> Result<Asset, AssetError> {
@@ -111,23 +107,12 @@ impl AssetIntent {
             }
         }
 
-        self.nonce
-            .checked_add(1)
-            .ok_or(AssetError::InvalidProgram)?;
-
         Ok(())
     }
 
     /// Newly-created canonical state weight. Consumed UTXOs are not counted.
-    pub fn created_state_weight_from_presence(
-        &self,
-        nonce_exists: bool,
-    ) -> Result<u64, AssetError> {
+    pub fn created_state_weight(&self) -> Result<u64, AssetError> {
         let mut weight = 0_u64;
-
-        if !nonce_exists {
-            weight = checked_entry_weight(weight, ADDRESS_SIZE, &0_u64)?;
-        }
 
         match &self.instruction {
             AssetInstruction::Register {
@@ -158,6 +143,16 @@ impl AssetIntent {
                         amount: *initial_mint,
                     },
                 )?;
+                if *mint_authority != Address::ZERO {
+                    weight = checked_entry_weight(
+                        weight,
+                        HASH_SIZE,
+                        &MintCapability {
+                            asset,
+                            authority: *mint_authority,
+                        },
+                    )?;
+                }
             }
             AssetInstruction::Mint {
                 asset, amount, ..

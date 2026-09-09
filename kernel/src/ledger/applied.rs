@@ -5,7 +5,8 @@ use borsh::BorshSerialize;
 use crypto::{Address, HASH_SIZE};
 
 use crate::native::asset::{
-    Asset, AssetError, AssetMetadata, AssetShare, Output as AssetOutput, Share, Unit,
+    Asset, AssetError, AssetMetadata, AssetShare, MintCapability, MintCapabilityId,
+    Output as AssetOutput, Share, Unit,
 };
 
 use crate::native::coin::{Recipient, XPQ, Zeno};
@@ -284,10 +285,6 @@ impl AssetState {
 
         let mut journal = AssetRollbackJournal::default();
 
-        journal
-            .nonces
-            .push((call.signer, self.nonces.get(&call.signer).copied()));
-
         match &call.instruction {
             //
             // Register asset contract.
@@ -342,6 +339,23 @@ impl AssetState {
                     )
                     .map_err(|_| AssetError::ShareAlreadyExists)?;
                 self.share_recipients.insert(share_id, call.signer);
+
+                if *mint_authority != Address::ZERO {
+                    let capability_id = MintCapabilityId::derive(asset, commitment);
+                    journal.capabilities.push((
+                        capability_id,
+                        utxos.mint_capability(&capability_id).copied(),
+                    ));
+                    utxos
+                        .insert_mint_capability(
+                            capability_id,
+                            MintCapability {
+                                asset,
+                                authority: *mint_authority,
+                            },
+                        )
+                        .map_err(|_| AssetError::ShareAlreadyExists)?;
+                }
             }
 
             //
@@ -349,10 +363,12 @@ impl AssetState {
             //
             AssetInstruction::Mint {
                 asset,
+                capability,
                 recipient,
                 amount,
             } => {
                 let share_id = Share::derive(*asset, commitment, 0);
+                let next_capability = MintCapabilityId::derive(*asset, commitment);
 
                 let supply = self
                     .supply(*asset)
@@ -369,8 +385,22 @@ impl AssetState {
                 journal
                     .recipients
                     .push((share_id, self.share_recipients.get(&share_id).copied()));
+                journal
+                    .capabilities
+                    .push((*capability, utxos.mint_capability(capability).copied()));
+                journal.capabilities.push((
+                    next_capability,
+                    utxos.mint_capability(&next_capability).copied(),
+                ));
 
                 self.supplies.insert(*asset, supply);
+
+                let consumed = utxos
+                    .consume_mint_capability(capability)
+                    .map_err(|_| AssetError::UnknownObject)?;
+                utxos
+                    .insert_mint_capability(next_capability, consumed)
+                    .map_err(|_| AssetError::ShareAlreadyExists)?;
 
                 //
                 // Recipient remains inside the transaction
@@ -417,13 +447,6 @@ impl AssetState {
                 self.supplies.insert(*asset, supply);
             }
         }
-
-        let next_nonce = call
-            .nonce
-            .checked_add(1)
-            .ok_or(AssetError::InvalidProgram)?;
-
-        self.nonces.insert(call.signer, next_nonce);
 
         Ok(journal)
     }
@@ -520,12 +543,8 @@ impl AssetState {
         &self,
         utxos: &utxo::UtxoSet,
         call: &AssetIntent,
-        _genesis_hash: [u8; 32],
+        genesis_hash: [u8; 32],
     ) -> Result<(), AssetError> {
-        if call.nonce != self.nonce(call.signer) {
-            return Err(AssetError::InvalidProgram);
-        }
-
         match &call.instruction {
             AssetInstruction::Register {
                 name,
@@ -549,15 +568,40 @@ impl AssetState {
                 if self.metadata(id).is_some() {
                     return Err(AssetError::AssetAlreadyExists);
                 }
+
+                if *mint_authority != Address::ZERO {
+                    let commitment = call.commitment(genesis_hash)?;
+                    let capability_id = MintCapabilityId::derive(id, commitment);
+                    if utxos.mint_capability(&capability_id).is_some() {
+                        return Err(AssetError::ShareAlreadyExists);
+                    }
+                }
             }
 
             AssetInstruction::Mint {
-                asset, amount, ..
+                asset,
+                capability,
+                amount,
+                ..
             } => {
                 let metadata = self.metadata(*asset).ok_or(AssetError::UnknownAsset)?;
+                let capability_utxo = utxos
+                    .mint_capability(capability)
+                    .ok_or(AssetError::UnknownObject)?;
 
-                if metadata.mint_authority != call.signer {
+                if capability_utxo.asset != *asset
+                    || capability_utxo.authority != call.signer
+                    || metadata.mint_authority != capability_utxo.authority
+                {
                     return Err(AssetError::Unauthorized);
+                }
+
+                let commitment = call.commitment(genesis_hash)?;
+                let next_capability = MintCapabilityId::derive(*asset, commitment);
+                if next_capability == *capability
+                    || utxos.mint_capability(&next_capability).is_some()
+                {
+                    return Err(AssetError::ShareAlreadyExists);
                 }
 
                 self.supply(*asset)
@@ -760,7 +804,14 @@ impl AssetState {
             }
         }
 
-        restore_map(&mut self.nonces, journal.nonces);
+        for (id, previous) in journal.capabilities.into_iter().rev() {
+            if utxos.mint_capability(&id).is_some() {
+                utxos.consume_mint_capability(&id)?;
+            }
+            if let Some(previous) = previous {
+                utxos.insert_mint_capability(id, previous)?;
+            }
+        }
         restore_map(&mut self.share_recipients, journal.recipients);
 
         Ok(())

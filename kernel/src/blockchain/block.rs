@@ -5,8 +5,8 @@ use std::{
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{
-    Address, BlockHash, Hash, HashDomain, MerkleHash, PreviousHash, StateRoot,
-    canonical_bytes, domain,
+    Address, BlockHash, Hash, HashDomain, MerkleHash, PreviousHash, StateRoot, canonical_bytes,
+    domain,
 };
 
 use crate::native::coin::Zeno;

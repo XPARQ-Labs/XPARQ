@@ -332,7 +332,7 @@ impl TransactionStateView for LedgerState {
         self.assets
             .validate_transition(&self.utxos, call, genesis_hash)?;
 
-        call.created_state_weight_from_presence(self.assets.nonces.contains_key(&call.signer))
+        call.created_state_weight()
     }
 }
 

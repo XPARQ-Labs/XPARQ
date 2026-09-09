@@ -14,14 +14,14 @@ content type `application/octet-stream`; it does not accept JSON.
 Account and Coin endpoints include `/status`, `/fee-policy`,
 `/balance/{address}`, `/account/{address}`, `/block/{height}`,
 `/blocks/latest`, and the explorer routes. Native asset endpoints are
-`/asset/nonce/{address}`, `/asset/{asset_id}`, and
-`/asset/{asset_id}/balance/{address}`.
+`/asset/{asset}` and `/asset/{asset}/balance/{address}`.
 
 Asset IDs use 64 lowercase hexadecimal
 characters. Asset quantities and supply are canonical `u128` values returned
 as decimal JSON strings. Coin and asset-share ownership is address-only. Asset
 metadata records the permanent creator separately from its optional account
-mint authority.
+mint authority. Mintable assets expose the current single-use
+`mint_capability`; each Mint consumes it and creates its successor.
 
 The former extension transaction, extension-owned UTXO, WASM execution,
 deployment, preview, nonce, and query APIs have been removed.

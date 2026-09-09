@@ -14,8 +14,7 @@ use kernel::{
     consensus::{DECIMALS, StateTransitionWeight, XPQ, Zeno, account_key_state_weight},
     crypto::{Address, Signature, address_from_string},
     transaction::{
-        AuthorizedAssetTransaction, AuthorizedSpendTransaction, AuthorizedTransaction,
-        SpendIntent,
+        AuthorizedAssetTransaction, AuthorizedSpendTransaction, AuthorizedTransaction, SpendIntent,
     },
 };
 use serde::Deserialize;
@@ -107,6 +106,7 @@ struct AccountAssetShare {
 #[derive(Deserialize)]
 struct AssetMetadataResponse {
     decimals: u8,
+    mint_capability: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -148,11 +148,6 @@ fn utxo_status(utxo: &AccountUtxo) -> &'static str {
 #[derive(Deserialize)]
 struct SubmitTransactionResponse {
     txhash: String,
-}
-
-#[derive(Deserialize)]
-struct AssetNonceResponse {
-    nonce: u64,
 }
 
 const MAX_CONSOLIDATION_INPUTS: usize = 1_000;
@@ -209,8 +204,8 @@ fn asset_register(args: &[String]) -> Result<(), String> {
             symbol.clone(),
             decimals,
             max_supply,
-            mint_authority,
             authority,
+            mint_authority,
         )
         .map_err(|error| error.to_string())?,
     )
@@ -264,13 +259,19 @@ fn normalize_asset_symbol(symbol: &str) -> Result<String, String> {
 
 fn asset_mint(args: &[String]) -> Result<(), String> {
     let asset = parse_asset(args)?;
-    let decimals = asset_decimals(args, asset)?;
+    let metadata = asset_metadata(args, asset)?;
+    let capability = metadata
+        .mint_capability
+        .ok_or("asset has no active mint capability")?
+        .parse()
+        .map_err(|_| "node returned an invalid mint capability id")?;
     submit_asset_instruction(
         args,
         AssetInstruction::Mint {
             asset,
+            capability,
             recipient: asset_recipient(args)?,
-            amount: parse_asset_amount(args, "--amount", decimals)?,
+            amount: parse_asset_amount(args, "--amount", metadata.decimals)?,
         },
     )
 }
@@ -432,15 +433,11 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
     reject_manual_fee(args)?;
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    let address = kernel::crypto::address_to_string(&wallet.address());
-    let nonce = http_get_json::<AssetNonceResponse>(rpc, &format!("/asset/nonce/{address}"))?.nonce;
     let public_key_known = account_public_key_registered(rpc, &wallet);
-    let call = wallet
-        .0
-        .sign_asset_intent(instruction, nonce, public_key_known)?;
+    let call = wallet.0.sign_asset_intent(instruction, public_key_known)?;
     let created_state_weight = call
         .intent
-        .created_state_weight_from_presence(nonce > 0)
+        .created_state_weight()
         .map_err(|error| format!("calculate asset state weight: {error:?}"))?;
     let transaction = automatic_fee_transaction(|fee, archival_burn| {
         let (inputs, _total, _state_burn, change) = select_account_inputs_with_state_burn(
@@ -477,8 +474,12 @@ fn parse_asset(args: &[String]) -> Result<Asset, String> {
 }
 
 fn asset_decimals(args: &[String], asset: Asset) -> Result<u8, String> {
+    Ok(asset_metadata(args, asset)?.decimals)
+}
+
+fn asset_metadata(args: &[String], asset: Asset) -> Result<AssetMetadataResponse, String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    Ok(http_get_json::<AssetMetadataResponse>(rpc, &format!("/asset/{asset}"))?.decimals)
+    http_get_json(rpc, &format!("/asset/{asset}"))
 }
 
 fn parse_asset_amount(

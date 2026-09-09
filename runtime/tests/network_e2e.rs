@@ -359,7 +359,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     };
     let submitted = post_transaction(&a_rpc, &transaction);
     assert_eq!(
-        submitted["transaction_id"],
+        submitted["txhash"],
         hex::encode(transaction.id().unwrap())
     );
 

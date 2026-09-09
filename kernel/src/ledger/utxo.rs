@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, error::Error as StdError, fmt};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crate::native::asset::{AssetShare, Share};
+use crate::native::asset::{AssetShare, MintCapability, MintCapabilityId, Share};
 use crate::native::coin::{XPQ, Zeno};
 
 #[derive(
@@ -11,12 +11,14 @@ use crate::native::coin::{XPQ, Zeno};
 pub enum UtxoId {
     Coin(XPQ),
     Asset(Share),
+    MintCapability(MintCapabilityId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Utxo {
     Coin(Zeno),
     Asset(AssetShare),
+    MintCapability(MintCapability),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -93,6 +95,47 @@ impl UtxoSet {
             })
     }
 
+    pub fn mint_capability(&self, id: &MintCapabilityId) -> Option<&MintCapability> {
+        match self.entries.get(&UtxoId::MintCapability(*id)) {
+            Some(Utxo::MintCapability(capability)) => Some(capability),
+            _ => None,
+        }
+    }
+
+    pub fn insert_mint_capability(
+        &mut self,
+        id: MintCapabilityId,
+        capability: MintCapability,
+    ) -> Result<(), Error> {
+        let key = UtxoId::MintCapability(id);
+        if self.entries.contains_key(&key) {
+            return Err(Error::MintCapabilityCollision);
+        }
+        self.entries.insert(key, Utxo::MintCapability(capability));
+        Ok(())
+    }
+
+    pub fn consume_mint_capability(
+        &mut self,
+        id: &MintCapabilityId,
+    ) -> Result<MintCapability, Error> {
+        match self.entries.remove(&UtxoId::MintCapability(*id)) {
+            Some(Utxo::MintCapability(capability)) => Ok(capability),
+            _ => Err(Error::NotFound),
+        }
+    }
+
+    pub fn mint_capabilities(
+        &self,
+    ) -> impl Iterator<Item = (MintCapabilityId, &MintCapability)> + '_ {
+        self.entries.iter().filter_map(|(id, utxo)| match (id, utxo) {
+            (UtxoId::MintCapability(id), Utxo::MintCapability(capability)) => {
+                Some((*id, capability))
+            }
+            _ => None,
+        })
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -107,6 +150,7 @@ pub enum Error {
     NotFound,
     CoinCollision,
     ShareCollision,
+    MintCapabilityCollision,
 }
 
 impl fmt::Display for Error {
@@ -115,6 +159,9 @@ impl fmt::Display for Error {
             Self::NotFound => f.write_str("UTXO was not found"),
             Self::CoinCollision => f.write_str("coin UTXO ID already exists"),
             Self::ShareCollision => f.write_str("asset share UTXO ID already exists"),
+            Self::MintCapabilityCollision => {
+                f.write_str("mint capability UTXO ID already exists")
+            }
         }
     }
 }

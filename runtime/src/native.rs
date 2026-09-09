@@ -948,7 +948,6 @@ fn asset_transaction_response(
     serde_json::json!({
         "asset": call.asset().map(|id| id.to_string()).unwrap_or_else(|_| "invalid".into()),
         "signer": kernel::crypto::address_to_string(&call.signer),
-        "nonce": call.nonce,
         "asset_instruction": instruction,
         "payment_sender": kernel::crypto::address_to_string(&transaction.payment.intent.signer),
         "payment_outputs": public_outputs_response(coin_outputs(&transaction.payment.intent), miner, Some(transaction.payment.intent.signer)),
@@ -1112,10 +1111,6 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             })
         }
         "/blocks/latest" => latest_blocks_response(&ledger)?,
-        route if route.starts_with("/asset/nonce/") => {
-            let address = parse_address(route.trim_start_matches("/asset/nonce/"))?;
-            asset_nonce_response(database, &ledger, address)?
-        }
         route if route.starts_with("/asset/") => asset_response(&ledger, route)?,
         route if route.starts_with("/balance/") => {
             let address = route.trim_start_matches("/balance/");
@@ -1200,32 +1195,6 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
     write_http_response(stream, 200, &response)
 }
 
-fn asset_nonce_response(
-    database: &Path,
-    ledger: &Ledger,
-    address: Address,
-) -> Result<serde_json::Value, String> {
-    let mut state = ledger.state().clone();
-    let height = Height(
-        ledger
-            .tip_height()
-            .map_or(0, |height| height.0.saturating_add(1)),
-    );
-    let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
-    for transaction in read_mempool(database)? {
-        let validated = validate_transaction(transaction, chain, height.0, &state)
-            .map_err(|error| format!("validate pending asset nonce: {error}"))?;
-        state
-            .apply_validated_transaction(&validated, height, Address::ZERO, chain)
-            .map_err(|error| format!("apply pending asset nonce: {error}"))?;
-    }
-    let nonce = state.assets.nonce(address);
-    Ok(serde_json::json!({
-        "address": kernel::crypto::address_to_string(&address),
-        "nonce": nonce,
-    }))
-}
-
 fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
     let path = route.trim_start_matches("/asset/");
     let parts = path.split('/').collect::<Vec<_>>();
@@ -1241,6 +1210,10 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
             .metadata(asset)
             .ok_or("asset was not found")?;
         let supply = ledger.state().assets.supply(asset);
+        let mint_capability = ledger
+            .state()
+            .assets
+            .mint_capability(&ledger.state().utxos, asset);
         return Ok(serde_json::json!({
             "asset": asset.to_string(),
             "name": metadata.name,
@@ -1250,6 +1223,7 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
             "supply": supply.to_string(),
             "creator": kernel::crypto::address_to_string(&metadata.creator),
             "mint_authority": asset_authority_response(metadata.mint_authority),
+            "mint_capability": mint_capability.map(|(id, _)| id.to_string()),
         }));
     }
     if parts.len() == 3 && parts[1] == "balance" {
@@ -3446,11 +3420,10 @@ mod tests {
             "/block/{height}",
             "/balance/{address}",
             "/account/{address}",
-            "/asset/nonce/{address}",
             "/asset/{asset}",
             "/asset/{asset}/balance/{address}",
             "/explorer/address/{address}",
-            "/explorer/transaction/{txhash}",
+            "/explorer/transaction/{transaction_id}",
             "/transaction",
         ] {
             assert!(
@@ -3483,7 +3456,6 @@ mod tests {
                 mint_authority: signer,
             },
             signer,
-            0,
         );
         let signature = seed.sign(&asset_call.commitment(chain.genesis_hash).unwrap());
         let asset = asset_call.asset().unwrap().to_string();
@@ -3547,7 +3519,6 @@ mod tests {
                 mint_authority: authority,
             },
             authority,
-            0,
         );
         let mut ledger = Ledger::new();
         ledger
