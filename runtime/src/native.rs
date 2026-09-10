@@ -785,6 +785,11 @@ fn address_transaction_activity(
             coin_outputs(&tx.payment.intent),
             coin_burn(&tx.payment.intent),
         ),
+        AuthorizedTransaction::Pool(tx) => (
+            Some(tx.payment.intent.signer),
+            coin_outputs(&tx.payment.intent),
+            coin_burn(&tx.payment.intent),
+        ),
     };
     let received = checked_output_sum(
         outputs
@@ -872,6 +877,14 @@ fn transaction_response(
         AuthorizedTransaction::Asset(asset) => {
             asset_transaction_response(asset, miner, protocol_burn)
         }
+        AuthorizedTransaction::Pool(pool) => serde_json::json!({
+            "type": "pool",
+            "signer": kernel::crypto::address_to_string(&pool.call.intent.signer),
+            "instruction": format!("{:?}", pool.call.intent.instruction),
+            "payment_outputs": public_outputs_response(coin_outputs(&pool.payment.intent), miner, Some(pool.payment.intent.signer)),
+            "miner_fee": miner_fee_from_outputs(coin_outputs(&pool.payment.intent)).unwrap_or(0),
+            "protocol_burn": protocol_burn.as_zeno(),
+        }),
     }
 }
 
@@ -1022,6 +1035,7 @@ fn transaction_kind(transaction: &Transaction) -> &'static str {
             kernel::transaction::Spend::Asset { .. } => "asset-transfer",
         },
         AuthorizedTransaction::Asset(_) => "asset",
+        AuthorizedTransaction::Pool(_) => "pool",
     }
 }
 
@@ -1808,9 +1822,8 @@ fn serve_block_requests(
                 if transaction_requests > MAX_RELAY_ITEMS_PER_SESSION {
                     return Err("peer exceeded the transaction request limit".into());
                 }
-                let requested: [u8; 32] = body
-                    .try_into()
-                    .map_err(|_| "invalid requested Tx Hash")?;
+                let requested: [u8; 32] =
+                    body.try_into().map_err(|_| "invalid requested Tx Hash")?;
                 let transaction = read_mempool(database)?
                     .into_iter()
                     .find(|transaction| transaction.id().ok() == Some(requested))
@@ -2080,11 +2093,7 @@ fn exchange_gossip_transactions(
     remote: &GossipInventory,
 ) -> Result<(), String> {
     let local = gossip_inventory(database)?;
-    let local_ids = local
-        .txhash
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
+    let local_ids = local.txhash.iter().copied().collect::<BTreeSet<_>>();
     for txhash in remote
         .txhash
         .iter()
@@ -2107,11 +2116,7 @@ fn exchange_gossip_transactions(
         accept_relayed_transaction(database, &response[1..])?;
     }
 
-    let remote_ids = remote
-        .txhash
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
+    let remote_ids = remote.txhash.iter().copied().collect::<BTreeSet<_>>();
     for transaction in read_mempool(database)?
         .into_iter()
         .filter(|transaction| {
@@ -2952,6 +2957,40 @@ fn reserved_coin_inputs(transactions: &[Transaction]) -> BTreeSet<kernel::native
                 .intent
                 .coin_parts()
                 .map_or_else(Vec::new, |(inputs, _)| inputs.to_vec()),
+            AuthorizedTransaction::Pool(transaction) => {
+                let mut inputs = transaction
+                    .payment
+                    .intent
+                    .coin_parts()
+                    .map_or_else(Vec::new, |(inputs, _)| inputs.to_vec());
+                use kernel::transaction::{PoolFunding, PoolInstruction};
+                let mut add = |funding: &PoolFunding| {
+                    if let PoolFunding::Coin {
+                        inputs: pool_inputs,
+                    } = funding
+                    {
+                        inputs.extend(pool_inputs.iter().copied());
+                    }
+                };
+                match &transaction.call.intent.instruction {
+                    PoolInstruction::Create {
+                        funding_x,
+                        funding_y,
+                        ..
+                    }
+                    | PoolInstruction::AddLiquidity {
+                        funding_x,
+                        funding_y,
+                        ..
+                    } => {
+                        add(funding_x);
+                        add(funding_y);
+                    }
+                    PoolInstruction::Swap { funding, .. } => add(funding),
+                    PoolInstruction::RemoveLiquidity { .. } => {}
+                }
+                inputs
+            }
         })
         .collect()
 }
@@ -3012,6 +3051,9 @@ fn transaction_miner_fee(transaction: &Transaction) -> Result<u64, String> {
                 .intent,
         )),
         AuthorizedTransaction::Asset(transaction) => {
+            miner_fee_from_outputs(coin_outputs(&transaction.payment.intent))
+        }
+        AuthorizedTransaction::Pool(transaction) => {
             miner_fee_from_outputs(coin_outputs(&transaction.payment.intent))
         }
     }

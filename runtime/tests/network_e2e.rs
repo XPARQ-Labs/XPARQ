@@ -358,10 +358,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
         archival_bytes = required;
     };
     let submitted = post_transaction(&a_rpc, &transaction);
-    assert_eq!(
-        submitted["txhash"],
-        hex::encode(transaction.id().unwrap())
-    );
+    assert_eq!(submitted["txhash"], hex::encode(transaction.id().unwrap()));
 
     wait_for_status(&c_rpc, |_| {
         account(&c_rpc, &sender_address).is_ok_and(|account| {

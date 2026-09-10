@@ -128,12 +128,14 @@ impl UtxoSet {
     pub fn mint_capabilities(
         &self,
     ) -> impl Iterator<Item = (MintCapabilityId, &MintCapability)> + '_ {
-        self.entries.iter().filter_map(|(id, utxo)| match (id, utxo) {
-            (UtxoId::MintCapability(id), Utxo::MintCapability(capability)) => {
-                Some((*id, capability))
-            }
-            _ => None,
-        })
+        self.entries
+            .iter()
+            .filter_map(|(id, utxo)| match (id, utxo) {
+                (UtxoId::MintCapability(id), Utxo::MintCapability(capability)) => {
+                    Some((*id, capability))
+                }
+                _ => None,
+            })
     }
 
     pub fn len(&self) -> usize {
@@ -159,9 +161,7 @@ impl fmt::Display for Error {
             Self::NotFound => f.write_str("UTXO was not found"),
             Self::CoinCollision => f.write_str("coin UTXO ID already exists"),
             Self::ShareCollision => f.write_str("asset share UTXO ID already exists"),
-            Self::MintCapabilityCollision => {
-                f.write_str("mint capability UTXO ID already exists")
-            }
+            Self::MintCapabilityCollision => f.write_str("mint capability UTXO ID already exists"),
         }
     }
 }

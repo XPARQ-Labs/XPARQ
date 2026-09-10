@@ -9,12 +9,13 @@ use crate::consensus::{
     BurnError, ProtocolBurn, StateTransitionWeight, account_key_state_weight,
     created_coin_output_count, validate_exact_burn,
 };
-use crate::native::asset::{AssetError, Share};
+use crate::native::asset::{AssetError, AssetShare, Share};
 use crate::native::coin::{Output as CoinOutput, XPQ, Zeno};
+use crate::native::pool::{PoolAmount, PoolError, PoolShareHash};
 use crate::transaction::{
     AccountAuthorization, AccountIntent, AssetInstruction, AssetIntent, AuthorizedAccountIntent,
-    AuthorizedTransaction, ChainContext, IntentError, Spend, SpendCommitment, SpendIntent,
-    Transaction as OnChainTransaction,
+    AuthorizedTransaction, ChainContext, IntentError, PoolFunding, PoolInstruction, PoolIntent,
+    Spend, SpendCommitment, SpendIntent, Transaction as OnChainTransaction,
 };
 
 pub trait ConsensusIntent: Clone {
@@ -29,6 +30,18 @@ impl ConsensusIntent for SpendIntent {
 
     fn commitment_for(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
         self.commitment(chain)
+    }
+}
+
+impl ConsensusIntent for PoolIntent {
+    fn validate_structure(&self) -> Result<(), IntentError> {
+        self.validate_structure()
+            .map_err(|_| IntentError::InvalidAssetCall)
+    }
+    fn commitment_for(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
+        self.commitment(chain.genesis_hash)
+            .map(SpendCommitment::from_bytes)
+            .map_err(|_| IntentError::InvalidAssetCall)
     }
 }
 
@@ -98,6 +111,7 @@ impl<T> AuthorizationValidated<T> {
 pub enum ValidatedAuthorizedTransaction {
     Spend(ValidatedSpendTransaction),
     Asset(ValidatedAssetTransaction),
+    Pool(ValidatedPoolTransaction),
 }
 
 pub type ValidatedTransaction = ValidatedAuthorizedTransaction;
@@ -111,6 +125,12 @@ pub struct ValidatedSpendTransaction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedAssetTransaction {
     pub call: AuthorizationValidated<AssetIntent>,
+    pub payment: AuthorizationValidated<SpendIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedPoolTransaction {
+    pub call: AuthorizationValidated<PoolIntent>,
     pub payment: AuthorizationValidated<SpendIntent>,
 }
 
@@ -130,6 +150,20 @@ pub trait TransactionStateView {
     fn coin_recipient(&self, id: XPQ) -> Option<Address>;
 
     fn share_recipient(&self, id: Share) -> Option<Address>;
+    fn asset_share(&self, _id: Share) -> Option<AssetShare> {
+        None
+    }
+    fn pool_share_owner(&self, _id: PoolShareHash) -> Option<Address> {
+        None
+    }
+    fn validate_pool_transition(
+        &self,
+        _intent: &PoolIntent,
+        _height: crypto::Height,
+        _commitment: [u8; 32],
+    ) -> Result<(), PoolError> {
+        Err(PoolError::UnknownPool)
+    }
 
     fn account_public_key(&self, address: Address) -> Option<PublicKey>;
 
@@ -330,6 +364,163 @@ fn validate_authorized_transaction(
                 ValidatedAssetTransaction { call, payment },
             ))
         }
+        AuthorizedTransaction::Pool(transaction) => {
+            let transaction = *transaction;
+            let call = validate_account_intent_authorization(
+                transaction.call,
+                chain,
+                current_height,
+                state,
+            )?;
+            validate_pool_funding(call.intent(), state)?;
+            if let PoolInstruction::RemoveLiquidity { share, .. } = call.intent().instruction {
+                if state.pool_share_owner(share) != Some(call.intent().signer) {
+                    return Err(TransactionConsensusError::RecipientMismatch);
+                }
+            }
+            state
+                .validate_pool_transition(
+                    call.intent(),
+                    crypto::Height(current_height),
+                    call.commitment().into_bytes(),
+                )
+                .map_err(TransactionConsensusError::Pool)?;
+            let payment = validate_account_intent_authorization(
+                transaction.payment,
+                chain,
+                current_height,
+                state,
+            )?;
+            let (payment_inputs, payment_outputs) = coin_parts(payment.intent())?;
+            ensure_pool_payment_disjoint(call.intent(), payment_inputs)?;
+            let actual_burn = validate_coin_inputs(
+                payment_inputs,
+                payment_outputs,
+                payment.intent().signer,
+                state,
+            )?;
+            let key_weight = combined_revealed_key_weight(
+                call.intent().signer,
+                call.revealed_account_key(),
+                payment.intent().signer,
+                payment.revealed_account_key(),
+            )?;
+            validate_required_burn(
+                actual_burn,
+                StateTransitionWeight {
+                    created_coin_utxos: created_coin_output_count(payment_outputs)?,
+                    consumed_coin_utxos: count_inputs(payment_inputs.len())?,
+                    created_account_key_weight: key_weight,
+                    ..StateTransitionWeight::default()
+                },
+                canonical_transaction_weight,
+            )?;
+            Ok(ValidatedAuthorizedTransaction::Pool(
+                ValidatedPoolTransaction { call, payment },
+            ))
+        }
+    }
+}
+
+fn validate_pool_funding(
+    intent: &PoolIntent,
+    state: &impl TransactionStateView,
+) -> Result<(), TransactionConsensusError> {
+    let validate =
+        |funding: &PoolFunding, expected: PoolAmount| -> Result<(), TransactionConsensusError> {
+            let actual = match funding {
+                PoolFunding::Coin { inputs } => {
+                    ensure_unique_coin_ids(inputs.iter().copied())?;
+                    let mut total = Zeno::ZERO;
+                    for id in inputs {
+                        if state.coin_recipient(*id) != Some(intent.signer) {
+                            return Err(TransactionConsensusError::RecipientMismatch);
+                        }
+                        total = total
+                            .checked_add(
+                                state
+                                    .coin(*id)
+                                    .ok_or(TransactionConsensusError::UtxoNotFound)?
+                                    .amount,
+                            )
+                            .ok_or(TransactionConsensusError::ZenoOverflow)?;
+                    }
+                    PoolAmount::from(total)
+                }
+                PoolFunding::Asset { asset, inputs } => {
+                    validate_share_ownership(inputs, intent.signer, state)?;
+                    let mut total = crate::native::asset::Unit::ZERO;
+                    for id in inputs {
+                        let share = state
+                            .asset_share(*id)
+                            .ok_or(TransactionConsensusError::UtxoNotFound)?;
+                        if share.parent != *asset {
+                            return Err(TransactionConsensusError::ValueMismatch);
+                        }
+                        total = total
+                            .checked_add(share.amount)
+                            .ok_or(TransactionConsensusError::ValueMismatch)?;
+                    }
+                    PoolAmount::from(total)
+                }
+            };
+            if actual != expected {
+                return Err(TransactionConsensusError::ValueMismatch);
+            }
+            Ok(())
+        };
+    match &intent.instruction {
+        PoolInstruction::Create {
+            amount_x,
+            amount_y,
+            funding_x,
+            funding_y,
+            ..
+        }
+        | PoolInstruction::AddLiquidity {
+            amount_x,
+            amount_y,
+            funding_x,
+            funding_y,
+            ..
+        } => {
+            validate(funding_x, *amount_x)?;
+            validate(funding_y, *amount_y)
+        }
+        PoolInstruction::Swap {
+            amount_in, funding, ..
+        } => validate(funding, *amount_in),
+        PoolInstruction::RemoveLiquidity { .. } => Ok(()),
+    }
+}
+
+fn ensure_pool_payment_disjoint(
+    intent: &PoolIntent,
+    payment_inputs: &[XPQ],
+) -> Result<(), TransactionConsensusError> {
+    let payment: BTreeSet<_> = payment_inputs.iter().copied().collect();
+    let overlaps = |funding: &PoolFunding| match funding {
+        PoolFunding::Coin { inputs } => inputs.iter().any(|id| payment.contains(id)),
+        PoolFunding::Asset { .. } => false,
+    };
+    let duplicate = match &intent.instruction {
+        PoolInstruction::Create {
+            funding_x,
+            funding_y,
+            ..
+        }
+        | PoolInstruction::AddLiquidity {
+            funding_x,
+            funding_y,
+            ..
+        } => overlaps(funding_x) || overlaps(funding_y),
+        PoolInstruction::Swap { funding, .. } => overlaps(funding),
+        PoolInstruction::RemoveLiquidity { .. } => false,
+    };
+    if duplicate {
+        Err(TransactionConsensusError::ValueMismatch)
+    } else {
+        Ok(())
     }
 }
 
@@ -588,6 +779,7 @@ pub enum TransactionConsensusError {
     ZenoOverflow,
     ValueMismatch,
     Asset(AssetError),
+    Pool(PoolError),
     Burn(BurnError),
 }
 
@@ -614,6 +806,7 @@ impl fmt::Display for TransactionConsensusError {
                 formatter.write_str("transaction outputs exceed canonical input value")
             }
             Self::Asset(error) => write!(formatter, "invalid native asset transaction: {error}"),
+            Self::Pool(error) => write!(formatter, "invalid native pool transaction: {error}"),
             Self::Burn(error) => write!(formatter, "invalid protocol burn: {error}"),
         }
     }
@@ -632,7 +825,9 @@ mod tests {
     use super::*;
     use crate::ledger::LedgerState;
     use crate::native::coin::Output as CoinOutput;
+    use crate::native::{Pair, PoolAmount, PoolHash};
     use crate::transaction::Spend;
+    use crate::transaction::{PoolFunding, PoolInstruction, PoolIntent};
 
     #[test]
     fn direct_spend_application_and_rollback_are_atomic() {
@@ -676,5 +871,92 @@ mod tests {
         assert_eq!(state.coin_recipients.get(&input), Some(&owner));
         assert_eq!(state.utxos.coin(&output), None);
         assert_eq!(state.total_burned, Zeno::ZERO);
+    }
+
+    #[test]
+    fn funded_pool_creation_and_rollback_are_atomic() {
+        let owner = Address([7; crypto::ADDRESS_SIZE]);
+        let asset = crate::native::asset::Asset::from_bytes([8; crypto::HASH_SIZE]);
+        let coin_input = XPQ::from_bytes([1; crypto::HASH_SIZE]);
+        let payment_input = XPQ::from_bytes([2; crypto::HASH_SIZE]);
+        let asset_input = Share::from_bytes([3; crypto::HASH_SIZE]);
+        let call_commitment = SpendCommitment::from_bytes([4; crypto::HASH_SIZE]);
+        let payment_commitment = SpendCommitment::from_bytes([5; crypto::HASH_SIZE]);
+        let chain = ChainContext::new([6; crypto::HASH_SIZE]);
+        let mut state = LedgerState::default();
+        state
+            .utxos
+            .insert_coin(coin_input, Zeno::from_zeno(100))
+            .unwrap();
+        state.coin_recipients.insert(coin_input, owner);
+        state
+            .utxos
+            .insert_coin(payment_input, Zeno::from_zeno(10))
+            .unwrap();
+        state.coin_recipients.insert(payment_input, owner);
+        state
+            .utxos
+            .insert_asset(
+                asset_input,
+                AssetShare {
+                    parent: asset,
+                    amount: crate::native::asset::Unit::from_units(200),
+                },
+            )
+            .unwrap();
+        state.assets.share_recipients.insert(asset_input, owner);
+
+        let call = PoolIntent::new(
+            owner,
+            PoolInstruction::Create {
+                asset_x: Pair::Coin,
+                asset_y: Pair::Asset(asset),
+                amount_x: PoolAmount::from(Zeno::from_zeno(100)),
+                amount_y: PoolAmount::from(crate::native::asset::Unit::from_units(200)),
+                funding_x: PoolFunding::Coin {
+                    inputs: vec![coin_input],
+                },
+                funding_y: PoolFunding::Asset {
+                    asset,
+                    inputs: vec![asset_input],
+                },
+                fee_units: 300,
+            },
+        );
+        let payment = SpendIntent::coin(
+            owner,
+            vec![payment_input],
+            vec![CoinOutput::new(owner, Zeno::from_zeno(9))],
+        )
+        .unwrap();
+        let transaction = ValidatedTransaction::Pool(ValidatedPoolTransaction {
+            call: AuthorizationValidated {
+                intent: call,
+                commitment: call_commitment,
+                revealed_account_key: None,
+            },
+            payment: AuthorizationValidated {
+                intent: payment,
+                commitment: payment_commitment,
+                revealed_account_key: None,
+            },
+        });
+
+        let journal = state
+            .apply_validated_transaction(&transaction, crypto::Height(1), owner, chain)
+            .unwrap();
+        let pool_id = PoolHash::derive(Pair::Coin, Pair::Asset(asset)).unwrap();
+        assert!(state.pools.pool(pool_id).is_some());
+        assert!(state.utxos.coin(&coin_input).is_none());
+        assert!(state.utxos.asset(&asset_input).is_none());
+
+        state.rollback_state(journal).unwrap();
+        assert!(state.pools.is_empty());
+        assert_eq!(state.utxos.coin(&coin_input), Some(Zeno::from_zeno(100)));
+        assert_eq!(
+            state.utxos.asset(&asset_input).map(|share| share.amount),
+            Some(crate::native::asset::Unit::from_units(200))
+        );
+        assert_eq!(state.utxos.coin(&payment_input), Some(Zeno::from_zeno(10)));
     }
 }

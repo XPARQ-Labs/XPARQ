@@ -37,7 +37,10 @@ pub struct AssetIntent {
 
 impl AssetIntent {
     pub const fn new(instruction: AssetInstruction, signer: Address) -> Self {
-        Self { instruction, signer }
+        Self {
+            instruction,
+            signer,
+        }
     }
 
     pub fn asset(&self) -> Result<Asset, AssetError> {
@@ -154,9 +157,7 @@ impl AssetIntent {
                     )?;
                 }
             }
-            AssetInstruction::Mint {
-                asset, amount, ..
-            } => {
+            AssetInstruction::Mint { asset, amount, .. } => {
                 weight = checked_entry_weight(
                     weight,
                     HASH_SIZE,

@@ -4,6 +4,7 @@ pub mod account;
 pub mod applied;
 mod error;
 pub mod ledger;
+pub mod pool;
 mod state;
 pub mod utxo;
 

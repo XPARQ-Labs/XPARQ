@@ -10,18 +10,21 @@ use crate::native::asset::{
 };
 
 use crate::native::coin::{Recipient, XPQ, Zeno};
+use crate::native::pool::{Pair, PoolAmount, PoolError, PoolHash, PoolShareHash, canonical_pair};
 
 use crate::consensus::{
     AuthorizationValidated, RevealedAccountKey, ValidatedAuthorizedTransaction,
-    ValidatedTransaction,
+    ValidatedPoolTransaction, ValidatedTransaction,
 };
 
 use crate::ledger::{
-    AssetRollbackJournal, AssetState, LedgerState, SpendRollbackJournal, StateError,
-    StateRollbackJournal, utxo,
+    AssetRollbackJournal, AssetState, LedgerState, PoolRollbackJournal, SpendRollbackJournal,
+    StateError, StateRollbackJournal, utxo,
 };
 
-use crate::transaction::{AssetInstruction, AssetIntent, SpendCommitment, SpendIntent};
+use crate::transaction::{
+    AssetInstruction, AssetIntent, PoolFunding, PoolInstruction, SpendCommitment, SpendIntent,
+};
 
 //
 // Apply validated transaction
@@ -31,11 +34,11 @@ impl LedgerState {
     pub fn apply_validated_transaction(
         &mut self,
         transaction: &ValidatedTransaction,
-        _height: crypto::Height,
+        height: crypto::Height,
         block_miner: Address,
         chain: crate::transaction::ChainContext,
     ) -> Result<StateRollbackJournal, StateError> {
-        self.apply_validated_authorized_transaction(transaction, chain, block_miner)
+        self.apply_validated_authorized_transaction(transaction, chain, block_miner, height)
     }
 
     fn apply_validated_authorized_transaction(
@@ -43,7 +46,26 @@ impl LedgerState {
         transaction: &ValidatedAuthorizedTransaction,
         chain: crate::transaction::ChainContext,
         block_miner: Address,
+        height: crypto::Height,
     ) -> Result<StateRollbackJournal, StateError> {
+        if let ValidatedAuthorizedTransaction::Pool(pool_transaction) = transaction {
+            let mut staged = self.clone();
+            let mut payment =
+                staged.apply_validated_onchain_spend(&pool_transaction.payment, block_miner)?;
+            staged.register_revealed_account(
+                pool_transaction.payment.intent().signer,
+                pool_transaction.payment.revealed_account_key().cloned(),
+                &mut payment,
+            )?;
+            staged.register_revealed_account(
+                pool_transaction.call.intent().signer,
+                pool_transaction.call.revealed_account_key().cloned(),
+                &mut payment,
+            )?;
+            let pool = staged.apply_pool_transaction(pool_transaction, height)?;
+            *self = staged;
+            return Ok(StateRollbackJournal::PoolWithPayment { pool, payment });
+        }
         //
         // Asset transfer that also carries native XPQ payment.
         //
@@ -139,7 +161,7 @@ impl LedgerState {
                 self.apply_validated_onchain_spend(&validated.spend, block_miner)
             }
 
-            ValidatedAuthorizedTransaction::Asset(_) => {
+            ValidatedAuthorizedTransaction::Asset(_) | ValidatedAuthorizedTransaction::Pool(_) => {
                 unreachable!("asset transaction handled above")
             }
         }?;
@@ -171,6 +193,227 @@ impl LedgerState {
 
             Err(error) => Err(StateError::Account(error)),
         }
+    }
+}
+
+//
+// Pool state transition
+//
+
+impl LedgerState {
+    fn apply_pool_transaction(
+        &mut self,
+        validated: &ValidatedPoolTransaction,
+        height: crypto::Height,
+    ) -> Result<PoolRollbackJournal, StateError> {
+        let intent = validated.call.intent();
+        let commitment = validated.call.commitment().into_bytes();
+        let mut journal = PoolRollbackJournal::default();
+
+        match &intent.instruction {
+            PoolInstruction::Create {
+                asset_x,
+                asset_y,
+                amount_x,
+                amount_y,
+                funding_x,
+                funding_y,
+                fee_units,
+            } => {
+                let (canonical_x, canonical_y) = canonical_pair(*asset_x, *asset_y)?;
+                let id = PoolHash::derive(canonical_x, canonical_y)?;
+                journal.pools.push((id, self.pools.pool(id).copied()));
+                let share = PoolShareHash::derive(id, commitment, 0);
+                journal
+                    .pool_shares
+                    .push((share, self.pools.pool_share(share).copied()));
+                self.consume_pool_funding(funding_x, &mut journal)?;
+                self.consume_pool_funding(funding_y, &mut journal)?;
+                self.pools.create_pool(
+                    *asset_x,
+                    *asset_y,
+                    *amount_x,
+                    *amount_y,
+                    *fee_units,
+                    intent.signer,
+                    commitment,
+                    height,
+                )?;
+            }
+            PoolInstruction::AddLiquidity {
+                pool,
+                amount_x,
+                amount_y,
+                funding_x,
+                funding_y,
+                minimum_liquidity,
+            } => {
+                let current = self
+                    .pools
+                    .pool(*pool)
+                    .copied()
+                    .ok_or(PoolError::UnknownPool)?;
+                if funding_x.pair() != current.asset_x || funding_y.pair() != current.asset_y {
+                    return Err(StateError::Pool(PoolError::InvalidAmount));
+                }
+                journal.pools.push((*pool, Some(current)));
+                let share = PoolShareHash::derive(*pool, commitment, 0);
+                journal
+                    .pool_shares
+                    .push((share, self.pools.pool_share(share).copied()));
+                self.consume_pool_funding(funding_x, &mut journal)?;
+                self.consume_pool_funding(funding_y, &mut journal)?;
+                self.pools.add_liquidity(
+                    *pool,
+                    *amount_x,
+                    *amount_y,
+                    *minimum_liquidity,
+                    intent.signer,
+                    commitment,
+                    0,
+                    height,
+                )?;
+            }
+            PoolInstruction::RemoveLiquidity {
+                share,
+                minimum_x,
+                minimum_y,
+            } => {
+                let owned = self
+                    .pools
+                    .pool_share(*share)
+                    .copied()
+                    .ok_or(PoolError::UnknownShare)?;
+                let current = self
+                    .pools
+                    .pool(owned.pool)
+                    .copied()
+                    .ok_or(PoolError::UnknownPool)?;
+                journal.pools.push((owned.pool, Some(current)));
+                journal.pool_shares.push((*share, Some(owned)));
+                let (x, y) = self.pools.remove_liquidity(
+                    *share,
+                    intent.signer,
+                    *minimum_x,
+                    *minimum_y,
+                    height,
+                )?;
+                self.create_pool_output(
+                    current.asset_x,
+                    x,
+                    intent.signer,
+                    commitment,
+                    0,
+                    &mut journal,
+                )?;
+                self.create_pool_output(
+                    current.asset_y,
+                    y,
+                    intent.signer,
+                    commitment,
+                    1,
+                    &mut journal,
+                )?;
+            }
+            PoolInstruction::Swap {
+                pool,
+                input_asset,
+                amount_in,
+                funding,
+                minimum_out,
+            } => {
+                let current = self
+                    .pools
+                    .pool(*pool)
+                    .copied()
+                    .ok_or(PoolError::UnknownPool)?;
+                if funding.pair() != *input_asset {
+                    return Err(StateError::Pool(PoolError::InvalidAmount));
+                }
+                journal.pools.push((*pool, Some(current)));
+                self.consume_pool_funding(funding, &mut journal)?;
+                let output =
+                    self.pools
+                        .swap(*pool, *input_asset, *amount_in, *minimum_out, height)?;
+                let output_asset = if *input_asset == current.asset_x {
+                    current.asset_y
+                } else {
+                    current.asset_x
+                };
+                self.create_pool_output(
+                    output_asset,
+                    output,
+                    intent.signer,
+                    commitment,
+                    0,
+                    &mut journal,
+                )?;
+            }
+        }
+        Ok(journal)
+    }
+
+    fn consume_pool_funding(
+        &mut self,
+        funding: &PoolFunding,
+        journal: &mut PoolRollbackJournal,
+    ) -> Result<(), StateError> {
+        match funding {
+            PoolFunding::Coin { inputs } => {
+                for id in inputs {
+                    let amount = self.utxos.consume_coin(id)?;
+                    let owner = self
+                        .coin_recipients
+                        .remove(id)
+                        .ok_or(StateError::InvalidTransaction)?;
+                    journal.consumed_coins.push((*id, amount, owner));
+                }
+            }
+            PoolFunding::Asset { inputs, .. } => {
+                for id in inputs {
+                    let share = self.utxos.consume_asset(id)?;
+                    let owner = self
+                        .assets
+                        .share_recipients
+                        .remove(id)
+                        .ok_or(StateError::InvalidTransaction)?;
+                    journal.consumed_assets.push((*id, share, owner));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn create_pool_output(
+        &mut self,
+        pair: Pair,
+        amount: PoolAmount,
+        owner: Address,
+        commitment: [u8; HASH_SIZE],
+        index: u32,
+        journal: &mut PoolRollbackJournal,
+    ) -> Result<(), StateError> {
+        match pair {
+            Pair::Coin => {
+                let id = XPQ::from_output(&commitment, index);
+                self.utxos.insert_coin(id, amount.into_zeno()?)?;
+                self.coin_recipients.insert(id, owner);
+                journal.created_coins.push(id);
+            }
+            Pair::Asset(asset) => {
+                let id = Share::derive(asset, commitment, index);
+                self.utxos.insert_asset(
+                    id,
+                    AssetShare {
+                        parent: asset,
+                        amount: amount.into_unit(),
+                    },
+                )?;
+                self.assets.share_recipients.insert(id, owner);
+                journal.created_assets.push(id);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -702,7 +945,33 @@ impl LedgerState {
 
                 self.rollback_spend(payment)
             }
+            StateRollbackJournal::PoolWithPayment { pool, payment } => {
+                self.rollback_pool(pool)?;
+                self.rollback_spend(payment)
+            }
         }
+    }
+
+    fn rollback_pool(&mut self, journal: PoolRollbackJournal) -> Result<(), StateError> {
+        for id in journal.created_coins.into_iter().rev() {
+            self.utxos.consume_coin(&id)?;
+            self.coin_recipients.remove(&id);
+        }
+        for id in journal.created_assets.into_iter().rev() {
+            self.utxos.consume_asset(&id)?;
+            self.assets.share_recipients.remove(&id);
+        }
+        for (id, share, owner) in journal.consumed_assets.into_iter().rev() {
+            self.utxos.insert_asset(id, share)?;
+            self.assets.share_recipients.insert(id, owner);
+        }
+        for (id, amount, owner) in journal.consumed_coins.into_iter().rev() {
+            self.utxos.insert_coin(id, amount)?;
+            self.coin_recipients.insert(id, owner);
+        }
+        restore_map(&mut self.pools.pool_shares, journal.pool_shares);
+        restore_map(&mut self.pools.pools, journal.pools);
+        Ok(())
     }
 
     pub(crate) fn rollback_spend(

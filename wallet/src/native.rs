@@ -150,7 +150,7 @@ struct SubmitTransactionResponse {
     txhash: String,
 }
 
-const MAX_CONSOLIDATION_INPUTS: usize = 1_000;
+const MAX_CONSOLIDATION_INPUTS: usize = 10_000;
 
 pub fn run(mut args: Vec<String>) -> Result<(), String> {
     let result = match args.first().map(String::as_str) {
@@ -740,9 +740,7 @@ fn interactive_block_explorer() -> Result<(), String> {
         }
         "2" => {
             let txhash = prompt("Tx Hash")?;
-            if txhash.len() != 64
-                || !txhash.bytes().all(|byte| byte.is_ascii_hexdigit())
-            {
+            if txhash.len() != 64 || !txhash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 return Err("Tx Hash must be 64 hexadecimal characters".into());
             }
             http_get_json(&rpc, &format!("/explorer/transaction/{txhash}"))?

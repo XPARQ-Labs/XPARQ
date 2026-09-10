@@ -210,7 +210,6 @@ impl AccountWallet {
             public_key_known,
         )
     }
-
 }
 
 #[cfg(test)]

@@ -303,6 +303,90 @@ impl TransactionStateView for LedgerState {
         self.assets.share_recipients.get(&id).copied()
     }
 
+    fn asset_share(
+        &self,
+        id: crate::native::asset::Share,
+    ) -> Option<crate::native::asset::AssetShare> {
+        self.utxos.asset(&id).copied()
+    }
+
+    fn pool_share_owner(&self, id: crate::native::pool::PoolShareHash) -> Option<Address> {
+        self.pools.pool_share(id).map(|share| share.owner)
+    }
+
+    fn validate_pool_transition(
+        &self,
+        intent: &crate::transaction::PoolIntent,
+        height: Height,
+        commitment: [u8; 32],
+    ) -> Result<(), crate::native::pool::PoolError> {
+        use crate::transaction::PoolInstruction;
+        let mut pools = self.pools.clone();
+        match &intent.instruction {
+            PoolInstruction::Create {
+                asset_x,
+                asset_y,
+                amount_x,
+                amount_y,
+                fee_units,
+                ..
+            } => {
+                pools.create_pool(
+                    *asset_x,
+                    *asset_y,
+                    *amount_x,
+                    *amount_y,
+                    *fee_units,
+                    intent.signer,
+                    commitment,
+                    height,
+                )?;
+            }
+            PoolInstruction::AddLiquidity {
+                pool,
+                amount_x,
+                amount_y,
+                minimum_liquidity,
+                funding_x,
+                funding_y,
+            } => {
+                let current = pools
+                    .pool(*pool)
+                    .ok_or(crate::native::pool::PoolError::UnknownPool)?;
+                if funding_x.pair() != current.asset_x || funding_y.pair() != current.asset_y {
+                    return Err(crate::native::pool::PoolError::InvalidAmount);
+                }
+                pools.add_liquidity(
+                    *pool,
+                    *amount_x,
+                    *amount_y,
+                    *minimum_liquidity,
+                    intent.signer,
+                    commitment,
+                    0,
+                    height,
+                )?;
+            }
+            PoolInstruction::RemoveLiquidity {
+                share,
+                minimum_x,
+                minimum_y,
+            } => {
+                pools.remove_liquidity(*share, intent.signer, *minimum_x, *minimum_y, height)?;
+            }
+            PoolInstruction::Swap {
+                pool,
+                input_asset,
+                amount_in,
+                minimum_out,
+                ..
+            } => {
+                pools.swap(*pool, *input_asset, *amount_in, *minimum_out, height)?;
+            }
+        }
+        Ok(())
+    }
+
     fn account_public_key(&self, address: Address) -> Option<PublicKey> {
         self.account_keys.get_account(&address).cloned()
     }
@@ -344,6 +428,7 @@ impl LedgerState {
     pub(crate) fn application_state_root(&self) -> Result<StateRoot, LedgerError> {
         if self.account_keys.is_empty()
             && self.assets.is_empty()
+            && self.pools.is_empty()
             && self.utxos.is_empty()
             && self.total_burned.is_zero()
             && self.coin_recipients.is_empty()
@@ -355,6 +440,7 @@ impl LedgerState {
             &self.account_keys,
             &self.utxos,
             &self.assets,
+            &self.pools,
             self.total_burned,
             &self.coin_recipients,
         ))?;
