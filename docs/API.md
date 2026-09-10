@@ -15,6 +15,13 @@ Account and Coin endpoints include `/status`, `/fee-policy`,
 `/balance/{address}`, `/account/{address}`, `/block/{height}`,
 `/blocks/latest`, and the explorer routes. Native asset endpoints are
 `/asset/{asset}` and `/asset/{asset}/balance/{address}`.
+Native pool endpoints are `/pools`, `/pool/{pool}`, and
+`/pool/shares/{address}`.
+
+The wallet exposes `pools`, `pool-info`, `pool-shares`, `pool-create`,
+`pool-add`, `pool-remove`, and `pool-swap`. Pool quantities use raw base units;
+the wallet keeps Pool funding inputs disjoint from automatic XPQ fee and burn
+payment inputs.
 
 Asset IDs use 64 lowercase hexadecimal
 characters. Asset quantities and supply are canonical `u128` values returned

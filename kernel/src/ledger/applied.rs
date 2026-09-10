@@ -200,6 +200,10 @@ impl LedgerState {
 // Pool state transition
 //
 
+//
+// Pool state transition
+//
+
 impl LedgerState {
     fn apply_pool_transaction(
         &mut self,
@@ -220,15 +224,54 @@ impl LedgerState {
                 funding_y,
                 fee_units,
             } => {
-                let (canonical_x, canonical_y) = canonical_pair(*asset_x, *asset_y)?;
+                let (canonical_x, canonical_y) =
+                    canonical_pair(*asset_x, *asset_y)?;
+
                 let id = PoolHash::derive(canonical_x, canonical_y)?;
-                journal.pools.push((id, self.pools.pool(id).copied()));
-                let share = PoolShareHash::derive(id, commitment, 0);
+
+                journal
+                    .pools
+                    .push((id, self.pools.pool(id).copied()));
+
+                let share = PoolShareHash::derive(
+                    id,
+                    commitment,
+                    0,
+                );
+
                 journal
                     .pool_shares
-                    .push((share, self.pools.pool_share(share).copied()));
-                self.consume_pool_funding(funding_x, &mut journal)?;
-                self.consume_pool_funding(funding_y, &mut journal)?;
+                    .push((
+                        share,
+                        self.pools.pool_share(share).copied(),
+                    ));
+
+                //
+                // Funding X.
+                //
+                // index 0 is reserved for the initial PoolShare.
+                //
+                self.consume_pool_funding(
+                    funding_x,
+                    *amount_x,
+                    intent.signer,
+                    commitment,
+                    1,
+                    &mut journal,
+                )?;
+
+                //
+                // Funding Y.
+                //
+                self.consume_pool_funding(
+                    funding_y,
+                    *amount_y,
+                    intent.signer,
+                    commitment,
+                    2,
+                    &mut journal,
+                )?;
+
                 self.pools.create_pool(
                     *asset_x,
                     *asset_y,
@@ -240,6 +283,7 @@ impl LedgerState {
                     height,
                 )?;
             }
+
             PoolInstruction::AddLiquidity {
                 pool,
                 amount_x,
@@ -253,16 +297,53 @@ impl LedgerState {
                     .pool(*pool)
                     .copied()
                     .ok_or(PoolError::UnknownPool)?;
-                if funding_x.pair() != current.asset_x || funding_y.pair() != current.asset_y {
-                    return Err(StateError::Pool(PoolError::InvalidAmount));
+
+                if funding_x.pair() != current.asset_x
+                    || funding_y.pair() != current.asset_y
+                {
+                    return Err(StateError::Pool(
+                        PoolError::InvalidAmount,
+                    ));
                 }
-                journal.pools.push((*pool, Some(current)));
-                let share = PoolShareHash::derive(*pool, commitment, 0);
+
+                journal
+                    .pools
+                    .push((*pool, Some(current)));
+
+                let share = PoolShareHash::derive(
+                    *pool,
+                    commitment,
+                    0,
+                );
+
                 journal
                     .pool_shares
-                    .push((share, self.pools.pool_share(share).copied()));
-                self.consume_pool_funding(funding_x, &mut journal)?;
-                self.consume_pool_funding(funding_y, &mut journal)?;
+                    .push((
+                        share,
+                        self.pools.pool_share(share).copied(),
+                    ));
+
+                //
+                // index 0 is reserved for the new LP share.
+                //
+                self.consume_pool_funding(
+                    funding_x,
+                    *amount_x,
+                    intent.signer,
+                    commitment,
+                    1,
+                    &mut journal,
+                )?;
+
+                self.consume_pool_funding(
+                    funding_y,
+                    *amount_y,
+                    intent.signer,
+                    commitment,
+                    2,
+                    &mut journal,
+                )?;
+
                 self.pools.add_liquidity(
                     *pool,
                     *amount_x,
@@ -274,6 +355,7 @@ impl LedgerState {
                     height,
                 )?;
             }
+
             PoolInstruction::RemoveLiquidity {
                 share,
                 minimum_x,
@@ -284,13 +366,21 @@ impl LedgerState {
                     .pool_share(*share)
                     .copied()
                     .ok_or(PoolError::UnknownShare)?;
+
                 let current = self
                     .pools
                     .pool(owned.pool)
                     .copied()
                     .ok_or(PoolError::UnknownPool)?;
-                journal.pools.push((owned.pool, Some(current)));
-                journal.pool_shares.push((*share, Some(owned)));
+
+                journal
+                    .pools
+                    .push((owned.pool, Some(current)));
+
+                journal
+                    .pool_shares
+                    .push((*share, Some(owned)));
+
                 let (x, y) = self.pools.remove_liquidity(
                     *share,
                     intent.signer,
@@ -298,6 +388,10 @@ impl LedgerState {
                     *minimum_y,
                     height,
                 )?;
+
+                //
+                // Returned liquidity becomes new UTXOs/shares.
+                //
                 self.create_pool_output(
                     current.asset_x,
                     x,
@@ -306,6 +400,7 @@ impl LedgerState {
                     0,
                     &mut journal,
                 )?;
+
                 self.create_pool_output(
                     current.asset_y,
                     y,
@@ -315,6 +410,7 @@ impl LedgerState {
                     &mut journal,
                 )?;
             }
+
             PoolInstruction::Swap {
                 pool,
                 input_asset,
@@ -327,19 +423,45 @@ impl LedgerState {
                     .pool(*pool)
                     .copied()
                     .ok_or(PoolError::UnknownPool)?;
+
                 if funding.pair() != *input_asset {
-                    return Err(StateError::Pool(PoolError::InvalidAmount));
+                    return Err(StateError::Pool(
+                        PoolError::InvalidAmount,
+                    ));
                 }
-                journal.pools.push((*pool, Some(current)));
-                self.consume_pool_funding(funding, &mut journal)?;
-                let output =
-                    self.pools
-                        .swap(*pool, *input_asset, *amount_in, *minimum_out, height)?;
-                let output_asset = if *input_asset == current.asset_x {
-                    current.asset_y
-                } else {
-                    current.asset_x
-                };
+
+                journal
+                    .pools
+                    .push((*pool, Some(current)));
+
+                //
+                // index 0 will be used for the swap output.
+                // index 1 is therefore reserved for funding change.
+                //
+                self.consume_pool_funding(
+                    funding,
+                    *amount_in,
+                    intent.signer,
+                    commitment,
+                    1,
+                    &mut journal,
+                )?;
+
+                let output = self.pools.swap(
+                    *pool,
+                    *input_asset,
+                    *amount_in,
+                    *minimum_out,
+                    height,
+                )?;
+
+                let output_asset =
+                    if *input_asset == current.asset_x {
+                        current.asset_y
+                    } else {
+                        current.asset_x
+                    };
+
                 self.create_pool_output(
                     output_asset,
                     output,
@@ -350,37 +472,201 @@ impl LedgerState {
                 )?;
             }
         }
+
         Ok(journal)
     }
 
     fn consume_pool_funding(
         &mut self,
         funding: &PoolFunding,
+        required: PoolAmount,
+        owner: Address,
+        commitment: [u8; HASH_SIZE],
+        change_index: u32,
         journal: &mut PoolRollbackJournal,
     ) -> Result<(), StateError> {
         match funding {
+            //
+            // Native XPQ funding.
+            //
             PoolFunding::Coin { inputs } => {
+                if inputs.is_empty() {
+                    return Err(StateError::Pool(
+                        PoolError::InvalidAmount,
+                    ));
+                }
+
+                let mut total = Zeno::ZERO;
+
+                //
+                // Validate all inputs before mutating state.
+                //
                 for id in inputs {
-                    let amount = self.utxos.consume_coin(id)?;
-                    let owner = self
+                    let amount = self
+                        .utxos
+                        .coin(id)
+                        .ok_or(StateError::InvalidTransaction)?;
+
+                    let input_owner = self
+                        .coin_recipients
+                        .get(id)
+                        .copied()
+                        .ok_or(StateError::InvalidTransaction)?;
+
+                    if input_owner != owner {
+                        return Err(StateError::InvalidTransaction);
+                    }
+
+                    total = total
+                        .checked_add(amount)
+                        .ok_or(StateError::AmountOverflow)?;
+                }
+
+                let required = required.into_zeno()?;
+
+                //
+                // total must be >= amount entering the pool.
+                //
+                let change = total
+                    .checked_sub(required)
+                    .ok_or(StateError::Pool(
+                        PoolError::InvalidAmount,
+                    ))?;
+
+                //
+                // Consume selected XPQ UTXOs.
+                //
+                for id in inputs {
+                    let amount =
+                        self.utxos.consume_coin(id)?;
+
+                    let input_owner = self
                         .coin_recipients
                         .remove(id)
                         .ok_or(StateError::InvalidTransaction)?;
-                    journal.consumed_coins.push((*id, amount, owner));
+
+                    journal
+                        .consumed_coins
+                        .push((
+                            *id,
+                            amount,
+                            input_owner,
+                        ));
+                }
+
+                //
+                // Return excess XPQ as a new UTXO.
+                //
+                if !change.is_zero() {
+                    self.create_pool_output(
+                        Pair::Coin,
+                        PoolAmount::from(change),
+                        owner,
+                        commitment,
+                        change_index,
+                        journal,
+                    )?;
                 }
             }
-            PoolFunding::Asset { inputs, .. } => {
+
+            //
+            // Native asset funding.
+            //
+            PoolFunding::Asset {
+                asset,
+                inputs,
+            } => {
+                if inputs.is_empty() {
+                    return Err(StateError::Pool(
+                        PoolError::InvalidAmount,
+                    ));
+                }
+
+                let mut total = Unit::ZERO;
+
+                //
+                // Validate all shares before mutating state.
+                //
                 for id in inputs {
-                    let share = self.utxos.consume_asset(id)?;
-                    let owner = self
+                    let share = self
+                        .utxos
+                        .asset(id)
+                        .ok_or(StateError::InvalidTransaction)?;
+
+                    //
+                    // Every input must belong to the requested asset.
+                    //
+                    if share.parent != *asset {
+                        return Err(StateError::InvalidTransaction);
+                    }
+
+                    let input_owner = self
+                        .assets
+                        .share_recipients
+                        .get(id)
+                        .copied()
+                        .ok_or(StateError::InvalidTransaction)?;
+
+                    if input_owner != owner {
+                        return Err(StateError::InvalidTransaction);
+                    }
+
+                    total = total
+                        .checked_add(share.amount)
+                        .ok_or(StateError::Pool(
+                            PoolError::ArithmeticOverflow,
+                        ))?;
+                }
+
+                let required = required.into_unit();
+
+                //
+                // total must be >= amount entering the pool.
+                //
+                let change = total
+                    .checked_sub(required)
+                    .ok_or(StateError::Pool(
+                        PoolError::InvalidAmount,
+                    ))?;
+
+                //
+                // Consume selected AssetShare UTXOs.
+                //
+                for id in inputs {
+                    let share =
+                        self.utxos.consume_asset(id)?;
+
+                    let input_owner = self
                         .assets
                         .share_recipients
                         .remove(id)
                         .ok_or(StateError::InvalidTransaction)?;
-                    journal.consumed_assets.push((*id, share, owner));
+
+                    journal
+                        .consumed_assets
+                        .push((
+                            *id,
+                            share,
+                            input_owner,
+                        ));
+                }
+
+                //
+                // Return excess asset as a new AssetShare.
+                //
+                if !change.is_zero() {
+                    self.create_pool_output(
+                        Pair::Asset(*asset),
+                        PoolAmount::from(change),
+                        owner,
+                        commitment,
+                        change_index,
+                        journal,
+                    )?;
                 }
             }
         }
+
         Ok(())
     }
 
@@ -395,13 +681,34 @@ impl LedgerState {
     ) -> Result<(), StateError> {
         match pair {
             Pair::Coin => {
-                let id = XPQ::from_output(&commitment, index);
-                self.utxos.insert_coin(id, amount.into_zeno()?)?;
-                self.coin_recipients.insert(id, owner);
+                let id = XPQ::from_output(
+                    &commitment,
+                    index,
+                );
+
+                self.utxos.insert_coin(
+                    id,
+                    amount.into_zeno()?,
+                )?;
+
+                if self
+                    .coin_recipients
+                    .insert(id, owner)
+                    .is_some()
+                {
+                    return Err(StateError::InvalidTransaction);
+                }
+
                 journal.created_coins.push(id);
             }
+
             Pair::Asset(asset) => {
-                let id = Share::derive(asset, commitment, index);
+                let id = Share::derive(
+                    asset,
+                    commitment,
+                    index,
+                );
+
                 self.utxos.insert_asset(
                     id,
                     AssetShare {
@@ -409,14 +716,23 @@ impl LedgerState {
                         amount: amount.into_unit(),
                     },
                 )?;
-                self.assets.share_recipients.insert(id, owner);
+
+                if self
+                    .assets
+                    .share_recipients
+                    .insert(id, owner)
+                    .is_some()
+                {
+                    return Err(StateError::InvalidTransaction);
+                }
+
                 journal.created_assets.push(id);
             }
         }
+
         Ok(())
     }
 }
-
 //
 // Coin state transition
 //

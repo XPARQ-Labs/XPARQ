@@ -45,7 +45,7 @@ const API_DOCS_HTML: &[u8] = br#"<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>kernel Node RPC API</title>
+  <title>kernel RPC API</title>
 </head>
 <body>
   <script id="api-reference" data-url="/openapi.json"></script>
@@ -156,7 +156,7 @@ struct GossipInventory {
     tip_hash: [u8; 32],
     cumulative_work: [u64; 8],
     cumulative_weight: u64,
-    txhash: Vec<[u8; 32]>,
+    hash: Vec<[u8; 32]>,
 }
 
 enum PeerSessionOutcome {
@@ -481,8 +481,8 @@ fn submit_transaction(path: Option<&str>, encoded: &str) -> Result<(), String> {
     }
     let transaction: Transaction =
         canonical_decode(&bytes).map_err(|error| format!("invalid transaction: {error}"))?;
-    let txhash = insert_mempool_transaction(&database, transaction, false)?;
-    println!("accepted transaction={}", hex::encode(txhash));
+    let hash = insert_mempool_transaction(&database, transaction, false)?;
+    println!("accepted transaction={}", hex::encode(hash));
     Ok(())
 }
 
@@ -733,7 +733,7 @@ fn explorer_address_response(
                 activities.push(serde_json::json!({
                     "height": block.height().0,
                     "block_hash": block_hash,
-                    "txhash": serde_json::Value::Null,
+                    "hash": serde_json::Value::Null,
                     "type": "emission",
                     "direction": "in",
                     "amount": miner_emission.as_zeno(),
@@ -822,7 +822,7 @@ fn address_transaction_activity(
     Ok(Some(serde_json::json!({
         "height": block.height().0,
         "block_hash": hex::encode(block.hash().map_err(|error| error.to_string())?.0),
-        "txhash": hex::encode(transaction.id().map_err(|error| error.to_string())?),
+        "hash": hex::encode(transaction.id().map_err(|error| error.to_string())?),
         "type": transaction_kind(transaction),
         "direction": direction,
         "amount": amount.as_zeno(),
@@ -832,7 +832,7 @@ fn address_transaction_activity(
 
 fn explorer_transaction_response(
     ledger: &Ledger,
-    txhash: [u8; 32],
+    hash: [u8; 32],
 ) -> Result<serde_json::Value, String> {
     let tip_height = ledger.tip_height().map_or(0, |height| height.0);
     for block in ledger.chain.blocks() {
@@ -840,13 +840,13 @@ fn explorer_transaction_response(
             .transaction_protocol_burns(block.height())
             .ok_or("transaction execution receipts are missing")?;
         for (index, transaction) in block.transactions().iter().enumerate() {
-            if transaction.id().map_err(|error| error.to_string())? == txhash {
+            if transaction.id().map_err(|error| error.to_string())? == hash {
                 let protocol_burn = burns
                     .get(index)
                     .copied()
                     .ok_or("transaction execution receipt is missing")?;
                 return Ok(serde_json::json!({
-                    "txhash": hex::encode(txhash),
+                    "hash": hex::encode(hash),
                     "type": transaction_kind(transaction),
                     "status": "confirmed",
                     "height": block.height().0,
@@ -1039,7 +1039,7 @@ fn transaction_kind(transaction: &Transaction) -> &'static str {
     }
 }
 
-fn parse_txhash(value: &str) -> Result<[u8; 32], String> {
+fn parse_hash(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64 || value.contains(['/', '?', '#']) {
         return Err("Tx Hash must be 64 hexadecimal characters".into());
     }
@@ -1085,12 +1085,8 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
     if method == "POST" && route == "/transaction" {
         let transaction: Transaction = canonical_decode(&request.body)
             .map_err(|error| format!("invalid submitted transaction: {error}"))?;
-        let txhash = insert_mempool_transaction(database, transaction, false)?;
-        return write_http_response(
-            stream,
-            200,
-            &serde_json::json!({"txhash": hex::encode(txhash)}),
-        );
+        let hash = insert_mempool_transaction(database, transaction, false)?;
+        return write_http_response(stream, 200, &serde_json::json!({"hash": hex::encode(hash)}));
     }
     if method != "GET" {
         return Err("unsupported RPC method".into());
@@ -1125,6 +1121,7 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             })
         }
         "/blocks/latest" => latest_blocks_response(&ledger)?,
+        route if route == "/pools" || route.starts_with("/pool/") => pool_response(&ledger, route)?,
         route if route.starts_with("/asset/") => asset_response(&ledger, route)?,
         route if route.starts_with("/balance/") => {
             let address = route.trim_start_matches("/balance/");
@@ -1201,12 +1198,70 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             )?
         }
         route if route.starts_with("/explorer/transaction/") => {
-            let txhash = route.trim_start_matches("/explorer/transaction/");
-            explorer_transaction_response(&ledger, parse_txhash(txhash)?)?
+            let hash = route.trim_start_matches("/explorer/transaction/");
+            explorer_transaction_response(&ledger, parse_hash(hash)?)?
         }
         _ => return Err("unknown RPC route".into()),
     };
     write_http_response(stream, 200, &response)
+}
+
+fn pair_response(pair: kernel::native::pool::Pair) -> serde_json::Value {
+    match pair {
+        kernel::native::pool::Pair::Coin => serde_json::json!({"type": "coin"}),
+        kernel::native::pool::Pair::Asset(asset) => {
+            serde_json::json!({"type": "asset", "asset": asset.to_string()})
+        }
+    }
+}
+
+fn pool_json(
+    id: kernel::native::pool::PoolHash,
+    pool: &kernel::native::pool::Pool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "pool": id.to_string(),
+        "asset_x": pair_response(pool.asset_x),
+        "asset_y": pair_response(pool.asset_y),
+        "reserve_x": pool.reserve_x.as_raw().to_string(),
+        "reserve_y": pool.reserve_y.as_raw().to_string(),
+        "total_liquidity": pool.total_liquidity.as_raw().to_string(),
+        "fee_units": pool.fee_units,
+        "last_updated_height": pool.last_updated_height.0,
+    })
+}
+
+fn pool_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
+    if route == "/pools" {
+        return Ok(serde_json::json!({
+            "pools": ledger.state().pools.pools()
+                .map(|(id, pool)| pool_json(id, pool))
+                .collect::<Vec<_>>()
+        }));
+    }
+    let path = route.trim_start_matches("/pool/");
+    if let Some(address) = path.strip_prefix("shares/") {
+        let address = parse_address(address)?;
+        return Ok(serde_json::json!({
+            "address": kernel::crypto::address_to_string(&address),
+            "shares": ledger.state().pools.pool_shares()
+                .filter(|(_, share)| share.owner == address)
+                .map(|(id, share)| serde_json::json!({
+                    "share": id.to_string(),
+                    "pool": share.pool.to_string(),
+                    "amount": share.amount.as_raw().to_string(),
+                }))
+                .collect::<Vec<_>>()
+        }));
+    }
+    if path.is_empty() || path.contains(['/', '?', '#']) {
+        return Err("invalid pool route".into());
+    }
+    let id = path
+        .parse::<kernel::native::pool::PoolHash>()
+        .map_err(|_| "invalid pool id")?;
+    let pool = ledger.state().pools.pool(id).ok_or("pool was not found")?;
+    Ok(pool_json(id, pool))
 }
 
 fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
@@ -1413,7 +1468,7 @@ fn block_response(ledger: &Ledger, block: &Block) -> Result<serde_json::Value, S
         .zip(burns)
         .map(|(transaction, protocol_burn)| {
             Ok(serde_json::json!({
-                "txhash": hex::encode(
+                "hash": hex::encode(
                     transaction.id().map_err(|error| error.to_string())?
                 ),
                 "type": transaction_kind(transaction),
@@ -1428,9 +1483,9 @@ fn block_response(ledger: &Ledger, block: &Block) -> Result<serde_json::Value, S
             }))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let txhash = transaction_details
+    let hash = transaction_details
         .iter()
-        .filter_map(|transaction| transaction.get("txhash").cloned())
+        .filter_map(|transaction| transaction.get("hash").cloned())
         .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "height": block.height().0,
@@ -1440,7 +1495,7 @@ fn block_response(ledger: &Ledger, block: &Block) -> Result<serde_json::Value, S
         "block_weight": block.block_weight(),
         "nonce": block.header.nonce.0,
         "transactions": block.transaction_count(),
-        "txhash": txhash,
+        "hash": hash,
         "transaction_details": transaction_details,
         "miner": kernel::crypto::address_to_string(&block.miner_address()),
         "subsidy": gross_subsidy.as_zeno(),
@@ -1901,7 +1956,7 @@ fn gossip_inventory(database: &Path) -> Result<GossipInventory, String> {
     let start = transactions
         .len()
         .saturating_sub(MAX_GOSSIP_INVENTORY_ITEMS);
-    let txhash = transactions[start..]
+    let hash = transactions[start..]
         .iter()
         .map(|transaction| transaction.id().map_err(|error| error.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1910,7 +1965,7 @@ fn gossip_inventory(database: &Path) -> Result<GossipInventory, String> {
         tip_hash,
         cumulative_work: state.cumulative_work.to_be_limbs(),
         cumulative_weight: state.cumulative_weight,
-        txhash,
+        hash,
     })
 }
 
@@ -1949,7 +2004,7 @@ fn decode_gossip_inventory(bytes: &[u8]) -> Result<GossipInventory, String> {
     }
     let inventory: GossipInventory =
         canonical_decode(bytes).map_err(|error| format!("decode gossip inventory: {error}"))?;
-    if inventory.txhash.len() > MAX_GOSSIP_INVENTORY_ITEMS {
+    if inventory.hash.len() > MAX_GOSSIP_INVENTORY_ITEMS {
         return Err("gossip inventory item count exceeds limit".into());
     }
     Ok(inventory)
@@ -2093,16 +2148,16 @@ fn exchange_gossip_transactions(
     remote: &GossipInventory,
 ) -> Result<(), String> {
     let local = gossip_inventory(database)?;
-    let local_ids = local.txhash.iter().copied().collect::<BTreeSet<_>>();
-    for txhash in remote
-        .txhash
+    let local_ids = local.hash.iter().copied().collect::<BTreeSet<_>>();
+    for hash in remote
+        .hash
         .iter()
-        .filter(|txhash| !local_ids.contains(*txhash))
+        .filter(|hash| !local_ids.contains(*hash))
         .take(MAX_RELAY_ITEMS_PER_SESSION)
     {
         let mut request = Vec::with_capacity(33);
         request.push(GET_TRANSACTION_MESSAGE);
-        request.extend_from_slice(txhash);
+        request.extend_from_slice(hash);
         write_frame(stream, &request)?;
         let response = read_frame(stream, 1 + MAX_STORED_TRANSACTION_SIZE)?;
         if response.first() != Some(&TRANSACTION_MESSAGE) {
@@ -2110,19 +2165,19 @@ fn exchange_gossip_transactions(
         }
         let transaction: Transaction = canonical_decode(&response[1..])
             .map_err(|error| format!("invalid gossip transaction: {error}"))?;
-        if transaction.id().map_err(|error| error.to_string())? != *txhash {
+        if transaction.id().map_err(|error| error.to_string())? != *hash {
             return Err("gossip transaction body does not match announced ID".into());
         }
         accept_relayed_transaction(database, &response[1..])?;
     }
 
-    let remote_ids = remote.txhash.iter().copied().collect::<BTreeSet<_>>();
+    let remote_ids = remote.hash.iter().copied().collect::<BTreeSet<_>>();
     for transaction in read_mempool(database)?
         .into_iter()
         .filter(|transaction| {
             transaction
                 .id()
-                .is_ok_and(|txhash| !remote_ids.contains(&txhash))
+                .is_ok_and(|hash| !remote_ids.contains(&hash))
         })
         .take(MAX_RELAY_ITEMS_PER_SESSION)
     {
@@ -2245,15 +2300,15 @@ fn insert_mempool_transaction(
     let _mutation = state_mutation_lock()?
         .lock()
         .map_err(|_| "state mutation lock is poisoned")?;
-    let txhash = transaction.id().map_err(|error| error.to_string())?;
+    let hash = transaction.id().map_err(|error| error.to_string())?;
     let ledger = load_or_initialize(database)?;
     let mut transactions = read_mempool(database)?;
     if transactions
         .iter()
-        .any(|existing| existing.id().ok() == Some(txhash))
+        .any(|existing| existing.id().ok() == Some(hash))
     {
         return if duplicate_is_ok {
-            Ok(txhash)
+            Ok(hash)
         } else {
             Err("transaction is already in mempool".into())
         };
@@ -2262,7 +2317,7 @@ fn insert_mempool_transaction(
     validate_mempool(&ledger, &transactions)?;
     write_mempool(database, &transactions)?;
     notify_gossip();
-    Ok(txhash)
+    Ok(hash)
 }
 
 fn accept_relayed_block(database: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -2559,7 +2614,7 @@ fn synchronize_blocks(
         .rev()
         .flat_map(|block| block.transactions().iter().cloned())
         .collect::<Vec<_>>();
-    let disconnected_txhash = disconnected_transactions
+    let disconnected_hash = disconnected_transactions
         .iter()
         .map(|transaction| transaction.id().map_err(|error| error.to_string()))
         .collect::<Result<BTreeSet<_>, _>>()?;
@@ -2586,7 +2641,7 @@ fn synchronize_blocks(
     let requeued_transactions = mempool
         .iter()
         .filter_map(|transaction| transaction.id().ok())
-        .filter(|txhash| disconnected_txhash.contains(txhash))
+        .filter(|hash| disconnected_hash.contains(hash))
         .count();
     persist_chain_and_mempool(database, &staged, &mempool)?;
     update_ledger_cache(database, &staged)?;
@@ -2597,7 +2652,7 @@ fn synchronize_blocks(
     if disconnected_blocks > 0 {
         println!(
             "reorg: disconnected_blocks={disconnected_blocks} disconnected_transactions={} requeued_transactions={requeued_transactions}",
-            disconnected_txhash.len(),
+            disconnected_hash.len(),
         );
     }
     Ok(count)
@@ -2623,10 +2678,10 @@ fn reconcile_mempool(
         if retained.len() >= MAX_MEMPOOL_TRANSACTIONS {
             break;
         }
-        let Ok(txhash) = transaction.id() else {
+        let Ok(hash) = transaction.id() else {
             continue;
         };
-        if included.contains(&txhash) || !seen.insert(txhash) {
+        if included.contains(&hash) || !seen.insert(hash) {
             continue;
         }
         let Ok(encoded) = canonical_bytes(&transaction) else {
@@ -3464,6 +3519,9 @@ mod tests {
             "/account/{address}",
             "/asset/{asset}",
             "/asset/{asset}/balance/{address}",
+            "/pools",
+            "/pool/{pool}",
+            "/pool/shares/{address}",
             "/explorer/address/{address}",
             "/explorer/transaction/{transaction_id}",
             "/transaction",
@@ -3650,7 +3708,7 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            parse_txhash(&hex::encode(transaction.id().unwrap())).unwrap(),
+            parse_hash(&hex::encode(transaction.id().unwrap())).unwrap(),
             transaction.id().unwrap()
         );
     }
@@ -3753,7 +3811,7 @@ mod tests {
             tip_hash: [3; 32],
             cumulative_work: Work::pow2(7).to_be_limbs(),
             cumulative_weight: 123,
-            txhash: vec![[4; 32], [5; 32]],
+            hash: vec![[4; 32], [5; 32]],
         };
         let encoded = canonical_bytes(&inventory).unwrap();
         let decoded = decode_gossip_inventory(&encoded).unwrap();
@@ -3761,7 +3819,7 @@ mod tests {
         assert_eq!(decoded.tip_hash, inventory.tip_hash);
         assert_eq!(decoded.cumulative_work, inventory.cumulative_work);
         assert_eq!(decoded.cumulative_weight, inventory.cumulative_weight);
-        assert_eq!(decoded.txhash, inventory.txhash);
+        assert_eq!(decoded.hash, inventory.hash);
 
         let mut oversized = encoded;
         oversized[112..116]
@@ -3780,7 +3838,7 @@ mod tests {
             tip_hash,
             cumulative_work: Work::from_be_limbs(work).to_be_limbs(),
             cumulative_weight: weight,
-            txhash: Vec::new(),
+            hash: Vec::new(),
         };
         let weaker = inventory([0, 0, 0, 0, 0, 0, 0, 7], 999, [1; 32]);
         let stronger = inventory([0, 0, 0, 0, 0, 0, 0, 8], 1, [9; 32]);

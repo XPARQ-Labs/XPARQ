@@ -427,15 +427,18 @@ fn validate_pool_funding(
     state: &impl TransactionStateView,
 ) -> Result<(), TransactionConsensusError> {
     let validate =
-        |funding: &PoolFunding, expected: PoolAmount| -> Result<(), TransactionConsensusError> {
+        |funding: &PoolFunding, required: PoolAmount| -> Result<(), TransactionConsensusError> {
             let actual = match funding {
                 PoolFunding::Coin { inputs } => {
                     ensure_unique_coin_ids(inputs.iter().copied())?;
+
                     let mut total = Zeno::ZERO;
+
                     for id in inputs {
                         if state.coin_recipient(*id) != Some(intent.signer) {
                             return Err(TransactionConsensusError::RecipientMismatch);
                         }
+
                         total = total
                             .checked_add(
                                 state
@@ -445,30 +448,58 @@ fn validate_pool_funding(
                             )
                             .ok_or(TransactionConsensusError::ZenoOverflow)?;
                     }
+
                     PoolAmount::from(total)
                 }
+
                 PoolFunding::Asset { asset, inputs } => {
-                    validate_share_ownership(inputs, intent.signer, state)?;
-                    let mut total = crate::native::asset::Unit::ZERO;
+                    validate_share_ownership(
+                        inputs,
+                        intent.signer,
+                        state,
+                    )?;
+
+                    let mut total =
+                        crate::native::asset::Unit::ZERO;
+
                     for id in inputs {
                         let share = state
                             .asset_share(*id)
-                            .ok_or(TransactionConsensusError::UtxoNotFound)?;
+                            .ok_or(
+                                TransactionConsensusError::UtxoNotFound,
+                            )?;
+
                         if share.parent != *asset {
-                            return Err(TransactionConsensusError::ValueMismatch);
+                            return Err(
+                                TransactionConsensusError::ValueMismatch,
+                            );
                         }
+
                         total = total
                             .checked_add(share.amount)
-                            .ok_or(TransactionConsensusError::ValueMismatch)?;
+                            .ok_or(
+                                TransactionConsensusError::ValueMismatch,
+                            )?;
                     }
+
                     PoolAmount::from(total)
                 }
             };
-            if actual != expected {
-                return Err(TransactionConsensusError::ValueMismatch);
+
+            //
+            // Funding may exceed the requested pool amount.
+            // The ledger deterministically returns the excess
+            // to the signer as change.
+            //
+            if actual < required {
+                return Err(
+                    TransactionConsensusError::ValueMismatch,
+                );
             }
+
             Ok(())
         };
+
     match &intent.instruction {
         PoolInstruction::Create {
             amount_x,
@@ -487,9 +518,13 @@ fn validate_pool_funding(
             validate(funding_x, *amount_x)?;
             validate(funding_y, *amount_y)
         }
+
         PoolInstruction::Swap {
-            amount_in, funding, ..
+            amount_in,
+            funding,
+            ..
         } => validate(funding, *amount_in),
+
         PoolInstruction::RemoveLiquidity { .. } => Ok(()),
     }
 }
