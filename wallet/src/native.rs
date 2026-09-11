@@ -141,14 +141,6 @@ struct AddressActivity {
     size_bytes: Option<usize>,
 }
 
-fn utxo_status(utxo: &AccountUtxo) -> &'static str {
-    if utxo.reserved {
-        "reserved"
-    } else {
-        "available"
-    }
-}
-
 #[derive(Deserialize)]
 struct SubmitTransactionResponse {
     hash: String,
@@ -1419,10 +1411,9 @@ fn print_utxo_tracker(args: &[String]) -> Result<(), String> {
     utxos.sort_by(|left, right| left.id.cmp(&right.id));
     for utxo in utxos {
         println!(
-            "- id={} amount={} status={}",
+            "- utxo: {}  {}",
             utxo.id,
             format_amount(utxo.amount),
-            utxo_status(utxo),
         );
     }
     Ok(())

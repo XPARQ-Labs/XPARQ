@@ -135,15 +135,15 @@ pub fn expected_difficulty_for_height<E>(
 // Emission
 // -----------------------------------------------------------------------------
 
-pub const MIN_BLOCK_EMISSION: u64 = 1_000_000;
-pub const MAX_BLOCK_EMISSION: u64 = 6_000_000;
+pub const MIN_BLOCK_EMISSION: u64 = 500_000;
+pub const MAX_BLOCK_EMISSION: u64 = 5_000_000;
 pub const BLOCK_EMISSION_START: u64 = 3_000_000;
-pub const BLOCK_EMISSION_STEP: u64 = 100_000;
+pub const BLOCK_EMISSION_STEP: u64 = 250_000;
 
-const_assert!(MIN_BLOCK_EMISSION == XPQ::ZENO_PER_COIN);
-const_assert!(MAX_BLOCK_EMISSION == 6 * XPQ::ZENO_PER_COIN);
+const_assert!(MIN_BLOCK_EMISSION == XPQ::ZENO_PER_COIN / 2);
+const_assert!(MAX_BLOCK_EMISSION == 5 * XPQ::ZENO_PER_COIN);
 const_assert!(BLOCK_EMISSION_START == 3 * XPQ::ZENO_PER_COIN);
-const_assert!(BLOCK_EMISSION_STEP == XPQ::ZENO_PER_COIN / 10);
+const_assert!(BLOCK_EMISSION_STEP == XPQ::ZENO_PER_COIN / 4);
 
 pub const fn initial_block_emission() -> Zeno {
     Zeno::from_zeno(BLOCK_EMISSION_START)

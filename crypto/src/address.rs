@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{HASH_SIZE, HashDomain, PublicKey, error::CryptoError, hash};
 
-pub const ADDRESS_SIZE: usize = 20;
+pub const ADDRESS_SIZE: usize = 16;
 pub const ADDRESS_PREFIX: &str = "Qx";
 pub const ADDRESS_CHECKSUM_SIZE: usize = 4;
 
