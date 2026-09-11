@@ -98,7 +98,7 @@ struct AccountAssetBalance {
 
 #[derive(Deserialize)]
 struct AccountAssetShare {
-    share: String,
+    share_id: String,
     amount: String,
     owner: serde_json::Value,
 }
@@ -367,7 +367,7 @@ fn select_asset_inputs(
     for share in entry.shares {
         inputs.push(
             share
-                .share
+                .share_id
                 .parse()
                 .map_err(|_| "node returned an invalid asset share id")?,
         );
@@ -858,7 +858,7 @@ fn print_balance(args: &[String]) -> Result<(), String> {
             let amount = format_asset_amount(&share.amount, asset.decimals, &asset.symbol)?;
             println!(
                 "  - share: {} amount: {} owner: {}",
-                share.share, amount, share.owner
+                share.share_id, amount, share.owner
             );
         }
     }
