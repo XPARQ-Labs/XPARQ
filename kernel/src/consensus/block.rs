@@ -11,7 +11,7 @@ use crypto::{BlockHash, HASH_SIZE, Hash, PoWHash, PoWMemory, hash_meets_difficul
 pub const MIN_DIFFICULTY: u32 = 1;
 pub const MAX_DIFFICULTY: u32 = (crypto::POW_HASH_SIZE * 8) as u32;
 pub const GENESIS_DIFFICULTY: u32 = crate::blockchain::GENESIS_BLOCK_DIFFICULTY;
-pub const DIFFICULTY_START: u32 = 5;
+pub const DIFFICULTY_START: u32 = 3;
 
 pub trait ApplyBlockState {
     type Error: From<ConsensusError>;
