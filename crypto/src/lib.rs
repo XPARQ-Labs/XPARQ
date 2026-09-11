@@ -5,7 +5,7 @@ pub mod codec;
 mod error;
 pub mod falcon;
 pub mod hash;
-pub mod profile;
+pub mod signature;
 pub mod types;
 
 pub mod crypto {
@@ -26,7 +26,7 @@ pub use falcon::{
     keypair_from_seed as falcon_keypair_from_seed, sign as falcon_sign, verify as falcon_verify,
 };
 pub use hash::*;
-pub use profile::*;
+pub use signature::*;
 pub use types::{BlockHeight, BlockNonce, Height, Nonce};
 
 pub mod block {
