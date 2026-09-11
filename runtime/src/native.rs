@@ -785,11 +785,6 @@ fn address_transaction_activity(
             coin_outputs(&tx.payment.intent),
             coin_burn(&tx.payment.intent),
         ),
-        AuthorizedTransaction::Pool(tx) => (
-            Some(tx.payment.intent.signer),
-            coin_outputs(&tx.payment.intent),
-            coin_burn(&tx.payment.intent),
-        ),
     };
     let received = checked_output_sum(
         outputs
@@ -877,14 +872,6 @@ fn transaction_response(
         AuthorizedTransaction::Asset(asset) => {
             asset_transaction_response(asset, miner, protocol_burn)
         }
-        AuthorizedTransaction::Pool(pool) => serde_json::json!({
-            "type": "pool",
-            "signer": kernel::crypto::address_to_string(&pool.call.intent.signer),
-            "instruction": format!("{:?}", pool.call.intent.instruction),
-            "payment_outputs": public_outputs_response(coin_outputs(&pool.payment.intent), miner, Some(pool.payment.intent.signer)),
-            "miner_fee": miner_fee_from_outputs(coin_outputs(&pool.payment.intent)).unwrap_or(0),
-            "protocol_burn": protocol_burn.as_zeno(),
-        }),
     }
 }
 
@@ -1035,7 +1022,6 @@ fn transaction_kind(transaction: &Transaction) -> &'static str {
             kernel::transaction::Spend::Asset { .. } => "asset-transfer",
         },
         AuthorizedTransaction::Asset(_) => "asset",
-        AuthorizedTransaction::Pool(_) => "pool",
     }
 }
 
@@ -1121,7 +1107,6 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             })
         }
         "/blocks/latest" => latest_blocks_response(&ledger)?,
-        route if route == "/pools" || route.starts_with("/pool/") => pool_response(&ledger, route)?,
         route if route.starts_with("/asset/") => asset_response(&ledger, route)?,
         route if route.starts_with("/balance/") => {
             let address = route.trim_start_matches("/balance/");
@@ -1204,64 +1189,6 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
         _ => return Err("unknown RPC route".into()),
     };
     write_http_response(stream, 200, &response)
-}
-
-fn pair_response(pair: kernel::native::pool::Pair) -> serde_json::Value {
-    match pair {
-        kernel::native::pool::Pair::Coin => serde_json::json!({"type": "coin"}),
-        kernel::native::pool::Pair::Asset(asset) => {
-            serde_json::json!({"type": "asset", "asset": asset.to_string()})
-        }
-    }
-}
-
-fn pool_json(
-    id: kernel::native::pool::PoolHash,
-    pool: &kernel::native::pool::Pool,
-) -> serde_json::Value {
-    serde_json::json!({
-        "pool": id.to_string(),
-        "asset_x": pair_response(pool.asset_x),
-        "asset_y": pair_response(pool.asset_y),
-        "reserve_x": pool.reserve_x.as_raw().to_string(),
-        "reserve_y": pool.reserve_y.as_raw().to_string(),
-        "total_liquidity": pool.total_liquidity.as_raw().to_string(),
-        "fee_units": pool.fee_units,
-        "last_updated_height": pool.last_updated_height.0,
-    })
-}
-
-fn pool_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
-    if route == "/pools" {
-        return Ok(serde_json::json!({
-            "pools": ledger.state().pools.pools()
-                .map(|(id, pool)| pool_json(id, pool))
-                .collect::<Vec<_>>()
-        }));
-    }
-    let path = route.trim_start_matches("/pool/");
-    if let Some(address) = path.strip_prefix("shares/") {
-        let address = parse_address(address)?;
-        return Ok(serde_json::json!({
-            "address": kernel::crypto::address_to_string(&address),
-            "shares": ledger.state().pools.pool_shares()
-                .filter(|(_, share)| share.owner == address)
-                .map(|(id, share)| serde_json::json!({
-                    "share": id.to_string(),
-                    "pool": share.pool.to_string(),
-                    "amount": share.amount.as_raw().to_string(),
-                }))
-                .collect::<Vec<_>>()
-        }));
-    }
-    if path.is_empty() || path.contains(['/', '?', '#']) {
-        return Err("invalid pool route".into());
-    }
-    let id = path
-        .parse::<kernel::native::pool::PoolHash>()
-        .map_err(|_| "invalid pool id")?;
-    let pool = ledger.state().pools.pool(id).ok_or("pool was not found")?;
-    Ok(pool_json(id, pool))
 }
 
 fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
@@ -3012,40 +2939,6 @@ fn reserved_coin_inputs(transactions: &[Transaction]) -> BTreeSet<kernel::native
                 .intent
                 .coin_parts()
                 .map_or_else(Vec::new, |(inputs, _)| inputs.to_vec()),
-            AuthorizedTransaction::Pool(transaction) => {
-                let mut inputs = transaction
-                    .payment
-                    .intent
-                    .coin_parts()
-                    .map_or_else(Vec::new, |(inputs, _)| inputs.to_vec());
-                use kernel::transaction::{PoolFunding, PoolInstruction};
-                let mut add = |funding: &PoolFunding| {
-                    if let PoolFunding::Coin {
-                        inputs: pool_inputs,
-                    } = funding
-                    {
-                        inputs.extend(pool_inputs.iter().copied());
-                    }
-                };
-                match &transaction.call.intent.instruction {
-                    PoolInstruction::Create {
-                        funding_x,
-                        funding_y,
-                        ..
-                    }
-                    | PoolInstruction::AddLiquidity {
-                        funding_x,
-                        funding_y,
-                        ..
-                    } => {
-                        add(funding_x);
-                        add(funding_y);
-                    }
-                    PoolInstruction::Swap { funding, .. } => add(funding),
-                    PoolInstruction::RemoveLiquidity { .. } => {}
-                }
-                inputs
-            }
         })
         .collect()
 }
@@ -3106,9 +2999,6 @@ fn transaction_miner_fee(transaction: &Transaction) -> Result<u64, String> {
                 .intent,
         )),
         AuthorizedTransaction::Asset(transaction) => {
-            miner_fee_from_outputs(coin_outputs(&transaction.payment.intent))
-        }
-        AuthorizedTransaction::Pool(transaction) => {
             miner_fee_from_outputs(coin_outputs(&transaction.payment.intent))
         }
     }

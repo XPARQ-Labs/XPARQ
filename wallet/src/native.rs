@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     fs,
     io::{self, Read, Write},
     net::TcpStream,
@@ -8,18 +7,15 @@ use std::{
 };
 
 use kernel::native::coin::Output as CoinOutput;
-use kernel::native::{
-    asset::{Asset, Share},
-    pool::{Liquidity, Pair, PoolAmount, PoolHash, PoolShareHash, canonical_pair},
-};
+use kernel::native::asset::Asset;
 use kernel::{
     codec::canonical_bytes,
     consensus::{DECIMALS, StateTransitionWeight, XPQ, Zeno, account_key_state_weight},
     crypto::{Address, Signature, address_from_string},
     transaction::{
-        AssetInstruction, AuthorizedAssetTransaction, AuthorizedPoolTransaction,
-        AuthorizedSpendTransaction, AuthorizedTransaction, PoolFunding, PoolInstruction,
-        PoolIntent, SpendIntent,
+        AssetInstruction, AuthorizedAssetTransaction,
+        AuthorizedSpendTransaction, AuthorizedTransaction,
+        SpendIntent,
     },
 };
 use serde::Deserialize;
@@ -102,7 +98,7 @@ struct AccountAssetBalance {
 
 #[derive(Deserialize)]
 struct AccountAssetShare {
-    share_id: String,
+    share: String,
     amount: String,
     owner: serde_json::Value,
 }
@@ -146,19 +142,6 @@ struct SubmitTransactionResponse {
     hash: String,
 }
 
-#[derive(Deserialize)]
-struct PoolPairResponse {
-    #[serde(rename = "type")]
-    pair_type: String,
-    asset: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct PoolResponse {
-    asset_x: PoolPairResponse,
-    asset_y: PoolPairResponse,
-}
-
 const MAX_CONSOLIDATION_INPUTS: usize = 10_000;
 
 pub fn run(mut args: Vec<String>) -> Result<(), String> {
@@ -178,13 +161,6 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         Some("asset-transfer") => asset_transfer(&args[1..]),
         Some("asset-info") => asset_info(&args[1..]),
         Some("asset-balance") => asset_balance(&args[1..]),
-        Some("pools") => pool_query(&args[1..], "/pools"),
-        Some("pool-info") => pool_info(&args[1..]),
-        Some("pool-shares") => pool_shares(&args[1..]),
-        Some("pool-create") => pool_create(&args[1..]),
-        Some("pool-add") => pool_add(&args[1..]),
-        Some("pool-remove") => pool_remove(&args[1..]),
-        Some("pool-swap") => pool_swap(&args[1..]),
         Some("version") | Some("--version") | Some("-V") => {
             println!("wallet {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -391,7 +367,7 @@ fn select_asset_inputs(
     for share in entry.shares {
         inputs.push(
             share
-                .share_id
+                .share
                 .parse()
                 .map_err(|_| "node returned an invalid asset share id")?,
         );
@@ -411,395 +387,6 @@ fn select_asset_inputs(
         return Err("insufficient asset balance".into());
     }
     Ok((inputs, total))
-}
-
-fn pool_query(args: &[String], route: &str) -> Result<(), String> {
-    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    let response: serde_json::Value = http_get_json(rpc, route)?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?
-    );
-    Ok(())
-}
-
-fn pool_info(args: &[String]) -> Result<(), String> {
-    let pool = parse_pool(args)?;
-    pool_query(args, &format!("/pool/{pool}"))
-}
-
-fn pool_shares(args: &[String]) -> Result<(), String> {
-    let address = match option(args, "--address") {
-        Some(value) => address_from_string(value).map_err(|error| error.to_string())?,
-        None => load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?.address(),
-    };
-    pool_query(
-        args,
-        &format!(
-            "/pool/shares/{}",
-            kernel::crypto::address_to_string(&address)
-        ),
-    )
-}
-
-fn parse_pool(args: &[String]) -> Result<PoolHash, String> {
-    option(args, "--pool")
-        .ok_or("missing --pool")?
-        .parse()
-        .map_err(|_| "invalid --pool id".into())
-}
-
-fn parse_pool_amount(args: &[String], name: &str) -> Result<PoolAmount, String> {
-    let raw = option(args, name)
-        .ok_or_else(|| format!("missing {name}"))?
-        .parse::<u128>()
-        .map_err(|_| format!("invalid {name}; use raw base units"))?;
-    if raw == 0 {
-        return Err(format!("{name} must be positive"));
-    }
-    Ok(PoolAmount::from_raw(raw))
-}
-
-fn parse_pair(value: &str) -> Result<Pair, String> {
-    if value.eq_ignore_ascii_case("coin") || value.eq_ignore_ascii_case("xpq") {
-        Ok(Pair::Coin)
-    } else {
-        value
-            .parse::<Asset>()
-            .map(Pair::Asset)
-            .map_err(|_| "invalid pool pair; use `coin` or an asset id".into())
-    }
-}
-
-fn response_pair(pair: &PoolPairResponse) -> Result<Pair, String> {
-    match pair.pair_type.as_str() {
-        "coin" => Ok(Pair::Coin),
-        "asset" => pair
-            .asset
-            .as_deref()
-            .ok_or("node omitted pool asset id")?
-            .parse()
-            .map(Pair::Asset)
-            .map_err(|_| "node returned an invalid pool asset id".into()),
-        _ => Err("node returned an invalid pool pair".into()),
-    }
-}
-
-fn pool_funding(
-    rpc: &str,
-    wallet: &LoadedWallet,
-    pair: Pair,
-    amount: PoolAmount,
-) -> Result<PoolFunding, String> {
-    match pair {
-        Pair::Coin => {
-            let required =
-                u64::try_from(amount.as_raw())
-                    .map_err(|_| "coin pool amount exceeds u64")?;
-
-            let mut candidates = account_input_candidates(rpc, wallet)?;
-
-            if candidates.is_empty() {
-                return Err("wallet has no available XPQ UTXOs".into());
-            }
-
-            //
-            // Prefer one UTXO that can fund the entire amount.
-            // Choose the smallest sufficient UTXO to minimize change.
-            //
-            candidates.sort_by_key(|utxo| utxo.amount);
-
-            if let Some(utxo) = candidates
-                .iter()
-                .find(|utxo| utxo.amount >= required)
-            {
-                let id = utxo
-                    .id
-                    .parse()
-                    .map_err(|_| "node returned invalid coin id")?;
-
-                return Ok(PoolFunding::Coin {
-                    inputs: vec![id],
-                });
-            }
-
-            //
-            // No single UTXO is sufficient.
-            // Combine the largest UTXOs first to minimize input count.
-            //
-            candidates.sort_by(|a, b| b.amount.cmp(&a.amount));
-
-            let mut inputs = Vec::new();
-            let mut total = 0_u64;
-
-            for utxo in candidates {
-                let id = utxo
-                    .id
-                    .parse()
-                    .map_err(|_| "node returned invalid coin id")?;
-
-                inputs.push(id);
-
-                total = total
-                    .checked_add(utxo.amount)
-                    .ok_or("coin amount overflow")?;
-
-                if total >= required {
-                    return Ok(PoolFunding::Coin { inputs });
-                }
-            }
-
-            Err(format!(
-                "insufficient XPQ for pool funding: required {required} raw units, available {total}"
-            ))
-        }
-
-        Pair::Asset(asset) => {
-            let address =
-                kernel::crypto::address_to_string(&wallet.address());
-
-            let balance: BalanceResponse =
-                http_get_json(
-                    rpc,
-                    &format!("/balance/{address}"),
-                )?;
-
-            let entry = balance
-                .assets
-                .into_iter()
-                .find(|entry| entry.asset == asset.to_string())
-                .ok_or("wallet has no shares for this pool asset")?;
-
-            let mut shares = entry
-                .shares
-                .into_iter()
-                .map(|share| {
-                    Ok::<_, String>((
-                        share
-                            .share_id
-                            .parse::<Share>()
-                            .map_err(|_| {
-                                "node returned invalid asset share id"
-                            })?,
-                        share
-                            .amount
-                            .parse::<u128>()
-                            .map_err(|_| {
-                                "node returned invalid asset share amount"
-                            })?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-
-            if shares.is_empty() {
-                return Err(
-                    "wallet has no shares for this pool asset".into(),
-                );
-            }
-
-            let required = amount.as_raw();
-
-            //
-            // Prefer one share large enough to cover the amount.
-            // Choose the smallest sufficient share.
-            //
-            shares.sort_by_key(|(_, value)| *value);
-
-            if let Some((id, _)) = shares
-                .iter()
-                .find(|(_, value)| *value >= required)
-            {
-                return Ok(PoolFunding::Asset {
-                    asset,
-                    inputs: vec![*id],
-                });
-            }
-
-            //
-            // No single share is sufficient.
-            // Combine largest shares first.
-            //
-            shares.sort_by(|a, b| b.1.cmp(&a.1));
-
-            let mut inputs = Vec::new();
-            let mut total = 0_u128;
-
-            for (id, value) in shares {
-                inputs.push(id);
-
-                total = total
-                    .checked_add(value)
-                    .ok_or("asset amount overflow")?;
-
-                if total >= required {
-                    return Ok(PoolFunding::Asset {
-                        asset,
-                        inputs,
-                    });
-                }
-            }
-
-            Err(format!(
-                "insufficient asset balance for pool funding: required {required} raw units, available {total}"
-            ))
-        }
-    }
-}
-
-fn pool_create(args: &[String]) -> Result<(), String> {
-    let supplied_x = parse_pair(option(args, "--x").ok_or("missing --x")?)?;
-    let supplied_y = parse_pair(option(args, "--y").ok_or("missing --y")?)?;
-    let supplied_amount_x = parse_pool_amount(args, "--amount-x")?;
-    let supplied_amount_y = parse_pool_amount(args, "--amount-y")?;
-    let (x, y) = canonical_pair(supplied_x, supplied_y).map_err(|e| e.to_string())?;
-    let (amount_x, amount_y) = if x == supplied_x {
-        (supplied_amount_x, supplied_amount_y)
-    } else {
-        (supplied_amount_y, supplied_amount_x)
-    };
-    let fee_units = option(args, "--fee-units")
-        .ok_or("missing --fee-units")?
-        .parse::<u32>()
-        .map_err(|_| "invalid --fee-units")?;
-    submit_pool_instruction(args, |rpc, wallet| {
-        Ok(PoolInstruction::Create {
-            asset_x: x,
-            asset_y: y,
-            amount_x,
-            amount_y,
-            funding_x: pool_funding(rpc, wallet, x, amount_x)?,
-            funding_y: pool_funding(rpc, wallet, y, amount_y)?,
-            fee_units,
-        })
-    })
-}
-
-fn pool_add(args: &[String]) -> Result<(), String> {
-    let pool = parse_pool(args)?;
-    let amount_x = parse_pool_amount(args, "--amount-x")?;
-    let amount_y = parse_pool_amount(args, "--amount-y")?;
-    let minimum_liquidity = option(args, "--minimum-liquidity")
-        .ok_or("missing --minimum-liquidity")?
-        .parse::<u128>()
-        .map(Liquidity::from_raw)
-        .map_err(|_| "invalid --minimum-liquidity")?;
-    submit_pool_instruction(args, |rpc, wallet| {
-        let state: PoolResponse = http_get_json(rpc, &format!("/pool/{pool}"))?;
-        let x = response_pair(&state.asset_x)?;
-        let y = response_pair(&state.asset_y)?;
-        Ok(PoolInstruction::AddLiquidity {
-            pool,
-            amount_x,
-            amount_y,
-            funding_x: pool_funding(rpc, wallet, x, amount_x)?,
-            funding_y: pool_funding(rpc, wallet, y, amount_y)?,
-            minimum_liquidity,
-        })
-    })
-}
-
-fn pool_remove(args: &[String]) -> Result<(), String> {
-    let share = option(args, "--share")
-        .ok_or("missing --share")?
-        .parse::<PoolShareHash>()
-        .map_err(|_| "invalid --share id")?;
-    let minimum_x = PoolAmount::from_raw(
-        option(args, "--minimum-x")
-            .ok_or("missing --minimum-x")?
-            .parse::<u128>()
-            .map_err(|_| "invalid --minimum-x")?,
-    );
-    let minimum_y = PoolAmount::from_raw(
-        option(args, "--minimum-y")
-            .ok_or("missing --minimum-y")?
-            .parse::<u128>()
-            .map_err(|_| "invalid --minimum-y")?,
-    );
-    submit_pool_instruction(args, |_rpc, _wallet| {
-        Ok(PoolInstruction::RemoveLiquidity {
-            share,
-            minimum_x,
-            minimum_y,
-        })
-    })
-}
-
-fn pool_swap(args: &[String]) -> Result<(), String> {
-    let pool = parse_pool(args)?;
-    let input_asset = parse_pair(option(args, "--input").ok_or("missing --input")?)?;
-    let amount_in = parse_pool_amount(args, "--amount-in")?;
-    let minimum_out = parse_pool_amount(args, "--minimum-out")?;
-    submit_pool_instruction(args, |rpc, wallet| {
-        Ok(PoolInstruction::Swap {
-            pool,
-            input_asset,
-            amount_in,
-            funding: pool_funding(rpc, wallet, input_asset, amount_in)?,
-            minimum_out,
-        })
-    })
-}
-
-fn submit_pool_instruction(
-    args: &[String],
-    build: impl FnOnce(&str, &LoadedWallet) -> Result<PoolInstruction, String>,
-) -> Result<(), String> {
-    reject_manual_fee(args)?;
-    let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
-    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    let known = account_public_key_registered(rpc, &wallet);
-    let instruction = build(rpc, &wallet)?;
-    let excluded = pool_coin_inputs(&instruction);
-    let call = wallet
-        .0
-        .sign_account_intent(PoolIntent::new(wallet.address(), instruction), known)?;
-    let transaction = automatic_fee_transaction(|fee, archival_burn| {
-        let (inputs, _total, _burn, change) =
-            select_payment_inputs(rpc, &wallet, fee, archival_burn, &excluded)?;
-        let mut outputs = Vec::new();
-        if change > 0 {
-            outputs.push(CoinOutput::new(wallet.address(), Zeno::from_zeno(change)));
-        }
-        outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
-        let payment = wallet.sign_onchain_spend(
-            SpendIntent::coin(wallet.address(), inputs, outputs).map_err(|e| e.to_string())?,
-            known,
-        )?;
-        Ok(AuthorizedTransaction::Pool(Box::new(
-            AuthorizedPoolTransaction {
-                call: call.clone(),
-                payment,
-            },
-        )))
-    })?;
-    submit_or_print_transaction(args, &transaction)
-}
-
-fn pool_coin_inputs(instruction: &PoolInstruction) -> BTreeSet<kernel::native::coin::XPQ> {
-    let mut result = BTreeSet::new();
-    let mut add = |funding: &PoolFunding| {
-        if let PoolFunding::Coin { inputs } = funding {
-            result.extend(inputs.iter().copied());
-        }
-    };
-    match instruction {
-        PoolInstruction::Create {
-            funding_x,
-            funding_y,
-            ..
-        }
-        | PoolInstruction::AddLiquidity {
-            funding_x,
-            funding_y,
-            ..
-        } => {
-            add(funding_x);
-            add(funding_y);
-        }
-        PoolInstruction::Swap { funding, .. } => add(funding),
-        PoolInstruction::RemoveLiquidity { .. } => {}
-    }
-    result
 }
 
 fn asset_info(args: &[String]) -> Result<(), String> {
@@ -965,8 +552,7 @@ fn interactive_menu() -> Result<(), String> {
         println!("8. Consolidate UTXOs");
         println!("9. Explorer");
         println!("10. Assets");
-        println!("11. Pools");
-        println!("13. Exit");
+        println!("11. Exit");
 
         match prompt("Select")?.as_str() {
             "1" => {
@@ -1000,83 +586,9 @@ fn interactive_menu() -> Result<(), String> {
             "8" => interactive_wallet_query(consolidate_coin_utxos)?,
             "9" => interactive_block_explorer()?,
             "10" => interactive_assets()?,
-            "11" => interactive_pools()?,
-            "13" | "exit" | "quit" => return Ok(()),
+            "11" | "exit" | "quit" => return Ok(()),
             choice => println!("Unknown selection `{choice}`"),
         }
-    }
-}
-
-fn interactive_pools() -> Result<(), String> {
-    println!();
-    println!("XPARQ Pools");
-    println!("1. List");
-    println!("2. Info");
-    println!("3. My Shares");
-    println!("4. Create");
-    println!("5. Add Liquidity");
-    println!("6. Remove Liquidity");
-    println!("7. Swap");
-    println!("8. Back");
-    let rpc = prompt_default("RPC", DEFAULT_RPC_ADDR)?;
-    match prompt("Select")?.as_str() {
-        "1" => pool_query(&["--rpc".into(), rpc], "/pools"),
-        "2" => pool_info(&["--pool".into(), prompt("Pool Hash")?, "--rpc".into(), rpc]),
-        "3" => pool_shares(&[
-            "--wallet".into(),
-            prompt_default("Wallet file", DEFAULT_WALLET_PATH)?,
-            "--rpc".into(),
-            rpc,
-        ]),
-        "4" => {
-            let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--x".into(), prompt("Pair X (coin or asset hash)")?]);
-            args.extend(["--y".into(), prompt("Pair Y (coin or asset hash)")?]);
-            args.extend(["--amount-x".into(), prompt("Amount X (raw units)")?]);
-            args.extend(["--amount-y".into(), prompt("Amount Y (raw units)")?]);
-            args.extend([
-                "--fee-units".into(),
-                prompt_default("Swap fee units", "300")?,
-            ]);
-            pool_create(&args)
-        }
-        "5" => {
-            let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--pool".into(), prompt("Pool Hash")?]);
-            args.extend(["--amount-x".into(), prompt("Amount X (raw units)")?]);
-            args.extend(["--amount-y".into(), prompt("Amount Y (raw units)")?]);
-            args.extend([
-                "--minimum-liquidity".into(),
-                prompt("Minimum liquidity (raw)")?,
-            ]);
-            pool_add(&args)
-        }
-        "6" => {
-            let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--share".into(), prompt("Pool Share Hash")?]);
-            args.extend([
-                "--minimum-x".into(),
-                prompt_default("Minimum X (raw)", "0")?,
-            ]);
-            args.extend([
-                "--minimum-y".into(),
-                prompt_default("Minimum Y (raw)", "0")?,
-            ]);
-            pool_remove(&args)
-        }
-        "7" => {
-            let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--pool".into(), prompt("Pool Hash")?]);
-            args.extend(["--input".into(), prompt("Input pair (coin or asset hash)")?]);
-            args.extend(["--amount-in".into(), prompt("Input amount (raw units)")?]);
-            args.extend([
-                "--minimum-out".into(),
-                prompt("Minimum output (raw units)")?,
-            ]);
-            pool_swap(&args)
-        }
-        "8" | "back" => Ok(()),
-        choice => Err(format!("unknown pool selection `{choice}`")),
     }
 }
 
@@ -1346,7 +858,7 @@ fn print_balance(args: &[String]) -> Result<(), String> {
             let amount = format_asset_amount(&share.amount, asset.decimals, &asset.symbol)?;
             println!(
                 "  - share: {} amount: {} owner: {}",
-                share.share_id, amount, share.owner
+                share.share, amount, share.owner
             );
         }
     }
@@ -1632,55 +1144,6 @@ fn select_account_inputs_with_state_burn(
     }
     Err(format!(
         "insufficient available balance for amount, fee, and state burn: available {total} units"
-    ))
-}
-
-fn select_payment_inputs(
-    rpc: &str,
-    wallet: &LoadedWallet,
-    fee: u64,
-    archival_burn: u64,
-    excluded: &BTreeSet<kernel::native::coin::XPQ>,
-) -> Result<(Vec<kernel::native::coin::XPQ>, u64, u64, u64), String> {
-    let key_weight = wallet.new_account_key_weight(account_public_key_registered(rpc, wallet))?;
-    let candidates = account_input_candidates(rpc, wallet)?;
-    let mut selected = Vec::new();
-    let mut total = 0_u64;
-    for utxo in candidates {
-        let id = utxo
-            .id
-            .parse::<kernel::native::coin::XPQ>()
-            .map_err(|_| "node returned an invalid coin id")?;
-        if excluded.contains(&id) {
-            continue;
-        }
-        selected.push(id);
-        total = total
-            .checked_add(utxo.amount)
-            .ok_or("payment input amount overflow")?;
-        for has_change in [false, true] {
-            let created_coin_utxos = 1 + u64::from(has_change);
-            let ledger_burn = StateTransitionWeight {
-                created_coin_utxos,
-                consumed_coin_utxos: u64::try_from(selected.len())
-                    .map_err(|_| "coin input count overflow")?,
-                created_account_key_weight: key_weight,
-                ..StateTransitionWeight::default()
-            }
-            .state_growth_burn()
-            .map_err(|error| error.to_string())?
-            .as_zeno();
-            let burn = ledger_burn
-                .checked_add(archival_burn)
-                .ok_or("pool payment burn overflow")?;
-            let required = fee.checked_add(burn).ok_or("pool payment overflow")?;
-            if (!has_change && total == required) || (has_change && total > required) {
-                return Ok((selected, total, burn, total - required));
-            }
-        }
-    }
-    Err(format!(
-        "insufficient non-funding XPQ for pool fee and protocol burn: available {total} units"
     ))
 }
 

@@ -10,7 +10,6 @@ use crate::native::asset::{
 use crate::native::coin::{Output as CoinOutput, XPQ, Zeno};
 use crate::transaction::IntentError;
 
-/// Genesis identity supplied by consensus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
 pub struct ChainContext {
     pub genesis_hash: [u8; HASH_SIZE],

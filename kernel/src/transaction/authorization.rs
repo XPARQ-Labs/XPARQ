@@ -6,7 +6,7 @@ use crypto::{
 };
 
 use crate::transaction::{
-    AssetIntent, ChainContext, IntentError, PoolIntent, Spend, SpendCommitment, SpendIntent,
+    AssetIntent, ChainContext, IntentError, Spend, SpendCommitment, SpendIntent,
     TransactionEncodingError,
 };
 
@@ -31,19 +31,7 @@ impl AccountIntent for AssetIntent {
     }
 
     fn commitment(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
-        self.commitment(chain.genesis_hash)
-            .map(SpendCommitment::from_bytes)
-            .map_err(|_| IntentError::InvalidAssetCall)
-    }
-}
-
-impl AccountIntent for PoolIntent {
-    fn sender(&self) -> Address {
-        self.signer
-    }
-
-    fn commitment(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
-        self.commitment(chain.genesis_hash)
+        AssetIntent::commitment(self, chain.genesis_hash)
             .map(SpendCommitment::from_bytes)
             .map_err(|_| IntentError::InvalidAssetCall)
     }
@@ -92,16 +80,8 @@ pub struct AuthorizedAssetTransaction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct AuthorizedPoolTransaction {
-    pub call: AuthorizedAccountIntent<PoolIntent>,
-    pub payment: AuthorizedAccountIntent<SpendIntent>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AuthorizedSpendTransaction {
     pub spend: AuthorizedAccountIntent<SpendIntent>,
-    /// Asset transfers pay their XPQ protocol/miner cost with a separate coin spend.
-    /// Native coin transfers leave this empty.
     pub payment: Option<AuthorizedAccountIntent<SpendIntent>>,
 }
 
@@ -109,7 +89,6 @@ pub struct AuthorizedSpendTransaction {
 pub enum AuthorizedTransaction {
     Spend(Box<AuthorizedSpendTransaction>),
     Asset(Box<AuthorizedAssetTransaction>),
-    Pool(Box<AuthorizedPoolTransaction>),
 }
 
 impl AuthorizedTransaction {
@@ -145,16 +124,7 @@ impl AuthorizedTransaction {
 
                 tx.payment.intent.validate()
             }
-            Self::Pool(tx) => {
-                tx.call
-                    .intent
-                    .validate_structure()
-                    .map_err(|_| IntentError::InvalidAssetCall)?;
-                if !matches!(tx.payment.intent.spend, Spend::Coin { .. }) {
-                    return Err(IntentError::InvalidAssetCall);
-                }
-                tx.payment.intent.validate()
-            }
+
         }
     }
 }

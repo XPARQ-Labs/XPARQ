@@ -1,7 +1,5 @@
-pub mod amm;
 pub mod asset;
 pub mod coin;
-pub mod pool;
 
 pub use asset::{
     ASSET_DECIMALS_MAX, ASSET_NAME_MAX_LEN, ASSET_SYMBOL_MAX_LEN, Asset, AssetMetadata, AssetShare,
@@ -10,4 +8,3 @@ pub use asset::{
 };
 
 pub use coin::{DECIMALS, Output as CoinOutput, Recipient, XPARQCoin, XPQ, Zeno};
-pub use pool::{Liquidity, Pair, Pool, PoolAmount, PoolError, PoolHash, PoolShare, PoolShareHash};

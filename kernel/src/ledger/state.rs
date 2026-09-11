@@ -1,12 +1,10 @@
 //! Canonical ledger state and rollback journal types.
 
-use super::pool::PoolState;
 use super::{account, utxo};
 use crate::native::asset::{
     Asset, AssetMetadata, AssetShare, MintCapability, MintCapabilityId, Share, Unit,
 };
 use crate::native::coin::{XPQ, Zeno};
-use crate::native::pool::{Pool, PoolHash, PoolShare, PoolShareHash};
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::Address;
 use std::collections::BTreeMap;
@@ -16,7 +14,6 @@ pub struct LedgerState {
     pub account_keys: account::Registry,
     pub utxos: utxo::UtxoSet,
     pub assets: AssetState,
-    pub pools: PoolState,
     pub total_burned: Zeno,
     pub(crate) coin_recipients: BTreeMap<XPQ, Address>,
 }
@@ -34,9 +31,6 @@ impl LedgerState {
         self.assets.share_recipients.get(&id).copied()
     }
 
-    pub fn pool_share_owner(&self, id: PoolShareHash) -> Option<Address> {
-        self.pools.pool_share(id).map(|share| share.owner)
-    }
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -99,16 +93,6 @@ pub struct AssetRollbackJournal {
     pub(crate) capabilities: Vec<(MintCapabilityId, Option<MintCapability>)>,
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
-pub struct PoolRollbackJournal {
-    pub(crate) pools: Vec<(PoolHash, Option<Pool>)>,
-    pub(crate) pool_shares: Vec<(PoolShareHash, Option<PoolShare>)>,
-    pub(crate) consumed_coins: Vec<(XPQ, Zeno, Address)>,
-    pub(crate) consumed_assets: Vec<(Share, AssetShare, Address)>,
-    pub(crate) created_coins: Vec<XPQ>,
-    pub(crate) created_assets: Vec<Share>,
-}
-
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq)]
 pub enum StateRollbackJournal {
     Spend(SpendRollbackJournal),
@@ -120,10 +104,6 @@ pub enum StateRollbackJournal {
         asset: AssetRollbackJournal,
         payment: SpendRollbackJournal,
     },
-    PoolWithPayment {
-        pool: PoolRollbackJournal,
-        payment: SpendRollbackJournal,
-    },
 }
 
 impl StateRollbackJournal {
@@ -132,7 +112,6 @@ impl StateRollbackJournal {
             Self::Spend(journal) => journal.burned,
             Self::AssetWithPayment { payment, .. }
             | Self::AssetSpendWithPayment { payment, .. } => payment.burned,
-            Self::PoolWithPayment { payment, .. } => payment.burned,
         }
     }
 }
