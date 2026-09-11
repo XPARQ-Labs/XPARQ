@@ -4,7 +4,7 @@ use std::{error::Error as StdError, fmt};
 
 use static_assertions::const_assert;
 
-use crate::blockchain::{Block, BlockHeight, Height};
+use crate::blockchain::{Block, BlockHeight};
 use crate::native::coin::{Output as CoinOutput, XPQ, Zeno};
 
 use crypto::{
@@ -15,12 +15,20 @@ use crypto::{
 // WBDA
 // -----------------------------------------------------------------------------
 
-pub const WBDA_WINDOW: usize = 50_000;
+pub const WBDA_WINDOW: usize = 10_000;
+
 pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 1 * 1024 * 1024;
-pub const WBDA_LOW_UTILIZATION_PPM: u64 = 400_000;
-pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 600_000;
+
+/// Below 45% utilization, increase difficulty.
+pub const WBDA_LOW_UTILIZATION_PPM: u64 = 450_000;
+
+/// Above 55% utilization, decrease difficulty.
+pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 550_000;
+
 pub const WBDA_DIFFICULTY_STEP: u32 = 1;
+
 pub const WBDA_ALGORITHM: &str = "argon2id-wbda-algorithm";
+
 pub const DIFFICULTY_ALGORITHM: &str = WBDA_ALGORITHM;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +65,11 @@ pub fn utilization_ppm(block_weights: &[usize]) -> Option<u64> {
     Some(average.saturating_mul(1_000_000) / target)
 }
 
+/// WBDA policy:
+///
+/// - utilization < 50% => increase difficulty
+/// - utilization = 50% => keep difficulty
+/// - utilization > 50% => decrease difficulty
 pub fn adjustment_for_utilization_ppm(utilization: u64) -> WbdaAdjustment {
     if utilization < WBDA_LOW_UTILIZATION_PPM {
         WbdaAdjustment::Increase
@@ -79,9 +92,13 @@ pub fn next_difficulty_from_window(
 
     Some(
         match adjustment {
-            WbdaAdjustment::Decrease => previous_difficulty.saturating_sub(WBDA_DIFFICULTY_STEP),
+            WbdaAdjustment::Decrease => {
+                previous_difficulty.saturating_sub(WBDA_DIFFICULTY_STEP)
+            }
             WbdaAdjustment::Keep => previous_difficulty,
-            WbdaAdjustment::Increase => previous_difficulty.saturating_add(WBDA_DIFFICULTY_STEP),
+            WbdaAdjustment::Increase => {
+                previous_difficulty.saturating_add(WBDA_DIFFICULTY_STEP)
+            }
         }
         .clamp(
             crate::consensus::MIN_DIFFICULTY,
@@ -120,6 +137,7 @@ pub fn expected_difficulty_for_height<E>(
     }
 
     let start = next_height - WBDA_WINDOW as u64;
+
     let weights = (start..next_height)
         .map(&mut weight_at)
         .collect::<Result<Vec<_>, _>>()?;
@@ -135,36 +153,54 @@ pub fn expected_difficulty_for_height<E>(
 // Emission
 // -----------------------------------------------------------------------------
 
-pub const MIN_BLOCK_EMISSION: u64 = 500_000;
-pub const MAX_BLOCK_EMISSION: u64 = 5_000_000;
-pub const BLOCK_EMISSION_START: u64 = 3_000_000;
+/// Initial block subsidy: 10 XPQ.
+pub const BLOCK_EMISSION_START: u64 = 10_000_000;
+
+/// Permanent tail emission: 0.5 XPQ per block.
+pub const TAIL_BLOCK_EMISSION: u64 = 500_000;
+
+/// Subsidy reduction: 0.25 XPQ per emission interval.
 pub const BLOCK_EMISSION_STEP: u64 = 250_000;
 
-const_assert!(MIN_BLOCK_EMISSION == XPQ::ZENO_PER_COIN / 2);
-const_assert!(MAX_BLOCK_EMISSION == 5 * XPQ::ZENO_PER_COIN);
-const_assert!(BLOCK_EMISSION_START == 3 * XPQ::ZENO_PER_COIN);
+/// Emission changes every 100,000 blocks.
+pub const EMISSION_INTERVAL: u64 = 100_000;
+
+const_assert!(BLOCK_EMISSION_START == 10 * XPQ::ZENO_PER_COIN);
+const_assert!(TAIL_BLOCK_EMISSION == XPQ::ZENO_PER_COIN / 2);
 const_assert!(BLOCK_EMISSION_STEP == XPQ::ZENO_PER_COIN / 4);
 
 pub const fn initial_block_emission() -> Zeno {
     Zeno::from_zeno(BLOCK_EMISSION_START)
 }
 
-pub fn next_emission_from_window(previous_emission: Zeno, block_weights: &[usize]) -> Option<Zeno> {
-    let adjustment = adjustment_for_window(block_weights)?;
+pub const fn is_emission_epoch_boundary(height: u64) -> bool {
+    height > 1 && (height - 1).is_multiple_of(EMISSION_INTERVAL)
+}
 
-    let emission = match adjustment {
-        WbdaAdjustment::Decrease => previous_emission
-            .as_zeno()
-            .saturating_sub(BLOCK_EMISSION_STEP),
-        WbdaAdjustment::Keep => previous_emission.as_zeno(),
-        WbdaAdjustment::Increase => previous_emission
-            .as_zeno()
-            .saturating_add(BLOCK_EMISSION_STEP),
-    };
+/// Deterministic block subsidy.
+///
+/// Schedule:
+///
+/// - heights 1..=100,000       => 10.00 XPQ
+/// - heights 100,001..=200,000 =>  9.75 XPQ
+/// - heights 200,001..=300,000 =>  9.50 XPQ
+/// - ...
+/// - heights 3,700,001..=3,800,000 => 0.75 XPQ
+/// - height 3,800,001 onward        => 0.50 XPQ forever
+///
+/// Emission is independent from WBDA and block utilization.
+pub fn block_emission_for_height(height: BlockHeight) -> Zeno {
+    let completed_intervals =
+        height.0.saturating_sub(1) / EMISSION_INTERVAL;
 
-    Some(Zeno::from_zeno(
-        emission.clamp(MIN_BLOCK_EMISSION, MAX_BLOCK_EMISSION),
-    ))
+    let reduction = completed_intervals
+        .saturating_mul(BLOCK_EMISSION_STEP);
+
+    let emission = BLOCK_EMISSION_START
+        .saturating_sub(reduction)
+        .max(TAIL_BLOCK_EMISSION);
+
+    Zeno::from_zeno(emission)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,25 +238,21 @@ impl ValidatedEmission {
 pub enum EmissionError {
     MissingEmission,
     InvalidSubsidy,
-    MissingHistory(Height),
-    InvalidBlockWeight(Height),
-    InvalidAdjustment,
     Serialization,
 }
 
 impl fmt::Display for EmissionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingEmission => f.write_str("block emission is missing"),
-            Self::InvalidSubsidy => f.write_str("block emission subsidy is invalid"),
-            Self::MissingHistory(height) => {
-                write!(f, "missing block history at height {}", height.0)
+            Self::MissingEmission => {
+                f.write_str("block emission is missing")
             }
-            Self::InvalidBlockWeight(height) => {
-                write!(f, "invalid block weight at height {}", height.0)
+            Self::InvalidSubsidy => {
+                f.write_str("block emission subsidy is invalid")
             }
-            Self::InvalidAdjustment => f.write_str("emission adjustment overflowed"),
-            Self::Serialization => f.write_str("emission encoding failed"),
+            Self::Serialization => {
+                f.write_str("emission encoding failed")
+            }
         }
     }
 }
@@ -229,25 +261,25 @@ impl StdError for EmissionError {}
 
 pub fn validate_emission(
     block: &Block,
-    parent_emission: Zeno,
-    weight_at: impl FnMut(Height) -> Option<u32>,
 ) -> Result<ValidatedEmission, EmissionError> {
-    authorize_emission(block, parent_emission, weight_at)
+    authorize_emission(block)
 }
 
 pub(crate) fn authorize_emission(
     block: &Block,
-    parent_emission: Zeno,
-    weight_at: impl FnMut(Height) -> Option<u32>,
 ) -> Result<ValidatedEmission, EmissionError> {
-    let emission = block.emission().ok_or(EmissionError::MissingEmission)?;
-    let expected = expected_emission_for_height(block.height(), parent_emission, weight_at)?;
+    let emission = block
+        .emission()
+        .ok_or(EmissionError::MissingEmission)?;
+
+    let expected = block_emission_for_height(block.height());
 
     if emission.subsidy != expected {
         return Err(EmissionError::InvalidSubsidy);
     }
 
     let protocol_burn = MINER_PROTOCOL_BURN;
+
     let miner_emission = emission
         .subsidy
         .checked_sub(protocol_burn)
@@ -273,67 +305,68 @@ pub(crate) fn authorize_emission(
     })
 }
 
+/// Returns the exact consensus subsidy for a block height.
+///
+/// Kept as a semantic wrapper so callers do not need to know how the
+/// emission schedule itself is calculated.
 pub fn expected_emission_for_height(
     height: BlockHeight,
-    parent_emission: Zeno,
-    mut weight_at: impl FnMut(Height) -> Option<u32>,
-) -> Result<Zeno, EmissionError> {
-    if height.0 <= 1 {
-        return Ok(Zeno::from_zeno(BLOCK_EMISSION_START));
-    }
-
-    if !is_wbda_epoch_boundary(height.0) {
-        return Ok(parent_emission);
-    }
-
-    let start = height.0 - WBDA_WINDOW as u64;
-
-    let weights = (start..height.0)
-        .map(|height| {
-            let height = Height(height);
-            let weight = weight_at(height).ok_or(EmissionError::MissingHistory(height))?;
-            usize::try_from(weight).map_err(|_| EmissionError::InvalidBlockWeight(height))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    next_emission_from_window(parent_emission, &weights).ok_or(EmissionError::InvalidAdjustment)
+) -> Zeno {
+    block_emission_for_height(height)
 }
 
 // -----------------------------------------------------------------------------
 // Protocol burn
 // -----------------------------------------------------------------------------
 
-pub const STATE_BURN_ALGORITHM: &str = "xparq-canonical-archival-and-net-coin-state-growth-burn";
+pub const STATE_BURN_ALGORITHM: &str =
+    "xparq-canonical-archival-and-net-coin-state-growth-burn";
+
 pub const STATE_BURN_RATE_ZENO_PER_WEIGHT: u64 = 1;
 
 const BORSH_OPTION_TAG_BYTES: usize = 1;
 const BORSH_VEC_LENGTH_BYTES: usize = core::mem::size_of::<u32>();
 
-pub const EMPTY_BLOCK_ARCHIVAL_BYTES: u64 = (3 * HASH_SIZE
-    + 2 * core::mem::size_of::<u32>()
-    + core::mem::size_of::<u64>()
-    + core::mem::size_of::<u64>()
-    + BORSH_OPTION_TAG_BYTES
-    + ADDRESS_SIZE
-    + core::mem::size_of::<u64>()
-    + BORSH_VEC_LENGTH_BYTES) as u64;
+pub const EMPTY_BLOCK_ARCHIVAL_BYTES: u64 = (
+    3 * HASH_SIZE
+        + 2 * core::mem::size_of::<u32>()
+        + core::mem::size_of::<u64>()
+        + core::mem::size_of::<u64>()
+        + BORSH_OPTION_TAG_BYTES
+        + ADDRESS_SIZE
+        + core::mem::size_of::<u64>()
+        + BORSH_VEC_LENGTH_BYTES
+) as u64;
 
 /// Ownerless canonical coin UTXO: XPQ key + Zeno value.
 /// Address is intentionally not included.
 pub const COIN_UTXO_STATE_WEIGHT: u64 =
-    (crate::native::coin::XPARQCoin::SIZE + core::mem::size_of::<u64>()) as u64;
+    (
+        crate::native::coin::XPARQCoin::SIZE
+            + core::mem::size_of::<u64>()
+    ) as u64;
 
 pub const EMISSION_UTXO_STATE_GROWTH_BURN: Zeno =
-    Zeno::from_zeno(COIN_UTXO_STATE_WEIGHT * STATE_BURN_RATE_ZENO_PER_WEIGHT);
+    Zeno::from_zeno(
+        COIN_UTXO_STATE_WEIGHT
+            * STATE_BURN_RATE_ZENO_PER_WEIGHT,
+    );
 
 pub const EMPTY_BLOCK_ARCHIVAL_BURN: Zeno =
-    Zeno::from_zeno(EMPTY_BLOCK_ARCHIVAL_BYTES * STATE_BURN_RATE_ZENO_PER_WEIGHT);
+    Zeno::from_zeno(
+        EMPTY_BLOCK_ARCHIVAL_BYTES
+            * STATE_BURN_RATE_ZENO_PER_WEIGHT,
+    );
 
-pub const MINER_PROTOCOL_BURN: Zeno = Zeno::from_zeno(
-    (EMPTY_BLOCK_ARCHIVAL_BYTES + COIN_UTXO_STATE_WEIGHT) * STATE_BURN_RATE_ZENO_PER_WEIGHT,
-);
+pub const MINER_PROTOCOL_BURN: Zeno =
+    Zeno::from_zeno(
+        (EMPTY_BLOCK_ARCHIVAL_BYTES + COIN_UTXO_STATE_WEIGHT)
+            * STATE_BURN_RATE_ZENO_PER_WEIGHT,
+    );
 
-pub fn account_key_state_weight(public_key: &PublicKey) -> Result<u64, BurnError> {
+pub fn account_key_state_weight(
+    public_key: &PublicKey,
+) -> Result<u64, BurnError> {
     let encoded_value = 1_usize
         .checked_add(core::mem::size_of::<u32>())
         .and_then(|weight| weight.checked_add(public_key.bytes.len()))
@@ -363,8 +396,12 @@ impl StateTransitionWeight {
 
         let created = net_coin_utxos
             .checked_mul(COIN_UTXO_STATE_WEIGHT)
-            .and_then(|weight| weight.checked_add(self.created_account_key_weight))
-            .and_then(|weight| weight.checked_add(self.created_state_weight))
+            .and_then(|weight| {
+                weight.checked_add(self.created_account_key_weight)
+            })
+            .and_then(|weight| {
+                weight.checked_add(self.created_state_weight)
+            })
             .ok_or(BurnError::WeightOverflow)?;
 
         let burn = created
@@ -403,17 +440,24 @@ impl ProtocolBurn {
     }
 }
 
-pub fn created_coin_output_count(outputs: &[CoinOutput]) -> Result<u64, BurnError> {
-    u64::try_from(outputs.len()).map_err(|_| BurnError::WeightOverflow)
+pub fn created_coin_output_count(
+    outputs: &[CoinOutput],
+) -> Result<u64, BurnError> {
+    u64::try_from(outputs.len())
+        .map_err(|_| BurnError::WeightOverflow)
 }
 
-pub fn validate_exact_burn(actual: Zeno, required: Zeno) -> Result<(), BurnError> {
+pub fn validate_exact_burn(
+    actual: Zeno,
+    required: Zeno,
+) -> Result<(), BurnError> {
     if actual != required {
         return Err(BurnError::IncorrectBurn {
             required: required.as_zeno(),
             actual: actual.as_zeno(),
         });
     }
+
     Ok(())
 }
 
@@ -421,18 +465,39 @@ pub fn validate_exact_burn(actual: Zeno, required: Zeno) -> Result<(), BurnError
 pub enum BurnError {
     WeightOverflow,
     ZenoOverflow,
-    IncorrectBurn { required: u64, actual: u64 },
+    IncorrectBurn {
+        required: u64,
+        actual: u64,
+    },
 }
 
 impl fmt::Display for BurnError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        formatter: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
         match self {
-            Self::WeightOverflow => formatter.write_str("state transition weight overflow"),
-            Self::ZenoOverflow => formatter.write_str("protocol burn Zeno overflow"),
-            Self::IncorrectBurn { required, actual } => {
+            Self::WeightOverflow => {
+                formatter.write_str(
+                    "state transition weight overflow",
+                )
+            }
+
+            Self::ZenoOverflow => {
+                formatter.write_str(
+                    "protocol burn Zeno overflow",
+                )
+            }
+
+            Self::IncorrectBurn {
+                required,
+                actual,
+            } => {
                 write!(
                     formatter,
-                    "incorrect protocol burn: required {required} zeno, actual {actual} zeno"
+                    "incorrect protocol burn: \
+                     required {required} zeno, \
+                     actual {actual} zeno"
                 )
             }
         }

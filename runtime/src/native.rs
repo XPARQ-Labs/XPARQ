@@ -453,23 +453,8 @@ fn expected_next_emission(ledger: &Ledger) -> Result<Zeno, String> {
             .tip_height()
             .map_or(0, |height| height.0.saturating_add(1)),
     );
-    let parent_emission = if height.0 <= 1 {
-        kernel::consensus::initial_block_emission()
-    } else {
-        ledger
-            .chain
-            .block(&Height(height.0 - 1))
-            .and_then(Block::emission)
-            .map(|emission| emission.subsidy)
-            .ok_or("parent emission is missing")?
-    };
-    expected_emission_for_height(height, parent_emission, |height| {
-        ledger
-            .chain
-            .header(&height)
-            .map(|header| header.block_weight)
-    })
-    .map_err(|error| error.to_string())
+
+    Ok(expected_emission_for_height(height))
 }
 
 fn submit_transaction(path: Option<&str>, encoded: &str) -> Result<(), String> {

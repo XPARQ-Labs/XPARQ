@@ -10,7 +10,7 @@ use crate::native::coin::XPQ;
 
 use crate::consensus::{
     ApplyBlockState, CoinInputState, ConsensusError, EmissionError, TransactionConsensusError,
-    TransactionStateView, ValidatedBlock, initial_block_emission, validate_emission,
+    TransactionStateView, ValidatedBlock, validate_emission,
     validate_transaction,
 };
 
@@ -87,19 +87,7 @@ impl Ledger {
 
         let chain_context = self.chain_context.ok_or(LedgerError::EmptyChain)?;
 
-        let parent_emission = if height.0 <= 1 {
-            initial_block_emission()
-        } else {
-            self.chain
-                .block(&Height(height.0 - 1))
-                .and_then(Block::emission)
-                .map(|emission| emission.subsidy)
-                .ok_or(LedgerError::MissingParentEmission)?
-        };
-
-        let emission = validate_emission(block, parent_emission, |height| {
-            self.chain.header(&height).map(|header| header.block_weight)
-        })?;
+        let emission = validate_emission(block)?;
 
         //
         // Emission creates one XPQ UTXO.

@@ -3,7 +3,7 @@
 use crate::blockchain::{Block, Chain, Height};
 use crate::consensus::{
     ConsensusError, ValidatedEmission, authorize_emission, expected_difficulty_for_height,
-    initial_block_emission, verify_pow,
+    verify_pow,
 };
 
 use crypto::{BlockHash, HASH_SIZE, Hash, PoWHash, PoWMemory, hash_meets_difficulty};
@@ -11,17 +11,23 @@ use crypto::{BlockHash, HASH_SIZE, Hash, PoWHash, PoWMemory, hash_meets_difficul
 pub const MIN_DIFFICULTY: u32 = 1;
 pub const MAX_DIFFICULTY: u32 = (crypto::POW_HASH_SIZE * 8) as u32;
 pub const GENESIS_DIFFICULTY: u32 = crate::blockchain::GENESIS_BLOCK_DIFFICULTY;
-pub const DIFFICULTY_START: u32 = 3;
+pub const DIFFICULTY_START: u32 = 1;
 
 pub trait ApplyBlockState {
     type Error: From<ConsensusError>;
 
     fn consensus_chain(&self) -> &Chain;
 
-    fn commit_validated_block(&mut self, block: ValidatedBlock) -> Result<(), Self::Error>;
+    fn commit_validated_block(
+        &mut self,
+        block: ValidatedBlock,
+    ) -> Result<(), Self::Error>;
 }
 
-pub fn apply_block<State>(state: &mut State, block: Block) -> Result<(), State::Error>
+pub fn apply_block<State>(
+    state: &mut State,
+    block: Block,
+) -> Result<(), State::Error>
 where
     State: ApplyBlockState,
 {
@@ -29,7 +35,8 @@ where
         return Err(ConsensusError::GenesisRequired.into());
     }
 
-    let validated = validate_block_for_apply(&block, state.consensus_chain())?;
+    let validated =
+        validate_block_for_apply(&block, state.consensus_chain())?;
 
     state.commit_validated_block(validated)
 }
@@ -46,13 +53,19 @@ where
         return Err(ConsensusError::InvalidHeight.into());
     }
 
-    Consensus::with_default_config().validate_genesis_block(&block)?;
+    Consensus::with_default_config()
+        .validate_genesis_block(&block)?;
 
-    if block.hash().map_err(|_| ConsensusError::Serialization)? != expected_hash {
+    if block
+        .hash()
+        .map_err(|_| ConsensusError::Serialization)?
+        != expected_hash
+    {
         return Err(ConsensusError::WrongGenesis.into());
     }
 
-    let validated = validate_for_apply(&block, state.consensus_chain(), true)?;
+    let validated =
+        validate_for_apply(&block, state.consensus_chain(), true)?;
 
     state.commit_validated_block(validated)
 }
@@ -102,15 +115,21 @@ fn validate_for_apply(
         .validate_next_block(block)
         .map_err(|error| match error {
             crate::blockchain::ChainError::InvalidHeight
-            | crate::blockchain::ChainError::DuplicateBlock => ConsensusError::InvalidHeight,
+            | crate::blockchain::ChainError::DuplicateBlock => {
+                ConsensusError::InvalidHeight
+            }
             _ => ConsensusError::InvalidPreviousHash,
         })?;
 
     if !block.is_genesis() {
-        let expected_difficulty = expected_difficulty(chain, block.height())?;
+        let expected_difficulty =
+            expected_difficulty(chain, block.height())?;
 
         if enforce_pow {
-            Consensus::validate_pow_at_difficulty(block, expected_difficulty)?;
+            Consensus::validate_pow_at_difficulty(
+                block,
+                expected_difficulty,
+            )?;
         } else if block.difficulty() != expected_difficulty {
             return Err(ConsensusError::UnexpectedDifficulty);
         }
@@ -119,19 +138,7 @@ fn validate_for_apply(
     let emission = if block.is_genesis() {
         None
     } else {
-        let parent_emission = if block.height().0 <= 1 {
-            initial_block_emission()
-        } else {
-            chain
-                .block(&Height(block.height().0 - 1))
-                .and_then(Block::emission)
-                .map(|emission| emission.subsidy)
-                .ok_or(ConsensusError::InvalidPreviousHash)?
-        };
-
-        Some(authorize_emission(block, parent_emission, |height| {
-            chain.header(&height).map(|header| header.block_weight)
-        })?)
+        Some(authorize_emission(block)?)
     };
 
     Ok(ValidatedBlock {
@@ -140,7 +147,10 @@ fn validate_for_apply(
     })
 }
 
-fn expected_difficulty(chain: &Chain, height: Height) -> Result<u32, ConsensusError> {
+fn expected_difficulty(
+    chain: &Chain,
+    height: Height,
+) -> Result<u32, ConsensusError> {
     if height.0 == 0 {
         return Ok(GENESIS_DIFFICULTY);
     }
@@ -149,18 +159,24 @@ fn expected_difficulty(chain: &Chain, height: Height) -> Result<u32, ConsensusEr
         .block(&Height(height.0 - 1))
         .ok_or(ConsensusError::InvalidPreviousHash)?;
 
-    expected_difficulty_for_height(height.0, parent.difficulty(), |height| {
-        chain
-            .block(&Height(height))
-            .ok_or(ConsensusError::InvalidPreviousHash)?
-            .block_weight()
-            .try_into()
-            .map_err(|_| ConsensusError::InvalidDifficulty)
-    })?
+    expected_difficulty_for_height(
+        height.0,
+        parent.difficulty(),
+        |height| {
+            chain
+                .block(&Height(height))
+                .ok_or(ConsensusError::InvalidPreviousHash)?
+                .block_weight()
+                .try_into()
+                .map_err(|_| ConsensusError::InvalidDifficulty)
+        },
+    )?
     .ok_or(ConsensusError::InvalidDifficulty)
 }
 
-pub fn expected_next_difficulty(chain: &Chain) -> Result<u32, ConsensusError> {
+pub fn expected_next_difficulty(
+    chain: &Chain,
+) -> Result<u32, ConsensusError> {
     let height = Height(
         chain
             .tip_height()
@@ -199,8 +215,12 @@ pub struct Consensus {
 }
 
 impl Consensus {
-    pub fn new(config: ConsensusConfig) -> Result<Self, ConsensusError> {
-        if !(MIN_DIFFICULTY..=MAX_DIFFICULTY).contains(&config.difficulty) {
+    pub fn new(
+        config: ConsensusConfig,
+    ) -> Result<Self, ConsensusError> {
+        if !(MIN_DIFFICULTY..=MAX_DIFFICULTY)
+            .contains(&config.difficulty)
+        {
             return Err(ConsensusError::InvalidDifficulty);
         }
 
@@ -215,7 +235,9 @@ impl Consensus {
         }
     }
 
-    pub fn with_expected_difficulty(expected_difficulty: u32) -> Result<Self, ConsensusError> {
+    pub fn with_expected_difficulty(
+        expected_difficulty: u32,
+    ) -> Result<Self, ConsensusError> {
         Self::new(ConsensusConfig::new(expected_difficulty))
     }
 
@@ -227,10 +249,15 @@ impl Consensus {
         self.config.difficulty()
     }
 
-    pub fn validate_genesis_block(&self, block: &Block) -> Result<(), ConsensusError> {
+    pub fn validate_genesis_block(
+        &self,
+        block: &Block,
+    ) -> Result<(), ConsensusError> {
         block.validate_structure()?;
 
-        if block.height() != Height(0) || block.previous_hash() != Hash([0; HASH_SIZE]) {
+        if block.height() != Height(0)
+            || block.previous_hash() != Hash([0; HASH_SIZE])
+        {
             return Err(ConsensusError::InvalidHeight);
         }
 
@@ -245,8 +272,17 @@ impl Consensus {
         expected_difficulty: u32,
     ) -> Result<(), ConsensusError> {
         block.validate_structure()?;
-        self.validate_next_block_linkage(block, tip_height, tip_hash)?;
-        Self::validate_pow_at_difficulty(block, expected_difficulty)
+
+        self.validate_next_block_linkage(
+            block,
+            tip_height,
+            tip_hash,
+        )?;
+
+        Self::validate_pow_at_difficulty(
+            block,
+            expected_difficulty,
+        )
     }
 
     pub fn validate_next_block_with_tip(
@@ -255,9 +291,16 @@ impl Consensus {
         tip: &Block,
         expected_difficulty: u32,
     ) -> Result<(), ConsensusError> {
-        let tip_hash = tip.hash().map_err(|_| ConsensusError::Serialization)?;
+        let tip_hash = tip
+            .hash()
+            .map_err(|_| ConsensusError::Serialization)?;
 
-        self.validate_next_block(block, tip.height(), tip_hash, expected_difficulty)
+        self.validate_next_block(
+            block,
+            tip.height(),
+            tip_hash,
+            expected_difficulty,
+        )
     }
 
     pub(crate) fn validate_next_block_linkage(
@@ -266,7 +309,9 @@ impl Consensus {
         tip_height: Height,
         tip_hash: BlockHash,
     ) -> Result<(), ConsensusError> {
-        if block.height().0 != tip_height.0.saturating_add(1) {
+        if block.height().0
+            != tip_height.0.saturating_add(1)
+        {
             return Err(ConsensusError::InvalidHeight);
         }
 
@@ -284,19 +329,29 @@ impl Consensus {
         expected_difficulty: Option<u32>,
     ) -> Result<(), ConsensusError> {
         match tip {
-            Some((tip_height, tip_hash)) => self.validate_next_block(
-                block,
-                tip_height,
-                tip_hash,
-                expected_difficulty.ok_or(ConsensusError::UnexpectedDifficulty)?,
-            ),
+            Some((tip_height, tip_hash)) => {
+                self.validate_next_block(
+                    block,
+                    tip_height,
+                    tip_hash,
+                    expected_difficulty.ok_or(
+                        ConsensusError::UnexpectedDifficulty,
+                    )?,
+                )
+            }
+
             None => self.validate_genesis_block(block),
         }
     }
 
-    pub fn validate_pow(&self, block: &Block) -> Result<(), ConsensusError> {
+    pub fn validate_pow(
+        &self,
+        block: &Block,
+    ) -> Result<(), ConsensusError> {
         if block.difficulty() != self.difficulty() {
-            return Err(ConsensusError::UnexpectedDifficulty);
+            return Err(
+                ConsensusError::UnexpectedDifficulty,
+            );
         }
 
         self.validate_claimed_pow(block)
@@ -307,18 +362,35 @@ impl Consensus {
         expected_difficulty: u32,
     ) -> Result<(), ConsensusError> {
         if block.difficulty() != expected_difficulty {
-            return Err(ConsensusError::UnexpectedDifficulty);
+            return Err(
+                ConsensusError::UnexpectedDifficulty,
+            );
         }
 
-        Self::with_expected_difficulty(expected_difficulty)?.validate_claimed_pow(block)
+        Self::with_expected_difficulty(
+            expected_difficulty,
+        )?
+        .validate_claimed_pow(block)
     }
 
-    pub fn validate_claimed_pow(&self, block: &Block) -> Result<(), ConsensusError> {
-        verify_pow(&block.header, block.difficulty())
+    pub fn validate_claimed_pow(
+        &self,
+        block: &Block,
+    ) -> Result<(), ConsensusError> {
+        verify_pow(
+            &block.header,
+            block.difficulty(),
+        )
     }
 
-    pub fn validate_pow_hash(&self, hash: &PoWHash) -> Result<(), ConsensusError> {
-        self.validate_pow_hash_with_difficulty(hash, self.difficulty())
+    pub fn validate_pow_hash(
+        &self,
+        hash: &PoWHash,
+    ) -> Result<(), ConsensusError> {
+        self.validate_pow_hash_with_difficulty(
+            hash,
+            self.difficulty(),
+        )
     }
 
     pub fn validate_pow_hash_with_difficulty(
@@ -326,8 +398,12 @@ impl Consensus {
         hash: &PoWHash,
         difficulty: u32,
     ) -> Result<(), ConsensusError> {
-        if !(MIN_DIFFICULTY..=MAX_DIFFICULTY).contains(&difficulty) {
-            return Err(ConsensusError::InvalidDifficulty);
+        if !(MIN_DIFFICULTY..=MAX_DIFFICULTY)
+            .contains(&difficulty)
+        {
+            return Err(
+                ConsensusError::InvalidDifficulty,
+            );
         }
 
         if hash_meets_difficulty(hash, difficulty) {
@@ -337,8 +413,13 @@ impl Consensus {
         }
     }
 
-    pub fn pow_hash(&self, block: &Block) -> Result<PoWHash, ConsensusError> {
-        crate::consensus::calculate_work(&block.header)
+    pub fn pow_hash(
+        &self,
+        block: &Block,
+    ) -> Result<PoWHash, ConsensusError> {
+        crate::consensus::calculate_work(
+            &block.header,
+        )
     }
 
     pub fn pow_hash_with_memory(
@@ -346,6 +427,9 @@ impl Consensus {
         block: &Block,
         memory: &mut PoWMemory,
     ) -> Result<PoWHash, ConsensusError> {
-        crate::consensus::calculate_work_with_memory(&block.header, memory)
+        crate::consensus::calculate_work_with_memory(
+            &block.header,
+            memory,
+        )
     }
 }
