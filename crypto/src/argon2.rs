@@ -1,4 +1,9 @@
-use crate::{CryptoError, HASH_SIZE, POW_HASH_SIZE, PoWHash};
+use crate::{
+    CryptoError,
+    HASH_SIZE,
+    POW_HASH_SIZE,
+    PoWHash,
+};
 
 /// Reusable Argon2 working memory supplied by higher-level protocols.
 pub struct PoWMemory {

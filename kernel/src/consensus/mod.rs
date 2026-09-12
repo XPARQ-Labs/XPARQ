@@ -25,5 +25,3 @@ pub use pow::*;
 pub use transaction::*;
 
 pub use crate::native::coin::{DECIMALS, XPQ, Zeno};
-
-

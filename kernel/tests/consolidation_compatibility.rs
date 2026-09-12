@@ -17,8 +17,8 @@ fn mainnet_genesis_is_unchanged_and_effect_rules_have_a_new_identity() {
     assert_eq!(
         genesis::chain_spec_hash().unwrap().into_bytes(),
         [
-            26, 33, 62, 6, 20, 189, 120, 141, 182, 194, 85, 204, 194, 182, 161, 207, 255, 212,
-            185, 20, 153, 176, 59, 237, 54, 90, 134, 76, 175, 91, 142, 60
+            26, 33, 62, 6, 20, 189, 120, 141, 182, 194, 85, 204, 194, 182, 161, 207, 255, 212, 185,
+            20, 153, 176, 59, 237, 54, 90, 134, 76, 175, 91, 142, 60
         ]
     );
     assert_ne!(
@@ -44,17 +44,17 @@ fn mainnet_genesis_is_unchanged_and_effect_rules_have_a_new_identity() {
 #[test]
 fn native_asset_and_share_ids_are_frozen() {
     use kernel::{
-        crypto::Address,
-        native::asset::{Asset, AssetMetadata, Share, Unit},
+        crypto::{ADDRESS_SIZE, Address},
+        native::asset::{Contract, Metadata, Share, Unit},
     };
-    let parent = Asset::derive(
-        &AssetMetadata::new(
+    let parent = Contract::derive(
+        &Metadata::new(
             "Test Asset".into(),
             "TEST".into(),
             6,
             Unit::from_units(1_000_000),
-            Address([7; 20]),
-            Address([7; 20]),
+            Address([7; ADDRESS_SIZE]),
+            Address([7; ADDRESS_SIZE]),
         )
         .unwrap(),
     )

@@ -10,7 +10,14 @@ const_assert!(GENESIS_HEIGHT == 0);
 
 
 
-#[derive(BorshSerialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(
+    BorshSerialize,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+)]
 pub struct GenesisHeader {
     pub blockchain: &'static str,
     pub network_id: &'static str,
@@ -29,7 +36,14 @@ impl GenesisHeader {
     }
 }
 
-#[derive(BorshSerialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(
+    BorshSerialize,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+)]
 pub struct GenesisBody {
     pub message: &'static [u8],
 }
@@ -42,7 +56,14 @@ impl GenesisBody {
     }
 }
 
-#[derive(BorshSerialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(
+    BorshSerialize,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+)]
 pub struct GenesisBlock {
     pub header: GenesisHeader,
     pub body: GenesisBody,

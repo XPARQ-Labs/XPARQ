@@ -1,5 +1,6 @@
 use kernel::{
-    block::{Block, Nonce},
+    block::Block,
+    common::Nonce,
     consensus::{ConsensusError, calculate_work_with_memory},
     crypto::{PoWMemory, hash_meets_difficulty},
 };

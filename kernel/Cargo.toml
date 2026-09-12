@@ -20,3 +20,4 @@ sqisign-blockchain-test = ["devnet"]
 borsh.workspace = true
 static_assertions.workspace = true
 crypto.workspace = true
+serde.workspace = true

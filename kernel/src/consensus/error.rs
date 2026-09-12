@@ -1,7 +1,6 @@
 use std::{error::Error as StdError, fmt};
 
-use crate::blockchain::BlockError;
-use crate::consensus::EmissionError;
+use crate::{blockchain::BlockError, consensus::EmissionError};
 
 #[derive(Debug)]
 pub enum ConsensusError {

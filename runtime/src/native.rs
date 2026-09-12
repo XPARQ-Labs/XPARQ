@@ -19,8 +19,9 @@ use crate::sync::{
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use kernel::{
-    block::{Block, Emission, Height, Nonce},
+    block::{Block, Emission},
     codec::{block_bytes, decode_block},
+    common::{Height, Nonce, Recipient},
     consensus::{
         ReorgPlan, Work, apply_block, compare_chain_tips, expected_emission_for_height,
         expected_next_difficulty, new_pow_memory, validate_transaction,
@@ -28,7 +29,7 @@ use kernel::{
     crypto::{Address, BlockHash, address_from_string, canonical_bytes, canonical_decode},
     genesis::{EXPECTED_GENESIS_HASH, chain_spec_hash, genesis_block},
     ledger::Ledger,
-    native::coin::{Output as CoinOutput, Recipient, Zeno},
+    native::coin::{CoinOutput, Zeno},
     transaction::{AuthorizedTransaction, Transaction},
 };
 
@@ -632,7 +633,7 @@ fn account_asset_balances(
         if ledger.state().share_recipient(id) != Some(address) || utxo.amount.is_zero() {
             continue;
         }
-        assets.insert(utxo.parent);
+        assets.insert(utxo.asset);
     }
     let mut response = Vec::with_capacity(assets.len());
     for asset in assets {
@@ -658,7 +659,7 @@ fn account_asset_balances(
 
 fn account_asset_shares(
     ledger: &Ledger,
-    asset: kernel::native::asset::Asset,
+    asset: kernel::native::asset::Contract,
     address: Address,
 ) -> Vec<serde_json::Value> {
     ledger
@@ -666,7 +667,7 @@ fn account_asset_shares(
         .assets
         .utxos(&ledger.state().utxos)
         .filter(|(id, share)| {
-            share.parent == asset && ledger.state().share_recipient(*id) == Some(address)
+            share.asset == asset && ledger.state().share_recipient(*id) == Some(address)
         })
         .map(|(share_id, share)| {
             serde_json::json!({
@@ -1182,7 +1183,7 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
     let asset = parts
         .first()
         .ok_or("missing asset id")?
-        .parse::<kernel::native::asset::Asset>()
+        .parse::<kernel::native::asset::Contract>()
         .map_err(|_| "invalid asset id")?;
     if parts.len() == 1 {
         let metadata = ledger
@@ -1214,7 +1215,7 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
             .assets
             .utxos(&ledger.state().utxos)
             .filter(|(id, share)| {
-                share.parent == asset && ledger.state().share_recipient(*id) == Some(address)
+                share.asset == asset && ledger.state().share_recipient(*id) == Some(address)
             })
             .try_fold(kernel::native::asset::Unit::ZERO, |total, (_, share)| {
                 total
@@ -3519,7 +3520,14 @@ mod tests {
     #[test]
     fn explorer_address_response_is_aggregate_only() {
         let ledger = kernel::genesis::genesis_ledger().unwrap();
-        let response = explorer_address_response(&ledger, &[], Address([7; 20]), true).unwrap();
+        let response =
+            explorer_address_response(
+                &ledger,
+                &[],
+                Address([7; kernel::crypto::ADDRESS_SIZE]),
+                true,
+            )
+                .unwrap();
         assert_eq!(response["balance"]["total"], 0);
         assert_eq!(response["activity_count"], 0);
         assert!(response.get("utxos").is_none());
@@ -3533,8 +3541,8 @@ mod tests {
             kernel::crypto::Signature::MlDsa44,
         )
         .unwrap();
-        let recipient = Address([4; 20]);
-        let miner = Address([5; 20]);
+        let recipient = Address([4; kernel::crypto::ADDRESS_SIZE]);
+        let miner = Address([5; kernel::crypto::ADDRESS_SIZE]);
         let intent = kernel::transaction::SpendIntent::coin(
             sender.address,
             vec![kernel::native::coin::XPQ::from_bytes(
@@ -3578,7 +3586,11 @@ mod tests {
         assert_eq!(incoming["direction"], "in");
         assert_eq!(incoming["amount"], 10);
         assert!(
-            address_transaction_activity(&transaction, Address([9; 20]), &block)
+            address_transaction_activity(
+                &transaction,
+                Address([9; kernel::crypto::ADDRESS_SIZE]),
+                &block,
+            )
                 .unwrap()
                 .is_none()
         );

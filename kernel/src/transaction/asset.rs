@@ -3,7 +3,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
 
 use crate::native::asset::{
-    Asset, AssetError, AssetMetadata, AssetShare, MintCapability, MintCapabilityId, Share, Unit,
+    AssetError, AssetShare, Contract, Metadata, MintCapability, MintCapabilityId, Share, Unit,
     ensure_nonzero_asset_amount, ensure_unique_asset_inputs,
 };
 
@@ -18,13 +18,13 @@ pub enum AssetInstruction {
         mint_authority: Address,
     },
     Mint {
-        asset: Asset,
+        asset: Contract,
         capability: MintCapabilityId,
         recipient: Address,
         amount: Unit,
     },
     Burn {
-        asset: Asset,
+        asset: Contract,
         inputs: Vec<Share>,
     },
 }
@@ -43,7 +43,7 @@ impl AssetIntent {
         }
     }
 
-    pub fn asset(&self) -> Result<Asset, AssetError> {
+    pub fn asset(&self) -> Result<Contract, AssetError> {
         match &self.instruction {
             AssetInstruction::Register {
                 name,
@@ -53,7 +53,7 @@ impl AssetIntent {
                 mint_authority,
                 ..
             } => {
-                let metadata = AssetMetadata::new(
+                let metadata = Metadata::new(
                     name.clone(),
                     symbol.clone(),
                     *decimals,
@@ -61,7 +61,7 @@ impl AssetIntent {
                     self.signer,
                     *mint_authority,
                 )?;
-                Asset::derive(&metadata)
+                Contract::derive(&metadata)
             }
             AssetInstruction::Mint { asset, .. } | AssetInstruction::Burn { asset, .. } => {
                 Ok(*asset)
@@ -85,7 +85,7 @@ impl AssetIntent {
                 initial_mint,
                 mint_authority,
             } => {
-                AssetMetadata::new(
+                Metadata::new(
                     name.clone(),
                     symbol.clone(),
                     *decimals,
@@ -126,7 +126,7 @@ impl AssetIntent {
                 initial_mint,
                 mint_authority,
             } => {
-                let metadata = AssetMetadata::new(
+                let metadata = Metadata::new(
                     name.clone(),
                     symbol.clone(),
                     *decimals,
@@ -134,7 +134,7 @@ impl AssetIntent {
                     self.signer,
                     *mint_authority,
                 )?;
-                let asset = Asset::derive(&metadata)?;
+                let asset = Contract::derive(&metadata)?;
 
                 weight = checked_entry_weight(weight, HASH_SIZE, &metadata)?;
                 weight = checked_entry_weight(weight, HASH_SIZE, initial_mint)?;
@@ -142,7 +142,7 @@ impl AssetIntent {
                     weight,
                     HASH_SIZE,
                     &AssetShare {
-                        parent: asset,
+                        asset: asset,
                         amount: *initial_mint,
                     },
                 )?;
@@ -162,7 +162,7 @@ impl AssetIntent {
                     weight,
                     HASH_SIZE,
                     &AssetShare {
-                        parent: *asset,
+                        asset: *asset,
                         amount: *amount,
                     },
                 )?;

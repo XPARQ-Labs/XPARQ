@@ -4,10 +4,13 @@ members = []
 exclude = [
     "argon2/*",
     "mldsa/*",
+    "mlkem/*",
+    "mlkem/ml-kem",
     "proc-macro/*",
     "sha3/*",
     "sqisign/*",
     "traits/*",
+    "traits/kem",
     "utils/*",
     "keccak",
 ]

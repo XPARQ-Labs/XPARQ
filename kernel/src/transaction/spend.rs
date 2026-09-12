@@ -4,11 +4,15 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
 
-use crate::native::asset::{
-    Asset, Output as AssetOutput, Share, ensure_nonzero_asset_amount, ensure_unique_asset_inputs,
+use crate::{
+    native::{
+        asset::{
+            AssetOutput, Contract, Share, ensure_nonzero_asset_amount, ensure_unique_asset_inputs,
+        },
+        coin::{CoinOutput, XPQ, Zeno},
+    },
+    transaction::IntentError,
 };
-use crate::native::coin::{Output as CoinOutput, XPQ, Zeno};
-use crate::transaction::IntentError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
 pub struct ChainContext {
@@ -41,7 +45,7 @@ impl SpendCommitment {
     }
 }
 
-/// A user-authorized transfer.
+/// A account-authorized transfer.
 ///
 /// Register, mint, and burn remain native asset operations.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -51,7 +55,7 @@ pub enum Spend {
         outputs: Vec<CoinOutput>,
     },
     Asset {
-        asset: Asset,
+        asset: Contract,
         inputs: Vec<Share>,
         outputs: Vec<AssetOutput>,
     },
@@ -79,7 +83,7 @@ impl SpendIntent {
 
     pub fn asset(
         signer: Address,
-        asset: Asset,
+        asset: Contract,
         inputs: Vec<Share>,
         outputs: Vec<AssetOutput>,
     ) -> Result<Self, IntentError> {
@@ -157,7 +161,7 @@ impl SpendIntent {
         }
     }
 
-    pub fn asset_parts(&self) -> Option<(Asset, &[Share], &[AssetOutput])> {
+    pub fn asset_parts(&self) -> Option<(Contract, &[Share], &[AssetOutput])> {
         match &self.spend {
             Spend::Asset {
                 asset,

@@ -16,6 +16,7 @@ sqisign-blockchain-test = ["dep:rand_10", "dep:sqisign_rs", "dep:chacha20"]
 [dependencies]
 sha3.workspace = true
 ml_dsa.workspace = true
+ml_kem.workspace = true
 sqisign_rs = { workspace = true, optional = true }
 rand_10 = { workspace = true, optional = true }
 chacha20 = { workspace = true, optional = true }

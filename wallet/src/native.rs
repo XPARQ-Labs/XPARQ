@@ -6,16 +6,15 @@ use std::{
     str::FromStr,
 };
 
-use kernel::native::coin::Output as CoinOutput;
-use kernel::native::asset::Asset;
+use kernel::native::asset::Contract;
+use kernel::native::coin::CoinOutput;
 use kernel::{
     codec::canonical_bytes,
     consensus::{DECIMALS, StateTransitionWeight, XPQ, Zeno, account_key_state_weight},
     crypto::{Address, Signature, address_from_string},
     transaction::{
-        AssetInstruction, AuthorizedAssetTransaction,
-        AuthorizedSpendTransaction, AuthorizedTransaction,
-        SpendIntent,
+        AssetInstruction, AuthorizedAssetTransaction, AuthorizedSpendTransaction,
+        AuthorizedTransaction, SpendIntent,
     },
 };
 use serde::Deserialize;
@@ -190,8 +189,8 @@ fn asset_register(args: &[String]) -> Result<(), String> {
     } else {
         authority
     };
-    let asset = Asset::derive(
-        &kernel::native::asset::AssetMetadata::new(
+    let asset = Contract::derive(
+        &kernel::native::asset::Metadata::new(
             name.clone(),
             symbol.clone(),
             decimals,
@@ -296,9 +295,9 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
     let asset = parse_asset(args)?;
     let amount = parse_asset_amount(args, "--amount", asset_decimals(args, asset)?)?;
     let (inputs, total) = select_asset_inputs(rpc, wallet.address(), asset, amount.as_units())?;
-    let mut outputs = vec![kernel::native::asset::Output { recipient, amount }];
+    let mut outputs = vec![kernel::native::asset::AssetOutput { recipient, amount }];
     if total > amount.as_units() {
-        outputs.push(kernel::native::asset::Output {
+        outputs.push(kernel::native::asset::AssetOutput {
             recipient: wallet.address(),
             amount: kernel::native::asset::Unit::from_units(total - amount.as_units()),
         });
@@ -314,7 +313,7 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
             weight,
             32,
             &kernel::native::asset::AssetShare {
-                parent: asset,
+                asset: asset,
                 amount: output.amount,
             },
         )
@@ -352,7 +351,7 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
 fn select_asset_inputs(
     rpc: &str,
     owner: Address,
-    asset: Asset,
+    asset: Contract,
     required: u128,
 ) -> Result<(Vec<kernel::native::asset::Share>, u128), String> {
     let address = kernel::crypto::address_to_string(&owner);
@@ -458,18 +457,18 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
     submit_or_print_transaction(args, &transaction)
 }
 
-fn parse_asset(args: &[String]) -> Result<Asset, String> {
+fn parse_asset(args: &[String]) -> Result<Contract, String> {
     option(args, "--asset")
         .ok_or_else(|| "missing --asset".to_string())?
-        .parse::<Asset>()
+        .parse::<Contract>()
         .map_err(|_| "invalid --asset id".to_string())
 }
 
-fn asset_decimals(args: &[String], asset: Asset) -> Result<u8, String> {
+fn asset_decimals(args: &[String], asset: Contract) -> Result<u8, String> {
     Ok(asset_metadata(args, asset)?.decimals)
 }
 
-fn asset_metadata(args: &[String], asset: Asset) -> Result<AssetMetadataResponse, String> {
+fn asset_metadata(args: &[String], asset: Contract) -> Result<AssetMetadataResponse, String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     http_get_json(rpc, &format!("/asset/{asset}"))
 }
@@ -787,6 +786,7 @@ fn create_wallet(args: &[String]) -> Result<(), String> {
     write_account_wallet(path, &wallet)?;
     println!("signature_account: {account}");
     println!("address: {}", kernel::crypto::address_to_string(&address));
+    println!("payment_address: {}", wallet.payment_address_string());
     println!("mnemonic: {}", mnemonic.as_str());
     println!("wallet: {path}");
     Ok(())
@@ -802,6 +802,7 @@ fn restore_wallet(args: &[String]) -> Result<(), String> {
     write_account_wallet(path, &wallet)?;
     println!("signature_account: {account}");
     println!("address: {}", kernel::crypto::address_to_string(&address));
+    println!("payment_address: {}", wallet.payment_address_string());
     println!("wallet: {path}");
     Ok(())
 }
@@ -821,8 +822,9 @@ fn print_address(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
-    let address = wallet_address_from_file_bytes(&bytes)?;
-    println!("{}", kernel::crypto::address_to_string(&address));
+    let wallet = account_wallet_from_file_bytes(&bytes)?;
+    println!("address: {}", kernel::crypto::address_to_string(&wallet.address));
+    println!("payment_address: {}", wallet.payment_address_string());
     Ok(())
 }
 

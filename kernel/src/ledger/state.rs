@@ -1,10 +1,12 @@
 //! Canonical ledger state and rollback journal types.
 
 use super::{account, utxo};
-use crate::native::asset::{
-    Asset, AssetMetadata, AssetShare, MintCapability, MintCapabilityId, Share, Unit,
+
+use crate::native::{
+    asset::{AssetShare, Contract, Metadata, MintCapability, MintCapabilityId, Share, Unit},
+    coin::{XPQ, Zeno},
 };
-use crate::native::coin::{XPQ, Zeno};
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::Address;
 use std::collections::BTreeMap;
@@ -30,13 +32,12 @@ impl LedgerState {
     pub fn share_recipient(&self, id: Share) -> Option<Address> {
         self.assets.share_recipients.get(&id).copied()
     }
-
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AssetState {
-    pub(crate) metadata: BTreeMap<Asset, AssetMetadata>,
-    pub(crate) supplies: BTreeMap<Asset, Unit>,
+    pub(crate) metadata: BTreeMap<Contract, Metadata>,
+    pub(crate) supplies: BTreeMap<Contract, Unit>,
     pub(crate) share_recipients: BTreeMap<Share, Address>,
 }
 
@@ -44,13 +45,13 @@ impl AssetState {
     pub fn is_empty(&self) -> bool {
         self.metadata.is_empty() && self.supplies.is_empty() && self.share_recipients.is_empty()
     }
-    pub fn metadata(&self, id: Asset) -> Option<&AssetMetadata> {
+    pub fn metadata(&self, id: Contract) -> Option<&Metadata> {
         self.metadata.get(&id)
     }
-    pub fn metadata_entries(&self) -> impl Iterator<Item = (Asset, &AssetMetadata)> + '_ {
+    pub fn metadata_entries(&self) -> impl Iterator<Item = (Contract, &Metadata)> + '_ {
         self.metadata.iter().map(|(&id, metadata)| (id, metadata))
     }
-    pub fn supply(&self, id: Asset) -> Unit {
+    pub fn supply(&self, id: Contract) -> Unit {
         self.supplies.get(&id).copied().unwrap_or(Unit::ZERO)
     }
     pub fn utxo<'a>(&self, utxos: &'a utxo::UtxoSet, id: Share) -> Option<&'a AssetShare> {
@@ -66,7 +67,7 @@ impl AssetState {
     pub fn mint_capability(
         &self,
         utxos: &utxo::UtxoSet,
-        asset: Asset,
+        asset: Contract,
     ) -> Option<(MintCapabilityId, MintCapability)> {
         utxos
             .mint_capabilities()
@@ -86,8 +87,8 @@ pub struct SpendRollbackJournal {
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AssetRollbackJournal {
-    pub(crate) metadata: Vec<(Asset, Option<AssetMetadata>)>,
-    pub(crate) supplies: Vec<(Asset, Option<Unit>)>,
+    pub(crate) metadata: Vec<(Contract, Option<Metadata>)>,
+    pub(crate) supplies: Vec<(Contract, Option<Unit>)>,
     pub(crate) utxos: Vec<(Share, Option<AssetShare>)>,
     pub(crate) recipients: Vec<(Share, Option<Address>)>,
     pub(crate) capabilities: Vec<(MintCapabilityId, Option<MintCapability>)>,

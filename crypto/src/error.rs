@@ -3,6 +3,7 @@ use std::{error::Error, fmt};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoError {
     InvalidAddressEncoding,
+    InvalidPaymentAddressEncoding,
     InvalidKeyDerivationParameters,
     InvalidPublicKey,
     InvalidSignatureEncoding,
@@ -15,6 +16,9 @@ impl fmt::Display for CryptoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CryptoError::InvalidAddressEncoding => f.write_str("address string is invalid"),
+            CryptoError::InvalidPaymentAddressEncoding => {
+                f.write_str("payment address string is invalid")
+            }
             CryptoError::InvalidKeyDerivationParameters => {
                 f.write_str("key derivation parameters are invalid")
             }

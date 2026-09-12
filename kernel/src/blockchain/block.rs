@@ -4,18 +4,21 @@ use std::{
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
+
 use crypto::{
     Address, BlockHash, Hash, HashDomain, MerkleHash, PreviousHash, StateRoot, canonical_bytes,
     domain,
 };
 
-use crate::native::coin::Zeno;
-use crate::transaction::Transaction;
-
-pub use crypto::{BlockHeight, BlockNonce, Height, Nonce};
-
-use crate::blockchain::error::{BlockError, CodecError};
-use crate::blockchain::merkle::{MerkleInclusionProof, merkle_root};
+use crate::{
+    blockchain::{
+        error::{BlockError, CodecError},
+        merkle::{MerkleInclusionProof, merkle_root},
+    },
+    common::{Height, Nonce},
+    native::coin::Zeno,
+    transaction::Transaction,
+};
 
 pub const MAX_BLOCK_SIZE: usize = 2 * 1024 * 1024;
 pub const GENESIS_BLOCK_DIFFICULTY: u32 = 1;

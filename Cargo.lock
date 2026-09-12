@@ -6,7 +6,7 @@ version = 4
 name = "argon2"
 version = "0.5.3"
 dependencies = [
- "base64ct",
+ "base64ct 1.8.3",
  "blake2",
  "cpufeatures 0.2.17",
  "password-hash",
@@ -43,6 +43,12 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 [[package]]
 name = "base64ct"
 version = "1.8.3"
+
+[[package]]
+name = "base64ct"
+version = "1.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bip39"
@@ -137,6 +143,12 @@ name = "cmov"
 version = "0.5.4"
 
 [[package]]
+name = "const-oid"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
 name = "cpubits"
 version = "0.1.1"
 
@@ -173,6 +185,7 @@ dependencies = [
  "fn-dsa",
  "hex",
  "ml-dsa",
+ "ml-kem",
  "rand 0.10.2",
  "rand_core 0.6.4",
  "serde",
@@ -213,6 +226,16 @@ name = "ctutils"
 version = "0.4.2"
 dependencies = [
  "cmov",
+]
+
+[[package]]
+name = "der"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a878c850e9e421b20262e9b41f9c860e4785fa07541c266b62ff9d1ef998a80a"
+dependencies = [
+ "const-oid",
+ "zeroize 1.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -526,11 +549,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kem"
+version = "0.3.0"
+dependencies = [
+ "crypto-common 0.2.2",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "kernel"
 version = "0.1.0"
 dependencies = [
  "borsh",
  "crypto",
+ "serde",
  "static_assertions",
 ]
 
@@ -580,6 +612,20 @@ dependencies = [
  "module-lattice",
  "shake",
  "signature",
+ "zeroize 1.9.0",
+]
+
+[[package]]
+name = "ml-kem"
+version = "0.3.2"
+dependencies = [
+ "hybrid-array",
+ "kem",
+ "module-lattice",
+ "pkcs8",
+ "rand_core 0.10.1",
+ "sha3",
+ "shake",
  "zeroize 1.9.0",
 ]
 
@@ -641,7 +687,7 @@ version = "1.21.4"
 name = "password-hash"
 version = "0.5.0"
 dependencies = [
- "base64ct",
+ "base64ct 1.8.3",
  "subtle",
 ]
 
@@ -654,6 +700,16 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "pkcs8"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
+dependencies = [
+ "der",
+ "spki",
+]
 
 [[package]]
 name = "potential_utf"
@@ -838,6 +894,16 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+
+[[package]]
+name = "spki"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
+dependencies = [
+ "base64ct 1.8.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "der",
+]
 
 [[package]]
 name = "sponge-cursor"

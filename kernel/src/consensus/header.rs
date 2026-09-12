@@ -4,10 +4,13 @@ use std::{error::Error as StdError, fmt};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crate::blockchain::{BlockHeight, Header, MAX_BLOCK_SIZE};
-use crate::consensus::{
-    ForkChoiceError, WBDA_WINDOW, Work, block_work, expected_difficulty_for_height, new_pow_memory,
-    verify_pow_with_memory,
+use crate::{
+    blockchain::{Header, MAX_BLOCK_SIZE},
+    common::Height,
+    consensus::{
+        ForkChoiceError, WBDA_WINDOW, Work, block_work, expected_difficulty_for_height,
+        new_pow_memory, verify_pow_with_memory,
+    },
 };
 
 use crypto::{BlockHash, PoWMemory};
@@ -16,12 +19,12 @@ pub const RECENT_HEADER_WINDOW: usize = WBDA_WINDOW * 2;
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct HeaderAtHeight {
-    pub height: BlockHeight,
+    pub height: Height,
     pub header: Header,
 }
 
 impl HeaderAtHeight {
-    pub const fn new(height: BlockHeight, header: Header) -> Self {
+    pub const fn new(height: Height, header: Header) -> Self {
         Self { height, header }
     }
 
@@ -34,7 +37,7 @@ impl HeaderAtHeight {
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct HeaderValidationState {
-    pub height: BlockHeight,
+    pub height: Height,
     pub header: Header,
     pub cumulative_work: Work,
     pub cumulative_weight: u64,

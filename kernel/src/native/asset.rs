@@ -92,7 +92,8 @@ impl fmt::Display for Unit {
 /// The canonical Borsh encoding of this structure is committed
 /// into the corresponding `Asset` identifier.
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
-pub struct AssetMetadata {
+pub struct Metadata {
+    // Rename to Metadata
     pub name: String,
     pub symbol: String,
     pub decimals: u8,
@@ -101,7 +102,7 @@ pub struct AssetMetadata {
     pub mint_authority: Address,
 }
 
-impl AssetMetadata {
+impl Metadata {
     pub fn new(
         name: String,
         symbol: String,
@@ -173,14 +174,14 @@ fn validate_symbol(symbol: &str) -> Result<(), AssetError> {
 
 /// Cryptographic identifier of one native asset.
 ///
-/// `Asset = H(HashDomain::Asset || Borsh(AssetMetadata))`
+/// `Asset = H(HashDomain::Asset || Borsh(Metadata))`
 #[derive(
     BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
-pub struct Asset(Hash);
+pub struct Contract(Hash); // Rename to Contract
 
-impl Asset {
-    pub fn derive(metadata: &AssetMetadata) -> Result<Self, AssetError> {
+impl Contract {
+    pub fn derive(metadata: &Metadata) -> Result<Self, AssetError> {
         metadata.validate()?;
 
         let bytes = borsh::to_vec(metadata).map_err(|_| AssetError::Encoding)?;
@@ -213,25 +214,25 @@ impl Asset {
     }
 }
 
-impl From<Hash> for Asset {
+impl From<Hash> for Contract {
     fn from(hash: Hash) -> Self {
         Self(hash)
     }
 }
 
-impl From<Asset> for Hash {
-    fn from(asset: Asset) -> Self {
+impl From<Contract> for Hash {
+    fn from(asset: Contract) -> Self {
         asset.0
     }
 }
 
-impl fmt::Display for Asset {
+impl fmt::Display for Contract {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         format("", &self.0, formatter)
     }
 }
 
-impl FromStr for Asset {
+impl FromStr for Contract {
     type Err = HashParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
@@ -239,11 +240,11 @@ impl FromStr for Asset {
     }
 }
 
-/// Unique identifier of one concrete native asset share/UTXO.
+/// Unique identifier of one concrete native Contract share/UTXO.
 ///
 /// A share ID is derived from:
 ///
-/// - parent asset
+/// - asset Contract
 /// - transaction/output commitment
 /// - output index
 #[derive(
@@ -252,10 +253,10 @@ impl FromStr for Asset {
 pub struct Share(Hash);
 
 impl Share {
-    pub fn derive(parent: Asset, commitment: [u8; HASH_SIZE], output_index: u32) -> Self {
+    pub fn derive(asset: Contract, commitment: [u8; HASH_SIZE], output_index: u32) -> Self {
         let mut bytes = [0_u8; HASH_SIZE * 2 + 4];
 
-        bytes[..HASH_SIZE].copy_from_slice(parent.as_bytes());
+        bytes[..HASH_SIZE].copy_from_slice(asset.as_bytes());
 
         bytes[HASH_SIZE..HASH_SIZE * 2].copy_from_slice(&commitment);
 
@@ -296,7 +297,7 @@ impl Share {
 pub struct MintCapabilityId(Hash);
 
 impl MintCapabilityId {
-    pub fn derive(asset: Asset, commitment: [u8; HASH_SIZE]) -> Self {
+    pub fn derive(asset: Contract, commitment: [u8; HASH_SIZE]) -> Self {
         let mut bytes = [0_u8; HASH_SIZE * 2];
         bytes[..HASH_SIZE].copy_from_slice(asset.as_bytes());
         bytes[HASH_SIZE..].copy_from_slice(&commitment);
@@ -329,7 +330,7 @@ impl FromStr for MintCapabilityId {
 /// Single-use mint authority carried in the canonical UTXO set.
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MintCapability {
-    pub asset: Asset,
+    pub asset: Contract,
     pub authority: Address,
 }
 
@@ -366,14 +367,14 @@ mod identifier_tests {
     #[test]
     fn asset_and_share_text_are_unprefixed_hex() {
         let encoded = "cd".repeat(HASH_SIZE);
-        let asset = Asset::from_bytes([0xcd; HASH_SIZE]);
+        let asset = Contract::from_bytes([0xcd; HASH_SIZE]);
         let share = Share::from_bytes([0xcd; HASH_SIZE]);
 
         assert_eq!(asset.to_string(), encoded);
         assert_eq!(share.to_string(), encoded);
-        assert_eq!(encoded.parse::<Asset>(), Ok(asset));
+        assert_eq!(encoded.parse::<Contract>(), Ok(asset));
         assert_eq!(encoded.parse::<Share>(), Ok(share));
-        assert!(format!("asset:{encoded}").parse::<Asset>().is_err());
+        assert!(format!("asset:{encoded}").parse::<Contract>().is_err());
         assert!(format!("share:{encoded}").parse::<Share>().is_err());
     }
 }
@@ -386,13 +387,13 @@ mod identifier_tests {
     BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
 pub struct AssetShare {
-    pub parent: Asset,
+    pub asset: Contract,
     pub amount: Unit,
 }
 
 impl AssetShare {
-    pub const fn new(parent: Asset, amount: Unit) -> Self {
-        Self { parent, amount }
+    pub const fn new(asset: Contract, amount: Unit) -> Self {
+        Self { asset, amount }
     }
 
     pub const fn is_zero(self) -> bool {
@@ -402,12 +403,12 @@ impl AssetShare {
 
 /// Transaction output that creates a new native asset share.
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
-pub struct Output {
+pub struct AssetOutput {
     pub recipient: Address,
     pub amount: Unit,
 }
 
-impl Output {
+impl AssetOutput {
     pub const fn new(recipient: Address, amount: Unit) -> Self {
         Self { recipient, amount }
     }

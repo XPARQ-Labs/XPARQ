@@ -2,7 +2,8 @@ use std::path::Path;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use kernel::{
-    block::{Block, Height},
+    block::Block,
+    common::Height,
     crypto::{BlockHash, canonical_bytes, canonical_decode, hash_bytes},
     genesis::{EXPECTED_GENESIS_HASH, chain_spec_hash},
     ledger::Ledger,

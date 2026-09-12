@@ -1,16 +1,43 @@
-use borsh::{BorshDeserialize, BorshSerialize};
+use borsh::{
+    BorshDeserialize,
+    BorshSerialize,
+};
 use ml_dsa::{
-    Keypair, MlDsa44, MlDsa65, MlDsa87, SignatureEncoding, Signer, SigningKey, Verifier,
+    Keypair,
+    MlDsa44,
+    MlDsa65,
+    MlDsa87,
+    SignatureEncoding,
+    Signer,
+    SigningKey,
+    Verifier,
     VerifyingKey,
 };
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{
+    Zeroize,
+    ZeroizeOnDrop,
+};
 
-use crate::{FalconLevel, falcon_keypair_from_seed, falcon_sign, falcon_verify};
+use crate::{
+    FalconLevel,
+    falcon_keypair_from_seed,
+    falcon_sign,
+    falcon_verify,
+};
 
 pub const SIGNATURE_ACTIVATION_HEIGHT: u64 = 0;
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    BorshSerialize,
+    BorshDeserialize,
 )]
 #[repr(u8)]
 #[borsh(use_discriminant = true)]
@@ -63,19 +90,41 @@ impl std::fmt::Display for Signature {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct PublicKey {
     pub account: Signature,
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct AccountSignature {
     pub account: Signature,
     pub bytes: Vec<u8>,
 }
 
-#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone,
+    PartialEq,
+    Eq,
+    Zeroize,
+    ZeroizeOnDrop,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct SigningSeed {
     #[zeroize(skip)]
     account: Signature,

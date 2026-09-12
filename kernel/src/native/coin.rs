@@ -2,6 +2,8 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{Address, HASH_SIZE, Hash, HashDomain, HashParseError, domain, format, parse};
 use std::{fmt, str::FromStr};
 
+use crate::common::Recipient;
+
 pub const DECIMALS: u8 = 6;
 #[derive(
     Debug,
@@ -137,19 +139,13 @@ mod tests {
     }
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Recipient {
-    Address(Address),
-    BlockMiner,
-}
-
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
-pub struct Output {
+pub struct CoinOutput {
     pub output: Recipient,
     pub amount: Zeno,
 }
 
-impl Output {
+impl CoinOutput {
     pub const fn new(recipient: Address, amount: Zeno) -> Self {
         Self {
             output: Recipient::Address(recipient),

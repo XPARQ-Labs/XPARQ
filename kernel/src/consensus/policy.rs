@@ -4,8 +4,11 @@ use std::{error::Error as StdError, fmt};
 
 use static_assertions::const_assert;
 
-use crate::blockchain::{Block, BlockHeight};
-use crate::native::coin::{Output as CoinOutput, XPQ, Zeno};
+use crate::{
+    blockchain::Block,
+    common::Height,
+    native::coin::{CoinOutput, XPQ, Zeno},
+};
 
 use crypto::{
     ADDRESS_SIZE, Address, HASH_SIZE, Hash, HashDomain, PublicKey, canonical_bytes, domain,
@@ -92,13 +95,9 @@ pub fn next_difficulty_from_window(
 
     Some(
         match adjustment {
-            WbdaAdjustment::Decrease => {
-                previous_difficulty.saturating_sub(WBDA_DIFFICULTY_STEP)
-            }
+            WbdaAdjustment::Decrease => previous_difficulty.saturating_sub(WBDA_DIFFICULTY_STEP),
             WbdaAdjustment::Keep => previous_difficulty,
-            WbdaAdjustment::Increase => {
-                previous_difficulty.saturating_add(WBDA_DIFFICULTY_STEP)
-            }
+            WbdaAdjustment::Increase => previous_difficulty.saturating_add(WBDA_DIFFICULTY_STEP),
         }
         .clamp(
             crate::consensus::MIN_DIFFICULTY,
@@ -189,12 +188,10 @@ pub const fn is_emission_epoch_boundary(height: u64) -> bool {
 /// - height 3,800,001 onward        => 0.50 XPQ forever
 ///
 /// Emission is independent from WBDA and block utilization.
-pub fn block_emission_for_height(height: BlockHeight) -> Zeno {
-    let completed_intervals =
-        height.0.saturating_sub(1) / EMISSION_INTERVAL;
+pub fn block_emission_for_height(height: Height) -> Zeno {
+    let completed_intervals = height.0.saturating_sub(1) / EMISSION_INTERVAL;
 
-    let reduction = completed_intervals
-        .saturating_mul(BLOCK_EMISSION_STEP);
+    let reduction = completed_intervals.saturating_mul(BLOCK_EMISSION_STEP);
 
     let emission = BLOCK_EMISSION_START
         .saturating_sub(reduction)
@@ -244,33 +241,21 @@ pub enum EmissionError {
 impl fmt::Display for EmissionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingEmission => {
-                f.write_str("block emission is missing")
-            }
-            Self::InvalidSubsidy => {
-                f.write_str("block emission subsidy is invalid")
-            }
-            Self::Serialization => {
-                f.write_str("emission encoding failed")
-            }
+            Self::MissingEmission => f.write_str("block emission is missing"),
+            Self::InvalidSubsidy => f.write_str("block emission subsidy is invalid"),
+            Self::Serialization => f.write_str("emission encoding failed"),
         }
     }
 }
 
 impl StdError for EmissionError {}
 
-pub fn validate_emission(
-    block: &Block,
-) -> Result<ValidatedEmission, EmissionError> {
+pub fn validate_emission(block: &Block) -> Result<ValidatedEmission, EmissionError> {
     authorize_emission(block)
 }
 
-pub(crate) fn authorize_emission(
-    block: &Block,
-) -> Result<ValidatedEmission, EmissionError> {
-    let emission = block
-        .emission()
-        .ok_or(EmissionError::MissingEmission)?;
+pub(crate) fn authorize_emission(block: &Block) -> Result<ValidatedEmission, EmissionError> {
+    let emission = block.emission().ok_or(EmissionError::MissingEmission)?;
 
     let expected = block_emission_for_height(block.height());
 
@@ -309,9 +294,7 @@ pub(crate) fn authorize_emission(
 ///
 /// Kept as a semantic wrapper so callers do not need to know how the
 /// emission schedule itself is calculated.
-pub fn expected_emission_for_height(
-    height: BlockHeight,
-) -> Zeno {
+pub fn expected_emission_for_height(height: Height) -> Zeno {
     block_emission_for_height(height)
 }
 
@@ -319,54 +302,38 @@ pub fn expected_emission_for_height(
 // Protocol burn
 // -----------------------------------------------------------------------------
 
-pub const STATE_BURN_ALGORITHM: &str =
-    "xparq-canonical-archival-and-net-coin-state-growth-burn";
+pub const STATE_BURN_ALGORITHM: &str = "xparq-canonical-archival-and-net-coin-state-growth-burn";
 
 pub const STATE_BURN_RATE_ZENO_PER_WEIGHT: u64 = 1;
 
 const BORSH_OPTION_TAG_BYTES: usize = 1;
 const BORSH_VEC_LENGTH_BYTES: usize = core::mem::size_of::<u32>();
 
-pub const EMPTY_BLOCK_ARCHIVAL_BYTES: u64 = (
-    3 * HASH_SIZE
-        + 2 * core::mem::size_of::<u32>()
-        + core::mem::size_of::<u64>()
-        + core::mem::size_of::<u64>()
-        + BORSH_OPTION_TAG_BYTES
-        + ADDRESS_SIZE
-        + core::mem::size_of::<u64>()
-        + BORSH_VEC_LENGTH_BYTES
-) as u64;
+pub const EMPTY_BLOCK_ARCHIVAL_BYTES: u64 = (3 * HASH_SIZE
+    + 2 * core::mem::size_of::<u32>()
+    + core::mem::size_of::<u64>()
+    + core::mem::size_of::<u64>()
+    + BORSH_OPTION_TAG_BYTES
+    + ADDRESS_SIZE
+    + core::mem::size_of::<u64>()
+    + BORSH_VEC_LENGTH_BYTES) as u64;
 
 /// Ownerless canonical coin UTXO: XPQ key + Zeno value.
 /// Address is intentionally not included.
 pub const COIN_UTXO_STATE_WEIGHT: u64 =
-    (
-        crate::native::coin::XPARQCoin::SIZE
-            + core::mem::size_of::<u64>()
-    ) as u64;
+    (crate::native::coin::XPARQCoin::SIZE + core::mem::size_of::<u64>()) as u64;
 
 pub const EMISSION_UTXO_STATE_GROWTH_BURN: Zeno =
-    Zeno::from_zeno(
-        COIN_UTXO_STATE_WEIGHT
-            * STATE_BURN_RATE_ZENO_PER_WEIGHT,
-    );
+    Zeno::from_zeno(COIN_UTXO_STATE_WEIGHT * STATE_BURN_RATE_ZENO_PER_WEIGHT);
 
 pub const EMPTY_BLOCK_ARCHIVAL_BURN: Zeno =
-    Zeno::from_zeno(
-        EMPTY_BLOCK_ARCHIVAL_BYTES
-            * STATE_BURN_RATE_ZENO_PER_WEIGHT,
-    );
+    Zeno::from_zeno(EMPTY_BLOCK_ARCHIVAL_BYTES * STATE_BURN_RATE_ZENO_PER_WEIGHT);
 
-pub const MINER_PROTOCOL_BURN: Zeno =
-    Zeno::from_zeno(
-        (EMPTY_BLOCK_ARCHIVAL_BYTES + COIN_UTXO_STATE_WEIGHT)
-            * STATE_BURN_RATE_ZENO_PER_WEIGHT,
-    );
+pub const MINER_PROTOCOL_BURN: Zeno = Zeno::from_zeno(
+    (EMPTY_BLOCK_ARCHIVAL_BYTES + COIN_UTXO_STATE_WEIGHT) * STATE_BURN_RATE_ZENO_PER_WEIGHT,
+);
 
-pub fn account_key_state_weight(
-    public_key: &PublicKey,
-) -> Result<u64, BurnError> {
+pub fn account_key_state_weight(public_key: &PublicKey) -> Result<u64, BurnError> {
     let encoded_value = 1_usize
         .checked_add(core::mem::size_of::<u32>())
         .and_then(|weight| weight.checked_add(public_key.bytes.len()))
@@ -396,12 +363,8 @@ impl StateTransitionWeight {
 
         let created = net_coin_utxos
             .checked_mul(COIN_UTXO_STATE_WEIGHT)
-            .and_then(|weight| {
-                weight.checked_add(self.created_account_key_weight)
-            })
-            .and_then(|weight| {
-                weight.checked_add(self.created_state_weight)
-            })
+            .and_then(|weight| weight.checked_add(self.created_account_key_weight))
+            .and_then(|weight| weight.checked_add(self.created_state_weight))
             .ok_or(BurnError::WeightOverflow)?;
 
         let burn = created
@@ -440,17 +403,11 @@ impl ProtocolBurn {
     }
 }
 
-pub fn created_coin_output_count(
-    outputs: &[CoinOutput],
-) -> Result<u64, BurnError> {
-    u64::try_from(outputs.len())
-        .map_err(|_| BurnError::WeightOverflow)
+pub fn created_coin_output_count(outputs: &[CoinOutput]) -> Result<u64, BurnError> {
+    u64::try_from(outputs.len()).map_err(|_| BurnError::WeightOverflow)
 }
 
-pub fn validate_exact_burn(
-    actual: Zeno,
-    required: Zeno,
-) -> Result<(), BurnError> {
+pub fn validate_exact_burn(actual: Zeno, required: Zeno) -> Result<(), BurnError> {
     if actual != required {
         return Err(BurnError::IncorrectBurn {
             required: required.as_zeno(),
@@ -465,34 +422,17 @@ pub fn validate_exact_burn(
 pub enum BurnError {
     WeightOverflow,
     ZenoOverflow,
-    IncorrectBurn {
-        required: u64,
-        actual: u64,
-    },
+    IncorrectBurn { required: u64, actual: u64 },
 }
 
 impl fmt::Display for BurnError {
-    fn fmt(
-        &self,
-        formatter: &mut fmt::Formatter<'_>,
-    ) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::WeightOverflow => {
-                formatter.write_str(
-                    "state transition weight overflow",
-                )
-            }
+            Self::WeightOverflow => formatter.write_str("state transition weight overflow"),
 
-            Self::ZenoOverflow => {
-                formatter.write_str(
-                    "protocol burn Zeno overflow",
-                )
-            }
+            Self::ZenoOverflow => formatter.write_str("protocol burn Zeno overflow"),
 
-            Self::IncorrectBurn {
-                required,
-                actual,
-            } => {
+            Self::IncorrectBurn { required, actual } => {
                 write!(
                     formatter,
                     "incorrect protocol burn: \

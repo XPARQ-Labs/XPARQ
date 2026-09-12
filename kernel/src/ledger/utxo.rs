@@ -2,8 +2,10 @@ use std::{collections::BTreeMap, error::Error as StdError, fmt};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crate::native::asset::{AssetShare, MintCapability, MintCapabilityId, Share};
-use crate::native::coin::{XPQ, Zeno};
+use crate::native::{
+    asset::{AssetShare, MintCapability, MintCapabilityId, Share},
+    coin::{XPQ, Zeno},
+};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,

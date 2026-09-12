@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 
 use borsh::{BorshDeserialize, BorshSerialize};
+
 use crypto::{BlockHash, PreviousHash};
 
-use crate::blockchain::{Block, ChainError, Header, Height};
+use crate::common::Height;
+
+use super::{Block, ChainError, Header};
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Chain {

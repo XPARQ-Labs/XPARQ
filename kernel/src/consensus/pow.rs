@@ -1,12 +1,15 @@
 //! XPARQ proof-of-work construction.
 
-use crate::blockchain::Header;
-use crate::blockchain::codec::block_header_bytes;
-use crate::consensus::{ConsensusError, MAX_DIFFICULTY, MIN_DIFFICULTY};
+use crate::{
+    blockchain::Header,
+    codec::block_header_bytes,
+    consensus::{ConsensusError, MAX_DIFFICULTY, MIN_DIFFICULTY},
+};
 
-use crypto::argon2::{argon2id_pow_hash, argon2id_pow_hash_with_memory};
 use crypto::{
-    CryptoError, Hash, HashDomain, PoWHash, PoWMemory, PreviousHash, domain, hash_meets_difficulty,
+    CryptoError, Hash, HashDomain, PoWHash, PoWMemory, PreviousHash,
+    argon2::{argon2id_pow_hash, argon2id_pow_hash_with_memory},
+    domain, hash_meets_difficulty,
 };
 
 pub const POW_ALGORITHM: &str = "xparq-argon2id-algorithm";

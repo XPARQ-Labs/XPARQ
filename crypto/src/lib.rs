@@ -5,8 +5,8 @@ pub mod codec;
 mod error;
 pub mod falcon;
 pub mod hash;
+pub mod kem;
 pub mod signature;
-pub mod types;
 
 pub mod crypto {
     pub use crate::*;
@@ -26,9 +26,5 @@ pub use falcon::{
     keypair_from_seed as falcon_keypair_from_seed, sign as falcon_sign, verify as falcon_verify,
 };
 pub use hash::*;
+pub use kem::*;
 pub use signature::*;
-pub use types::{BlockHeight, BlockNonce, Height, Nonce};
-
-pub mod block {
-    pub use crate::types::{BlockHeight, Height};
-}

@@ -1,4 +1,5 @@
 pub mod blockchain;
+pub mod common;
 pub mod consensus;
 pub mod genesis;
 pub mod ledger;

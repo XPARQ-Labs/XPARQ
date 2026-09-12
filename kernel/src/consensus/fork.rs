@@ -1,15 +1,22 @@
-use crate::blockchain::Block;
-use crate::blockchain::{Height, MAX_BLOCK_SIZE};
-use crate::consensus::{
-    Consensus, GENESIS_DIFFICULTY, MAX_DIFFICULTY, MIN_DIFFICULTY, expected_difficulty_for_height,
+use crate::{
+    blockchain::{Block, MAX_BLOCK_SIZE},
+    common::Height,
+    consensus::{
+        Consensus, GENESIS_DIFFICULTY, MAX_DIFFICULTY, MIN_DIFFICULTY,
+        expected_difficulty_for_height,
+    },
 };
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{BlockHash, HASH_SIZE, Hash};
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
-use std::error::Error;
-use std::fmt;
-use std::ops::Add;
+
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    ops::Add,
+};
 
 #[derive(
     BorshSerialize, BorshDeserialize, Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord,

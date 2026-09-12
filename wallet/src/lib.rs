@@ -1,8 +1,9 @@
 use bip39::{Language, Mnemonic};
 use kernel::{
     crypto::{
-        Address, PublicKey, Signature, SigningSeed, address_from_public_key, address_from_string,
-        address_to_string, hash_bytes,
+        Address, KemPublicKey, KemSeed, KeyExchange, PaymentAddress, PublicKey, Signature,
+        SigningSeed, address_from_public_key, address_from_string, address_to_string, hash_bytes,
+        payment_address_from_public_keys, payment_address_to_string,
     },
     transaction::{AccountAuthorization, AccountIntent, AuthorizedAccountIntent},
 };
@@ -19,6 +20,8 @@ pub struct AccountWallet {
     pub address: Address,
     pub public_key: PublicKey,
     signing_seed: SigningSeed,
+    pub kem_public_key: KemPublicKey,
+    kem_seed: KemSeed,
 }
 
 impl Drop for AccountWallet {
@@ -38,6 +41,12 @@ struct WalletFile {
     public_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     private_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payment_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kem_public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kem_private_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +72,9 @@ pub fn account_wallet_file_bytes(wallet: &AccountWallet) -> Result<Zeroizing<Vec
         signature_account: Some(wallet.account().as_str().to_string()),
         public_key: Some(hex::encode(&wallet.public_key.bytes)),
         private_key: Some(hex::encode(wallet.signing_seed.to_bytes())),
+        payment_address: Some(wallet.payment_address_string()),
+        kem_public_key: Some(hex::encode(wallet.kem_public_key.as_bytes())),
+        kem_private_key: Some(hex::encode(wallet.kem_seed.to_bytes())),
     };
     serde_json::to_vec_pretty(&wallet_file)
         .map(Zeroizing::new)
@@ -93,6 +105,21 @@ pub fn account_wallet_from_file_bytes(bytes: &[u8]) -> Result<AccountWallet, Str
         && private_key != hex::encode(wallet.signing_seed.to_bytes())
     {
         return Err("wallet private key does not match its mnemonic and signature account".into());
+    }
+    if let Some(public_key) = wallet_file.kem_public_key.as_deref()
+        && public_key != hex::encode(wallet.kem_public_key.as_bytes())
+    {
+        return Err("wallet KEM public key does not match its mnemonic".into());
+    }
+    if let Some(private_key) = wallet_file.kem_private_key.as_deref()
+        && private_key != hex::encode(wallet.kem_seed.to_bytes())
+    {
+        return Err("wallet KEM private key does not match its mnemonic".into());
+    }
+    if let Some(payment_address) = wallet_file.payment_address.as_deref()
+        && payment_address != wallet.payment_address_string()
+    {
+        return Err("wallet payment address does not match its mnemonic and keys".into());
     }
     wallet.mnemonic = Some(wallet_file.mnemonic.clone());
     Ok(wallet)
@@ -130,11 +157,18 @@ pub fn account_wallet_from_bip39_mnemonic(
     let seed = tagged_wallet_hash(&tag, &entropy);
     let signing_seed = SigningSeed::new(account, seed);
     let public_key = signing_seed.public_key();
+    let kem_seed = KemSeed::new(
+        KeyExchange::MlKem768,
+        tagged_wallet_hash64(b"XPARQ_WALLET_ML_KEM_768", &entropy),
+    );
+    let kem_public_key = kem_seed.public_key();
     Ok(AccountWallet {
         mnemonic: None,
         address: address_from_public_key(&public_key),
         public_key,
         signing_seed,
+        kem_public_key,
+        kem_seed,
     })
 }
 
@@ -168,9 +202,35 @@ fn tagged_wallet_hash(tag: &[u8], bytes: &[u8]) -> [u8; 32] {
     hash_bytes(&payload).0
 }
 
+fn tagged_wallet_hash64(tag: &[u8], bytes: &[u8]) -> [u8; 64] {
+    let mut first_tag = Zeroizing::new(Vec::with_capacity(tag.len() + 1));
+    first_tag.extend_from_slice(tag);
+    first_tag.push(0);
+    let first = tagged_wallet_hash(&first_tag, bytes);
+
+    let mut second_tag = Zeroizing::new(Vec::with_capacity(tag.len() + 1));
+    second_tag.extend_from_slice(tag);
+    second_tag.push(1);
+    let second = tagged_wallet_hash(&second_tag, bytes);
+
+    let mut seed = [0; 64];
+    seed[..32].copy_from_slice(&first);
+    seed[32..].copy_from_slice(&second);
+    seed
+}
+
 impl AccountWallet {
     pub const fn account(&self) -> Signature {
         self.signing_seed.account()
+    }
+
+    pub fn payment_address(&self) -> PaymentAddress {
+        payment_address_from_public_keys(self.public_key.clone(), self.kem_public_key.clone())
+            .expect("wallet contains a validated KEM public key")
+    }
+
+    pub fn payment_address_string(&self) -> String {
+        payment_address_to_string(&self.payment_address())
     }
 
     pub fn sign_account_intent<T: AccountIntent>(
@@ -327,6 +387,15 @@ mod tests {
                 hex::encode(wallet.signing_seed.to_bytes())
             );
             assert_eq!(
+                json["kem_public_key"],
+                hex::encode(wallet.kem_public_key.as_bytes())
+            );
+            assert_eq!(
+                json["kem_private_key"],
+                hex::encode(wallet.kem_seed.to_bytes())
+            );
+            assert_eq!(json["payment_address"], wallet.payment_address_string());
+            assert_eq!(
                 wallet_file_signature_account(&bytes).unwrap(),
                 Some(account)
             );
@@ -361,5 +430,54 @@ mod tests {
                 .unwrap_err()
                 .contains("private key does not match")
         );
+
+        json["private_key"] =
+            serde_json::Value::String(hex::encode(wallet.signing_seed.to_bytes()));
+        json["kem_public_key"] =
+            serde_json::Value::String("00".repeat(wallet.kem_public_key.as_bytes().len()));
+        let tampered_kem_public = serde_json::to_vec(&json).unwrap();
+        assert!(
+            account_wallet_from_file_bytes(&tampered_kem_public)
+                .unwrap_err()
+                .contains("KEM public key does not match")
+        );
+
+        json["kem_public_key"] =
+            serde_json::Value::String(hex::encode(wallet.kem_public_key.as_bytes()));
+        json["kem_private_key"] = serde_json::Value::String("00".repeat(64));
+        let tampered_kem_private = serde_json::to_vec(&json).unwrap();
+        assert!(
+            account_wallet_from_file_bytes(&tampered_kem_private)
+                .unwrap_err()
+                .contains("KEM private key does not match")
+        );
+
+        json["kem_private_key"] =
+            serde_json::Value::String(hex::encode(wallet.kem_seed.to_bytes()));
+        json["payment_address"] = serde_json::Value::String("Qp00".into());
+        let tampered_payment_address = serde_json::to_vec(&json).unwrap();
+        assert!(
+            account_wallet_from_file_bytes(&tampered_payment_address)
+                .unwrap_err()
+                .contains("payment address does not match")
+        );
+    }
+
+    #[test]
+    fn wallet_without_kem_fields_recovers_them_from_mnemonic() {
+        let mnemonic = encode_bip39_mnemonic(&[15; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+        let mut wallet = account_wallet_from_bip39_mnemonic(&mnemonic, Signature::MlDsa44).unwrap();
+        wallet.mnemonic = Some(mnemonic);
+        let bytes = account_wallet_file_bytes(&wallet).unwrap();
+        let mut json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let object = json.as_object_mut().unwrap();
+        object.remove("payment_address");
+        object.remove("kem_public_key");
+        object.remove("kem_private_key");
+
+        let legacy = serde_json::to_vec(&json).unwrap();
+        let recovered = account_wallet_from_file_bytes(&legacy).unwrap();
+        assert_eq!(recovered.kem_public_key, wallet.kem_public_key);
+        assert_eq!(recovered.payment_address(), wallet.payment_address());
     }
 }

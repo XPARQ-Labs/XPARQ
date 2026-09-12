@@ -5,16 +5,20 @@ use std::{collections::BTreeSet, error::Error as StdError, fmt};
 
 use crypto::{Address, PublicKey, canonical_bytes};
 
-use crate::consensus::{
-    BurnError, ProtocolBurn, StateTransitionWeight, account_key_state_weight,
-    created_coin_output_count, validate_exact_burn,
-};
-use crate::native::asset::{AssetError, AssetShare, Share};
-use crate::native::coin::{Output as CoinOutput, XPQ, Zeno};
-use crate::transaction::{
-    AccountAuthorization, AccountIntent, AssetInstruction, AssetIntent, AuthorizedAccountIntent,
-    AuthorizedTransaction, ChainContext, IntentError,
-    Spend, SpendCommitment, SpendIntent, Transaction as OnChainTransaction,
+use crate::{
+    consensus::{
+        BurnError, ProtocolBurn, StateTransitionWeight, account_key_state_weight,
+        created_coin_output_count, validate_exact_burn,
+    },
+    native::{
+        asset::{AssetError, AssetShare, Share},
+        coin::{CoinOutput, XPQ, Zeno},
+    },
+    transaction::{
+        AccountAuthorization, AccountIntent, AssetInstruction, AssetIntent,
+        AuthorizedAccountIntent, AuthorizedTransaction, ChainContext, IntentError, Spend,
+        SpendCommitment, SpendIntent, Transaction as OnChainTransaction,
+    },
 };
 
 pub trait ConsensusIntent: Clone {
@@ -334,7 +338,7 @@ fn validate_authorized_transaction(
                 ValidatedAssetTransaction { call, payment },
             ))
         }
-    }    
+    }
 }
 
 fn count_inputs(len: usize) -> Result<u64, TransactionConsensusError> {

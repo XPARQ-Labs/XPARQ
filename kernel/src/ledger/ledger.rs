@@ -4,21 +4,16 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 use crypto::{Address, BlockHash, HashDomain, PublicKey, StateRoot, canonical_bytes, domain};
 
-use crate::blockchain::{Block, Chain, ChainError, Height};
-
-use crate::native::coin::XPQ;
-
-use crate::consensus::{
-    ApplyBlockState, CoinInputState, ConsensusError, EmissionError, TransactionConsensusError,
-    TransactionStateView, ValidatedBlock, validate_emission,
-    validate_transaction,
+use crate::{
+    blockchain::{Block, Chain, ChainError},
+    common::Height,
+    consensus::{
+        ApplyBlockState, CoinInputState, ConsensusError, EmissionError, TransactionConsensusError,
+        TransactionStateView, ValidatedBlock, validate_emission, validate_transaction,
+    },
+    ledger::{LedgerState, SpendRollbackJournal, StateError, StateRollbackJournal},
+    native::coin::XPQ,
 };
-
-use crate::ledger::{LedgerState, SpendRollbackJournal, StateError, StateRollbackJournal};
-
-//
-// Ledger
-//
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ledger {

@@ -1,11 +1,23 @@
 //! Canonical wire encoding shared by the protocol crates.
 
-use borsh::{BorshDeserialize, BorshSerialize};
-use std::{error::Error, fmt};
+use borsh::{
+    BorshDeserialize,
+    BorshSerialize,
+};
+use std::{
+    error::Error,
+    fmt,
+};
 
 pub const CANONICAL_ENCODING_PROFILE: &str = "xparq-borsh-le";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+)]
 pub enum CodecError {
     EncodeFailed,
     DecodeFailed,

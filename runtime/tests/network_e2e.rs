@@ -10,7 +10,7 @@ use std::{
 
 use kernel::{
     crypto::{Signature, SigningSeed, address_from_public_key, address_to_string, canonical_bytes},
-    native::coin::{Output as CoinOutput, XPQ, Zeno},
+    native::coin::{CoinOutput, XPQ, Zeno},
     transaction::{AuthorizedTransaction, SpendIntent, Transaction},
 };
 use serde_json::Value;

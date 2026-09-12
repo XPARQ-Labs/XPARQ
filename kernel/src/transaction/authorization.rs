@@ -124,7 +124,6 @@ impl AuthorizedTransaction {
 
                 tx.payment.intent.validate()
             }
-
         }
     }
 }

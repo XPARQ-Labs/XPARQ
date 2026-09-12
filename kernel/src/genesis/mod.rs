@@ -2,49 +2,29 @@
 
 use std::{error::Error, fmt};
 
-use crate::blockchain::{Block, MAX_BLOCK_SIZE, Nonce};
-use crate::consensus::{
-    BLOCK_EMISSION_START,
-    BLOCK_EMISSION_STEP,
-    COIN_UTXO_STATE_WEIGHT,
-    DIFFICULTY_ALGORITHM,
-    DIFFICULTY_START,
-    EMPTY_BLOCK_ARCHIVAL_BYTES,
-    EMISSION_INTERVAL,
-    MAX_DIFFICULTY,
-    MIN_DIFFICULTY,
-    POW_ALGORITHM,
-    POW_ARGON2_ITERATIONS,
-    POW_ARGON2_LANES,
-    POW_ARGON2_MEMORY_KIB,
-    STATE_BURN_ALGORITHM,
-    STATE_BURN_RATE_ZENO_PER_WEIGHT,
-    TAIL_BLOCK_EMISSION,
-    WBDA_DIFFICULTY_STEP,
-    WBDA_TARGET_BLOCK_WEIGHT,
-    WBDA_LOW_UTILIZATION_PPM,
-    WBDA_HIGH_UTILIZATION_PPM,
-    WBDA_WINDOW,
+use crate::{
+    blockchain::{Block, MAX_BLOCK_SIZE},
+    common::Nonce,
+    consensus::{
+        BLOCK_EMISSION_START, BLOCK_EMISSION_STEP, COIN_UTXO_STATE_WEIGHT, DIFFICULTY_ALGORITHM,
+        DIFFICULTY_START, EMISSION_INTERVAL, EMPTY_BLOCK_ARCHIVAL_BYTES, MAX_DIFFICULTY,
+        MIN_DIFFICULTY, POW_ALGORITHM, POW_ARGON2_ITERATIONS, POW_ARGON2_LANES,
+        POW_ARGON2_MEMORY_KIB, STATE_BURN_ALGORITHM, STATE_BURN_RATE_ZENO_PER_WEIGHT,
+        TAIL_BLOCK_EMISSION, WBDA_DIFFICULTY_STEP, WBDA_HIGH_UTILIZATION_PPM,
+        WBDA_LOW_UTILIZATION_PPM, WBDA_TARGET_BLOCK_WEIGHT, WBDA_WINDOW,
+    },
+    ledger::{Ledger, LedgerError},
+    transaction::ChainContext,
 };
-
-use crate::ledger::{Ledger, LedgerError};
-use crate::transaction::ChainContext;
 
 use borsh::BorshSerialize;
 
 use crypto::{
-    ADDRESS_SIZE,
-    BlockHash,
-    FALCON_512_ACTIVATION_HEIGHT,
-    HASH_SIZE,
-    Hash,
-    HashDomain,
-    SIGNATURE_ACTIVATION_HEIGHT,
-    domain_hash,
+    ADDRESS_SIZE, BlockHash, FALCON_512_ACTIVATION_HEIGHT, HASH_SIZE, Hash, HashDomain,
+    SIGNATURE_ACTIVATION_HEIGHT, domain_hash,
 };
 
-const FORK_CHOICE_ALGORITHM: &str =
-    "cumulative-work/cumulative-weight/hash";
+const FORK_CHOICE_ALGORITHM: &str = "cumulative-work/cumulative-weight/hash";
 
 // -----------------------------------------------------------------------------
 // Mainnet
@@ -55,10 +35,8 @@ pub const GENESIS_NONCE: u64 = 4;
 
 #[cfg(feature = "mainnet")]
 pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
-    0x65, 0x40, 0x76, 0x44, 0x36, 0x56, 0x40, 0xe1,
-    0x64, 0x66, 0x31, 0x9f, 0xb6, 0x07, 0xae, 0xd0,
-    0x54, 0x3b, 0x1e, 0x4b, 0xed, 0xef, 0x54, 0xe1,
-    0xba, 0x68, 0x66, 0x81, 0xc7, 0x8c, 0x42, 0x9f,
+    0x65, 0x40, 0x76, 0x44, 0x36, 0x56, 0x40, 0xe1, 0x64, 0x66, 0x31, 0x9f, 0xb6, 0x07, 0xae, 0xd0,
+    0x54, 0x3b, 0x1e, 0x4b, 0xed, 0xef, 0x54, 0xe1, 0xba, 0x68, 0x66, 0x81, 0xc7, 0x8c, 0x42, 0x9f,
 ]);
 
 // -----------------------------------------------------------------------------
@@ -70,10 +48,8 @@ pub const GENESIS_NONCE: u64 = 5;
 
 #[cfg(feature = "testnet")]
 pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
-    0x5a, 0x0e, 0x26, 0x10, 0x08, 0x87, 0x88, 0x8c,
-    0xee, 0xab, 0xd0, 0xf7, 0x8a, 0xe4, 0x80, 0xa8,
-    0xc4, 0xd0, 0x9b, 0x78, 0x7f, 0xfa, 0x4b, 0xfa,
-    0x6c, 0x6d, 0xab, 0x8c, 0xde, 0x5c, 0xfa, 0xcd,
+    0x5a, 0x0e, 0x26, 0x10, 0x08, 0x87, 0x88, 0x8c, 0xee, 0xab, 0xd0, 0xf7, 0x8a, 0xe4, 0x80, 0xa8,
+    0xc4, 0xd0, 0x9b, 0x78, 0x7f, 0xfa, 0x4b, 0xfa, 0x6c, 0x6d, 0xab, 0x8c, 0xde, 0x5c, 0xfa, 0xcd,
 ]);
 
 // -----------------------------------------------------------------------------
@@ -85,10 +61,8 @@ pub const GENESIS_NONCE: u64 = 6;
 
 #[cfg(feature = "devnet")]
 pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
-    0xb1, 0x31, 0x39, 0xf1, 0x3c, 0xe5, 0x22, 0x32,
-    0x8e, 0xd0, 0x7f, 0x29, 0x09, 0x9c, 0xff, 0x60,
-    0x69, 0xa0, 0x50, 0x61, 0x81, 0x06, 0x71, 0x64,
-    0xe4, 0xf5, 0x9d, 0x0a, 0x7c, 0x7b, 0x67, 0xc2,
+    0xb1, 0x31, 0x39, 0xf1, 0x3c, 0xe5, 0x22, 0x32, 0x8e, 0xd0, 0x7f, 0x29, 0x09, 0x9c, 0xff, 0x60,
+    0x69, 0xa0, 0x50, 0x61, 0x81, 0x06, 0x71, 0x64, 0xe4, 0xf5, 0x9d, 0x0a, 0x7c, 0x7b, 0x67, 0xc2,
 ]);
 
 // -----------------------------------------------------------------------------
@@ -116,7 +90,7 @@ struct ChainSpecIdentity<'a> {
     difficulty_start: u32,
     min_difficulty: u32,
     max_difficulty: u32,
-    
+
     wbda_window: u64,
     wbda_target_block_weight: u64,
     wbda_low_utilization_ppm: u64,
@@ -187,8 +161,7 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 
         // Protocol burn
         state_burn_algorithm: STATE_BURN_ALGORITHM,
-        state_burn_rate_zeno_per_weight:
-            STATE_BURN_RATE_ZENO_PER_WEIGHT,
+        state_burn_rate_zeno_per_weight: STATE_BURN_RATE_ZENO_PER_WEIGHT,
         block_state_weight: EMPTY_BLOCK_ARCHIVAL_BYTES,
         coin_utxo_state_weight: COIN_UTXO_STATE_WEIGHT,
 
@@ -202,19 +175,15 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         fork_choice_algorithm: FORK_CHOICE_ALGORITHM,
 
         // Signature activation
-        falcon_512_activation_height:
-            FALCON_512_ACTIVATION_HEIGHT,
-        signature_profile_activation_height:
-            SIGNATURE_ACTIVATION_HEIGHT,
+        falcon_512_activation_height: FALCON_512_ACTIVATION_HEIGHT,
+        signature_profile_activation_height: SIGNATURE_ACTIVATION_HEIGHT,
 
         // Native protocol identity
         native_asset_program: "xparq-native-asset-program",
         transaction_format: "direct-authorized-v1",
     };
 
-    let bytes =
-        crypto::canonical_bytes(&identity)
-            .map_err(GenesisError::Encoding)?;
+    let bytes = crypto::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
 
     Ok(domain_hash(HashDomain::ChainSpec, &bytes))
 }
@@ -224,14 +193,11 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 // -----------------------------------------------------------------------------
 
 pub fn genesis_block() -> Result<Block, GenesisError> {
-    let mut block =
-        Block::genesis().map_err(GenesisError::Encoding)?;
+    let mut block = Block::genesis().map_err(GenesisError::Encoding)?;
 
     block.header.nonce = Nonce(GENESIS_NONCE);
 
-    if block.hash().map_err(GenesisError::Encoding)?
-        != EXPECTED_GENESIS_HASH
-    {
+    if block.hash().map_err(GenesisError::Encoding)? != EXPECTED_GENESIS_HASH {
         return Err(GenesisError::HashMismatch);
     }
 
@@ -239,27 +205,19 @@ pub fn genesis_block() -> Result<Block, GenesisError> {
 }
 
 pub fn genesis_hash() -> Result<BlockHash, GenesisError> {
-    genesis_block()?
-        .hash()
-        .map_err(GenesisError::Encoding)
+    genesis_block()?.hash().map_err(GenesisError::Encoding)
 }
 
 pub fn chain_context() -> Result<ChainContext, GenesisError> {
-    Ok(ChainContext::new(
-        genesis_hash()?.into_bytes(),
-    ))
+    Ok(ChainContext::new(genesis_hash()?.into_bytes()))
 }
 
 pub fn genesis_ledger() -> Result<Ledger, GenesisError> {
     let mut ledger = Ledger::new();
     let block = genesis_block()?;
 
-    crate::consensus::apply_genesis(
-        &mut ledger,
-        block,
-        EXPECTED_GENESIS_HASH,
-    )
-    .map_err(GenesisError::Ledger)?;
+    crate::consensus::apply_genesis(&mut ledger, block, EXPECTED_GENESIS_HASH)
+        .map_err(GenesisError::Ledger)?;
 
     Ok(ledger)
 }
@@ -284,29 +242,18 @@ pub enum GenesisError {
 }
 
 impl fmt::Display for GenesisError {
-    fn fmt(
-        &self,
-        formatter: &mut fmt::Formatter<'_>,
-    ) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Encoding(error) => {
-                write!(
-                    formatter,
-                    "genesis encoding failed: {error}"
-                )
+                write!(formatter, "genesis encoding failed: {error}")
             }
 
             Self::HashMismatch => {
-                formatter.write_str(
-                    "constructed genesis does not match frozen chain identity",
-                )
+                formatter.write_str("constructed genesis does not match frozen chain identity")
             }
 
             Self::Ledger(error) => {
-                write!(
-                    formatter,
-                    "genesis ledger failed: {error}"
-                )
+                write!(formatter, "genesis ledger failed: {error}")
             }
         }
     }
