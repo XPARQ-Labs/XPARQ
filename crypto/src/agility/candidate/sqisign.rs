@@ -7,46 +7,24 @@ use crate::error::CryptoError;
 use borsh::{BorshDeserialize, BorshSerialize};
 use chacha20::ChaCha12Rng;
 
-use rand_10::{
-    SeedableRng,
-    rand_core::UnwrapErr,
-    rngs::SysRng,
-};
-
+use rand_10::{SeedableRng, rand_core::UnwrapErr, rngs::SysRng};
 
 use serde::{
-    de::{
-        Error as DeError,
-        Visitor,
-    },
-    Deserialize,
-    Deserialize,
-    Serialize,
-    Serializer,
+    Deserialize, Serialize, Serializer,
+    de::{Error as DeError, Visitor},
 };
 
 use sqisign_rs::{
-    Level5,
-    PublicKey as SqisignPublicKey
-    Signature as SqisignSignature,
-    SigningKey as SqisignSigningKey,
-    Verifier,
-    generate,
+    Level5, PublicKey as SqisignPublicKey, Signature as SqisignSignature,
+    SigningKey as SqisignSigningKey, Verifier, generate,
 };
 
 use static_assertions::const_assert_eq;
 
 use std::{
-    collections::{
-        HashMap,
-        VecDeque,
-    },
+    collections::{HashMap, VecDeque},
     fmt,
-    sync::{
-        Arc,
-        Mutex,
-        OnceLock,
-    },
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use zeroize::{Zeroize, ZeroizeOnDrop};

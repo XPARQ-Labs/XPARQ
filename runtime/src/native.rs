@@ -39,6 +39,7 @@ const MAX_STORED_TRANSACTION_SIZE: usize = kernel::block::MAX_BLOCK_SIZE;
 const MAX_STORED_MEMPOOL_SIZE: u64 = 64 * 1024 * 1024;
 const MAX_RPC_HEADER_SIZE: usize = 16 * 1024;
 const MAX_ACCOUNT_UTXOS_PER_PAGE: usize = 1_000;
+const MAX_VAULTS_PER_PAGE: usize = 256;
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 const OPENAPI_JSON: &[u8] = include_bytes!("../../docs/openapi.json");
 const API_DOCS_HTML: &[u8] = br#"<!doctype html>
@@ -771,6 +772,22 @@ fn address_transaction_activity(
             coin_outputs(&tx.payment.intent),
             coin_burn(&tx.payment.intent),
         ),
+        AuthorizedTransaction::VaultLock(tx) => {
+            let payment = tx.payment.as_ref();
+            (
+                Some(tx.lock.intent.signer),
+                payment.map_or(&[] as &[CoinOutput], |p| coin_outputs(&p.intent)),
+                Zeno::ZERO,
+            )
+        }
+        AuthorizedTransaction::VaultSpend(tx) => {
+            let payment = tx.payment.as_ref();
+            (
+                payment.map(|p| p.intent.signer),
+                payment.map_or(&[] as &[CoinOutput], |p| coin_outputs(&p.intent)),
+                Zeno::ZERO,
+            )
+        }
     };
     let received = checked_output_sum(
         outputs
@@ -858,6 +875,17 @@ fn transaction_response(
         AuthorizedTransaction::Asset(asset) => {
             asset_transaction_response(asset, miner, protocol_burn)
         }
+        AuthorizedTransaction::VaultLock(tx) => serde_json::json!({
+            "kind": "vault-lock",
+            "outputs": tx.lock.intent.outputs.len(),
+            "protocol_burn": protocol_burn.as_zeno(),
+        }),
+        AuthorizedTransaction::VaultSpend(tx) => serde_json::json!({
+            "kind": "vault-spend",
+            "inputs": tx.spend.inputs.len(),
+            "outputs": tx.spend.outputs.len(),
+            "protocol_burn": protocol_burn.as_zeno(),
+        }),
     }
 }
 
@@ -1008,6 +1036,8 @@ fn transaction_kind(transaction: &Transaction) -> &'static str {
             kernel::transaction::Spend::Asset { .. } => "asset-transfer",
         },
         AuthorizedTransaction::Asset(_) => "asset",
+        AuthorizedTransaction::VaultLock(_) => "vault-lock",
+        AuthorizedTransaction::VaultSpend(_) => "vault-spend",
     }
 }
 
@@ -1093,6 +1123,10 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
             })
         }
         "/blocks/latest" => latest_blocks_response(&ledger)?,
+        route if route == "/vaults" || route.starts_with("/vaults?") => {
+            vaults_response(&ledger, route)?
+        }
+        route if route.starts_with("/vault/") => vault_response(&ledger, route)?,
         route if route.starts_with("/asset/") => asset_response(&ledger, route)?,
         route if route.starts_with("/balance/") => {
             let address = route.trim_start_matches("/balance/");
@@ -1175,6 +1209,60 @@ fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> Result<(), 
         _ => return Err("unknown RPC route".into()),
     };
     write_http_response(stream, 200, &response)
+}
+
+fn vaults_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
+    let query = route.split_once('?').map_or("", |(_, query)| query);
+    let mut offset = 0_usize;
+    let mut limit = MAX_VAULTS_PER_PAGE;
+    if !query.is_empty() {
+        for parameter in query.split('&') {
+            let (name, value) = parameter.split_once('=').ok_or("invalid vault query")?;
+            match name {
+                "offset" => offset = value.parse().map_err(|_| "invalid vault offset")?,
+                "limit" => limit = value.parse().map_err(|_| "invalid vault limit")?,
+                _ => return Err("invalid vault query".into()),
+            }
+        }
+    }
+    if limit == 0 || limit > MAX_VAULTS_PER_PAGE {
+        return Err("vault limit is outside allowed range".into());
+    }
+    let total = ledger.state().vault_utxos().len();
+    let vaults = ledger.state().vault_utxos().iter().skip(offset).take(limit)
+        .map(|(id, output)| {
+            let encoded = canonical_bytes(output).map_err(|error| error.to_string())?;
+            Ok(serde_json::json!({"id": hex::encode(id.as_bytes()), "output": hex::encode(encoded)}))
+        }).collect::<Result<Vec<_>, String>>()?;
+    let next_offset = offset
+        .checked_add(vaults.len())
+        .filter(|next| *next < total);
+    Ok(serde_json::json!({
+        "tip_height": ledger.tip_height().map_or(0, |height| height.0),
+        "snapshot": ledger.tip_hash().map_or_else(|| hex::encode([0_u8; 32]), |hash| hex::encode(hash.as_bytes())),
+        "total": total,
+        "next_offset": next_offset,
+        "vaults": vaults,
+    }))
+}
+
+fn vault_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
+    let value = route.trim_start_matches("/vault/");
+    if value.len() != 64 || value.contains(['/', '?', '#']) {
+        return Err("invalid vault ID".into());
+    }
+    let bytes = hex::decode(value).map_err(|_| "invalid vault ID")?;
+    let id =
+        kernel::transaction::VaultId::from_bytes(bytes.try_into().map_err(|_| "invalid vault ID")?);
+    let output = ledger
+        .state()
+        .vault_utxos()
+        .get(&id)
+        .ok_or("vault was not found")?;
+    Ok(serde_json::json!({
+        "id": value,
+        "output": hex::encode(canonical_bytes(output).map_err(|error| error.to_string())?),
+    }))
 }
 
 fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
@@ -2925,6 +3013,21 @@ fn reserved_coin_inputs(transactions: &[Transaction]) -> BTreeSet<kernel::native
                 .intent
                 .coin_parts()
                 .map_or_else(Vec::new, |(inputs, _)| inputs.to_vec()),
+            AuthorizedTransaction::VaultLock(transaction) => {
+                match &transaction.lock.intent.source {
+                    kernel::transaction::VaultSource::Coin { inputs } => inputs.clone(),
+                    kernel::transaction::VaultSource::Asset { .. } => transaction
+                        .payment
+                        .as_ref()
+                        .and_then(|p| p.intent.coin_parts())
+                        .map_or_else(Vec::new, |(inputs, _)| inputs.to_vec()),
+                }
+            }
+            AuthorizedTransaction::VaultSpend(transaction) => transaction
+                .payment
+                .as_ref()
+                .and_then(|p| p.intent.coin_parts())
+                .map_or_else(Vec::new, |(inputs, _)| inputs.to_vec()),
         })
         .collect()
 }
@@ -2986,6 +3089,28 @@ fn transaction_miner_fee(transaction: &Transaction) -> Result<u64, String> {
         )),
         AuthorizedTransaction::Asset(transaction) => {
             miner_fee_from_outputs(coin_outputs(&transaction.payment.intent))
+        }
+        AuthorizedTransaction::VaultLock(transaction) => miner_fee_from_outputs(
+            transaction
+                .payment
+                .as_ref()
+                .map_or(&[], |p| coin_outputs(&p.intent)),
+        ),
+        AuthorizedTransaction::VaultSpend(transaction) => {
+            if let Some(payment) = &transaction.payment {
+                miner_fee_from_outputs(coin_outputs(&payment.intent))
+            } else {
+                let outputs: Vec<CoinOutput> = transaction
+                    .spend
+                    .outputs
+                    .iter()
+                    .filter_map(|o| match o {
+                        kernel::transaction::VaultSpendOutput::Coin(output) => Some(output.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                miner_fee_from_outputs(&outputs)
+            }
         }
     }
 }
@@ -3520,14 +3645,13 @@ mod tests {
     #[test]
     fn explorer_address_response_is_aggregate_only() {
         let ledger = kernel::genesis::genesis_ledger().unwrap();
-        let response =
-            explorer_address_response(
-                &ledger,
-                &[],
-                Address([7; kernel::crypto::ADDRESS_SIZE]),
-                true,
-            )
-                .unwrap();
+        let response = explorer_address_response(
+            &ledger,
+            &[],
+            Address([7; kernel::crypto::ADDRESS_SIZE]),
+            true,
+        )
+        .unwrap();
         assert_eq!(response["balance"]["total"], 0);
         assert_eq!(response["activity_count"], 0);
         assert!(response.get("utxos").is_none());
@@ -3591,8 +3715,8 @@ mod tests {
                 Address([9; kernel::crypto::ADDRESS_SIZE]),
                 &block,
             )
-                .unwrap()
-                .is_none()
+            .unwrap()
+            .is_none()
         );
         assert_eq!(
             parse_hash(&hex::encode(transaction.id().unwrap())).unwrap(),

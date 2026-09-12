@@ -18,7 +18,7 @@ use crypto::{
 // WBDA
 // -----------------------------------------------------------------------------
 
-pub const WBDA_WINDOW: usize = 10_000;
+pub const WBDA_WINDOW: usize = 25_000;
 
 pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 1 * 1024 * 1024;
 
@@ -151,22 +151,22 @@ pub fn expected_difficulty_for_height<E>(
 // -----------------------------------------------------------------------------
 // Emission
 // -----------------------------------------------------------------------------
-
-/// Initial block subsidy: 10 XPQ.
-pub const BLOCK_EMISSION_START: u64 = 10_000_000;
+pub const BLOCK_EMISSION_START: u64 = 1_000_000;
+pub const MAX_BLOCK_EMISSION: u64 = 10_000_000;
 
 /// Permanent tail emission: 0.5 XPQ per block.
 pub const TAIL_BLOCK_EMISSION: u64 = 500_000;
 
-/// Subsidy reduction: 0.25 XPQ per emission interval.
-pub const BLOCK_EMISSION_STEP: u64 = 250_000;
+/// Subsidy reduction: 0.5 XPQ per emission interval.
+pub const BLOCK_EMISSION_STEP: u64 = 500_000;
 
 /// Emission changes every 100,000 blocks.
 pub const EMISSION_INTERVAL: u64 = 100_000;
 
-const_assert!(BLOCK_EMISSION_START == 10 * XPQ::ZENO_PER_COIN);
+const_assert!(BLOCK_EMISSION_START == XPQ::ZENO_PER_COIN);
+const_assert!(MAX_BLOCK_EMISSION == 10 * XPQ::ZENO_PER_COIN);
 const_assert!(TAIL_BLOCK_EMISSION == XPQ::ZENO_PER_COIN / 2);
-const_assert!(BLOCK_EMISSION_STEP == XPQ::ZENO_PER_COIN / 4);
+const_assert!(BLOCK_EMISSION_STEP == XPQ::ZENO_PER_COIN / 2);
 
 pub const fn initial_block_emission() -> Zeno {
     Zeno::from_zeno(BLOCK_EMISSION_START)
@@ -180,22 +180,40 @@ pub const fn is_emission_epoch_boundary(height: u64) -> bool {
 ///
 /// Schedule:
 ///
-/// - heights 1..=100,000       => 10.00 XPQ
-/// - heights 100,001..=200,000 =>  9.75 XPQ
-/// - heights 200,001..=300,000 =>  9.50 XPQ
+/// Rising phase:
+/// - heights 1..=100,000           =>  1.00 XPQ
+/// - heights 100,001..=200,000     =>  1.50 XPQ
+/// - heights 200,001..=300,000     =>  2.00 XPQ
 /// - ...
-/// - heights 3,700,001..=3,800,000 => 0.75 XPQ
-/// - height 3,800,001 onward        => 0.50 XPQ forever
+/// - heights 1,800,001..=1,900,000 => 10.00 XPQ
+///
+/// Declining phase:
+/// - heights 1,900,001..=2,000,000 =>  9.50 XPQ
+/// - heights 2,000,001..=2,100,000 =>  9.00 XPQ
+/// - ...
+/// - heights 3,600,001..=3,700,000 =>  1.00 XPQ
+///
+/// Tail:
+/// - height 3,700,001 onward        =>  0.50 XPQ forever
 ///
 /// Emission is independent from WBDA and block utilization.
+
 pub fn block_emission_for_height(height: Height) -> Zeno {
     let completed_intervals = height.0.saturating_sub(1) / EMISSION_INTERVAL;
 
-    let reduction = completed_intervals.saturating_mul(BLOCK_EMISSION_STEP);
+    let rising_steps = (MAX_BLOCK_EMISSION - BLOCK_EMISSION_START) / BLOCK_EMISSION_STEP;
 
-    let emission = BLOCK_EMISSION_START
-        .saturating_sub(reduction)
-        .max(TAIL_BLOCK_EMISSION);
+    let emission = if completed_intervals <= rising_steps {
+        BLOCK_EMISSION_START
+            .saturating_add(completed_intervals.saturating_mul(BLOCK_EMISSION_STEP))
+            .min(MAX_BLOCK_EMISSION)
+    } else {
+        let declining_steps = completed_intervals - rising_steps;
+
+        MAX_BLOCK_EMISSION
+            .saturating_sub(declining_steps.saturating_mul(BLOCK_EMISSION_STEP))
+            .max(TAIL_BLOCK_EMISSION)
+    };
 
     Zeno::from_zeno(emission)
 }

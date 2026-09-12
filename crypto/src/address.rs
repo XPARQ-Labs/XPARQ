@@ -1,12 +1,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    HASH_SIZE, HashDomain, PublicKey,
-    error::CryptoError,
-    hash,
-    kem::{KemError, KemPublicKey},
-};
+use crate::{HASH_SIZE, HashDomain, PublicKey, error::CryptoError, hash, kem::KemPublicKey};
 
 pub const ADDRESS_SIZE: usize = 16;
 pub const ADDRESS_PREFIX: &str = "Qx";
@@ -33,30 +28,18 @@ pub const ADDRESS_STRING_LEN: usize =
 )]
 pub struct Address(pub [u8; ADDRESS_SIZE]);
 
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    BorshSerialize,
-    BorshDeserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct PaymentAddress {
     pub spend_public_key: PublicKey,
     pub kem_public_key: KemPublicKey,
 }
 
 impl PaymentAddress {
-    pub fn new(
-        spend_public_key: PublicKey,
-        kem_public_key: KemPublicKey,
-    ) -> Result<Self, KemError> {
-        let kem_public_key =
-            KemPublicKey::from_bytes(kem_public_key.kem(), kem_public_key.into_bytes())?;
-        Ok(Self {
+    pub const fn new(spend_public_key: PublicKey, kem_public_key: KemPublicKey) -> Self {
+        Self {
             spend_public_key,
             kem_public_key,
-        })
+        }
     }
 
     pub fn account_address(&self) -> Address {
@@ -67,7 +50,7 @@ impl PaymentAddress {
 pub fn payment_address_from_public_keys(
     spend_public_key: PublicKey,
     kem_public_key: KemPublicKey,
-) -> Result<PaymentAddress, KemError> {
+) -> PaymentAddress {
     PaymentAddress::new(spend_public_key, kem_public_key)
 }
 
@@ -250,8 +233,7 @@ mod tests {
         let kem_public_key = KemSeed::new(KeyExchange::MlKem768, [5; 64]).public_key();
         let expected = address_from_public_key(&spend_public_key);
 
-        let payment_address =
-            payment_address_from_public_keys(spend_public_key, kem_public_key).unwrap();
+        let payment_address = payment_address_from_public_keys(spend_public_key, kem_public_key);
 
         assert_eq!(payment_address.account_address(), expected);
         assert_eq!(payment_address.kem_public_key.kem(), KeyExchange::MlKem768);

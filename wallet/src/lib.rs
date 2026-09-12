@@ -2,10 +2,15 @@ use bip39::{Language, Mnemonic};
 use kernel::{
     crypto::{
         Address, KemPublicKey, KemSeed, KeyExchange, PaymentAddress, PublicKey, Signature,
-        SigningSeed, address_from_public_key, address_from_string, address_to_string, hash_bytes,
-        payment_address_from_public_keys, payment_address_to_string,
+        SigningSeed, VaultOpening, address_from_public_key, address_from_string, address_to_string,
+        decapsulate, encapsulate, hash_bytes, open_vault_opening, payment_address_from_public_keys,
+        payment_address_to_string, seal_vault_opening,
     },
-    transaction::{AccountAuthorization, AccountIntent, AuthorizedAccountIntent},
+    transaction::{
+        AccountAuthorization, AccountIntent, AuthorizedAccountIntent,
+        AuthorizedVaultSpendTransaction, VaultAuthorization, VaultEnvelope, VaultId, VaultLock,
+        VaultOutput, VaultSpendIntent, VaultValue,
+    },
 };
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -22,6 +27,19 @@ pub struct AccountWallet {
     signing_seed: SigningSeed,
     pub kem_public_key: KemPublicKey,
     kem_seed: KemSeed,
+}
+
+#[derive(Debug)]
+pub struct OwnedVault {
+    pub id: VaultId,
+    pub value: VaultValue,
+    opening: VaultOpening,
+}
+
+impl OwnedVault {
+    pub const fn opening(&self) -> &VaultOpening {
+        &self.opening
+    }
 }
 
 impl Drop for AccountWallet {
@@ -226,11 +244,85 @@ impl AccountWallet {
 
     pub fn payment_address(&self) -> PaymentAddress {
         payment_address_from_public_keys(self.public_key.clone(), self.kem_public_key.clone())
-            .expect("wallet contains a validated KEM public key")
     }
 
     pub fn payment_address_string(&self) -> String {
         payment_address_to_string(&self.payment_address())
+    }
+
+    pub fn create_vault_output(
+        recipient: &PaymentAddress,
+        value: VaultValue,
+    ) -> Result<(VaultOutput, VaultOpening), String> {
+        value.validate().map_err(|error| error.to_string())?;
+        let mut opening_bytes = [0_u8; 32];
+        getrandom::fill(&mut opening_bytes)
+            .map_err(|error| format!("secure vault opening generation failed: {error}"))?;
+        let opening = VaultOpening::from_bytes(opening_bytes);
+        let lock = VaultLock::derive(&recipient.spend_public_key, opening.as_bytes());
+        let (ciphertext, shared) =
+            encapsulate(&recipient.kem_public_key).map_err(|error| error.to_string())?;
+        let context = vault_envelope_context(lock)?;
+        let payload = seal_vault_opening(&shared, &context, &opening);
+        let output = VaultOutput::new(value, lock, VaultEnvelope::new(ciphertext, payload))
+            .map_err(|error| error.to_string())?;
+        Ok((output, opening))
+    }
+
+    pub fn scan_vault(
+        &self,
+        id: VaultId,
+        output: &VaultOutput,
+    ) -> Result<Option<OwnedVault>, String> {
+        if output.envelope.kem_ciphertext().kem() != self.kem_seed.kem() {
+            return Ok(None);
+        }
+        let shared = decapsulate(&self.kem_seed, output.envelope.kem_ciphertext())
+            .map_err(|error| error.to_string())?;
+        let context = vault_envelope_context(output.lock)?;
+        let opening =
+            match open_vault_opening(&shared, &context, output.envelope.encrypted_payload()) {
+                Ok(opening) => opening,
+                Err(_) => return Ok(None),
+            };
+        if VaultLock::derive(&self.public_key, opening.as_bytes()) != output.lock {
+            return Ok(None);
+        }
+        Ok(Some(OwnedVault {
+            id,
+            value: output.value,
+            opening,
+        }))
+    }
+
+    pub fn authorize_vault_spend(
+        &self,
+        intent: VaultSpendIntent,
+        owned: &[OwnedVault],
+        payment: Option<AuthorizedAccountIntent<kernel::transaction::SpendIntent>>,
+    ) -> Result<AuthorizedVaultSpendTransaction, String> {
+        intent.validate().map_err(|error| error.to_string())?;
+        let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
+        let commitment = intent
+            .commitment(chain)
+            .map_err(|error| error.to_string())?;
+        let mut authorizations = Vec::with_capacity(intent.inputs.len());
+        for id in &intent.inputs {
+            let vault = owned.iter().find(|vault| vault.id == *id).ok_or_else(|| {
+                format!("wallet does not own vault {}", hex::encode(id.as_bytes()))
+            })?;
+            authorizations.push(VaultAuthorization {
+                vault: *id,
+                public_key: self.public_key.clone(),
+                opening: *vault.opening.as_bytes(),
+                signature: self.signing_seed.sign(commitment.as_bytes()),
+            });
+        }
+        Ok(AuthorizedVaultSpendTransaction {
+            spend: intent,
+            authorizations,
+            payment,
+        })
     }
 
     pub fn sign_account_intent<T: AccountIntent>(
@@ -272,9 +364,43 @@ impl AccountWallet {
     }
 }
 
+fn vault_envelope_context(lock: VaultLock) -> Result<Vec<u8>, String> {
+    let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
+    kernel::crypto::canonical_bytes(&(chain.genesis_hash, lock))
+        .map_err(|error| format!("vault envelope context encoding failed: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payment_address_vault_is_discovered_only_by_recipient() {
+        let alice_phrase = encode_bip39_mnemonic(&[21; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+        let bob_phrase = encode_bip39_mnemonic(&[22; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
+        let alice = account_wallet_from_bip39_mnemonic(&alice_phrase, Signature::MlDsa44).unwrap();
+        let bob = account_wallet_from_bip39_mnemonic(&bob_phrase, Signature::MlDsa44).unwrap();
+        let (output, opening) = AccountWallet::create_vault_output(
+            &bob.payment_address(),
+            VaultValue::coin(kernel::native::coin::Zeno::from_zeno(10)),
+        )
+        .unwrap();
+        let id = VaultId::from_bytes([8; 32]);
+        let discovered = bob.scan_vault(id, &output).unwrap().unwrap();
+        assert_eq!(discovered.id, id);
+        assert_eq!(discovered.opening().as_bytes(), opening.as_bytes());
+        assert!(alice.scan_vault(id, &output).unwrap().is_none());
+
+        let mut payload = output.envelope.encrypted_payload().to_vec();
+        payload[0] ^= 1;
+        let corrupted = VaultOutput::new(
+            output.value,
+            output.lock,
+            VaultEnvelope::new(output.envelope.kem_ciphertext().clone(), payload),
+        )
+        .unwrap();
+        assert!(bob.scan_vault(id, &corrupted).unwrap().is_none());
+    }
 
     /* Legacy wallet tests removed with the account-only chain reset.
     #[test]

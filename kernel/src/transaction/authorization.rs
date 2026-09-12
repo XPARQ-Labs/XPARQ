@@ -7,7 +7,7 @@ use crypto::{
 
 use crate::transaction::{
     AssetIntent, ChainContext, IntentError, Spend, SpendCommitment, SpendIntent,
-    TransactionEncodingError,
+    TransactionEncodingError, VaultLockIntent,
 };
 
 pub trait AccountIntent {
@@ -34,6 +34,16 @@ impl AccountIntent for AssetIntent {
         AssetIntent::commitment(self, chain.genesis_hash)
             .map(SpendCommitment::from_bytes)
             .map_err(|_| IntentError::InvalidAssetCall)
+    }
+}
+
+impl AccountIntent for VaultLockIntent {
+    fn sender(&self) -> Address {
+        self.signer
+    }
+
+    fn commitment(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
+        VaultLockIntent::commitment(self, chain)
     }
 }
 
@@ -89,6 +99,8 @@ pub struct AuthorizedSpendTransaction {
 pub enum AuthorizedTransaction {
     Spend(Box<AuthorizedSpendTransaction>),
     Asset(Box<AuthorizedAssetTransaction>),
+    VaultLock(Box<crate::transaction::AuthorizedVaultLockTransaction>),
+    VaultSpend(Box<crate::transaction::AuthorizedVaultSpendTransaction>),
 }
 
 impl AuthorizedTransaction {
@@ -123,6 +135,32 @@ impl AuthorizedTransaction {
                 }
 
                 tx.payment.intent.validate()
+            }
+            Self::VaultLock(tx) => {
+                tx.lock.intent.validate()?;
+                match (&tx.lock.intent.source, &tx.payment) {
+                    (
+                        crate::transaction::VaultSource::Coin { .. }
+                        | crate::transaction::VaultSource::Asset { .. },
+                        Some(payment),
+                    ) if matches!(payment.intent.spend, Spend::Coin { .. }) => {
+                        payment.intent.validate()
+                    }
+                    _ => Err(IntentError::InvalidVault),
+                }
+            }
+            Self::VaultSpend(tx) => {
+                tx.spend.validate()?;
+                if tx.authorizations.len() != tx.spend.inputs.len() {
+                    return Err(IntentError::InvalidVault);
+                }
+                if let Some(payment) = &tx.payment {
+                    if !matches!(payment.intent.spend, Spend::Coin { .. }) {
+                        return Err(IntentError::InvalidVault);
+                    }
+                    payment.intent.validate()?;
+                }
+                Ok(())
             }
         }
     }

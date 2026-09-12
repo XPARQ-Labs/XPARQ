@@ -7,6 +7,7 @@ pub mod falcon;
 pub mod hash;
 pub mod kem;
 pub mod signature;
+pub mod vault;
 
 pub mod crypto {
     pub use crate::*;
@@ -28,3 +29,4 @@ pub use falcon::{
 pub use hash::*;
 pub use kem::*;
 pub use signature::*;
+pub use vault::*;

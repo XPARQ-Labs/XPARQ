@@ -12,7 +12,7 @@ use crate::{
     },
     ledger::{
         AssetRollbackJournal, AssetState, LedgerState, SpendRollbackJournal, StateError,
-        StateRollbackJournal, utxo,
+        StateRollbackJournal, VaultRollbackJournal, utxo,
     },
     native::{
         asset::{
@@ -21,7 +21,10 @@ use crate::{
         },
         coin::{XPQ, Zeno},
     },
-    transaction::{AssetInstruction, AssetIntent, SpendCommitment, SpendIntent},
+    transaction::{
+        AssetInstruction, AssetIntent, SpendCommitment, SpendIntent, VaultId, VaultSource,
+        VaultSpendOutput, VaultValue,
+    },
 };
 
 //
@@ -36,6 +39,18 @@ impl LedgerState {
         block_miner: Address,
         chain: crate::transaction::ChainContext,
     ) -> Result<StateRollbackJournal, StateError> {
+        if matches!(
+            transaction,
+            ValidatedAuthorizedTransaction::VaultLock(_)
+                | ValidatedAuthorizedTransaction::VaultSpend(_)
+        ) {
+            let snapshot = self.clone();
+            let result = self.apply_validated_vault_transaction(transaction, block_miner);
+            if result.is_err() {
+                *self = snapshot;
+            }
+            return result;
+        }
         self.apply_validated_authorized_transaction(transaction, chain, block_miner, height)
     }
 
@@ -141,6 +156,10 @@ impl LedgerState {
             ValidatedAuthorizedTransaction::Asset(_) => {
                 unreachable!("asset transaction handled above")
             }
+            ValidatedAuthorizedTransaction::VaultLock(_)
+            | ValidatedAuthorizedTransaction::VaultSpend(_) => {
+                unreachable!("vault transaction handled above")
+            }
         }?;
 
         if let Some((address, public_key)) = revealed_account_key(transaction) {
@@ -170,6 +189,230 @@ impl LedgerState {
 
             Err(error) => Err(StateError::Account(error)),
         }
+    }
+}
+
+impl LedgerState {
+    fn apply_validated_vault_transaction(
+        &mut self,
+        transaction: &ValidatedAuthorizedTransaction,
+        block_miner: Address,
+    ) -> Result<StateRollbackJournal, StateError> {
+        let mut vault = VaultRollbackJournal::default();
+        let mut payment = None;
+        match transaction {
+            ValidatedAuthorizedTransaction::VaultLock(tx) => {
+                if let Some(validated) = &tx.payment {
+                    payment = Some(self.apply_validated_onchain_spend(validated, block_miner)?);
+                    self.register_revealed_account(
+                        validated.intent().signer,
+                        validated.revealed_account_key().cloned(),
+                        payment.as_mut().expect("vault payment journal"),
+                    )?;
+                }
+                match &tx.lock.intent().source {
+                    VaultSource::Coin { inputs } => {
+                        let mut input_total = Zeno::ZERO;
+                        for id in inputs {
+                            let amount = self.utxos.consume_coin(id)?;
+                            let recipient = self
+                                .coin_recipients
+                                .remove(id)
+                                .ok_or(StateError::InvalidTransaction)?;
+                            input_total = input_total
+                                .checked_add(amount)
+                                .ok_or(StateError::AmountOverflow)?;
+                            vault.consumed_coins.push((*id, amount, recipient));
+                        }
+                        let output_total = tx.lock.intent().outputs.iter().try_fold(
+                            Zeno::ZERO,
+                            |sum, output| match output.value {
+                                VaultValue::Coin(amount) => {
+                                    sum.checked_add(amount).ok_or(StateError::AmountOverflow)
+                                }
+                                _ => Err(StateError::InvalidTransaction),
+                            },
+                        )?;
+                        let remainder = input_total
+                            .checked_sub(output_total)
+                            .ok_or(StateError::InvalidTransaction)?;
+                        if !remainder.is_zero() {
+                            return Err(StateError::InvalidTransaction);
+                        }
+                    }
+                    VaultSource::Asset { inputs, .. } => {
+                        for id in inputs {
+                            let share = self.utxos.consume_asset(id)?;
+                            let recipient = self
+                                .assets
+                                .share_recipients
+                                .remove(id)
+                                .ok_or(StateError::InvalidTransaction)?;
+                            vault.consumed_assets.push((*id, share, recipient));
+                        }
+                    }
+                }
+                for (index, output) in tx.lock.intent().outputs.iter().enumerate() {
+                    let id = VaultId::derive(tx.lock.commitment(), output_index(index)?);
+                    self.vault_utxos.insert(id, output.clone())?;
+                    vault.created_vaults.push(id);
+                }
+                self.register_vault_account(
+                    tx.lock.intent().signer,
+                    tx.lock.revealed_account_key(),
+                    &mut vault,
+                )?;
+            }
+            ValidatedAuthorizedTransaction::VaultSpend(tx) => {
+                if let Some(validated) = &tx.payment {
+                    payment = Some(self.apply_validated_onchain_spend(validated, block_miner)?);
+                    self.register_revealed_account(
+                        validated.intent().signer,
+                        validated.revealed_account_key().cloned(),
+                        payment.as_mut().unwrap(),
+                    )?;
+                }
+                for id in &tx.spend.intent().inputs {
+                    let output = self.vault_utxos.consume(id)?;
+                    vault.consumed_vaults.push((*id, output));
+                }
+                let commitment = tx.spend.commitment();
+                for (index, output) in tx.spend.intent().outputs.iter().enumerate() {
+                    let index_u32 = output_index(index)?;
+                    match output {
+                        VaultSpendOutput::Vault(output) => {
+                            let id = VaultId::derive(commitment, index_u32);
+                            self.vault_utxos.insert(id, output.clone())?;
+                            vault.created_vaults.push(id);
+                        }
+                        VaultSpendOutput::Coin(output) => {
+                            let id = XPQ::from_output(commitment.as_bytes(), index_u32);
+                            self.utxos.insert_coin(id, output.amount)?;
+                            let recipient = match output.output {
+                                Recipient::Address(a) => a,
+                                Recipient::BlockMiner => block_miner,
+                            };
+                            if self.coin_recipients.insert(id, recipient).is_some() {
+                                return Err(StateError::InvalidTransaction);
+                            }
+                            vault.created_coins.push(id);
+                        }
+                        VaultSpendOutput::Asset(output) => {
+                            let asset = vault
+                                .consumed_vaults
+                                .first()
+                                .and_then(|(_, v)| v.value.as_asset())
+                                .ok_or(StateError::InvalidTransaction)?
+                                .asset;
+                            let id = Share::derive(asset, commitment.into_bytes(), index_u32);
+                            self.utxos.insert_asset(
+                                id,
+                                AssetShare {
+                                    asset,
+                                    amount: output.amount,
+                                },
+                            )?;
+                            if self
+                                .assets
+                                .share_recipients
+                                .insert(id, output.recipient)
+                                .is_some()
+                            {
+                                return Err(StateError::InvalidTransaction);
+                            }
+                            vault.created_assets.push(id);
+                        }
+                    }
+                }
+                if payment.is_none() {
+                    let inputs =
+                        vault
+                            .consumed_vaults
+                            .iter()
+                            .try_fold(Zeno::ZERO, |sum, (_, v)| {
+                                sum.checked_add(
+                                    v.value.as_coin().ok_or(StateError::InvalidTransaction)?,
+                                )
+                                .ok_or(StateError::AmountOverflow)
+                            })?;
+                    let outputs =
+                        tx.spend
+                            .intent()
+                            .outputs
+                            .iter()
+                            .try_fold(Zeno::ZERO, |sum, o| {
+                                let amount = match o {
+                                    VaultSpendOutput::Vault(v) => {
+                                        v.value.as_coin().ok_or(StateError::InvalidTransaction)?
+                                    }
+                                    VaultSpendOutput::Coin(v) => v.amount,
+                                    VaultSpendOutput::Asset(_) => {
+                                        return Err(StateError::InvalidTransaction);
+                                    }
+                                };
+                                sum.checked_add(amount).ok_or(StateError::AmountOverflow)
+                            })?;
+                    let burned = inputs
+                        .checked_sub(outputs)
+                        .ok_or(StateError::InvalidTransaction)?;
+                    self.total_burned = self
+                        .total_burned
+                        .checked_add(burned)
+                        .ok_or(StateError::BurnOverflow)?;
+                    vault.burned = burned;
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(StateRollbackJournal::Vault { vault, payment })
+    }
+
+    fn register_vault_account(
+        &mut self,
+        address: Address,
+        revealed: Option<&RevealedAccountKey>,
+        journal: &mut VaultRollbackJournal,
+    ) -> Result<(), StateError> {
+        let Some(RevealedAccountKey::Account(key)) = revealed else {
+            return Ok(());
+        };
+        if self.account_keys.register_account(address, key.clone())? {
+            journal.registered_accounts.push(address);
+        }
+        Ok(())
+    }
+
+    fn rollback_vault(&mut self, journal: VaultRollbackJournal) -> Result<(), StateError> {
+        self.total_burned = self
+            .total_burned
+            .checked_sub(journal.burned)
+            .ok_or(StateError::BurnUnderflow)?;
+        for id in journal.created_vaults.into_iter().rev() {
+            self.vault_utxos.consume(&id)?;
+        }
+        for id in journal.created_coins.into_iter().rev() {
+            self.utxos.consume_coin(&id)?;
+            self.coin_recipients.remove(&id);
+        }
+        for id in journal.created_assets.into_iter().rev() {
+            self.utxos.consume_asset(&id)?;
+            self.assets.share_recipients.remove(&id);
+        }
+        for (id, output) in journal.consumed_vaults.into_iter().rev() {
+            self.vault_utxos.insert(id, output)?;
+        }
+        for (id, share, recipient) in journal.consumed_assets.into_iter().rev() {
+            self.utxos.insert_asset(id, share)?;
+            self.assets.share_recipients.insert(id, recipient);
+        }
+        for (id, amount, recipient) in journal.consumed_coins.into_iter().rev() {
+            self.utxos.insert_coin(id, amount)?;
+            self.coin_recipients.insert(id, recipient);
+        }
+        for address in journal.registered_accounts {
+            self.account_keys.remove_account(&address)?;
+        }
+        Ok(())
     }
 }
 
@@ -657,6 +900,13 @@ impl LedgerState {
 
                 self.rollback_spend(payment)
             }
+            StateRollbackJournal::Vault { vault, payment } => {
+                self.rollback_vault(vault)?;
+                if let Some(payment) = payment {
+                    self.rollback_spend(payment)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -768,6 +1018,11 @@ fn revealed_account_key(
             .cloned()
             .map(|key| (validated.spend.intent().signer, key)),
 
+        ValidatedAuthorizedTransaction::VaultLock(validated) => validated
+            .lock
+            .revealed_account_key()
+            .cloned()
+            .map(|key| (validated.lock.intent().signer, key)),
         _ => None,
     }
 }

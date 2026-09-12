@@ -11,7 +11,7 @@ use kernel::native::coin::CoinOutput;
 use kernel::{
     codec::canonical_bytes,
     consensus::{DECIMALS, StateTransitionWeight, XPQ, Zeno, account_key_state_weight},
-    crypto::{Address, Signature, address_from_string},
+    crypto::{Address, Signature, address_from_string, canonical_decode},
     transaction::{
         AssetInstruction, AuthorizedAssetTransaction, AuthorizedSpendTransaction,
         AuthorizedTransaction, SpendIntent,
@@ -141,6 +141,19 @@ struct SubmitTransactionResponse {
     hash: String,
 }
 
+#[derive(Deserialize)]
+struct VaultPageResponse {
+    snapshot: String,
+    next_offset: Option<usize>,
+    vaults: Vec<VaultResponse>,
+}
+
+#[derive(Deserialize)]
+struct VaultResponse {
+    id: String,
+    output: String,
+}
+
 const MAX_CONSOLIDATION_INPUTS: usize = 10_000;
 
 pub fn run(mut args: Vec<String>) -> Result<(), String> {
@@ -152,6 +165,7 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         Some("balance") => print_balance(&args[1..]),
         Some("history") => print_history(&args[1..]),
         Some("utxos") | Some("utxo-tracker") => print_utxo_tracker(&args[1..]),
+        Some("vaults") | Some("vault-scan") => print_vaults(&args[1..]),
         Some("sign-spend") => sign_spend(&args[1..]),
         Some("consolidate") => consolidate_coin_utxos(&args[1..]),
         Some("asset-register") => asset_register(&args[1..]),
@@ -823,7 +837,10 @@ fn print_address(args: &[String]) -> Result<(), String> {
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
     let wallet = account_wallet_from_file_bytes(&bytes)?;
-    println!("address: {}", kernel::crypto::address_to_string(&wallet.address));
+    println!(
+        "address: {}",
+        kernel::crypto::address_to_string(&wallet.address)
+    );
     println!("payment_address: {}", wallet.payment_address_string());
     Ok(())
 }
@@ -924,11 +941,64 @@ fn print_utxo_tracker(args: &[String]) -> Result<(), String> {
     let mut utxos = account.utxos.iter().collect::<Vec<_>>();
     utxos.sort_by(|left, right| left.id.cmp(&right.id));
     for utxo in utxos {
-        println!(
-            "- utxo: {}  {}",
-            utxo.id,
-            format_amount(utxo.amount),
-        );
+        println!("- utxo: {}  {}", utxo.id, format_amount(utxo.amount),);
+    }
+    Ok(())
+}
+
+fn print_vaults(args: &[String]) -> Result<(), String> {
+    let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let mut offset = 0_usize;
+    let mut snapshot: Option<String> = None;
+    let mut owned = Vec::new();
+    loop {
+        let page: VaultPageResponse =
+            http_get_json(rpc, &format!("/vaults?offset={offset}&limit=256"))?;
+        match snapshot.as_deref() {
+            Some(expected) if expected != page.snapshot => {
+                return Err("chain changed while scanning vaults; retry the scan".into());
+            }
+            None => snapshot = Some(page.snapshot.clone()),
+            _ => {}
+        }
+        for entry in page.vaults {
+            let id_bytes =
+                hex::decode(&entry.id).map_err(|_| "node returned an invalid vault ID")?;
+            let id = kernel::transaction::VaultId::from_bytes(
+                id_bytes
+                    .try_into()
+                    .map_err(|_| "node returned an invalid vault ID")?,
+            );
+            let output_bytes =
+                hex::decode(&entry.output).map_err(|_| "node returned an invalid vault output")?;
+            let output: kernel::transaction::VaultOutput = canonical_decode(&output_bytes)
+                .map_err(|_| "node returned an invalid vault output")?;
+            if let Some(vault) = wallet.0.scan_vault(id, &output)? {
+                owned.push(vault);
+            }
+        }
+        match page.next_offset {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    println!("payment_address: {}", wallet.0.payment_address_string());
+    println!("vaults: {}", owned.len());
+    for vault in owned {
+        match vault.value {
+            kernel::transaction::VaultValue::Coin(amount) => println!(
+                "- vault: {} coin_zeno: {}",
+                hex::encode(vault.id.as_bytes()),
+                amount.as_zeno()
+            ),
+            kernel::transaction::VaultValue::Asset(share) => println!(
+                "- vault: {} asset: {} amount: {}",
+                hex::encode(vault.id.as_bytes()),
+                share.asset,
+                share.amount.as_units()
+            ),
+        }
     }
     Ok(())
 }
@@ -1414,7 +1484,7 @@ fn format_amount(units: u64) -> String {
 
 fn print_help() {
     println!(
-        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--account account]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--account ACCOUNT]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet consolidate [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet version\n\nAll signature accounts are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 zeno per canonical transaction byte; manual --miner fee input is not supported. Consolidation merges selected XPQ UTXOs into one self-owned output and remains subject to archival burn and miner fee. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs.\nRunning without a command opens the interactive menu.\nWithout --input, spend selects active XPQ inputs and calculates change through node RPC."
+        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--account account]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--account ACCOUNT]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet vaults [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet consolidate [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet version\n\nAll signature accounts are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 zeno per canonical transaction byte; manual --miner fee input is not supported. Consolidation merges selected XPQ UTXOs into one self-owned output and remains subject to archival burn and miner fee. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs. Vault scanning decapsulates ML-KEM envelopes locally and never sends the KEM secret to the node.\nRunning without a command opens the interactive menu.\nWithout --input, spend selects active XPQ inputs and calculates change through node RPC."
     );
     println!(
         "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply AMOUNT --initial-mint AMOUNT [--fixed-supply] [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset Hash --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset Hash --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset Hash --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset Hash [--rpc ADDRESS]\nwallet asset-balance --asset Hash [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts use the human decimal denomination declared by asset metadata. For decimals=8, 1.25 is encoded canonically as 125000000 Unit. Registration atomically credits the initial mint to the signing creator address."
@@ -1427,6 +1497,14 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn utxo_status(utxo: &AccountUtxo) -> &'static str {
+        if utxo.reserved {
+            "reserved"
+        } else {
+            "available"
+        }
+    }
 
     #[test]
     fn asset_symbol_is_normalized_and_rejects_non_ascii_punctuation() {

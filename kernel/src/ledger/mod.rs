@@ -6,6 +6,7 @@ mod error;
 pub mod ledger;
 mod state;
 pub mod utxo;
+pub mod vutxo;
 
 pub use error::*;
 pub use ledger::*;

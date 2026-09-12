@@ -1,6 +1,6 @@
 //! Ledger state-transition errors.
 
-use super::{account, utxo};
+use super::{account, utxo, vutxo};
 use crate::native::asset::AssetError;
 use std::{error::Error as StdError, fmt};
 
@@ -9,6 +9,7 @@ pub enum StateError {
     Utxo(utxo::Error),
     Account(account::Error),
     Asset(AssetError),
+    Vault(vutxo::Error),
     InvalidTransaction,
     OutputIndexOverflow,
     BurnOverflow,
@@ -22,6 +23,7 @@ impl fmt::Display for StateError {
             Self::Utxo(error) => write!(formatter, "UTXO transition failed: {error}"),
             Self::Account(error) => write!(formatter, "account transition failed: {error}"),
             Self::Asset(error) => write!(formatter, "asset transition failed: {error}"),
+            Self::Vault(error) => write!(formatter, "vault transition failed: {error}"),
             Self::InvalidTransaction => formatter.write_str("invalid transaction state transition"),
             Self::OutputIndexOverflow => formatter.write_str("transaction output index overflow"),
             Self::BurnOverflow => formatter.write_str("total burned amount overflow"),
@@ -44,5 +46,10 @@ impl From<account::Error> for StateError {
 impl From<AssetError> for StateError {
     fn from(error: AssetError) -> Self {
         Self::Asset(error)
+    }
+}
+impl From<vutxo::Error> for StateError {
+    fn from(error: vutxo::Error) -> Self {
+        Self::Vault(error)
     }
 }

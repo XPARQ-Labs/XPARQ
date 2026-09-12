@@ -293,6 +293,10 @@ impl TransactionStateView for LedgerState {
         self.utxos.asset(&id).copied()
     }
 
+    fn vault(&self, id: crate::transaction::VaultId) -> Option<crate::transaction::VaultOutput> {
+        self.vault_utxos.get(&id).cloned()
+    }
+
     fn account_public_key(&self, address: Address) -> Option<PublicKey> {
         self.account_keys.get_account(&address).cloned()
     }
@@ -335,6 +339,7 @@ impl LedgerState {
         if self.account_keys.is_empty()
             && self.assets.is_empty()
             && self.utxos.is_empty()
+            && self.vault_utxos.is_empty()
             && self.total_burned.is_zero()
             && self.coin_recipients.is_empty()
         {
@@ -344,6 +349,7 @@ impl LedgerState {
         let state = canonical_bytes(&(
             &self.account_keys,
             &self.utxos,
+            &self.vault_utxos,
             &self.assets,
             self.total_burned,
             &self.coin_recipients,

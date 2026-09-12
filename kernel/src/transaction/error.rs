@@ -7,6 +7,7 @@ pub enum IntentError {
     ZeroAmount,
     DuplicateInput,
     InvalidAssetCall,
+    InvalidVault,
     Encoding,
 }
 
@@ -18,6 +19,7 @@ impl fmt::Display for IntentError {
             Self::ZeroAmount => formatter.write_str("intent contains a zero amount"),
             Self::DuplicateInput => formatter.write_str("intent contains a duplicate input"),
             Self::InvalidAssetCall => formatter.write_str("asset call is structurally invalid"),
+            Self::InvalidVault => formatter.write_str("vault transaction is structurally invalid"),
             Self::Encoding => formatter.write_str("intent encoding failed"),
         }
     }

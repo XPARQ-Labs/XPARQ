@@ -3,7 +3,7 @@
 
 use std::{collections::BTreeSet, error::Error as StdError, fmt};
 
-use crypto::{Address, PublicKey, canonical_bytes};
+use crypto::{Address, HASH_SIZE, PublicKey, canonical_bytes, verify};
 
 use crate::{
     consensus::{
@@ -16,8 +16,10 @@ use crate::{
     },
     transaction::{
         AccountAuthorization, AccountIntent, AssetInstruction, AssetIntent,
-        AuthorizedAccountIntent, AuthorizedTransaction, ChainContext, IntentError, Spend,
-        SpendCommitment, SpendIntent, Transaction as OnChainTransaction,
+        AuthorizedAccountIntent, AuthorizedTransaction, AuthorizedVaultLockTransaction,
+        AuthorizedVaultSpendTransaction, ChainContext, IntentError, Spend, SpendCommitment,
+        SpendIntent, Transaction as OnChainTransaction, VaultAuthorization, VaultId, VaultLock,
+        VaultLockIntent, VaultOutput, VaultSource, VaultSpendIntent, VaultSpendOutput, VaultValue,
     },
 };
 
@@ -31,6 +33,24 @@ impl ConsensusIntent for SpendIntent {
         self.validate()
     }
 
+    fn commitment_for(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
+        self.commitment(chain)
+    }
+}
+
+impl ConsensusIntent for VaultLockIntent {
+    fn validate_structure(&self) -> Result<(), IntentError> {
+        self.validate()
+    }
+    fn commitment_for(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
+        self.commitment(chain)
+    }
+}
+
+impl ConsensusIntent for VaultSpendIntent {
+    fn validate_structure(&self) -> Result<(), IntentError> {
+        self.validate()
+    }
     fn commitment_for(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
         self.commitment(chain)
     }
@@ -102,6 +122,8 @@ impl<T> AuthorizationValidated<T> {
 pub enum ValidatedAuthorizedTransaction {
     Spend(ValidatedSpendTransaction),
     Asset(ValidatedAssetTransaction),
+    VaultLock(ValidatedVaultLockTransaction),
+    VaultSpend(ValidatedVaultSpendTransaction),
 }
 
 pub type ValidatedTransaction = ValidatedAuthorizedTransaction;
@@ -116,6 +138,18 @@ pub struct ValidatedSpendTransaction {
 pub struct ValidatedAssetTransaction {
     pub call: AuthorizationValidated<AssetIntent>,
     pub payment: AuthorizationValidated<SpendIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedVaultLockTransaction {
+    pub lock: AuthorizationValidated<VaultLockIntent>,
+    pub payment: Option<AuthorizationValidated<SpendIntent>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedVaultSpendTransaction {
+    pub spend: StructurallyValidated<VaultSpendIntent>,
+    pub payment: Option<AuthorizationValidated<SpendIntent>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +170,10 @@ pub trait TransactionStateView {
     fn share_recipient(&self, id: Share) -> Option<Address>;
 
     fn asset_share(&self, _id: Share) -> Option<AssetShare> {
+        None
+    }
+
+    fn vault(&self, _id: VaultId) -> Option<VaultOutput> {
         None
     }
 
@@ -338,7 +376,411 @@ fn validate_authorized_transaction(
                 ValidatedAssetTransaction { call, payment },
             ))
         }
+        AuthorizedTransaction::VaultLock(transaction) => validate_vault_lock(
+            *transaction,
+            chain,
+            current_height,
+            canonical_transaction_weight,
+            state,
+        ),
+        AuthorizedTransaction::VaultSpend(transaction) => validate_vault_spend(
+            *transaction,
+            chain,
+            current_height,
+            canonical_transaction_weight,
+            state,
+        ),
     }
+}
+
+fn validate_vault_lock(
+    transaction: AuthorizedVaultLockTransaction,
+    chain: ChainContext,
+    current_height: u64,
+    canonical_weight: u64,
+    state: &impl TransactionStateView,
+) -> Result<ValidatedAuthorizedTransaction, TransactionConsensusError> {
+    let lock =
+        validate_account_intent_authorization(transaction.lock, chain, current_height, state)?;
+    if lock.intent().outputs.iter().any(|output| {
+        !output
+            .envelope
+            .kem_ciphertext()
+            .kem()
+            .active_at_height(current_height)
+    }) {
+        return Err(TransactionConsensusError::KemSchemeInactive);
+    }
+    let vault_weight = vault_outputs_weight(&lock.intent().outputs)?;
+    match &lock.intent().source {
+        VaultSource::Coin { inputs } => {
+            let outputs = lock
+                .intent()
+                .outputs
+                .iter()
+                .map(|o| match o.value {
+                    VaultValue::Coin(amount) => Ok(amount),
+                    _ => Err(TransactionConsensusError::VaultValueMismatch),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let source_remainder =
+                validate_coin_values(inputs, &outputs, lock.intent().signer, state)?;
+            if !source_remainder.is_zero() {
+                return Err(TransactionConsensusError::VaultValueMismatch);
+            }
+            let payment = transaction
+                .payment
+                .ok_or(TransactionConsensusError::Intent(IntentError::InvalidVault))?;
+            let payment =
+                validate_account_intent_authorization(payment, chain, current_height, state)?;
+            let (payment_inputs, payment_outputs) = coin_parts(payment.intent())?;
+            if payment_inputs.iter().any(|id| inputs.contains(id)) {
+                return Err(TransactionConsensusError::Intent(
+                    IntentError::DuplicateInput,
+                ));
+            }
+            let actual = validate_coin_inputs(
+                payment_inputs,
+                payment_outputs,
+                payment.intent().signer,
+                state,
+            )?;
+            validate_required_burn(
+                actual,
+                StateTransitionWeight {
+                    created_coin_utxos: created_coin_output_count(payment_outputs)?,
+                    consumed_coin_utxos: count_inputs(inputs.len())?
+                        .checked_add(count_inputs(payment_inputs.len())?)
+                        .ok_or(TransactionConsensusError::Burn(BurnError::WeightOverflow))?,
+                    created_account_key_weight: combined_revealed_key_weight(
+                        lock.intent().signer,
+                        lock.revealed_account_key(),
+                        payment.intent().signer,
+                        payment.revealed_account_key(),
+                    )?,
+                    created_state_weight: vault_weight,
+                },
+                canonical_weight,
+            )?;
+            Ok(ValidatedAuthorizedTransaction::VaultLock(
+                ValidatedVaultLockTransaction {
+                    lock,
+                    payment: Some(payment),
+                },
+            ))
+        }
+        VaultSource::Asset { asset, inputs } => {
+            validate_share_ownership(inputs, lock.intent().signer, state)?;
+            let input_total = asset_input_total(*asset, inputs, state)?;
+            let output_total = lock.intent().outputs.iter().try_fold(
+                crate::native::asset::Unit::ZERO,
+                |sum, output| match output.value {
+                    VaultValue::Asset(share) if share.asset == *asset => sum
+                        .checked_add(share.amount)
+                        .ok_or(TransactionConsensusError::AssetAmountOverflow),
+                    _ => Err(TransactionConsensusError::VaultValueMismatch),
+                },
+            )?;
+            if input_total != output_total {
+                return Err(TransactionConsensusError::VaultValueMismatch);
+            }
+            let payment = transaction
+                .payment
+                .ok_or(TransactionConsensusError::Intent(IntentError::InvalidVault))?;
+            let payment =
+                validate_account_intent_authorization(payment, chain, current_height, state)?;
+            let (pi, po) = coin_parts(payment.intent())?;
+            let actual = validate_coin_inputs(pi, po, payment.intent().signer, state)?;
+            validate_required_burn(
+                actual,
+                StateTransitionWeight {
+                    created_coin_utxos: created_coin_output_count(po)?,
+                    consumed_coin_utxos: count_inputs(pi.len())?,
+                    created_account_key_weight: combined_revealed_key_weight(
+                        lock.intent().signer,
+                        lock.revealed_account_key(),
+                        payment.intent().signer,
+                        payment.revealed_account_key(),
+                    )?,
+                    created_state_weight: vault_weight,
+                },
+                canonical_weight,
+            )?;
+            Ok(ValidatedAuthorizedTransaction::VaultLock(
+                ValidatedVaultLockTransaction {
+                    lock,
+                    payment: Some(payment),
+                },
+            ))
+        }
+    }
+}
+
+fn validate_vault_spend(
+    transaction: AuthorizedVaultSpendTransaction,
+    chain: ChainContext,
+    current_height: u64,
+    canonical_weight: u64,
+    state: &impl TransactionStateView,
+) -> Result<ValidatedAuthorizedTransaction, TransactionConsensusError> {
+    let spend = validate_intent(transaction.spend, chain)?;
+    if spend.intent().outputs.iter().any(|output| matches!(output, VaultSpendOutput::Vault(vault) if !vault.envelope.kem_ciphertext().kem().active_at_height(current_height))) {
+        return Err(TransactionConsensusError::KemSchemeInactive);
+    }
+    if transaction.authorizations.len() != spend.intent().inputs.len() {
+        return Err(TransactionConsensusError::InvalidVaultAuthorization);
+    }
+    let mut input_values = Vec::with_capacity(spend.intent().inputs.len());
+    for (id, authorization) in spend
+        .intent()
+        .inputs
+        .iter()
+        .zip(&transaction.authorizations)
+    {
+        validate_vault_authorization(
+            *id,
+            authorization,
+            spend.commitment(),
+            current_height,
+            state,
+        )?;
+        input_values.push(
+            state
+                .vault(*id)
+                .ok_or(TransactionConsensusError::VaultNotFound)?
+                .value,
+        );
+    }
+    let vault_outputs: Vec<VaultOutput> = spend
+        .intent()
+        .outputs
+        .iter()
+        .filter_map(|o| match o {
+            VaultSpendOutput::Vault(v) => Some(v.clone()),
+            _ => None,
+        })
+        .collect();
+    let created_state_weight = vault_outputs_weight(&vault_outputs)?
+        .checked_add(vault_asset_outputs_weight(spend.intent())?)
+        .ok_or(TransactionConsensusError::Burn(BurnError::WeightOverflow))?;
+    match input_values
+        .first()
+        .copied()
+        .ok_or(TransactionConsensusError::VaultNotFound)?
+    {
+        VaultValue::Coin(_) => {
+            if transaction.payment.is_some() || input_values.iter().any(|v| !v.is_coin()) {
+                return Err(TransactionConsensusError::VaultValueMismatch);
+            }
+            let input_total = input_values.iter().try_fold(Zeno::ZERO, |sum, v| {
+                sum.checked_add(v.as_coin().unwrap())
+                    .ok_or(TransactionConsensusError::ZenoOverflow)
+            })?;
+            let mut transparent_count = 0_u64;
+            let output_total =
+                spend
+                    .intent()
+                    .outputs
+                    .iter()
+                    .try_fold(Zeno::ZERO, |sum, output| {
+                        let amount = match output {
+                            VaultSpendOutput::Vault(v) => v
+                                .value
+                                .as_coin()
+                                .ok_or(TransactionConsensusError::VaultValueMismatch)?,
+                            VaultSpendOutput::Coin(v) => {
+                                transparent_count = transparent_count.checked_add(1).ok_or(
+                                    TransactionConsensusError::Burn(BurnError::WeightOverflow),
+                                )?;
+                                v.amount
+                            }
+                            VaultSpendOutput::Asset(_) => {
+                                return Err(TransactionConsensusError::VaultValueMismatch);
+                            }
+                        };
+                        sum.checked_add(amount)
+                            .ok_or(TransactionConsensusError::ZenoOverflow)
+                    })?;
+            let actual = input_total
+                .checked_sub(output_total)
+                .ok_or(TransactionConsensusError::ValueMismatch)?;
+            validate_required_burn(
+                actual,
+                StateTransitionWeight {
+                    created_coin_utxos: transparent_count,
+                    created_state_weight,
+                    ..Default::default()
+                },
+                canonical_weight,
+            )?;
+            Ok(ValidatedAuthorizedTransaction::VaultSpend(
+                ValidatedVaultSpendTransaction {
+                    spend,
+                    payment: None,
+                },
+            ))
+        }
+        VaultValue::Asset(first) => {
+            if input_values
+                .iter()
+                .any(|v| !matches!(v, VaultValue::Asset(s) if s.asset == first.asset))
+            {
+                return Err(TransactionConsensusError::VaultValueMismatch);
+            }
+            let input_total =
+                input_values
+                    .iter()
+                    .try_fold(crate::native::asset::Unit::ZERO, |sum, v| {
+                        sum.checked_add(v.as_asset().unwrap().amount)
+                            .ok_or(TransactionConsensusError::AssetAmountOverflow)
+                    })?;
+            let output_total = spend.intent().outputs.iter().try_fold(
+                crate::native::asset::Unit::ZERO,
+                |sum, output| {
+                    let amount = match output {
+                        VaultSpendOutput::Vault(v) => match v.value {
+                            VaultValue::Asset(s) if s.asset == first.asset => s.amount,
+                            _ => return Err(TransactionConsensusError::VaultValueMismatch),
+                        },
+                        VaultSpendOutput::Asset(v) => v.amount,
+                        _ => return Err(TransactionConsensusError::VaultValueMismatch),
+                    };
+                    sum.checked_add(amount)
+                        .ok_or(TransactionConsensusError::AssetAmountOverflow)
+                },
+            )?;
+            if input_total != output_total {
+                return Err(TransactionConsensusError::VaultValueMismatch);
+            }
+            let payment = transaction
+                .payment
+                .ok_or(TransactionConsensusError::Intent(IntentError::InvalidVault))?;
+            let payment =
+                validate_account_intent_authorization(payment, chain, current_height, state)?;
+            let (pi, po) = coin_parts(payment.intent())?;
+            let actual = validate_coin_inputs(pi, po, payment.intent().signer, state)?;
+            validate_required_burn(
+                actual,
+                StateTransitionWeight {
+                    created_coin_utxos: created_coin_output_count(po)?,
+                    consumed_coin_utxos: count_inputs(pi.len())?,
+                    created_account_key_weight: revealed_account_key_weight(
+                        payment.revealed_account_key(),
+                    )?,
+                    created_state_weight,
+                },
+                canonical_weight,
+            )?;
+            Ok(ValidatedAuthorizedTransaction::VaultSpend(
+                ValidatedVaultSpendTransaction {
+                    spend,
+                    payment: Some(payment),
+                },
+            ))
+        }
+    }
+}
+
+fn validate_vault_authorization(
+    id: VaultId,
+    auth: &VaultAuthorization,
+    commitment: SpendCommitment,
+    height: u64,
+    state: &impl TransactionStateView,
+) -> Result<(), TransactionConsensusError> {
+    if auth.vault != id {
+        return Err(TransactionConsensusError::InvalidVaultAuthorization);
+    }
+    let vault = state
+        .vault(id)
+        .ok_or(TransactionConsensusError::VaultNotFound)?;
+    if !auth.public_key.account.active_at_height(height)
+        || VaultLock::derive(&auth.public_key, &auth.opening) != vault.lock
+        || !verify(&auth.public_key, commitment.as_bytes(), &auth.signature)
+    {
+        return Err(TransactionConsensusError::InvalidVaultAuthorization);
+    }
+    Ok(())
+}
+
+fn validate_coin_values(
+    inputs: &[XPQ],
+    outputs: &[Zeno],
+    signer: Address,
+    state: &impl TransactionStateView,
+) -> Result<Zeno, TransactionConsensusError> {
+    ensure_unique_coin_ids(inputs.iter().copied())?;
+    let input_total = inputs.iter().try_fold(Zeno::ZERO, |sum, id| {
+        let coin = state
+            .coin(*id)
+            .ok_or(TransactionConsensusError::UtxoNotFound)?;
+        if state.coin_recipient(*id) != Some(signer) {
+            return Err(TransactionConsensusError::RecipientMismatch);
+        }
+        sum.checked_add(coin.amount)
+            .ok_or(TransactionConsensusError::ZenoOverflow)
+    })?;
+    let output_total = outputs.iter().try_fold(Zeno::ZERO, |sum, amount| {
+        sum.checked_add(*amount)
+            .ok_or(TransactionConsensusError::ZenoOverflow)
+    })?;
+    input_total
+        .checked_sub(output_total)
+        .ok_or(TransactionConsensusError::ValueMismatch)
+}
+
+fn asset_input_total(
+    asset: crate::native::asset::Contract,
+    inputs: &[Share],
+    state: &impl TransactionStateView,
+) -> Result<crate::native::asset::Unit, TransactionConsensusError> {
+    inputs
+        .iter()
+        .try_fold(crate::native::asset::Unit::ZERO, |sum, id| {
+            let share = state
+                .asset_share(*id)
+                .ok_or(TransactionConsensusError::UtxoNotFound)?;
+            if share.asset != asset {
+                return Err(TransactionConsensusError::VaultValueMismatch);
+            }
+            sum.checked_add(share.amount)
+                .ok_or(TransactionConsensusError::AssetAmountOverflow)
+        })
+}
+
+fn vault_outputs_weight(outputs: &[VaultOutput]) -> Result<u64, TransactionConsensusError> {
+    outputs.iter().try_fold(0_u64, |sum, output| {
+        let len = canonical_bytes(&(VaultId::ZERO, output))
+            .map_err(|_| TransactionConsensusError::Encoding)?
+            .len();
+        sum.checked_add(
+            u64::try_from(len)
+                .map_err(|_| TransactionConsensusError::Burn(BurnError::WeightOverflow))?,
+        )
+        .ok_or(TransactionConsensusError::Burn(BurnError::WeightOverflow))
+    })
+}
+
+fn vault_asset_outputs_weight(intent: &VaultSpendIntent) -> Result<u64, TransactionConsensusError> {
+    intent.outputs.iter().try_fold(0_u64, |sum, output| {
+        let VaultSpendOutput::Asset(output) = output else {
+            return Ok(sum);
+        };
+        let value_len = canonical_bytes(&AssetShare {
+            asset: crate::native::asset::Contract::from_bytes([0; HASH_SIZE]),
+            amount: output.amount,
+        })
+        .map_err(|_| TransactionConsensusError::Encoding)?
+        .len();
+        let entry = HASH_SIZE
+            .checked_add(value_len)
+            .ok_or(TransactionConsensusError::Burn(BurnError::WeightOverflow))?;
+        sum.checked_add(
+            u64::try_from(entry)
+                .map_err(|_| TransactionConsensusError::Burn(BurnError::WeightOverflow))?,
+        )
+        .ok_or(TransactionConsensusError::Burn(BurnError::WeightOverflow))
+    })
 }
 
 fn count_inputs(len: usize) -> Result<u64, TransactionConsensusError> {
@@ -590,11 +1032,16 @@ pub enum TransactionConsensusError {
     Intent(IntentError),
     InvalidAuthorization,
     SignatureSchemeInactive,
+    KemSchemeInactive,
     UtxoNotFound,
     OwnershipProofMissing,
     RecipientMismatch,
     ZenoOverflow,
     ValueMismatch,
+    VaultNotFound,
+    InvalidVaultAuthorization,
+    VaultValueMismatch,
+    AssetAmountOverflow,
     Asset(AssetError),
     Burn(BurnError),
 }
@@ -610,6 +1057,9 @@ impl fmt::Display for TransactionConsensusError {
             Self::SignatureSchemeInactive => {
                 formatter.write_str("transaction signature scheme is not active at this height")
             }
+            Self::KemSchemeInactive => {
+                formatter.write_str("transaction KEM scheme is not active at this height")
+            }
             Self::UtxoNotFound => formatter.write_str("transaction input UTXO was not found"),
             Self::OwnershipProofMissing => {
                 formatter.write_str("transaction input ownership proof is unavailable")
@@ -621,6 +1071,14 @@ impl fmt::Display for TransactionConsensusError {
             Self::ValueMismatch => {
                 formatter.write_str("transaction outputs exceed canonical input value")
             }
+            Self::VaultNotFound => formatter.write_str("transaction input vault was not found"),
+            Self::InvalidVaultAuthorization => {
+                formatter.write_str("vault ownership authorization is invalid")
+            }
+            Self::VaultValueMismatch => {
+                formatter.write_str("vault input and output values are incompatible")
+            }
+            Self::AssetAmountOverflow => formatter.write_str("vault asset amount overflow"),
             Self::Asset(error) => write!(formatter, "invalid native asset transaction: {error}"),
             Self::Burn(error) => write!(formatter, "invalid protocol burn: {error}"),
         }

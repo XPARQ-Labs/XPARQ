@@ -1,6 +1,6 @@
 //! Canonical ledger state and rollback journal types.
 
-use super::{account, utxo};
+use super::{account, utxo, vutxo};
 
 use crate::native::{
     asset::{AssetShare, Contract, Metadata, MintCapability, MintCapabilityId, Share, Unit},
@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 pub struct LedgerState {
     pub account_keys: account::Registry,
     pub utxos: utxo::UtxoSet,
+    pub vault_utxos: vutxo::VaultUtxoSet,
     pub assets: AssetState,
     pub total_burned: Zeno,
     pub(crate) coin_recipients: BTreeMap<XPQ, Address>,
@@ -23,6 +24,10 @@ pub struct LedgerState {
 impl LedgerState {
     pub const fn utxos(&self) -> &utxo::UtxoSet {
         &self.utxos
+    }
+
+    pub const fn vault_utxos(&self) -> &vutxo::VaultUtxoSet {
+        &self.vault_utxos
     }
 
     pub fn coin_recipient(&self, id: XPQ) -> Option<Address> {
@@ -94,6 +99,18 @@ pub struct AssetRollbackJournal {
     pub(crate) capabilities: Vec<(MintCapabilityId, Option<MintCapability>)>,
 }
 
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct VaultRollbackJournal {
+    pub(crate) consumed_coins: Vec<(XPQ, Zeno, Address)>,
+    pub(crate) consumed_assets: Vec<(Share, AssetShare, Address)>,
+    pub(crate) consumed_vaults: Vec<(crate::transaction::VaultId, crate::transaction::VaultOutput)>,
+    pub(crate) created_coins: Vec<XPQ>,
+    pub(crate) created_assets: Vec<Share>,
+    pub(crate) created_vaults: Vec<crate::transaction::VaultId>,
+    pub(crate) registered_accounts: Vec<Address>,
+    pub(crate) burned: Zeno,
+}
+
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq)]
 pub enum StateRollbackJournal {
     Spend(SpendRollbackJournal),
@@ -105,6 +122,10 @@ pub enum StateRollbackJournal {
         asset: AssetRollbackJournal,
         payment: SpendRollbackJournal,
     },
+    Vault {
+        vault: VaultRollbackJournal,
+        payment: Option<SpendRollbackJournal>,
+    },
 }
 
 impl StateRollbackJournal {
@@ -113,6 +134,10 @@ impl StateRollbackJournal {
             Self::Spend(journal) => journal.burned,
             Self::AssetWithPayment { payment, .. }
             | Self::AssetSpendWithPayment { payment, .. } => payment.burned,
+            Self::Vault { vault, payment } => match payment {
+                Some(payment) => payment.burned,
+                None => vault.burned,
+            },
         }
     }
 }
