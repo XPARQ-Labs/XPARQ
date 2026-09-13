@@ -16,8 +16,6 @@ pub enum SignatureScheme {
     MlDsa65 = 2,
     MlDsa87 = 3,
     SqisignLevel5 = 4,
-    Falcon512 = 5,
-    Falcon1024 = 6,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -136,19 +134,14 @@ pub enum SignatureContext {
     RecoveryProof = 3,
 }
 
-/// Falcon-512 account authorizations are accepted from genesis.
-/// ML-DSA-44 remains valid; this is coexistence, not replacement.
-pub const FALCON_512_ACTIVATION_HEIGHT: u64 = 0;
-
 pub const fn account_signature_scheme_active_at_height(
     scheme: SignatureScheme,
-    height: u64,
+    _height: u64,
 ) -> bool {
-    match scheme {
-        SignatureScheme::MlDsa44 => true,
-        SignatureScheme::Falcon512 => height >= FALCON_512_ACTIVATION_HEIGHT,
-        _ => false,
-    }
+    matches!(
+        scheme,
+        SignatureScheme::MlDsa44 | SignatureScheme::MlDsa65 | SignatureScheme::MlDsa87
+    )
 }
 
 #[cfg(not(feature = "sqisign-blockchain-test"))]
@@ -258,18 +251,13 @@ mod tests {
     }
 
     #[test]
-    fn falcon_512_coexists_with_ml_dsa_from_genesis() {
-        assert!(account_signature_scheme_active_at_height(
+    fn only_ml_dsa_accounts_are_active() {
+        for scheme in [
             SignatureScheme::MlDsa44,
-            0,
-        ));
-        assert!(account_signature_scheme_active_at_height(
-            SignatureScheme::MlDsa44,
-            0,
-        ));
-        assert!(account_signature_scheme_active_at_height(
-            SignatureScheme::Falcon512,
-            0,
-        ));
+            SignatureScheme::MlDsa65,
+            SignatureScheme::MlDsa87,
+        ] {
+            assert!(account_signature_scheme_active_at_height(scheme, 0));
+        }
     }
 }

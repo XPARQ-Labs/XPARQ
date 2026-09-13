@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, error::Error as StdError, fmt};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crypto::{Address, BlockHash, HashDomain, PublicKey, StateRoot, canonical_bytes, domain};
+use crypto::{BlockHash, HashDomain, StateRoot, canonical_bytes, domain};
 
 use crate::{
     blockchain::{Block, Chain, ChainError},
@@ -11,7 +11,7 @@ use crate::{
         ApplyBlockState, CoinInputState, ConsensusError, EmissionError, TransactionConsensusError,
         TransactionStateView, ValidatedBlock, validate_emission, validate_transaction,
     },
-    ledger::{LedgerState, SpendRollbackJournal, StateError, StateRollbackJournal},
+    ledger::{CoinUtxo, LedgerState, SpendRollbackJournal, StateError, StateRollbackJournal},
     native::coin::XPQ,
 };
 
@@ -22,7 +22,15 @@ pub struct Ledger {
 
     journals: BTreeMap<Height, Vec<StateRollbackJournal>>,
 
-    chain_context: Option<crate::transaction::ChainContext>,
+    chain_context: Option<crate::common::ChainContext>,
+}
+
+struct ExecutedBlock {
+    state: LedgerState,
+    journals: Vec<StateRollbackJournal>,
+    state_root: StateRoot,
+    block_weight: u32,
+    chain_context: crate::common::ChainContext,
 }
 
 impl Ledger {
@@ -73,53 +81,63 @@ impl Ledger {
         &self,
         block: &Block,
     ) -> Result<(StateRoot, u32), LedgerError> {
-        let mut staged = self.state.clone();
+        let executed = self.execute_block(block)?;
+        Ok((executed.state_root, executed.block_weight))
+    }
 
+    fn execute_block(&self, block: &Block) -> Result<ExecutedBlock, LedgerError> {
+        let mut state = self.state.clone();
+        let mut journals = Vec::new();
         let block_weight =
-            u64::try_from(block.weight()?).map_err(|_| LedgerError::InvalidBlockWeight)?;
-
+            u32::try_from(block.weight()?).map_err(|_| LedgerError::InvalidBlockWeight)?;
         let height = block.height();
-
-        let chain_context = self.chain_context.ok_or(LedgerError::EmptyChain)?;
-
-        let emission = validate_emission(block)?;
-
-        //
-        // Emission creates one XPQ UTXO.
-        //
-        // The ownerless UTXO value is paired with its canonical origin index.
-        //
-        let id = XPQ::from_emission_origin(&emission.origin().0);
-
-        staged.utxos.insert_coin(id, emission.miner_emission())?;
-        staged.coin_recipients.insert(id, block.miner_address());
-
-        let mut emission_journal = SpendRollbackJournal {
-            created_coin_ids: vec![id],
-            ..SpendRollbackJournal::default()
+        let chain_context = match self.chain_context {
+            Some(context) => context,
+            None if block.is_genesis() => {
+                crate::common::ChainContext::new(block.hash()?.into_bytes())
+            }
+            None => return Err(LedgerError::EmptyChain),
         };
 
-        staged.record_protocol_burn(emission.protocol_burn(), &mut emission_journal)?;
-
-        //
-        // Validate and execute transactions against staged state.
-        //
-        for transaction in block.transactions() {
-            let validated =
-                validate_transaction(transaction.clone(), chain_context, height.0, &staged)?;
-
-            staged.apply_validated_transaction(
-                &validated,
-                height,
-                block.miner_address(),
-                chain_context,
+        if !block.is_genesis() {
+            let emission = validate_emission(block)?;
+            let id = XPQ::from_emission_origin(&emission.origin().0);
+            state.utxos.insert_coin(
+                id,
+                CoinUtxo {
+                    amount: emission.miner_emission(),
+                    owner: block.miner_address(),
+                },
             )?;
+            let mut spend = SpendRollbackJournal {
+                created_coin_ids: vec![id],
+                ..SpendRollbackJournal::default()
+            };
+            state.record_protocol_burn(emission.protocol_burn(), &mut spend)?;
+            journals.push(StateRollbackJournal {
+                spend: Some(spend),
+                asset: None,
+            });
         }
 
-        let block_weight =
-            u32::try_from(block_weight).map_err(|_| LedgerError::InvalidBlockWeight)?;
+        for transaction in block.transactions() {
+            let validated =
+                validate_transaction(transaction.clone(), chain_context, height.0, &state)?;
+            journals.push(state.apply_validated_transaction(
+                &validated,
+                block.miner_address(),
+                chain_context,
+            )?);
+        }
 
-        Ok((staged.application_state_root()?, block_weight))
+        let state_root = state.application_state_root()?;
+        Ok(ExecutedBlock {
+            state,
+            journals,
+            state_root,
+            block_weight,
+            chain_context,
+        })
     }
 
     pub fn rollback_tip(&mut self) -> Result<Block, LedgerError> {
@@ -158,97 +176,21 @@ impl Ledger {
 
     fn apply_validated_block(&mut self, validated: ValidatedBlock) -> Result<(), LedgerError> {
         let block = validated.block();
-
         let height = block.height();
+        let executed = self.execute_block(block)?;
 
-        let miner = block.miner_address();
-
-        let chain_context = match self.chain_context {
-            Some(chain_context) => chain_context,
-
-            None => {
-                let genesis = self.chain.block(&Height(0)).unwrap_or(block);
-
-                crate::transaction::ChainContext::new(genesis.hash()?.into_bytes())
-            }
-        };
-
-        let mut staged_state = self.state.clone();
-
-        let expected_block_weight =
-            u64::try_from(block.weight()?).map_err(|_| LedgerError::InvalidBlockWeight)?;
-
-        let mut block_journals = Vec::new();
-
-        //
-        // Apply block emission.
-        //
-        if let Some(emission) = validated.emission() {
-            let id = XPQ::from_emission_origin(&emission.origin().0);
-
-            staged_state
-                .utxos
-                .insert_coin(id, emission.miner_emission())?;
-            staged_state.coin_recipients.insert(id, miner);
-
-            let mut journal = SpendRollbackJournal {
-                created_coin_ids: vec![id],
-                ..SpendRollbackJournal::default()
-            };
-
-            staged_state.record_protocol_burn(emission.protocol_burn(), &mut journal)?;
-
-            block_journals.push(StateRollbackJournal::Spend(journal));
-        }
-
-        //
-        // Execute validated transactions.
-        //
-        for transaction in block.transactions() {
-            let validated_transaction =
-                validate_transaction(transaction.clone(), chain_context, height.0, &staged_state)?;
-
-            let journal = staged_state.apply_validated_transaction(
-                &validated_transaction,
-                height,
-                miner,
-                chain_context,
-            )?;
-
-            block_journals.push(journal);
-        }
-
-        //
-        // Verify block weight.
-        //
-        if expected_block_weight != u64::from(block.block_weight()) {
+        if executed.block_weight != block.block_weight() {
             return Err(LedgerError::InvalidBlockWeight);
         }
-
-        //
-        // Verify canonical state root.
-        //
-        let state_root = staged_state.application_state_root()?;
-
-        if block.state_root() != state_root {
+        if block.state_root() != executed.state_root {
             return Err(LedgerError::InvalidStateRoot);
         }
-
-        //
-        // Commit chain + state atomically.
-        //
         let mut staged_chain = self.chain.clone();
-
         staged_chain.insert_block(block.clone())?;
-
-        self.state = staged_state;
-
+        self.state = executed.state;
         self.chain = staged_chain;
-
-        self.chain_context = Some(chain_context);
-
-        self.journals.insert(height, block_journals);
-
+        self.chain_context = Some(executed.chain_context);
+        self.journals.insert(height, executed.journals);
         Ok(())
     }
 }
@@ -275,15 +217,10 @@ impl ApplyBlockState for Ledger {
 
 impl TransactionStateView for LedgerState {
     fn coin(&self, id: XPQ) -> Option<CoinInputState> {
-        self.utxos.coin(&id).map(|amount| CoinInputState { amount })
-    }
-
-    fn coin_recipient(&self, id: XPQ) -> Option<Address> {
-        self.coin_recipients.get(&id).copied()
-    }
-
-    fn share_recipient(&self, id: crate::native::asset::Share) -> Option<Address> {
-        self.assets.share_recipients.get(&id).copied()
+        self.utxos.coin(&id).map(|coin| CoinInputState {
+            amount: coin.amount,
+            owner: coin.owner,
+        })
     }
 
     fn asset_share(
@@ -291,14 +228,6 @@ impl TransactionStateView for LedgerState {
         id: crate::native::asset::Share,
     ) -> Option<crate::native::asset::AssetShare> {
         self.utxos.asset(&id).copied()
-    }
-
-    fn vault(&self, id: crate::transaction::VaultId) -> Option<crate::transaction::VaultOutput> {
-        self.vault_utxos.get(&id).cloned()
-    }
-
-    fn account_public_key(&self, address: Address) -> Option<PublicKey> {
-        self.account_keys.get_account(&address).cloned()
     }
 
     fn asset_spend_created_state_weight(
@@ -309,13 +238,8 @@ impl TransactionStateView for LedgerState {
             .asset_parts()
             .ok_or(crate::native::asset::AssetError::InvalidProgram)?;
 
-        self.assets.account_transfer_created_state_weight(
-            &self.utxos,
-            intent.signer,
-            asset,
-            inputs,
-            outputs,
-        )
+        self.assets
+            .account_transfer_created_state_weight(&self.utxos, asset, inputs, outputs)
     }
 
     fn asset_transition_created_state_weight(
@@ -336,24 +260,11 @@ impl TransactionStateView for LedgerState {
 
 impl LedgerState {
     pub(crate) fn application_state_root(&self) -> Result<StateRoot, LedgerError> {
-        if self.account_keys.is_empty()
-            && self.assets.is_empty()
-            && self.utxos.is_empty()
-            && self.vault_utxos.is_empty()
-            && self.total_burned.is_zero()
-            && self.coin_recipients.is_empty()
-        {
+        if self.assets.is_empty() && self.utxos.is_empty() && self.total_burned.is_zero() {
             return Ok(StateRoot::ZERO);
         }
 
-        let state = canonical_bytes(&(
-            &self.account_keys,
-            &self.utxos,
-            &self.vault_utxos,
-            &self.assets,
-            self.total_burned,
-            &self.coin_recipients,
-        ))?;
+        let state = canonical_bytes(&(&self.utxos, &self.assets, self.total_burned))?;
 
         Ok(StateRoot(
             domain(HashDomain::ProtocolState, &state).into_bytes(),

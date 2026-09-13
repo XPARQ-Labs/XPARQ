@@ -1,6 +1,7 @@
 pub mod blockchain;
 pub mod common;
 pub mod consensus;
+pub mod error;
 pub mod genesis;
 pub mod ledger;
 pub mod native;

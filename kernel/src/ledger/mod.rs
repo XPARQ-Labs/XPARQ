@@ -1,14 +1,11 @@
 //! Canonical UTXO ledger state.
 
-pub mod account;
 pub mod applied;
-mod error;
 pub mod ledger;
 mod state;
 pub mod utxo;
-pub mod vutxo;
 
-pub use error::*;
+pub use crate::error::StateError;
 pub use ledger::*;
 pub use state::*;
 pub use utxo::*;

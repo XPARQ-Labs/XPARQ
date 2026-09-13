@@ -12,11 +12,11 @@ mainnet = []
 testnet = []
 devnet = ["sqisign-blockchain-test"]
 sqisign-blockchain-test = ["dep:rand_10", "dep:sqisign_rs", "dep:chacha20"]
+falcon-candidate = ["dep:fn-dsa"]
 
 [dependencies]
 sha3.workspace = true
 ml_dsa.workspace = true
-ml_kem.workspace = true
 sqisign_rs = { workspace = true, optional = true }
 rand_10 = { workspace = true, optional = true }
 chacha20 = { workspace = true, optional = true }
@@ -26,5 +26,5 @@ hex.workspace = true
 zeroize.workspace = true
 argon2.workspace = true
 static_assertions.workspace = true
-fn-dsa.workspace = true
+fn-dsa = { workspace = true, optional = true }
 rand_core_06.workspace = true

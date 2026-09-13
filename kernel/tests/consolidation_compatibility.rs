@@ -17,8 +17,8 @@ fn mainnet_genesis_is_unchanged_and_effect_rules_have_a_new_identity() {
     assert_eq!(
         genesis::chain_spec_hash().unwrap().into_bytes(),
         [
-            83, 224, 12, 56, 185, 39, 161, 57, 138, 115, 139, 102, 17, 169, 220, 8, 78, 78, 226,
-            64, 119, 97, 85, 80, 196, 14, 14, 80, 32, 111, 144, 234
+            76, 112, 241, 202, 189, 79, 237, 208, 176, 27, 83, 246, 124, 255, 76, 221, 5, 147, 76,
+            55, 149, 14, 184, 212, 189, 75, 174, 39, 171, 152, 191, 252
         ]
     );
     assert_ne!(
@@ -61,10 +61,10 @@ fn native_asset_and_share_ids_are_frozen() {
     .unwrap();
     assert_eq!(
         parent.to_string(),
-        "40db0d5be4a57edb2d3c7ce96fc4d600ff37c65042dd9793191bdefce60dd659"
+        "e91c4dea105744cb320d7881bc55ce8bf492da026f19daa99be649b11939e87c"
     );
     assert_eq!(
         Share::derive(parent, [9; 32], 3).to_string(),
-        "baed600776659b95bf8c4ca0b8b225dd633b42a20cd9db1acce2e0b262a90aa4"
+        "283647b427cd9a41c83845d7045e80a254b3ecf8cc998495179e2e972640f8b1"
     );
 }

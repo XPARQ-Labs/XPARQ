@@ -10,29 +10,14 @@ use crate::{
     native::coin::{CoinOutput, XPQ, Zeno},
 };
 
-use crypto::{
-    ADDRESS_SIZE, Address, HASH_SIZE, Hash, HashDomain, PublicKey, canonical_bytes, domain,
-};
-
-// -----------------------------------------------------------------------------
-// WBDA
-// -----------------------------------------------------------------------------
+use crypto::{ADDRESS_SIZE, Address, HASH_SIZE, Hash, HashDomain, canonical_bytes, domain};
 
 pub const WBDA_WINDOW: usize = 25_000;
-
 pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 1 * 1024 * 1024;
-
-/// Below 45% utilization, increase difficulty.
-pub const WBDA_LOW_UTILIZATION_PPM: u64 = 450_000;
-
-/// Above 55% utilization, decrease difficulty.
-pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 550_000;
-
+pub const WBDA_LOW_UTILIZATION_PPM: u64 = 400_000;
+pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 600_000;
 pub const WBDA_DIFFICULTY_STEP: u32 = 1;
-
-pub const WBDA_ALGORITHM: &str = "argon2id-wbda-algorithm";
-
-pub const DIFFICULTY_ALGORITHM: &str = WBDA_ALGORITHM;
+pub const DIFFICULTY_ALGORITHM: &str = "argon2id-wbda-algorithm";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WbdaAdjustment {
@@ -68,11 +53,6 @@ pub fn utilization_ppm(block_weights: &[usize]) -> Option<u64> {
     Some(average.saturating_mul(1_000_000) / target)
 }
 
-/// WBDA policy:
-///
-/// - utilization < 50% => increase difficulty
-/// - utilization = 50% => keep difficulty
-/// - utilization > 50% => decrease difficulty
 pub fn adjustment_for_utilization_ppm(utilization: u64) -> WbdaAdjustment {
     if utilization < WBDA_LOW_UTILIZATION_PPM {
         WbdaAdjustment::Increase
@@ -148,20 +128,11 @@ pub fn expected_difficulty_for_height<E>(
     ))
 }
 
-// -----------------------------------------------------------------------------
-// Emission
-// -----------------------------------------------------------------------------
 pub const BLOCK_EMISSION_START: u64 = 1_000_000;
 pub const MAX_BLOCK_EMISSION: u64 = 10_000_000;
-
-/// Permanent tail emission: 0.5 XPQ per block.
 pub const TAIL_BLOCK_EMISSION: u64 = 500_000;
-
-/// Subsidy reduction: 0.5 XPQ per emission interval.
 pub const BLOCK_EMISSION_STEP: u64 = 500_000;
-
-/// Emission changes every 100,000 blocks.
-pub const EMISSION_INTERVAL: u64 = 100_000;
+pub const EMISSION_INTERVAL: u64 = 50_000;
 
 const_assert!(BLOCK_EMISSION_START == XPQ::ZENO_PER_COIN);
 const_assert!(MAX_BLOCK_EMISSION == 10 * XPQ::ZENO_PER_COIN);
@@ -175,28 +146,6 @@ pub const fn initial_block_emission() -> Zeno {
 pub const fn is_emission_epoch_boundary(height: u64) -> bool {
     height > 1 && (height - 1).is_multiple_of(EMISSION_INTERVAL)
 }
-
-/// Deterministic block subsidy.
-///
-/// Schedule:
-///
-/// Rising phase:
-/// - heights 1..=100,000           =>  1.00 XPQ
-/// - heights 100,001..=200,000     =>  1.50 XPQ
-/// - heights 200,001..=300,000     =>  2.00 XPQ
-/// - ...
-/// - heights 1,800,001..=1,900,000 => 10.00 XPQ
-///
-/// Declining phase:
-/// - heights 1,900,001..=2,000,000 =>  9.50 XPQ
-/// - heights 2,000,001..=2,100,000 =>  9.00 XPQ
-/// - ...
-/// - heights 3,600,001..=3,700,000 =>  1.00 XPQ
-///
-/// Tail:
-/// - height 3,700,001 onward        =>  0.50 XPQ forever
-///
-/// Emission is independent from WBDA and block utilization.
 
 pub fn block_emission_for_height(height: Height) -> Zeno {
     let completed_intervals = height.0.saturating_sub(1) / EMISSION_INTERVAL;
@@ -308,20 +257,11 @@ pub(crate) fn authorize_emission(block: &Block) -> Result<ValidatedEmission, Emi
     })
 }
 
-/// Returns the exact consensus subsidy for a block height.
-///
-/// Kept as a semantic wrapper so callers do not need to know how the
-/// emission schedule itself is calculated.
 pub fn expected_emission_for_height(height: Height) -> Zeno {
     block_emission_for_height(height)
 }
 
-// -----------------------------------------------------------------------------
-// Protocol burn
-// -----------------------------------------------------------------------------
-
 pub const STATE_BURN_ALGORITHM: &str = "xparq-canonical-archival-and-net-coin-state-growth-burn";
-
 pub const STATE_BURN_RATE_ZENO_PER_WEIGHT: u64 = 1;
 
 const BORSH_OPTION_TAG_BYTES: usize = 1;
@@ -336,10 +276,9 @@ pub const EMPTY_BLOCK_ARCHIVAL_BYTES: u64 = (3 * HASH_SIZE
     + core::mem::size_of::<u64>()
     + BORSH_VEC_LENGTH_BYTES) as u64;
 
-/// Ownerless canonical coin UTXO: XPQ key + Zeno value.
-/// Address is intentionally not included.
+/// Canonical coin UTXO: XPQ key + amount + owner.
 pub const COIN_UTXO_STATE_WEIGHT: u64 =
-    (crate::native::coin::XPARQCoin::SIZE + core::mem::size_of::<u64>()) as u64;
+    (crate::native::coin::XPARQCoin::SIZE + core::mem::size_of::<u64>() + ADDRESS_SIZE) as u64;
 
 pub const EMISSION_UTXO_STATE_GROWTH_BURN: Zeno =
     Zeno::from_zeno(COIN_UTXO_STATE_WEIGHT * STATE_BURN_RATE_ZENO_PER_WEIGHT);
@@ -351,25 +290,10 @@ pub const MINER_PROTOCOL_BURN: Zeno = Zeno::from_zeno(
     (EMPTY_BLOCK_ARCHIVAL_BYTES + COIN_UTXO_STATE_WEIGHT) * STATE_BURN_RATE_ZENO_PER_WEIGHT,
 );
 
-pub fn account_key_state_weight(public_key: &PublicKey) -> Result<u64, BurnError> {
-    let encoded_value = 1_usize
-        .checked_add(core::mem::size_of::<u32>())
-        .and_then(|weight| weight.checked_add(public_key.bytes.len()))
-        .ok_or(BurnError::WeightOverflow)?;
-
-    u64::try_from(
-        ADDRESS_SIZE
-            .checked_add(encoded_value)
-            .ok_or(BurnError::WeightOverflow)?,
-    )
-    .map_err(|_| BurnError::WeightOverflow)
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StateTransitionWeight {
     pub created_coin_utxos: u64,
     pub consumed_coin_utxos: u64,
-    pub created_account_key_weight: u64,
     pub created_state_weight: u64,
 }
 
@@ -381,7 +305,6 @@ impl StateTransitionWeight {
 
         let created = net_coin_utxos
             .checked_mul(COIN_UTXO_STATE_WEIGHT)
-            .and_then(|weight| weight.checked_add(self.created_account_key_weight))
             .and_then(|weight| weight.checked_add(self.created_state_weight))
             .ok_or(BurnError::WeightOverflow)?;
 

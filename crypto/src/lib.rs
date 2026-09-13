@@ -3,11 +3,8 @@ pub mod agility;
 pub mod argon2;
 pub mod codec;
 mod error;
-pub mod falcon;
 pub mod hash;
-pub mod kem;
 pub mod signature;
-pub mod vault;
 
 pub mod crypto {
     pub use crate::*;
@@ -21,12 +18,5 @@ pub use codec::{
     canonical_deserialize,
 };
 pub use error::CryptoError;
-pub use falcon::{
-    FalconError, FalconKeyPair, FalconLevel, FalconPublicKey, FalconSecretKey, FalconSignature,
-    derive_public_key as derive_falcon_public_key, generate_keypair as generate_falcon_keypair,
-    keypair_from_seed as falcon_keypair_from_seed, sign as falcon_sign, verify as falcon_verify,
-};
 pub use hash::*;
-pub use kem::*;
 pub use signature::*;
-pub use vault::*;

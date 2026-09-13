@@ -3,7 +3,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
 
 use crate::native::asset::{
-    AssetError, AssetShare, Contract, Metadata, MintCapability, MintCapabilityId, Share, Unit,
+    AssetError, AssetShare, Contract, Metadata, Share, Unit,
     ensure_nonzero_asset_amount, ensure_unique_asset_inputs,
 };
 
@@ -19,7 +19,7 @@ pub enum AssetInstruction {
     },
     Mint {
         asset: Contract,
-        capability: MintCapabilityId,
+        nonce: u64,
         recipient: Address,
         amount: Unit,
     },
@@ -136,34 +136,34 @@ impl AssetIntent {
                 )?;
                 let asset = Contract::derive(&metadata)?;
 
-                weight = checked_entry_weight(weight, HASH_SIZE, &metadata)?;
-                weight = checked_entry_weight(weight, HASH_SIZE, initial_mint)?;
+                weight = checked_entry_weight(
+                    weight,
+                    HASH_SIZE,
+                    &(&metadata, initial_mint, initial_mint, 0_u64),
+                )?;
                 weight = checked_entry_weight(
                     weight,
                     HASH_SIZE,
                     &AssetShare {
                         asset: asset,
                         amount: *initial_mint,
+                        owner: self.signer,
                     },
                 )?;
-                if *mint_authority != Address::ZERO {
-                    weight = checked_entry_weight(
-                        weight,
-                        HASH_SIZE,
-                        &MintCapability {
-                            asset,
-                            authority: *mint_authority,
-                        },
-                    )?;
-                }
             }
-            AssetInstruction::Mint { asset, amount, .. } => {
+            AssetInstruction::Mint {
+                asset,
+                recipient,
+                amount,
+                ..
+            } => {
                 weight = checked_entry_weight(
                     weight,
                     HASH_SIZE,
                     &AssetShare {
                         asset: *asset,
                         amount: *amount,
+                        owner: *recipient,
                     },
                 )?;
             }

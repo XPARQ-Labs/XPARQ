@@ -322,8 +322,6 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     let state_burn = kernel::consensus::StateTransitionWeight {
         created_coin_utxos: 3,
         consumed_coin_utxos: 1,
-        created_account_key_weight: kernel::consensus::account_key_state_weight(&sender.public_key)
-            .unwrap(),
         ..kernel::consensus::StateTransitionWeight::default()
     }
     .state_growth_burn()
@@ -347,7 +345,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
         .unwrap();
         let transaction = AuthorizedTransaction::Spend(Box::new(
             kernel::transaction::AuthorizedSpendTransaction {
-                spend: sender.sign_account_intent(intent, false).unwrap(),
+                spend: sender.sign_account_intent(intent).unwrap(),
                 payment: None,
             },
         ));

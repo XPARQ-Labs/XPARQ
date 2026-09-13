@@ -1,143 +1,97 @@
 //! Canonical ledger state and rollback journal types.
 
-use super::{account, utxo, vutxo};
+use super::utxo::{self, CoinUtxo};
 
 use crate::native::{
-    asset::{AssetShare, Contract, Metadata, MintCapability, MintCapabilityId, Share, Unit},
+    asset::{AssetShare, Contract, Metadata, Share, Unit},
     coin::{XPQ, Zeno},
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use crypto::Address;
 use std::collections::BTreeMap;
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct LedgerState {
-    pub account_keys: account::Registry,
     pub utxos: utxo::UtxoSet,
-    pub vault_utxos: vutxo::VaultUtxoSet,
     pub assets: AssetState,
     pub total_burned: Zeno,
-    pub(crate) coin_recipients: BTreeMap<XPQ, Address>,
 }
 
 impl LedgerState {
     pub const fn utxos(&self) -> &utxo::UtxoSet {
         &self.utxos
     }
+}
 
-    pub const fn vault_utxos(&self) -> &vutxo::VaultUtxoSet {
-        &self.vault_utxos
-    }
-
-    pub fn coin_recipient(&self, id: XPQ) -> Option<Address> {
-        self.coin_recipients.get(&id).copied()
-    }
-
-    pub fn share_recipient(&self, id: Share) -> Option<Address> {
-        self.assets.share_recipients.get(&id).copied()
-    }
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AssetRecord {
+    pub metadata: Metadata,
+    pub supply: Unit,
+    pub total_minted: Unit,
+    pub mint_nonce: u64,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AssetState {
-    pub(crate) metadata: BTreeMap<Contract, Metadata>,
-    pub(crate) supplies: BTreeMap<Contract, Unit>,
-    pub(crate) share_recipients: BTreeMap<Share, Address>,
+    pub(crate) assets: BTreeMap<Contract, AssetRecord>,
 }
 
 impl AssetState {
     pub fn is_empty(&self) -> bool {
-        self.metadata.is_empty() && self.supplies.is_empty() && self.share_recipients.is_empty()
-    }
-    pub fn metadata(&self, id: Contract) -> Option<&Metadata> {
-        self.metadata.get(&id)
-    }
-    pub fn metadata_entries(&self) -> impl Iterator<Item = (Contract, &Metadata)> + '_ {
-        self.metadata.iter().map(|(&id, metadata)| (id, metadata))
-    }
-    pub fn supply(&self, id: Contract) -> Unit {
-        self.supplies.get(&id).copied().unwrap_or(Unit::ZERO)
-    }
-    pub fn utxo<'a>(&self, utxos: &'a utxo::UtxoSet, id: Share) -> Option<&'a AssetShare> {
-        utxos.asset(&id)
-    }
-    pub fn utxos<'a>(
-        &self,
-        utxos: &'a utxo::UtxoSet,
-    ) -> impl Iterator<Item = (Share, &'a AssetShare)> + 'a {
-        utxos.assets()
+        self.assets.is_empty()
     }
 
-    pub fn mint_capability(
-        &self,
-        utxos: &utxo::UtxoSet,
-        asset: Contract,
-    ) -> Option<(MintCapabilityId, MintCapability)> {
-        utxos
-            .mint_capabilities()
-            .find(|(_, capability)| capability.asset == asset)
-            .map(|(id, capability)| (id, *capability))
+    pub fn record(&self, id: Contract) -> Option<&AssetRecord> {
+        self.assets.get(&id)
+    }
+
+    pub fn metadata(&self, id: Contract) -> Option<&Metadata> {
+        self.record(id).map(|record| &record.metadata)
+    }
+
+    pub fn metadata_entries(&self) -> impl Iterator<Item = (Contract, &Metadata)> + '_ {
+        self.assets
+            .iter()
+            .map(|(&id, record)| (id, &record.metadata))
+    }
+
+    pub fn supply(&self, id: Contract) -> Unit {
+        self.record(id).map_or(Unit::ZERO, |record| record.supply)
+    }
+
+    pub fn total_minted(&self, id: Contract) -> Option<Unit> {
+        self.record(id).map(|record| record.total_minted)
+    }
+
+    pub fn mint_nonce(&self, id: Contract) -> Option<u64> {
+        self.record(id).map(|record| record.mint_nonce)
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct SpendRollbackJournal {
-    pub(crate) consumed_coins: Vec<(XPQ, Zeno)>,
-    pub(crate) consumed_coin_recipients: Vec<(XPQ, Address)>,
+    pub(crate) consumed_coins: Vec<(XPQ, CoinUtxo)>,
     pub(crate) created_coin_ids: Vec<XPQ>,
-    pub(crate) registered_accounts: Vec<Address>,
     pub(crate) burned: Zeno,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AssetRollbackJournal {
-    pub(crate) metadata: Vec<(Contract, Option<Metadata>)>,
-    pub(crate) supplies: Vec<(Contract, Option<Unit>)>,
+    pub(crate) assets: Vec<(Contract, Option<AssetRecord>)>,
     pub(crate) utxos: Vec<(Share, Option<AssetShare>)>,
-    pub(crate) recipients: Vec<(Share, Option<Address>)>,
-    pub(crate) capabilities: Vec<(MintCapabilityId, Option<MintCapability>)>,
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
-pub struct VaultRollbackJournal {
-    pub(crate) consumed_coins: Vec<(XPQ, Zeno, Address)>,
-    pub(crate) consumed_assets: Vec<(Share, AssetShare, Address)>,
-    pub(crate) consumed_vaults: Vec<(crate::transaction::VaultId, crate::transaction::VaultOutput)>,
-    pub(crate) created_coins: Vec<XPQ>,
-    pub(crate) created_assets: Vec<Share>,
-    pub(crate) created_vaults: Vec<crate::transaction::VaultId>,
-    pub(crate) registered_accounts: Vec<Address>,
-    pub(crate) burned: Zeno,
-}
-
-#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq)]
-pub enum StateRollbackJournal {
-    Spend(SpendRollbackJournal),
-    AssetWithPayment {
-        asset: AssetRollbackJournal,
-        payment: SpendRollbackJournal,
-    },
-    AssetSpendWithPayment {
-        asset: AssetRollbackJournal,
-        payment: SpendRollbackJournal,
-    },
-    Vault {
-        vault: VaultRollbackJournal,
-        payment: Option<SpendRollbackJournal>,
-    },
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct StateRollbackJournal {
+    pub spend: Option<SpendRollbackJournal>,
+    pub asset: Option<AssetRollbackJournal>,
 }
 
 impl StateRollbackJournal {
     pub const fn protocol_burn(&self) -> Zeno {
-        match self {
-            Self::Spend(journal) => journal.burned,
-            Self::AssetWithPayment { payment, .. }
-            | Self::AssetSpendWithPayment { payment, .. } => payment.burned,
-            Self::Vault { vault, payment } => match payment {
-                Some(payment) => payment.burned,
-                None => vault.burned,
-            },
+        match &self.spend {
+            Some(journal) => journal.burned,
+            None => Zeno::ZERO,
         }
     }
 }

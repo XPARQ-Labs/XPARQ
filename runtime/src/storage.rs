@@ -7,8 +7,8 @@ use std::{
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 const DATABASE_FILE: &str = "xparq.redb";
-// Reset-chain generation 2 stores native Layer-1 asset state.
-const SCHEMA_VERSION: u32 = 2;
+// Reset-chain generation 3 stores owners inside UTXOs and unified asset records.
+const SCHEMA_VERSION: u32 = 3;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("canonical_blocks");

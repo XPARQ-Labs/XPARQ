@@ -11,16 +11,14 @@ use crypto::{
 };
 
 use crate::{
-    blockchain::{
-        error::{BlockError, CodecError},
-        merkle::{MerkleInclusionProof, merkle_root},
-    },
+    blockchain::merkle::{MerkleInclusionProof, merkle_root},
     common::{Height, Nonce},
+    error::{BlockError, CodecError},
     native::coin::Zeno,
     transaction::Transaction,
 };
 
-pub const MAX_BLOCK_SIZE: usize = 2 * 1024 * 1024;
+pub const MAX_BLOCK_SIZE: usize = 3 * 1024 * 1024;
 pub const GENESIS_BLOCK_DIFFICULTY: u32 = 1;
 
 // Lower bound for a direct coin transaction with one input, one block-miner

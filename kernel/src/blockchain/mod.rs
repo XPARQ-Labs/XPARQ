@@ -6,13 +6,12 @@
 
 pub mod block;
 pub mod chain;
-mod error;
 pub mod merkle;
 
 pub use {
     block::*,
     chain::Chain,
-    error::{BlockError, ChainError, CodecError},
+    crate::error::{BlockError, ChainError, CodecError},
     merkle::{MerkleHash, MerkleInclusionProof},
 };
 

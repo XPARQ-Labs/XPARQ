@@ -14,17 +14,15 @@ use crate::{
         WBDA_LOW_UTILIZATION_PPM, WBDA_TARGET_BLOCK_WEIGHT, WBDA_WINDOW,
     },
     ledger::{Ledger, LedgerError},
-    transaction::ChainContext,
+    common::ChainContext,
 };
 
 use borsh::BorshSerialize;
 
 use crypto::{
-    ADDRESS_SIZE, BlockHash, FALCON_512_ACTIVATION_HEIGHT, HASH_SIZE, Hash, HashDomain,
+    ADDRESS_SIZE, BlockHash, HASH_SIZE, Hash, HashDomain,
     SIGNATURE_ACTIVATION_HEIGHT, domain_hash,
 };
-
-const FORK_CHOICE_ALGORITHM: &str = "cumulative-work/cumulative-weight/hash";
 
 // -----------------------------------------------------------------------------
 // Mainnet
@@ -115,11 +113,7 @@ struct ChainSpecIdentity<'a> {
     address_encoding: &'a str,
     hash_size: u32,
 
-    // Fork choice
-    fork_choice_algorithm: &'a str,
-
     // Signature activation
-    falcon_512_activation_height: u64,
     signature_profile_activation_height: u64,
 
     // Native protocol identity
@@ -171,16 +165,12 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         address_encoding: "xparq-0x-sha3-checksum",
         hash_size: HASH_SIZE as u32,
 
-        // Fork choice
-        fork_choice_algorithm: FORK_CHOICE_ALGORITHM,
-
         // Signature activation
-        falcon_512_activation_height: FALCON_512_ACTIVATION_HEIGHT,
         signature_profile_activation_height: SIGNATURE_ACTIVATION_HEIGHT,
 
         // Native protocol identity
-        native_asset_program: "xparq-native-asset-program",
-        transaction_format: "direct-authorized-v1",
+        native_asset_program: "xparq-native-asset-record-nonce-v1",
+        transaction_format: "direct-authorized-v2",
     };
 
     let bytes = crypto::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;

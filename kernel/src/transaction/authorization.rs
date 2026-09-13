@@ -6,9 +6,11 @@ use crypto::{
 };
 
 use crate::transaction::{
-    AssetIntent, ChainContext, IntentError, Spend, SpendCommitment, SpendIntent,
-    TransactionEncodingError, VaultLockIntent,
+    AssetIntent, IntentError, Spend, SpendCommitment, SpendIntent,
+    TransactionEncodingError,
 };
+
+use crate::common::ChainContext;
 
 pub trait AccountIntent {
     fn sender(&self) -> Address;
@@ -37,29 +39,10 @@ impl AccountIntent for AssetIntent {
     }
 }
 
-impl AccountIntent for VaultLockIntent {
-    fn sender(&self) -> Address {
-        self.signer
-    }
-
-    fn commitment(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
-        VaultLockIntent::commitment(self, chain)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-#[allow(clippy::large_enum_variant)]
-pub enum AccountAuthorization {
-    /// First use of an account reveals the full public key.
-    AccountReveal {
-        public_key: PublicKey,
-        signature: AccountSignature,
-    },
-    /// Later uses refer to the signature profile already registered for the account.
-    AccountKnown {
-        account: crypto::Signature,
-        signature: AccountSignature,
-    },
+pub struct AccountAuthorization {
+    pub public_key: PublicKey,
+    pub signature: AccountSignature,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -69,17 +52,15 @@ pub struct AuthorizedAccountIntent<T> {
 }
 
 impl<T: AccountIntent> AuthorizedAccountIntent<T> {
-    pub fn verify_revealed_signature(&self, chain: ChainContext) -> Result<bool, IntentError> {
+    pub fn verify_signature(&self, chain: ChainContext) -> Result<bool, IntentError> {
         let commitment = self.intent.commitment(chain)?;
 
-        match &self.authorization {
-            AccountAuthorization::AccountReveal {
-                public_key,
-                signature,
-            } => Ok(address_from_public_key(public_key) == self.intent.sender()
-                && verify(public_key, commitment.as_bytes(), signature)),
-            AccountAuthorization::AccountKnown { .. } => Ok(false),
-        }
+        Ok(address_from_public_key(&self.authorization.public_key) == self.intent.sender()
+            && verify(
+                &self.authorization.public_key,
+                commitment.as_bytes(),
+                &self.authorization.signature,
+            ))
     }
 }
 
@@ -99,8 +80,6 @@ pub struct AuthorizedSpendTransaction {
 pub enum AuthorizedTransaction {
     Spend(Box<AuthorizedSpendTransaction>),
     Asset(Box<AuthorizedAssetTransaction>),
-    VaultLock(Box<crate::transaction::AuthorizedVaultLockTransaction>),
-    VaultSpend(Box<crate::transaction::AuthorizedVaultSpendTransaction>),
 }
 
 impl AuthorizedTransaction {
@@ -135,32 +114,6 @@ impl AuthorizedTransaction {
                 }
 
                 tx.payment.intent.validate()
-            }
-            Self::VaultLock(tx) => {
-                tx.lock.intent.validate()?;
-                match (&tx.lock.intent.source, &tx.payment) {
-                    (
-                        crate::transaction::VaultSource::Coin { .. }
-                        | crate::transaction::VaultSource::Asset { .. },
-                        Some(payment),
-                    ) if matches!(payment.intent.spend, Spend::Coin { .. }) => {
-                        payment.intent.validate()
-                    }
-                    _ => Err(IntentError::InvalidVault),
-                }
-            }
-            Self::VaultSpend(tx) => {
-                tx.spend.validate()?;
-                if tx.authorizations.len() != tx.spend.inputs.len() {
-                    return Err(IntentError::InvalidVault);
-                }
-                if let Some(payment) = &tx.payment {
-                    if !matches!(payment.intent.spend, Spend::Coin { .. }) {
-                        return Err(IntentError::InvalidVault);
-                    }
-                    payment.intent.validate()?;
-                }
-                Ok(())
             }
         }
     }

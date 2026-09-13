@@ -10,8 +10,8 @@ use kernel::native::asset::Contract;
 use kernel::native::coin::CoinOutput;
 use kernel::{
     codec::canonical_bytes,
-    consensus::{DECIMALS, StateTransitionWeight, XPQ, Zeno, account_key_state_weight},
-    crypto::{Address, Signature, address_from_string, canonical_decode},
+    consensus::{DECIMALS, StateTransitionWeight, XPQ, Zeno},
+    crypto::{Address, Signature, address_from_string},
     transaction::{
         AssetInstruction, AuthorizedAssetTransaction, AuthorizedSpendTransaction,
         AuthorizedTransaction, SpendIntent,
@@ -35,20 +35,11 @@ impl LoadedWallet {
         self.0.address
     }
 
-    fn new_account_key_weight(&self, public_key_known: bool) -> Result<u64, String> {
-        if public_key_known {
-            Ok(0)
-        } else {
-            account_key_state_weight(&self.0.public_key).map_err(|error| error.to_string())
-        }
-    }
-
     fn sign_onchain_spend(
         &self,
         intent: SpendIntent,
-        public_key_known: bool,
     ) -> Result<kernel::transaction::AuthorizedAccountIntent<SpendIntent>, String> {
-        self.0.sign_account_intent(intent, public_key_known)
+        self.0.sign_account_intent(intent)
     }
 }
 #[cfg(feature = "mainnet")]
@@ -61,7 +52,6 @@ const DEFAULT_RPC_ADDR: &str = "127.0.0.1:26666";
 #[derive(Deserialize)]
 struct AccountResponse {
     next_height: u64,
-    public_key_registered: bool,
     #[serde(rename = "utxo_snapshot")]
     _utxo_snapshot: String,
     utxos: Vec<AccountUtxo>,
@@ -105,7 +95,7 @@ struct AccountAssetShare {
 #[derive(Deserialize)]
 struct AssetMetadataResponse {
     decimals: u8,
-    mint_capability: Option<String>,
+    mint_nonce: u64,
 }
 
 #[derive(Deserialize)]
@@ -141,19 +131,6 @@ struct SubmitTransactionResponse {
     hash: String,
 }
 
-#[derive(Deserialize)]
-struct VaultPageResponse {
-    snapshot: String,
-    next_offset: Option<usize>,
-    vaults: Vec<VaultResponse>,
-}
-
-#[derive(Deserialize)]
-struct VaultResponse {
-    id: String,
-    output: String,
-}
-
 const MAX_CONSOLIDATION_INPUTS: usize = 10_000;
 
 pub fn run(mut args: Vec<String>) -> Result<(), String> {
@@ -165,7 +142,6 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         Some("balance") => print_balance(&args[1..]),
         Some("history") => print_history(&args[1..]),
         Some("utxos") | Some("utxo-tracker") => print_utxo_tracker(&args[1..]),
-        Some("vaults") | Some("vault-scan") => print_vaults(&args[1..]),
         Some("sign-spend") => sign_spend(&args[1..]),
         Some("consolidate") => consolidate_coin_utxos(&args[1..]),
         Some("asset-register") => asset_register(&args[1..]),
@@ -265,16 +241,15 @@ fn normalize_asset_symbol(symbol: &str) -> Result<String, String> {
 fn asset_mint(args: &[String]) -> Result<(), String> {
     let asset = parse_asset(args)?;
     let metadata = asset_metadata(args, asset)?;
-    let capability = metadata
-        .mint_capability
-        .ok_or("asset has no active mint capability")?
-        .parse()
-        .map_err(|_| "node returned an invalid mint capability id")?;
+    let nonce = metadata
+        .mint_nonce
+        .checked_add(1)
+        .ok_or("asset mint nonce is exhausted")?;
     submit_asset_instruction(
         args,
         AssetInstruction::Mint {
             asset,
-            capability,
+            nonce,
             recipient: asset_recipient(args)?,
             amount: parse_asset_amount(args, "--amount", metadata.decimals)?,
         },
@@ -316,11 +291,9 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
             amount: kernel::native::asset::Unit::from_units(total - amount.as_units()),
         });
     }
-    let public_key_known = account_public_key_registered(rpc, &wallet);
     let spend = wallet.sign_onchain_spend(
         SpendIntent::asset(wallet.address(), asset, inputs, outputs.clone())
             .map_err(|e| e.to_string())?,
-        public_key_known,
     )?;
     let asset_weight = outputs.iter().try_fold(0_u64, |weight, output| {
         kernel::native::asset::checked_asset_entry_weight(
@@ -329,6 +302,7 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
             &kernel::native::asset::AssetShare {
                 asset: asset,
                 amount: output.amount,
+                owner: output.recipient,
             },
         )
         .map_err(|e| format!("calculate asset state weight: {e:?}"))
@@ -350,7 +324,6 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
         let payment = wallet.sign_onchain_spend(
             SpendIntent::coin(wallet.address(), coin_inputs, fee_outputs)
                 .map_err(|e| e.to_string())?,
-            public_key_known,
         )?;
         Ok(AuthorizedTransaction::Spend(Box::new(
             AuthorizedSpendTransaction {
@@ -438,8 +411,7 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
     reject_manual_fee(args)?;
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    let public_key_known = account_public_key_registered(rpc, &wallet);
-    let call = wallet.0.sign_asset_intent(instruction, public_key_known)?;
+    let call = wallet.0.sign_asset_intent(instruction)?;
     let created_state_weight = call
         .intent
         .created_state_weight()
@@ -460,7 +432,7 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
         outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
         let fee_intent = SpendIntent::coin(wallet.address(), inputs, outputs)
             .map_err(|error| error.to_string())?;
-        let fee = wallet.sign_onchain_spend(fee_intent, public_key_known)?;
+        let fee = wallet.sign_onchain_spend(fee_intent)?;
         Ok(AuthorizedTransaction::Asset(Box::new(
             AuthorizedAssetTransaction {
                 call: call.clone(),
@@ -696,7 +668,7 @@ fn interactive_asset_wallet_rpc() -> Result<Vec<String>, String> {
 fn prompt_signature_account() -> Result<String, String> {
     loop {
         let value = prompt_default(
-            "Signature account (mldsa44, mldsa65, mldsa87, falcon512, falcon1024)",
+            "Signature account (mldsa44, mldsa65, mldsa87)",
             "mldsa44",
         )?;
         if value.parse::<Signature>().is_ok() {
@@ -800,7 +772,6 @@ fn create_wallet(args: &[String]) -> Result<(), String> {
     write_account_wallet(path, &wallet)?;
     println!("signature_account: {account}");
     println!("address: {}", kernel::crypto::address_to_string(&address));
-    println!("payment_address: {}", wallet.payment_address_string());
     println!("mnemonic: {}", mnemonic.as_str());
     println!("wallet: {path}");
     Ok(())
@@ -816,7 +787,6 @@ fn restore_wallet(args: &[String]) -> Result<(), String> {
     write_account_wallet(path, &wallet)?;
     println!("signature_account: {account}");
     println!("address: {}", kernel::crypto::address_to_string(&address));
-    println!("payment_address: {}", wallet.payment_address_string());
     println!("wallet: {path}");
     Ok(())
 }
@@ -825,7 +795,7 @@ fn signature_account_option(args: &[String]) -> Result<Option<Signature>, String
     option(args, "--account")
         .map(|value| {
             value.parse::<Signature>().map_err(|_| {
-                "invalid --account; use mldsa44, mldsa65, mldsa87, falcon512, or falcon1024"
+                "invalid --account; use mldsa44, mldsa65, or mldsa87"
                     .to_string()
             })
         })
@@ -836,12 +806,8 @@ fn print_address(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
-    let wallet = account_wallet_from_file_bytes(&bytes)?;
-    println!(
-        "address: {}",
-        kernel::crypto::address_to_string(&wallet.address)
-    );
-    println!("payment_address: {}", wallet.payment_address_string());
+    let address = wallet_address_from_file_bytes(&bytes)?;
+    println!("{}", kernel::crypto::address_to_string(&address));
     Ok(())
 }
 
@@ -941,64 +907,11 @@ fn print_utxo_tracker(args: &[String]) -> Result<(), String> {
     let mut utxos = account.utxos.iter().collect::<Vec<_>>();
     utxos.sort_by(|left, right| left.id.cmp(&right.id));
     for utxo in utxos {
-        println!("- utxo: {}  {}", utxo.id, format_amount(utxo.amount),);
-    }
-    Ok(())
-}
-
-fn print_vaults(args: &[String]) -> Result<(), String> {
-    let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
-    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    let mut offset = 0_usize;
-    let mut snapshot: Option<String> = None;
-    let mut owned = Vec::new();
-    loop {
-        let page: VaultPageResponse =
-            http_get_json(rpc, &format!("/vaults?offset={offset}&limit=256"))?;
-        match snapshot.as_deref() {
-            Some(expected) if expected != page.snapshot => {
-                return Err("chain changed while scanning vaults; retry the scan".into());
-            }
-            None => snapshot = Some(page.snapshot.clone()),
-            _ => {}
-        }
-        for entry in page.vaults {
-            let id_bytes =
-                hex::decode(&entry.id).map_err(|_| "node returned an invalid vault ID")?;
-            let id = kernel::transaction::VaultId::from_bytes(
-                id_bytes
-                    .try_into()
-                    .map_err(|_| "node returned an invalid vault ID")?,
-            );
-            let output_bytes =
-                hex::decode(&entry.output).map_err(|_| "node returned an invalid vault output")?;
-            let output: kernel::transaction::VaultOutput = canonical_decode(&output_bytes)
-                .map_err(|_| "node returned an invalid vault output")?;
-            if let Some(vault) = wallet.0.scan_vault(id, &output)? {
-                owned.push(vault);
-            }
-        }
-        match page.next_offset {
-            Some(next) => offset = next,
-            None => break,
-        }
-    }
-    println!("payment_address: {}", wallet.0.payment_address_string());
-    println!("vaults: {}", owned.len());
-    for vault in owned {
-        match vault.value {
-            kernel::transaction::VaultValue::Coin(amount) => println!(
-                "- vault: {} coin_zeno: {}",
-                hex::encode(vault.id.as_bytes()),
-                amount.as_zeno()
-            ),
-            kernel::transaction::VaultValue::Asset(share) => println!(
-                "- vault: {} asset: {} amount: {}",
-                hex::encode(vault.id.as_bytes()),
-                share.asset,
-                share.amount.as_units()
-            ),
-        }
+        println!(
+            "- utxo: {}  {}",
+            utxo.id,
+            format_amount(utxo.amount),
+        );
     }
     Ok(())
 }
@@ -1018,7 +931,6 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
         .map_err(|_| "invalid --input coin id".to_string())?;
     let wallet = load_wallet(path)?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    let known = account_public_key_registered(rpc, &wallet);
     let explicit_change = option(args, "--change").map(parse_amount).transpose()?;
     let change_target = option(args, "--change-to")
         .map(|address| address_from_string(address).map_err(|error| error.to_string()))
@@ -1042,7 +954,6 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
                 created_coin_utxos: created,
                 consumed_coin_utxos: u64::try_from(inputs.len())
                     .map_err(|_| "coin input count overflow")?,
-                created_account_key_weight: wallet.new_account_key_weight(known)?,
                 ..StateTransitionWeight::default()
             }
             .state_growth_burn()
@@ -1068,7 +979,7 @@ fn sign_spend(args: &[String]) -> Result<(), String> {
         outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
         let intent = SpendIntent::coin(wallet.address(), selected, outputs)
             .map_err(|error| error.to_string())?;
-        let signed = wallet.sign_onchain_spend(intent, known)?;
+        let signed = wallet.sign_onchain_spend(intent)?;
         Ok(AuthorizedTransaction::Spend(Box::new(
             AuthorizedSpendTransaction {
                 spend: signed,
@@ -1084,7 +995,6 @@ fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let wallet = load_wallet(path)?;
-    let public_key_known = account_public_key_registered(rpc, &wallet);
     let mut candidates = account_input_candidates(rpc, &wallet)?;
     if candidates.len() < 2 {
         return Err("consolidation requires at least two available XPQ UTXOs".into());
@@ -1114,7 +1024,6 @@ fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
         let state_growth_burn = StateTransitionWeight {
             created_coin_utxos: 2,
             consumed_coin_utxos,
-            created_account_key_weight: wallet.new_account_key_weight(public_key_known)?,
             ..StateTransitionWeight::default()
         }
         .state_growth_burn()
@@ -1134,7 +1043,7 @@ fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
         ];
         let intent = SpendIntent::coin(wallet.address(), inputs.clone(), outputs)
             .map_err(|error| error.to_string())?;
-        let signed = wallet.sign_onchain_spend(intent, public_key_known)?;
+        let signed = wallet.sign_onchain_spend(intent)?;
         Ok(AuthorizedTransaction::Spend(Box::new(
             AuthorizedSpendTransaction {
                 spend: signed,
@@ -1170,8 +1079,6 @@ fn select_account_inputs_with_state_burn(
     created_state_weight: u64,
     archival_burn: u64,
 ) -> Result<(Vec<kernel::native::coin::XPQ>, u64, u64, u64), String> {
-    let created_account_key_weight =
-        wallet.new_account_key_weight(account_public_key_registered(rpc, wallet))?;
     let candidates = account_input_candidates(rpc, wallet)?;
     let mut selected = Vec::new();
     let mut total = 0_u64;
@@ -1191,7 +1098,6 @@ fn select_account_inputs_with_state_burn(
                 created_coin_utxos: created,
                 consumed_coin_utxos: u64::try_from(selected.len())
                     .map_err(|_| "coin input count overflow")?,
-                created_account_key_weight,
                 created_state_weight,
                 ..StateTransitionWeight::default()
             }
@@ -1217,13 +1123,6 @@ fn select_account_inputs_with_state_burn(
     Err(format!(
         "insufficient available balance for amount, fee, and state burn: available {total} units"
     ))
-}
-
-fn account_public_key_registered(rpc: &str, wallet: &LoadedWallet) -> bool {
-    let address = kernel::crypto::address_to_string(&wallet.address());
-    http_get_json::<AccountResponse>(rpc, &format!("/account/{address}"))
-        .map(|response| response.public_key_registered)
-        .unwrap_or(false)
 }
 
 fn fetch_account(rpc: &str, address: &str) -> Result<AccountResponse, String> {
@@ -1484,7 +1383,7 @@ fn format_amount(units: u64) -> String {
 
 fn print_help() {
     println!(
-        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--account account]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--account ACCOUNT]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet vaults [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet consolidate [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet version\n\nAll signature accounts are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 zeno per canonical transaction byte; manual --miner fee input is not supported. Consolidation merges selected XPQ UTXOs into one self-owned output and remains subject to archival burn and miner fee. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs. Vault scanning decapsulates ML-KEM envelopes locally and never sends the KEM secret to the node.\nRunning without a command opens the interactive menu.\nWithout --input, spend selects active XPQ inputs and calculates change through node RPC."
+        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--account account]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--account ACCOUNT]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet consolidate [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet version\n\nAll signature accounts are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 zeno per canonical transaction byte; manual --miner fee input is not supported. Consolidation merges selected XPQ UTXOs into one self-owned output and remains subject to archival burn and miner fee. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs.\nRunning without a command opens the interactive menu.\nWithout --input, spend selects active XPQ inputs and calculates change through node RPC."
     );
     println!(
         "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply AMOUNT --initial-mint AMOUNT [--fixed-supply] [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset Hash --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset Hash --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset Hash --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset Hash [--rpc ADDRESS]\nwallet asset-balance --asset Hash [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts use the human decimal denomination declared by asset metadata. For decimals=8, 1.25 is encoded canonically as 125000000 Unit. Registration atomically credits the initial mint to the signing creator address."
@@ -1607,7 +1506,6 @@ mod tests {
     fn utxo_status_and_amount_format_are_canonical() {
         let account = AccountResponse {
             next_height: 100,
-            public_key_registered: false,
             _utxo_snapshot: "test-snapshot".into(),
             next_utxo_offset: None,
             next_utxo_cursor: None,

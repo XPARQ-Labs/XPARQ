@@ -18,13 +18,6 @@ use zeroize::{
     ZeroizeOnDrop,
 };
 
-use crate::{
-    FalconLevel,
-    falcon_keypair_from_seed,
-    falcon_sign,
-    falcon_verify,
-};
-
 pub const SIGNATURE_ACTIVATION_HEIGHT: u64 = 0;
 
 #[derive(
@@ -45,8 +38,6 @@ pub enum Signature {
     MlDsa44 = 1,
     MlDsa65 = 2,
     MlDsa87 = 3,
-    Falcon512 = 4,
-    Falcon1024 = 5,
 }
 
 impl Signature {
@@ -55,8 +46,6 @@ impl Signature {
             Self::MlDsa44 => "mldsa44",
             Self::MlDsa65 => "mldsa65",
             Self::MlDsa87 => "mldsa87",
-            Self::Falcon512 => "falcon512",
-            Self::Falcon1024 => "falcon1024",
         }
     }
 
@@ -77,8 +66,6 @@ impl std::str::FromStr for Signature {
             "mldsa44" => Ok(Self::MlDsa44),
             "mldsa65" => Ok(Self::MlDsa65),
             "mldsa87" => Ok(Self::MlDsa87),
-            "falcon512" => Ok(Self::Falcon512),
-            "falcon1024" => Ok(Self::Falcon1024),
             _ => Err("unknown signature account"),
         }
     }
@@ -177,16 +164,6 @@ pub fn public_key_from_seed(account: Signature, seed: &[u8; 32]) -> PublicKey {
             .verifying_key()
             .encode()
             .to_vec(),
-        Signature::Falcon512 => falcon_keypair_from_seed(FalconLevel::Level1, seed)
-            .expect("Falcon-512 seed keygen")
-            .public_key
-            .as_bytes()
-            .to_vec(),
-        Signature::Falcon1024 => falcon_keypair_from_seed(FalconLevel::Level5, seed)
-            .expect("Falcon-1024 seed keygen")
-            .public_key
-            .as_bytes()
-            .to_vec(),
     };
     PublicKey { account, bytes }
 }
@@ -207,22 +184,6 @@ pub fn sign_from_seed(account: Signature, seed: &[u8; 32], message: &[u8]) -> Ac
             let key = SigningKey::<MlDsa87>::from_seed(&(*seed).into());
             let sig: ml_dsa::Signature<MlDsa87> = key.sign(message);
             sig.to_bytes().to_vec()
-        }
-        Signature::Falcon512 => {
-            let key = falcon_keypair_from_seed(FalconLevel::Level1, seed)
-                .expect("Falcon-512 seed keygen");
-            falcon_sign(&key.secret_key, message)
-                .expect("Falcon-512 sign")
-                .as_bytes()
-                .to_vec()
-        }
-        Signature::Falcon1024 => {
-            let key = falcon_keypair_from_seed(FalconLevel::Level5, seed)
-                .expect("Falcon-1024 seed keygen");
-            falcon_sign(&key.secret_key, message)
-                .expect("Falcon-1024 sign")
-                .as_bytes()
-                .to_vec()
         }
     };
     AccountSignature { account, bytes }
@@ -255,20 +216,6 @@ pub fn verify(public_key: &PublicKey, message: &[u8], signature: &AccountSignatu
         Signature::MlDsa44 => verify_ml!(MlDsa44, 1312, 2420),
         Signature::MlDsa65 => verify_ml!(MlDsa65, 1952, 3309),
         Signature::MlDsa87 => verify_ml!(MlDsa87, 2592, 4627),
-        Signature::Falcon512 | Signature::Falcon1024 => {
-            let level = if public_key.account == Signature::Falcon512 {
-                FalconLevel::Level1
-            } else {
-                FalconLevel::Level5
-            };
-            let Ok(pk) = crate::FalconPublicKey::from_bytes(level, public_key.bytes.clone()) else {
-                return false;
-            };
-            let Ok(sig) = crate::FalconSignature::from_bytes(level, signature.bytes.clone()) else {
-                return false;
-            };
-            falcon_verify(&pk, message, &sig).unwrap_or(false)
-        }
     }
 }
 
@@ -282,8 +229,6 @@ mod tests {
             Signature::MlDsa44,
             Signature::MlDsa65,
             Signature::MlDsa87,
-            Signature::Falcon512,
-            Signature::Falcon1024,
         ] {
             let seed = SigningSeed::new(account, [31; 32]);
             let public = seed.public_key();
@@ -299,8 +244,6 @@ mod tests {
             Signature::MlDsa44,
             Signature::MlDsa65,
             Signature::MlDsa87,
-            Signature::Falcon512,
-            Signature::Falcon1024,
         ] {
             assert!(account.active_at_height(0));
         }

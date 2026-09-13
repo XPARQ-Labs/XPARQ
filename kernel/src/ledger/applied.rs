@@ -5,26 +5,17 @@ use borsh::BorshSerialize;
 use crypto::{Address, HASH_SIZE};
 
 use crate::{
-    common::{Height, Recipient},
-    consensus::{
-        AuthorizationValidated, RevealedAccountKey, ValidatedAuthorizedTransaction,
-        ValidatedTransaction,
-    },
+    common::Recipient,
+    consensus::{AuthorizationValidated, ValidatedTransaction},
     ledger::{
-        AssetRollbackJournal, AssetState, LedgerState, SpendRollbackJournal, StateError,
-        StateRollbackJournal, VaultRollbackJournal, utxo,
+        AssetRecord, AssetRollbackJournal, AssetState, CoinUtxo, LedgerState, SpendRollbackJournal,
+        StateError, StateRollbackJournal, utxo,
     },
     native::{
-        asset::{
-            AssetError, AssetOutput, AssetShare, Contract, Metadata, MintCapability,
-            MintCapabilityId, Share, Unit,
-        },
+        asset::{AssetError, AssetOutput, AssetShare, Contract, Metadata, Share, Unit},
         coin::{XPQ, Zeno},
     },
-    transaction::{
-        AssetInstruction, AssetIntent, SpendCommitment, SpendIntent, VaultId, VaultSource,
-        VaultSpendOutput, VaultValue,
-    },
+    transaction::{AssetInstruction, AssetIntent, SpendCommitment, SpendIntent},
 };
 
 //
@@ -35,36 +26,20 @@ impl LedgerState {
     pub fn apply_validated_transaction(
         &mut self,
         transaction: &ValidatedTransaction,
-        height: Height,
         block_miner: Address,
-        chain: crate::transaction::ChainContext,
+        chain: crate::common::ChainContext,
     ) -> Result<StateRollbackJournal, StateError> {
-        if matches!(
-            transaction,
-            ValidatedAuthorizedTransaction::VaultLock(_)
-                | ValidatedAuthorizedTransaction::VaultSpend(_)
-        ) {
-            let snapshot = self.clone();
-            let result = self.apply_validated_vault_transaction(transaction, block_miner);
-            if result.is_err() {
-                *self = snapshot;
+        match transaction {
+            ValidatedTransaction::CoinSpend(transaction) => {
+                let spend = self.apply_validated_onchain_spend(&transaction.spend, block_miner)?;
+                Ok(StateRollbackJournal {
+                    spend: Some(spend),
+                    asset: None,
+                })
             }
-            return result;
-        }
-        self.apply_validated_authorized_transaction(transaction, chain, block_miner, height)
-    }
-
-    fn apply_validated_authorized_transaction(
-        &mut self,
-        transaction: &ValidatedAuthorizedTransaction,
-        chain: crate::transaction::ChainContext,
-        block_miner: Address,
-        _height: Height,
-    ) -> Result<StateRollbackJournal, StateError> {
-        if let ValidatedAuthorizedTransaction::Spend(transaction) = transaction {
-            if let Some(payment) = &transaction.payment {
-                let mut payment_journal =
-                    self.apply_validated_onchain_spend(payment, block_miner)?;
+            ValidatedTransaction::AssetTransfer(transaction) => {
+                let payment_journal =
+                    self.apply_validated_onchain_spend(&transaction.payment, block_miner)?;
 
                 let (asset, inputs, outputs) = transaction
                     .spend
@@ -74,7 +49,6 @@ impl LedgerState {
 
                 let asset_journal = match self.assets.apply_account_transfer(
                     &mut self.utxos,
-                    transaction.spend.intent().signer,
                     asset,
                     inputs,
                     outputs,
@@ -88,331 +62,32 @@ impl LedgerState {
                     }
                 };
 
-                let registrations = [
-                    (payment.intent().signer, payment.revealed_account_key()),
-                    (
-                        transaction.spend.intent().signer,
-                        transaction.spend.revealed_account_key(),
-                    ),
-                ];
-
-                for (address, revealed) in registrations {
-                    self.register_revealed_account(
-                        address,
-                        revealed.cloned(),
-                        &mut payment_journal,
-                    )?;
-                }
-
-                return Ok(StateRollbackJournal::AssetSpendWithPayment {
-                    asset: asset_journal,
-                    payment: payment_journal,
-                });
+                Ok(StateRollbackJournal {
+                    spend: Some(payment_journal),
+                    asset: Some(asset_journal),
+                })
             }
-        }
+            ValidatedTransaction::AssetCall(transaction) => {
+                let payment =
+                    self.apply_validated_onchain_spend(&transaction.payment, block_miner)?;
 
-        //
-        // Asset program transaction:
-        // register / mint / burn.
-        //
-        if let ValidatedAuthorizedTransaction::Asset(asset_transaction) = transaction {
-            let mut payment =
-                self.apply_validated_onchain_spend(&asset_transaction.payment, block_miner)?;
+                match self.assets.apply(
+                    &mut self.utxos,
+                    transaction.call.intent(),
+                    chain.genesis_hash,
+                ) {
+                    Ok(asset) => Ok(StateRollbackJournal {
+                        spend: Some(payment),
+                        asset: Some(asset),
+                    }),
 
-            self.register_revealed_account(
-                asset_transaction.payment.intent().signer,
-                asset_transaction.payment.revealed_account_key().cloned(),
-                &mut payment,
-            )?;
-
-            self.register_revealed_account(
-                asset_transaction.call.intent().signer,
-                asset_transaction.call.revealed_account_key().cloned(),
-                &mut payment,
-            )?;
-
-            return match self.assets.apply(
-                &mut self.utxos,
-                asset_transaction.call.intent(),
-                chain.genesis_hash,
-            ) {
-                Ok(asset) => Ok(StateRollbackJournal::AssetWithPayment { asset, payment }),
-
-                Err(error) => {
-                    self.rollback_spend(payment)?;
-                    Err(StateError::Asset(error))
-                }
-            };
-        }
-
-        //
-        // Normal native XPQ spend.
-        //
-        let mut journal = match transaction {
-            ValidatedAuthorizedTransaction::Spend(validated) => {
-                self.apply_validated_onchain_spend(&validated.spend, block_miner)
-            }
-
-            ValidatedAuthorizedTransaction::Asset(_) => {
-                unreachable!("asset transaction handled above")
-            }
-            ValidatedAuthorizedTransaction::VaultLock(_)
-            | ValidatedAuthorizedTransaction::VaultSpend(_) => {
-                unreachable!("vault transaction handled above")
-            }
-        }?;
-
-        if let Some((address, public_key)) = revealed_account_key(transaction) {
-            self.register_revealed_account(address, Some(public_key), &mut journal)?;
-        }
-
-        Ok(StateRollbackJournal::Spend(journal))
-    }
-
-    fn register_revealed_account(
-        &mut self,
-        address: Address,
-        revealed: Option<RevealedAccountKey>,
-        journal: &mut SpendRollbackJournal,
-    ) -> Result<(), StateError> {
-        let Some(RevealedAccountKey::Account(public_key)) = revealed else {
-            return Ok(());
-        };
-
-        match self.account_keys.register_account(address, public_key) {
-            Ok(true) => {
-                journal.registered_accounts.push(address);
-                Ok(())
-            }
-
-            Ok(false) => Ok(()),
-
-            Err(error) => Err(StateError::Account(error)),
-        }
-    }
-}
-
-impl LedgerState {
-    fn apply_validated_vault_transaction(
-        &mut self,
-        transaction: &ValidatedAuthorizedTransaction,
-        block_miner: Address,
-    ) -> Result<StateRollbackJournal, StateError> {
-        let mut vault = VaultRollbackJournal::default();
-        let mut payment = None;
-        match transaction {
-            ValidatedAuthorizedTransaction::VaultLock(tx) => {
-                if let Some(validated) = &tx.payment {
-                    payment = Some(self.apply_validated_onchain_spend(validated, block_miner)?);
-                    self.register_revealed_account(
-                        validated.intent().signer,
-                        validated.revealed_account_key().cloned(),
-                        payment.as_mut().expect("vault payment journal"),
-                    )?;
-                }
-                match &tx.lock.intent().source {
-                    VaultSource::Coin { inputs } => {
-                        let mut input_total = Zeno::ZERO;
-                        for id in inputs {
-                            let amount = self.utxos.consume_coin(id)?;
-                            let recipient = self
-                                .coin_recipients
-                                .remove(id)
-                                .ok_or(StateError::InvalidTransaction)?;
-                            input_total = input_total
-                                .checked_add(amount)
-                                .ok_or(StateError::AmountOverflow)?;
-                            vault.consumed_coins.push((*id, amount, recipient));
-                        }
-                        let output_total = tx.lock.intent().outputs.iter().try_fold(
-                            Zeno::ZERO,
-                            |sum, output| match output.value {
-                                VaultValue::Coin(amount) => {
-                                    sum.checked_add(amount).ok_or(StateError::AmountOverflow)
-                                }
-                                _ => Err(StateError::InvalidTransaction),
-                            },
-                        )?;
-                        let remainder = input_total
-                            .checked_sub(output_total)
-                            .ok_or(StateError::InvalidTransaction)?;
-                        if !remainder.is_zero() {
-                            return Err(StateError::InvalidTransaction);
-                        }
-                    }
-                    VaultSource::Asset { inputs, .. } => {
-                        for id in inputs {
-                            let share = self.utxos.consume_asset(id)?;
-                            let recipient = self
-                                .assets
-                                .share_recipients
-                                .remove(id)
-                                .ok_or(StateError::InvalidTransaction)?;
-                            vault.consumed_assets.push((*id, share, recipient));
-                        }
+                    Err(error) => {
+                        self.rollback_spend(payment)?;
+                        Err(StateError::Asset(error))
                     }
                 }
-                for (index, output) in tx.lock.intent().outputs.iter().enumerate() {
-                    let id = VaultId::derive(tx.lock.commitment(), output_index(index)?);
-                    self.vault_utxos.insert(id, output.clone())?;
-                    vault.created_vaults.push(id);
-                }
-                self.register_vault_account(
-                    tx.lock.intent().signer,
-                    tx.lock.revealed_account_key(),
-                    &mut vault,
-                )?;
             }
-            ValidatedAuthorizedTransaction::VaultSpend(tx) => {
-                if let Some(validated) = &tx.payment {
-                    payment = Some(self.apply_validated_onchain_spend(validated, block_miner)?);
-                    self.register_revealed_account(
-                        validated.intent().signer,
-                        validated.revealed_account_key().cloned(),
-                        payment.as_mut().unwrap(),
-                    )?;
-                }
-                for id in &tx.spend.intent().inputs {
-                    let output = self.vault_utxos.consume(id)?;
-                    vault.consumed_vaults.push((*id, output));
-                }
-                let commitment = tx.spend.commitment();
-                for (index, output) in tx.spend.intent().outputs.iter().enumerate() {
-                    let index_u32 = output_index(index)?;
-                    match output {
-                        VaultSpendOutput::Vault(output) => {
-                            let id = VaultId::derive(commitment, index_u32);
-                            self.vault_utxos.insert(id, output.clone())?;
-                            vault.created_vaults.push(id);
-                        }
-                        VaultSpendOutput::Coin(output) => {
-                            let id = XPQ::from_output(commitment.as_bytes(), index_u32);
-                            self.utxos.insert_coin(id, output.amount)?;
-                            let recipient = match output.output {
-                                Recipient::Address(a) => a,
-                                Recipient::BlockMiner => block_miner,
-                            };
-                            if self.coin_recipients.insert(id, recipient).is_some() {
-                                return Err(StateError::InvalidTransaction);
-                            }
-                            vault.created_coins.push(id);
-                        }
-                        VaultSpendOutput::Asset(output) => {
-                            let asset = vault
-                                .consumed_vaults
-                                .first()
-                                .and_then(|(_, v)| v.value.as_asset())
-                                .ok_or(StateError::InvalidTransaction)?
-                                .asset;
-                            let id = Share::derive(asset, commitment.into_bytes(), index_u32);
-                            self.utxos.insert_asset(
-                                id,
-                                AssetShare {
-                                    asset,
-                                    amount: output.amount,
-                                },
-                            )?;
-                            if self
-                                .assets
-                                .share_recipients
-                                .insert(id, output.recipient)
-                                .is_some()
-                            {
-                                return Err(StateError::InvalidTransaction);
-                            }
-                            vault.created_assets.push(id);
-                        }
-                    }
-                }
-                if payment.is_none() {
-                    let inputs =
-                        vault
-                            .consumed_vaults
-                            .iter()
-                            .try_fold(Zeno::ZERO, |sum, (_, v)| {
-                                sum.checked_add(
-                                    v.value.as_coin().ok_or(StateError::InvalidTransaction)?,
-                                )
-                                .ok_or(StateError::AmountOverflow)
-                            })?;
-                    let outputs =
-                        tx.spend
-                            .intent()
-                            .outputs
-                            .iter()
-                            .try_fold(Zeno::ZERO, |sum, o| {
-                                let amount = match o {
-                                    VaultSpendOutput::Vault(v) => {
-                                        v.value.as_coin().ok_or(StateError::InvalidTransaction)?
-                                    }
-                                    VaultSpendOutput::Coin(v) => v.amount,
-                                    VaultSpendOutput::Asset(_) => {
-                                        return Err(StateError::InvalidTransaction);
-                                    }
-                                };
-                                sum.checked_add(amount).ok_or(StateError::AmountOverflow)
-                            })?;
-                    let burned = inputs
-                        .checked_sub(outputs)
-                        .ok_or(StateError::InvalidTransaction)?;
-                    self.total_burned = self
-                        .total_burned
-                        .checked_add(burned)
-                        .ok_or(StateError::BurnOverflow)?;
-                    vault.burned = burned;
-                }
-            }
-            _ => unreachable!(),
         }
-        Ok(StateRollbackJournal::Vault { vault, payment })
-    }
-
-    fn register_vault_account(
-        &mut self,
-        address: Address,
-        revealed: Option<&RevealedAccountKey>,
-        journal: &mut VaultRollbackJournal,
-    ) -> Result<(), StateError> {
-        let Some(RevealedAccountKey::Account(key)) = revealed else {
-            return Ok(());
-        };
-        if self.account_keys.register_account(address, key.clone())? {
-            journal.registered_accounts.push(address);
-        }
-        Ok(())
-    }
-
-    fn rollback_vault(&mut self, journal: VaultRollbackJournal) -> Result<(), StateError> {
-        self.total_burned = self
-            .total_burned
-            .checked_sub(journal.burned)
-            .ok_or(StateError::BurnUnderflow)?;
-        for id in journal.created_vaults.into_iter().rev() {
-            self.vault_utxos.consume(&id)?;
-        }
-        for id in journal.created_coins.into_iter().rev() {
-            self.utxos.consume_coin(&id)?;
-            self.coin_recipients.remove(&id);
-        }
-        for id in journal.created_assets.into_iter().rev() {
-            self.utxos.consume_asset(&id)?;
-            self.assets.share_recipients.remove(&id);
-        }
-        for (id, output) in journal.consumed_vaults.into_iter().rev() {
-            self.vault_utxos.insert(id, output)?;
-        }
-        for (id, share, recipient) in journal.consumed_assets.into_iter().rev() {
-            self.utxos.insert_asset(id, share)?;
-            self.assets.share_recipients.insert(id, recipient);
-        }
-        for (id, amount, recipient) in journal.consumed_coins.into_iter().rev() {
-            self.utxos.insert_coin(id, amount)?;
-            self.coin_recipients.insert(id, recipient);
-        }
-        for address in journal.registered_accounts {
-            self.account_keys.remove_account(&address)?;
-        }
-        Ok(())
     }
 }
 
@@ -446,7 +121,12 @@ impl LedgerState {
 
             let input_total = inputs.iter().try_fold(Zeno::ZERO, |total, id| {
                 total
-                    .checked_add(self.utxos.coin(id).ok_or(StateError::InvalidTransaction)?)
+                    .checked_add(
+                        self.utxos
+                            .coin(id)
+                            .ok_or(StateError::InvalidTransaction)?
+                            .amount,
+                    )
                     .ok_or(StateError::AmountOverflow)
             })?;
             let output_total = outputs.iter().try_fold(Zeno::ZERO, |total, output| {
@@ -462,15 +142,8 @@ impl LedgerState {
             // Consume existing XPQ objects.
             //
             for id in inputs {
-                let amount = self.utxos.consume_coin(id)?;
-
-                let recipient = self
-                    .coin_recipients
-                    .remove(id)
-                    .ok_or(StateError::InvalidTransaction)?;
-
-                journal.consumed_coins.push((*id, amount));
-                journal.consumed_coin_recipients.push((*id, recipient));
+                let coin = self.utxos.consume_coin(id)?;
+                journal.consumed_coins.push((*id, coin));
             }
 
             //
@@ -486,15 +159,17 @@ impl LedgerState {
                 // Ownership is bound by the transaction
                 // commitment and validated by consensus.
                 //
-                self.utxos.insert_coin(id, output.amount)?;
-
                 let recipient = match output.output {
                     Recipient::Address(address) => address,
                     Recipient::BlockMiner => block_miner,
                 };
-                if self.coin_recipients.insert(id, recipient).is_some() {
-                    return Err(StateError::InvalidTransaction);
-                }
+                self.utxos.insert_coin(
+                    id,
+                    CoinUtxo {
+                        amount: output.amount,
+                        owner: recipient,
+                    },
+                )?;
 
                 journal.created_coin_ids.push(id);
             }
@@ -521,6 +196,15 @@ impl AssetState {
 
         let commitment = call.commitment(genesis_hash)?;
 
+        let created_share = match &call.instruction {
+            AssetInstruction::Register { .. } => Some(Share::derive(call.asset()?, commitment, 0)),
+            AssetInstruction::Mint { asset, .. } => Some(Share::derive(*asset, commitment, 0)),
+            AssetInstruction::Burn { .. } => None,
+        };
+        if created_share.is_some_and(|share| utxos.asset(&share).is_some()) {
+            return Err(AssetError::ShareAlreadyExists);
+        }
+
         let mut journal = AssetRollbackJournal::default();
 
         match &call.instruction {
@@ -546,21 +230,19 @@ impl AssetState {
                 let share = Share::derive(asset, commitment, 0);
 
                 journal
-                    .metadata
-                    .push((asset, self.metadata.get(&asset).cloned()));
-
-                journal
-                    .supplies
-                    .push((asset, self.supplies.get(&asset).copied()));
+                    .assets
+                    .push((asset, self.assets.get(&asset).cloned()));
 
                 journal.utxos.push((share, utxos.asset(&share).copied()));
-                journal
-                    .recipients
-                    .push((share, self.share_recipients.get(&share).copied()));
-
-                self.metadata.insert(asset, metadata);
-
-                self.supplies.insert(asset, *initial_mint);
+                self.assets.insert(
+                    asset,
+                    AssetRecord {
+                        metadata,
+                        supply: *initial_mint,
+                        total_minted: *initial_mint,
+                        mint_nonce: 0,
+                    },
+                );
 
                 utxos
                     .insert_asset(
@@ -568,67 +250,33 @@ impl AssetState {
                         AssetShare {
                             asset: asset,
                             amount: *initial_mint,
+                            owner: call.signer,
                         },
                     )
                     .map_err(|_| AssetError::ShareAlreadyExists)?;
-                self.share_recipients.insert(share, call.signer);
-
-                if *mint_authority != Address::ZERO {
-                    let capability_id = MintCapabilityId::derive(asset, commitment);
-                    journal.capabilities.push((
-                        capability_id,
-                        utxos.mint_capability(&capability_id).copied(),
-                    ));
-                    utxos
-                        .insert_mint_capability(
-                            capability_id,
-                            MintCapability {
-                                asset,
-                                authority: *mint_authority,
-                            },
-                        )
-                        .map_err(|_| AssetError::ShareAlreadyExists)?;
-                }
             }
 
             AssetInstruction::Mint {
                 asset,
-                capability,
+                nonce,
                 recipient,
                 amount,
             } => {
                 let share = Share::derive(*asset, commitment, 0);
-                let next_capability = MintCapabilityId::derive(*asset, commitment);
-
-                let supply = self
-                    .supply(*asset)
+                let previous = self.assets.get(asset).cloned();
+                let record = self.assets.get_mut(asset).ok_or(AssetError::UnknownAsset)?;
+                record.supply = record
+                    .supply
                     .checked_add(*amount)
                     .ok_or(AssetError::SupplyOverflow)?;
-
-                journal
-                    .supplies
-                    .push((*asset, self.supplies.get(asset).copied()));
+                record.total_minted = record
+                    .total_minted
+                    .checked_add(*amount)
+                    .ok_or(AssetError::SupplyOverflow)?;
+                record.mint_nonce = *nonce;
+                journal.assets.push((*asset, previous));
 
                 journal.utxos.push((share, utxos.asset(&share).copied()));
-                journal
-                    .recipients
-                    .push((share, self.share_recipients.get(&share).copied()));
-                journal
-                    .capabilities
-                    .push((*capability, utxos.mint_capability(capability).copied()));
-                journal.capabilities.push((
-                    next_capability,
-                    utxos.mint_capability(&next_capability).copied(),
-                ));
-
-                self.supplies.insert(*asset, supply);
-
-                let consumed = utxos
-                    .consume_mint_capability(capability)
-                    .map_err(|_| AssetError::UnknownObject)?;
-                utxos
-                    .insert_mint_capability(next_capability, consumed)
-                    .map_err(|_| AssetError::ShareAlreadyExists)?;
 
                 utxos
                     .insert_asset(
@@ -636,36 +284,29 @@ impl AssetState {
                         AssetShare {
                             asset: *asset,
                             amount: *amount,
+                            owner: *recipient,
                         },
                     )
                     .map_err(|_| AssetError::ShareAlreadyExists)?;
-                self.share_recipients.insert(share, *recipient);
             }
 
             AssetInstruction::Burn { asset, inputs } => {
                 let total = self.validate_inputs(utxos, *asset, inputs)?;
 
-                let supply = self
-                    .supply(*asset)
+                let previous = self.assets.get(asset).cloned();
+                let record = self.assets.get_mut(asset).ok_or(AssetError::UnknownAsset)?;
+                record.supply = record
+                    .supply
                     .checked_sub(total)
                     .ok_or(AssetError::SupplyOverflow)?;
-
-                journal
-                    .supplies
-                    .push((*asset, self.supplies.get(asset).copied()));
+                journal.assets.push((*asset, previous));
 
                 for input in inputs {
                     journal.utxos.push((*input, utxos.asset(input).copied()));
-                    journal
-                        .recipients
-                        .push((*input, self.share_recipients.remove(input)));
-
                     utxos
                         .consume_asset(input)
                         .map_err(|_| AssetError::UnknownObject)?;
                 }
-
-                self.supplies.insert(*asset, supply);
             }
         }
 
@@ -675,7 +316,6 @@ impl AssetState {
     pub fn apply_account_transfer(
         &mut self,
         utxos: &mut utxo::UtxoSet,
-        _signer: Address,
         asset: Contract,
         inputs: &[Share],
         outputs: &[AssetOutput],
@@ -705,10 +345,6 @@ impl AssetState {
 
         for input in inputs {
             journal.utxos.push((*input, utxos.asset(input).copied()));
-            journal
-                .recipients
-                .push((*input, self.share_recipients.remove(input)));
-
             utxos
                 .consume_asset(input)
                 .map_err(|_| AssetError::UnknownObject)?;
@@ -720,9 +356,6 @@ impl AssetState {
             let id = Share::derive(asset, commitment, index);
 
             journal.utxos.push((id, utxos.asset(&id).copied()));
-            journal
-                .recipients
-                .push((id, self.share_recipients.get(&id).copied()));
 
             utxos
                 .insert_asset(
@@ -730,10 +363,10 @@ impl AssetState {
                     AssetShare {
                         asset: asset,
                         amount: output.amount,
+                        owner: output.recipient,
                     },
                 )
                 .map_err(|_| AssetError::ShareAlreadyExists)?;
-            self.share_recipients.insert(id, output.recipient);
         }
 
         Ok(journal)
@@ -745,7 +378,7 @@ impl AssetState {
         &self,
         utxos: &utxo::UtxoSet,
         call: &AssetIntent,
-        genesis_hash: [u8; 32],
+        _genesis_hash: [u8; 32],
     ) -> Result<(), AssetError> {
         match &call.instruction {
             AssetInstruction::Register {
@@ -770,45 +403,34 @@ impl AssetState {
                 if self.metadata(id).is_some() {
                     return Err(AssetError::AssetAlreadyExists);
                 }
-
-                if *mint_authority != Address::ZERO {
-                    let commitment = call.commitment(genesis_hash)?;
-                    let capability_id = MintCapabilityId::derive(id, commitment);
-                    if utxos.mint_capability(&capability_id).is_some() {
-                        return Err(AssetError::ShareAlreadyExists);
-                    }
-                }
             }
 
             AssetInstruction::Mint {
                 asset,
-                capability,
+                nonce,
                 amount,
                 ..
             } => {
                 let metadata = self.metadata(*asset).ok_or(AssetError::UnknownAsset)?;
-                let capability_utxo = utxos
-                    .mint_capability(capability)
-                    .ok_or(AssetError::UnknownObject)?;
-
-                if capability_utxo.asset != *asset
-                    || capability_utxo.authority != call.signer
-                    || metadata.mint_authority != capability_utxo.authority
+                if metadata.mint_authority == Address::ZERO
+                    || metadata.mint_authority != call.signer
                 {
                     return Err(AssetError::Unauthorized);
                 }
-
-                let commitment = call.commitment(genesis_hash)?;
-                let next_capability = MintCapabilityId::derive(*asset, commitment);
-                if next_capability == *capability
-                    || utxos.mint_capability(&next_capability).is_some()
-                {
-                    return Err(AssetError::ShareAlreadyExists);
+                let expected_nonce = self
+                    .mint_nonce(*asset)
+                    .ok_or(AssetError::UnknownAsset)?
+                    .checked_add(1)
+                    .ok_or(AssetError::InvalidMintNonce)?;
+                if *nonce != expected_nonce {
+                    return Err(AssetError::InvalidMintNonce);
                 }
 
-                self.supply(*asset)
+                self.record(*asset)
+                    .ok_or(AssetError::UnknownAsset)?
+                    .total_minted
                     .checked_add(*amount)
-                    .filter(|supply| *supply <= metadata.max_supply)
+                    .filter(|total| *total <= metadata.max_supply)
                     .ok_or(AssetError::SupplyOverflow)?;
             }
 
@@ -837,7 +459,7 @@ impl AssetState {
         let mut total = Unit::ZERO;
 
         for input in inputs {
-            let share = self.utxo(utxos, *input).ok_or(AssetError::UnknownObject)?;
+            let share = utxos.asset(input).ok_or(AssetError::UnknownObject)?;
 
             if share.asset != asset {
                 return Err(AssetError::AssetMismatch);
@@ -860,7 +482,6 @@ impl AssetState {
     pub fn account_transfer_created_state_weight(
         &self,
         utxos: &utxo::UtxoSet,
-        _signer: Address,
         asset: Contract,
         inputs: &[Share],
         outputs: &[AssetOutput],
@@ -880,6 +501,7 @@ impl AssetState {
                 &AssetShare {
                     asset: asset,
                     amount: output.amount,
+                    owner: output.recipient,
                 },
             )
         })
@@ -891,23 +513,13 @@ impl LedgerState {
         &mut self,
         journal: StateRollbackJournal,
     ) -> Result<(), StateError> {
-        match journal {
-            StateRollbackJournal::Spend(journal) => self.rollback_spend(journal),
-
-            StateRollbackJournal::AssetWithPayment { asset, payment }
-            | StateRollbackJournal::AssetSpendWithPayment { asset, payment } => {
-                self.assets.rollback(&mut self.utxos, asset)?;
-
-                self.rollback_spend(payment)
-            }
-            StateRollbackJournal::Vault { vault, payment } => {
-                self.rollback_vault(vault)?;
-                if let Some(payment) = payment {
-                    self.rollback_spend(payment)?;
-                }
-                Ok(())
-            }
+        if let Some(asset) = journal.asset {
+            self.assets.rollback(&mut self.utxos, asset)?;
         }
+        if let Some(spend) = journal.spend {
+            self.rollback_spend(spend)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn rollback_spend(
@@ -921,18 +533,10 @@ impl LedgerState {
 
         for id in journal.created_coin_ids {
             self.utxos.consume_coin(&id)?;
-            self.coin_recipients.remove(&id);
         }
-        for (id, amount) in journal.consumed_coins {
-            self.utxos.insert_coin(id, amount)?;
+        for (id, coin) in journal.consumed_coins {
+            self.utxos.insert_coin(id, coin)?;
         }
-        for (id, recipient) in journal.consumed_coin_recipients {
-            self.coin_recipients.insert(id, recipient);
-        }
-        for address in journal.registered_accounts {
-            self.account_keys.remove_account(&address)?;
-        }
-
         Ok(())
     }
 
@@ -976,9 +580,7 @@ impl AssetState {
         utxos: &mut utxo::UtxoSet,
         journal: AssetRollbackJournal,
     ) -> Result<(), StateError> {
-        restore_map(&mut self.metadata, journal.metadata);
-
-        restore_map(&mut self.supplies, journal.supplies);
+        restore_map(&mut self.assets, journal.assets);
 
         for (id, previous) in journal.utxos.into_iter().rev() {
             if utxos.asset(&id).is_some() {
@@ -989,17 +591,6 @@ impl AssetState {
                 utxos.insert_asset(id, previous)?;
             }
         }
-
-        for (id, previous) in journal.capabilities.into_iter().rev() {
-            if utxos.mint_capability(&id).is_some() {
-                utxos.consume_mint_capability(&id)?;
-            }
-            if let Some(previous) = previous {
-                utxos.insert_mint_capability(id, previous)?;
-            }
-        }
-        restore_map(&mut self.share_recipients, journal.recipients);
-
         Ok(())
     }
 }
@@ -1007,25 +598,6 @@ impl AssetState {
 //
 // Helpers
 //
-
-fn revealed_account_key(
-    transaction: &ValidatedAuthorizedTransaction,
-) -> Option<(Address, RevealedAccountKey)> {
-    match transaction {
-        ValidatedAuthorizedTransaction::Spend(validated) => validated
-            .spend
-            .revealed_account_key()
-            .cloned()
-            .map(|key| (validated.spend.intent().signer, key)),
-
-        ValidatedAuthorizedTransaction::VaultLock(validated) => validated
-            .lock
-            .revealed_account_key()
-            .cloned()
-            .map(|key| (validated.lock.intent().signer, key)),
-        _ => None,
-    }
-}
 
 fn output_index(index: usize) -> Result<u32, StateError> {
     u32::try_from(index).map_err(|_| StateError::OutputIndexOverflow)
@@ -1097,5 +669,125 @@ fn restore_map<K: Ord, V>(map: &mut BTreeMap<K, V>, entries: Vec<(K, Option<V>)>
                 map.remove(&key);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn address(byte: u8) -> Address {
+        Address([byte; crypto::ADDRESS_SIZE])
+    }
+
+    fn register(authority: Address) -> AssetIntent {
+        AssetIntent::new(
+            AssetInstruction::Register {
+                name: "Nonce Asset".into(),
+                symbol: "NONCE".into(),
+                decimals: 0,
+                max_supply: Unit::from_units(100),
+                initial_mint: Unit::from_units(10),
+                mint_authority: authority,
+            },
+            address(1),
+        )
+    }
+
+    #[test]
+    fn mint_nonce_is_sequential_and_rollback_restores_it() {
+        let authority = address(2);
+        let register = register(authority);
+        let asset = register.asset().unwrap();
+        let mut state = AssetState::default();
+        let mut utxos = utxo::UtxoSet::default();
+
+        state.apply(&mut utxos, &register, [3; 32]).unwrap();
+        assert_eq!(state.mint_nonce(asset), Some(0));
+
+        let mint = AssetIntent::new(
+            AssetInstruction::Mint {
+                asset,
+                nonce: 1,
+                recipient: address(4),
+                amount: Unit::from_units(5),
+            },
+            authority,
+        );
+        let journal = state.apply(&mut utxos, &mint, [3; 32]).unwrap();
+        assert_eq!(state.mint_nonce(asset), Some(1));
+        assert_eq!(state.supply(asset), Unit::from_units(15));
+        assert_eq!(state.total_minted(asset), Some(Unit::from_units(15)));
+
+        assert_eq!(
+            state.apply(&mut utxos, &mint, [3; 32]),
+            Err(AssetError::InvalidMintNonce)
+        );
+
+        state.rollback(&mut utxos, journal).unwrap();
+        assert_eq!(state.mint_nonce(asset), Some(0));
+        assert_eq!(state.supply(asset), Unit::from_units(10));
+        assert_eq!(state.total_minted(asset), Some(Unit::from_units(10)));
+    }
+
+    #[test]
+    fn mint_nonce_does_not_replace_authority_check() {
+        let authority = address(2);
+        let register = register(authority);
+        let asset = register.asset().unwrap();
+        let mut state = AssetState::default();
+        let mut utxos = utxo::UtxoSet::default();
+        state.apply(&mut utxos, &register, [3; 32]).unwrap();
+
+        let mint = AssetIntent::new(
+            AssetInstruction::Mint {
+                asset,
+                nonce: 1,
+                recipient: address(4),
+                amount: Unit::from_units(5),
+            },
+            address(9),
+        );
+        assert_eq!(
+            state.apply(&mut utxos, &mint, [3; 32]),
+            Err(AssetError::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn burned_supply_cannot_be_minted_past_cumulative_cap() {
+        let authority = address(2);
+        let register = register(authority);
+        let asset = register.asset().unwrap();
+        let genesis_hash = [3; 32];
+        let initial_share = Share::derive(asset, register.commitment(genesis_hash).unwrap(), 0);
+        let mut state = AssetState::default();
+        let mut utxos = utxo::UtxoSet::default();
+        state.apply(&mut utxos, &register, genesis_hash).unwrap();
+
+        let burn = AssetIntent::new(
+            AssetInstruction::Burn {
+                asset,
+                inputs: vec![initial_share],
+            },
+            address(1),
+        );
+        state.apply(&mut utxos, &burn, genesis_hash).unwrap();
+        assert_eq!(state.supply(asset), Unit::ZERO);
+        assert_eq!(state.total_minted(asset), Some(Unit::from_units(10)));
+
+        let mint = AssetIntent::new(
+            AssetInstruction::Mint {
+                asset,
+                nonce: 1,
+                recipient: address(4),
+                amount: Unit::from_units(95),
+            },
+            authority,
+        );
+        assert_eq!(
+            state.apply(&mut utxos, &mint, genesis_hash),
+            Err(AssetError::SupplyOverflow)
+        );
     }
 }

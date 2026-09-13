@@ -9,7 +9,6 @@
 //! - header: header-only synchronization validation
 
 mod block;
-mod error;
 mod fork;
 mod header;
 mod policy;
@@ -17,7 +16,7 @@ mod pow;
 mod transaction;
 
 pub use block::*;
-pub use error::*;
+pub use crate::error::ConsensusError;
 pub use fork::*;
 pub use header::*;
 pub use policy::*;
