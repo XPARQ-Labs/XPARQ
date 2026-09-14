@@ -62,7 +62,10 @@ pub fn account_wallet_file_bytes(wallet: &AccountWallet) -> Result<Zeroizing<Vec
         mnemonic: mnemonic.to_string(),
         signature_account: Some(wallet.account().as_str().to_string()),
         public_key: Some(hex::encode(&wallet.public_key.bytes)),
-        private_key: Some(hex::encode(wallet.signing_seed.to_bytes())),
+        private_key: Some({
+            let seed = wallet.signing_seed.dangerous_export_seed();
+            hex::encode(&seed[..])
+        }),
     };
     serde_json::to_vec_pretty(&wallet_file)
         .map(Zeroizing::new)
@@ -89,10 +92,14 @@ pub fn account_wallet_from_file_bytes(bytes: &[u8]) -> Result<AccountWallet, Str
     {
         return Err("wallet public key does not match its mnemonic and signature account".into());
     }
-    if let Some(private_key) = wallet_file.private_key.as_deref()
-        && private_key != hex::encode(wallet.signing_seed.to_bytes())
-    {
-        return Err("wallet private key does not match its mnemonic and signature account".into());
+    if let Some(private_key) = wallet_file.private_key.as_deref() {
+        let expected_private_key = {
+            let seed = wallet.signing_seed.dangerous_export_seed();
+            Zeroizing::new(hex::encode(&seed[..]))
+        };
+        if private_key != expected_private_key.as_str() {
+            return Err("wallet private key does not match its mnemonic and signature account".into());
+        }
     }
     wallet.mnemonic = Some(wallet_file.mnemonic.clone());
     Ok(wallet)
@@ -128,7 +135,9 @@ pub fn account_wallet_from_bip39_mnemonic(
     let mut tag = Vec::from(b"XPARQ_WALLET_SIGNATURE_ACCOUNT".as_slice());
     tag.push(account as u8);
     let seed = tagged_wallet_hash(&tag, &entropy);
-    let signing_seed = SigningSeed::new(account, seed);
+    let mut boxed_seed = Box::new([0_u8; 32]);
+    boxed_seed.copy_from_slice(seed.as_ref());
+    let signing_seed = SigningSeed::new(account, boxed_seed);
     let public_key = signing_seed.public_key();
     Ok(AccountWallet {
         mnemonic: None,
@@ -161,11 +170,11 @@ pub fn decode_bip39_mnemonic(phrase: &str) -> Result<Zeroizing<Vec<u8>>, String>
         .map_err(|error| format!("invalid bip39 mnemonic: {error}"))
 }
 
-fn tagged_wallet_hash(tag: &[u8], bytes: &[u8]) -> [u8; 32] {
+fn tagged_wallet_hash(tag: &[u8], bytes: &[u8]) -> Zeroizing<[u8; 32]> {
     let mut payload = Zeroizing::new(Vec::with_capacity(tag.len() + bytes.len()));
     payload.extend_from_slice(tag);
     payload.extend_from_slice(bytes);
-    hash_bytes(&payload).0
+    Zeroizing::new(hash_bytes(&payload).0)
 }
 
 impl AccountWallet {
@@ -296,9 +305,13 @@ mod tests {
             let bytes = account_wallet_file_bytes(&wallet).unwrap();
             let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(json["public_key"], hex::encode(&wallet.public_key.bytes));
+            let expected_private_key = {
+                let seed = wallet.signing_seed.dangerous_export_seed();
+                Zeroizing::new(hex::encode(&seed[..]))
+            };
             assert_eq!(
-                json["private_key"],
-                hex::encode(wallet.signing_seed.to_bytes())
+                json["private_key"].as_str(),
+                Some(expected_private_key.as_str())
             );
             assert_eq!(
                 wallet_file_signature_account(&bytes).unwrap(),

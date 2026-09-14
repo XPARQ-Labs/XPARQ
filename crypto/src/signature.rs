@@ -16,6 +16,7 @@ use ml_dsa::{
 use zeroize::{
     Zeroize,
     ZeroizeOnDrop,
+    Zeroizing,
 };
 
 pub const SIGNATURE_ACTIVATION_HEIGHT: u64 = 0;
@@ -103,20 +104,18 @@ pub struct AccountSignature {
     pub bytes: Vec<u8>,
 }
 
-#[derive(
-    Clone,
-    PartialEq,
-    Eq,
-    Zeroize,
-    ZeroizeOnDrop,
-    BorshSerialize,
-    BorshDeserialize,
-)]
 pub struct SigningSeed {
-    #[zeroize(skip)]
     account: Signature,
-    seed: [u8; 32],
+    seed: Box<[u8; 32]>,
 }
+
+impl Drop for SigningSeed {
+    fn drop(&mut self) {
+        self.seed.as_mut().zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for SigningSeed {}
 
 impl std::fmt::Debug for SigningSeed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -128,7 +127,7 @@ impl std::fmt::Debug for SigningSeed {
 }
 
 impl SigningSeed {
-    pub const fn new(account: Signature, seed: [u8; 32]) -> Self {
+    pub fn new(account: Signature, seed: Box<[u8; 32]>) -> Self {
         Self { account, seed }
     }
 
@@ -136,31 +135,35 @@ impl SigningSeed {
         self.account
     }
 
-    /// Returns the deterministic 32-byte private signing seed.
-    pub const fn to_bytes(&self) -> [u8; 32] {
-        self.seed
-    }
-
     pub fn public_key(&self) -> PublicKey {
-        public_key_from_seed(self.account, &self.seed)
+        public_key_from_seed(self.account, &self.seed.as_ref())
     }
 
     pub fn sign(&self, message: &[u8]) -> AccountSignature {
-        sign_from_seed(self.account, &self.seed, message)
+        sign_from_seed(self.account, &self.seed.as_ref(), message)
+    }
+
+    pub fn dangerous_export_seed(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(*self.seed)
+    }
+
+    pub fn destroy(self) {
+        drop(self);
     }
 }
 
 pub fn public_key_from_seed(account: Signature, seed: &[u8; 32]) -> PublicKey {
+    let seed = Zeroizing::new((*seed).into());
     let bytes = match account {
-        Signature::MlDsa44 => SigningKey::<MlDsa44>::from_seed(&(*seed).into())
+        Signature::MlDsa44 => SigningKey::<MlDsa44>::from_seed(&seed)
             .verifying_key()
             .encode()
             .to_vec(),
-        Signature::MlDsa65 => SigningKey::<MlDsa65>::from_seed(&(*seed).into())
+        Signature::MlDsa65 => SigningKey::<MlDsa65>::from_seed(&seed)
             .verifying_key()
             .encode()
             .to_vec(),
-        Signature::MlDsa87 => SigningKey::<MlDsa87>::from_seed(&(*seed).into())
+        Signature::MlDsa87 => SigningKey::<MlDsa87>::from_seed(&seed)
             .verifying_key()
             .encode()
             .to_vec(),
@@ -169,19 +172,20 @@ pub fn public_key_from_seed(account: Signature, seed: &[u8; 32]) -> PublicKey {
 }
 
 pub fn sign_from_seed(account: Signature, seed: &[u8; 32], message: &[u8]) -> AccountSignature {
+    let seed = Zeroizing::new((*seed).into());
     let bytes = match account {
         Signature::MlDsa44 => {
-            let key = SigningKey::<MlDsa44>::from_seed(&(*seed).into());
+            let key = SigningKey::<MlDsa44>::from_seed(&seed);
             let sig: ml_dsa::Signature<MlDsa44> = key.sign(message);
             sig.to_bytes().to_vec()
         }
         Signature::MlDsa65 => {
-            let key = SigningKey::<MlDsa65>::from_seed(&(*seed).into());
+            let key = SigningKey::<MlDsa65>::from_seed(&seed);
             let sig: ml_dsa::Signature<MlDsa65> = key.sign(message);
             sig.to_bytes().to_vec()
         }
         Signature::MlDsa87 => {
-            let key = SigningKey::<MlDsa87>::from_seed(&(*seed).into());
+            let key = SigningKey::<MlDsa87>::from_seed(&seed);
             let sig: ml_dsa::Signature<MlDsa87> = key.sign(message);
             sig.to_bytes().to_vec()
         }
@@ -230,7 +234,7 @@ mod tests {
             Signature::MlDsa65,
             Signature::MlDsa87,
         ] {
-            let seed = SigningSeed::new(account, [31; 32]);
+            let seed = SigningSeed::new(account, Box::new([31; 32]),);
             let public = seed.public_key();
             let signature = seed.sign(b"account message");
             assert!(verify(&public, b"account message", &signature));
