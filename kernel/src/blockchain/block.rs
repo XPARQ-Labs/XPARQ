@@ -18,8 +18,8 @@ use crate::{
     transaction::Transaction,
 };
 
-pub const MAX_BLOCK_SIZE: usize = 3 * 1024 * 1024;
-pub const GENESIS_BLOCK_DIFFICULTY: u32 = 1;
+pub const MAX_BLOCK_SIZE: usize = 4 * 1024 * 1024;
+pub const GENESIS_TARGET_BITS: u32 = 0x207f_ffff;
 
 // Lower bound for a direct coin transaction with one input, one block-miner
 // output, and an empty known-account signature byte vector.
@@ -31,7 +31,7 @@ pub struct Header {
     pub previous_hash: PreviousHash,
     pub merkle_root: MerkleHash,
     pub state_root: StateRoot,
-    pub difficulty: u32,
+    pub target_bits: u32,
     /// Canonical serialized block size plus any ledger execution reservation.
     pub block_weight: u32,
     pub nonce: Nonce,
@@ -42,7 +42,7 @@ impl Header {
         previous_hash: PreviousHash,
         merkle_root: MerkleHash,
         state_root: StateRoot,
-        difficulty: u32,
+        target_bits: u32,
         block_weight: u32,
         nonce: Nonce,
     ) -> Self {
@@ -50,7 +50,7 @@ impl Header {
             previous_hash,
             merkle_root,
             state_root,
-            difficulty,
+            target_bits,
             block_weight,
             nonce,
         }
@@ -150,7 +150,7 @@ impl Block {
         Self::from_protocol_transactions(
             Height(0),
             PreviousHash::ZERO,
-            GENESIS_BLOCK_DIFFICULTY,
+            GENESIS_TARGET_BITS,
             Nonce(0),
             None,
             vec![],
@@ -161,7 +161,7 @@ impl Block {
     pub fn from_protocol_transactions(
         height: Height,
         previous_hash: impl Into<PreviousHash>,
-        difficulty: u32,
+        target_bits: u32,
         nonce: Nonce,
         emission: Option<Emission>,
         transactions: Vec<Transaction>,
@@ -174,7 +174,7 @@ impl Block {
                 previous_hash,
                 merkle_root,
                 StateRoot::ZERO,
-                difficulty,
+                target_bits,
                 0,
                 nonce,
             ),
@@ -262,8 +262,8 @@ impl Block {
         self.header.block_weight = block_weight;
     }
 
-    pub const fn difficulty(&self) -> u32 {
-        self.header.difficulty
+    pub const fn target_bits(&self) -> u32 {
+        self.header.target_bits
     }
 
     pub const fn block_weight(&self) -> u32 {

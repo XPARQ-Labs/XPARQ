@@ -3,16 +3,17 @@
 use std::{error::Error, fmt};
 
 use crate::{
-    blockchain::{Block, MAX_BLOCK_SIZE},
+    blockchain::{Block, GENESIS_TARGET_BITS, MAX_BLOCK_SIZE},
     common::Nonce,
     consensus::{
-        BLOCK_EMISSION_START, BLOCK_EMISSION_STEP, COIN_UTXO_STATE_WEIGHT, DIFFICULTY_ALGORITHM,
-        DIFFICULTY_START, EMISSION_INTERVAL, EMPTY_BLOCK_ARCHIVAL_BYTES, MAX_DIFFICULTY,
-        MIN_DIFFICULTY, POW_ALGORITHM, POW_ARGON2_ITERATIONS, POW_ARGON2_LANES,
-        POW_ARGON2_MEMORY_KIB, STATE_BURN_ALGORITHM, STATE_BURN_RATE_ZENO_PER_WEIGHT,
-        TAIL_BLOCK_EMISSION, WBDA_DIFFICULTY_STEP, WBDA_HIGH_UTILIZATION_PPM,
-        WBDA_LOW_UTILIZATION_PPM, WBDA_TARGET_BLOCK_WEIGHT, WBDA_WINDOW,
-    },
+    BLOCK_EMISSION_START, EMISSION_RISING_STEPS, COIN_UTXO_STATE_WEIGHT,
+    DIFFICULTY_ALGORITHM, EMISSION_INTERVAL, EMPTY_BLOCK_ARCHIVAL_BYTES,
+    POW_ALGORITHM, POW_ARGON2_ITERATIONS, POW_ARGON2_LANES,
+    POW_ARGON2_MEMORY_KIB, STATE_BURN_ALGORITHM,
+    STATE_BURN_RATE_ZENO_PER_WEIGHT, TAIL_BLOCK_EMISSION,
+    TARGET_BITS_START, WBDA_HIGH_UTILIZATION_PPM,
+    WBDA_LOW_UTILIZATION_PPM, WBDA_TARGET_BLOCK_WEIGHT, WBDA_WINDOW,
+},
     ledger::{Ledger, LedgerError},
     common::ChainContext,
 };
@@ -33,8 +34,8 @@ pub const GENESIS_NONCE: u64 = 4;
 
 #[cfg(feature = "mainnet")]
 pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
-    0x65, 0x40, 0x76, 0x44, 0x36, 0x56, 0x40, 0xe1, 0x64, 0x66, 0x31, 0x9f, 0xb6, 0x07, 0xae, 0xd0,
-    0x54, 0x3b, 0x1e, 0x4b, 0xed, 0xef, 0x54, 0xe1, 0xba, 0x68, 0x66, 0x81, 0xc7, 0x8c, 0x42, 0x9f,
+    0xd4, 0x09, 0x63, 0xc3, 0x68, 0x81, 0x4a, 0xb2, 0x23, 0x10, 0x57, 0xea, 0xc0, 0x4c, 0xe2, 0xa9,
+    0xbb, 0x78, 0x24, 0xac, 0xb9, 0xf6, 0xba, 0x91, 0xed, 0x77, 0xe8, 0x83, 0xb3, 0xea, 0xbc, 0xc5,
 ]);
 
 // -----------------------------------------------------------------------------
@@ -46,8 +47,8 @@ pub const GENESIS_NONCE: u64 = 5;
 
 #[cfg(feature = "testnet")]
 pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
-    0x5a, 0x0e, 0x26, 0x10, 0x08, 0x87, 0x88, 0x8c, 0xee, 0xab, 0xd0, 0xf7, 0x8a, 0xe4, 0x80, 0xa8,
-    0xc4, 0xd0, 0x9b, 0x78, 0x7f, 0xfa, 0x4b, 0xfa, 0x6c, 0x6d, 0xab, 0x8c, 0xde, 0x5c, 0xfa, 0xcd,
+    0xed, 0x1b, 0x1e, 0x5d, 0x6d, 0x0b, 0x34, 0xd2, 0x58, 0xb9, 0x25, 0x18, 0x66, 0x51, 0x63, 0xc1,
+    0xb1, 0x23, 0xb8, 0xc7, 0xdb, 0x33, 0x4a, 0x8d, 0x0b, 0x3b, 0x81, 0x3e, 0xcb, 0x21, 0xa2, 0x44,
 ]);
 
 // -----------------------------------------------------------------------------
@@ -59,8 +60,8 @@ pub const GENESIS_NONCE: u64 = 6;
 
 #[cfg(feature = "devnet")]
 pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
-    0xb1, 0x31, 0x39, 0xf1, 0x3c, 0xe5, 0x22, 0x32, 0x8e, 0xd0, 0x7f, 0x29, 0x09, 0x9c, 0xff, 0x60,
-    0x69, 0xa0, 0x50, 0x61, 0x81, 0x06, 0x71, 0x64, 0xe4, 0xf5, 0x9d, 0x0a, 0x7c, 0x7b, 0x67, 0xc2,
+    0x15, 0xae, 0x31, 0x7b, 0x08, 0xe1, 0xa1, 0x73, 0x91, 0xd1, 0x8d, 0x48, 0x1e, 0xc0, 0x0d, 0x3d,
+    0x84, 0xbf, 0x4e, 0x1c, 0xfa, 0x82, 0xa7, 0x8a, 0xef, 0xda, 0x80, 0x6d, 0x8a, 0x7a, 0x6a, 0x54,
 ]);
 
 // -----------------------------------------------------------------------------
@@ -69,7 +70,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`]
 /// changes.
-pub const CHAIN_SPEC_VERSION: u32 = 2;
+pub const CHAIN_SPEC_VERSION: u32 = 1;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -84,20 +85,18 @@ struct ChainSpecIdentity<'a> {
     pow_iterations: u32,
     pow_lanes: u32,
 
-    difficulty_algorithm: &'a str,
-    difficulty_start: u32,
-    min_difficulty: u32,
-    max_difficulty: u32,
+    target_algorithm: &'a str,
+    genesis_target_bits: u32,
+    target_bits_start: u32,
 
     wbda_window: u64,
     wbda_target_block_weight: u64,
     wbda_low_utilization_ppm: u64,
     wbda_high_utilization_ppm: u64,
-    wbda_difficulty_step: u32,
 
     // Monetary policy
     block_emission_start: u64,
-    block_emission_step: u64,
+    emission_rising_steps: u64,
     emission_interval: u64,
     tail_block_emission: u64,
 
@@ -136,20 +135,18 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         pow_lanes: POW_ARGON2_LANES,
 
         // Difficulty / WBDA
-        difficulty_algorithm: DIFFICULTY_ALGORITHM,
-        difficulty_start: DIFFICULTY_START,
-        min_difficulty: MIN_DIFFICULTY,
-        max_difficulty: MAX_DIFFICULTY,
+        target_algorithm: DIFFICULTY_ALGORITHM,
+        genesis_target_bits: GENESIS_TARGET_BITS,
+        target_bits_start: TARGET_BITS_START,
 
         wbda_window: WBDA_WINDOW as u64,
         wbda_target_block_weight: WBDA_TARGET_BLOCK_WEIGHT as u64,
         wbda_low_utilization_ppm: WBDA_LOW_UTILIZATION_PPM,
         wbda_high_utilization_ppm: WBDA_HIGH_UTILIZATION_PPM,
-        wbda_difficulty_step: WBDA_DIFFICULTY_STEP,
 
         // Emission
         block_emission_start: BLOCK_EMISSION_START,
-        block_emission_step: BLOCK_EMISSION_STEP,
+        emission_rising_steps: EMISSION_RISING_STEPS,
         emission_interval: EMISSION_INTERVAL,
         tail_block_emission: TAIL_BLOCK_EMISSION,
 

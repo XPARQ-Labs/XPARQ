@@ -144,6 +144,7 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         Some("utxos") | Some("utxo-tracker") => print_utxo_tracker(&args[1..]),
         Some("sign-spend") => sign_spend(&args[1..]),
         Some("consolidate") => consolidate_coin_utxos(&args[1..]),
+        Some("asset-consolidate") => consolidate_asset_shares(&args[1..]),
         Some("asset-register") => asset_register(&args[1..]),
         Some("asset-mint") => asset_mint(&args[1..]),
         Some("asset-burn") => asset_burn(&args[1..]),
@@ -270,6 +271,96 @@ fn asset_burn(args: &[String]) -> Result<(), String> {
 
 fn asset_transfer(args: &[String]) -> Result<(), String> {
     submit_asset_spend(args, asset_recipient(args)?)
+}
+
+fn consolidate_asset_shares(args: &[String]) -> Result<(), String> {
+    reject_manual_fee(args)?;
+    let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let asset = parse_asset(args)?;
+    let address = kernel::crypto::address_to_string(&wallet.address());
+    let balance: BalanceResponse = http_get_json(rpc, &format!("/balance/{address}"))?;
+    let mut shares = balance
+        .assets
+        .into_iter()
+        .find(|entry| entry.asset == asset.to_string())
+        .ok_or("wallet has no shares for this asset")?
+        .shares;
+    if shares.len() < 2 {
+        return Err("asset consolidation requires at least two shares for this asset".into());
+    }
+    shares.sort_by(|left, right| {
+        let left_amount = left.amount.parse::<u128>().unwrap_or(u128::MAX);
+        let right_amount = right.amount.parse::<u128>().unwrap_or(u128::MAX);
+        left_amount
+            .cmp(&right_amount)
+            .then_with(|| left.share_id.cmp(&right.share_id))
+    });
+    shares.truncate(MAX_CONSOLIDATION_INPUTS);
+
+    let inputs = shares
+        .iter()
+        .map(|share| {
+            share
+                .share_id
+                .parse::<kernel::native::asset::Share>()
+                .map_err(|_| "node returned an invalid asset share id".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let total = shares.iter().try_fold(0_u128, |total, share| {
+        let amount = share
+            .amount
+            .parse::<u128>()
+            .map_err(|_| "node returned an invalid asset share amount".to_string())?;
+        total
+            .checked_add(amount)
+            .ok_or_else(|| "asset consolidation amount overflow".to_string())
+    })?;
+    let output = kernel::native::asset::AssetOutput {
+        recipient: wallet.address(),
+        amount: kernel::native::asset::Unit::from_units(total),
+    };
+    let spend = wallet.sign_onchain_spend(
+        SpendIntent::asset(wallet.address(), asset, inputs, vec![output.clone()])
+            .map_err(|error| error.to_string())?,
+    )?;
+    let asset_weight = kernel::native::asset::checked_asset_entry_weight(
+        0,
+        32,
+        &kernel::native::asset::AssetShare {
+            asset,
+            amount: output.amount,
+            owner: output.recipient,
+        },
+    )
+    .map_err(|error| format!("calculate asset state weight: {error:?}"))?;
+
+    let transaction = automatic_fee_transaction(|fee, archival_burn| {
+        let (coin_inputs, _, _state_burn, change) = select_account_inputs_with_state_burn(
+            rpc,
+            &wallet,
+            fee,
+            1,
+            asset_weight,
+            archival_burn,
+        )?;
+        let mut fee_outputs = Vec::new();
+        if change > 0 {
+            fee_outputs.push(CoinOutput::new(wallet.address(), Zeno::from_zeno(change)));
+        }
+        fee_outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
+        let payment = wallet.sign_onchain_spend(
+            SpendIntent::coin(wallet.address(), coin_inputs, fee_outputs)
+                .map_err(|error| error.to_string())?,
+        )?;
+        Ok(AuthorizedTransaction::Spend(Box::new(
+            AuthorizedSpendTransaction {
+                spend: spend.clone(),
+                payment: Some(payment),
+            },
+        )))
+    })?;
+    submit_or_print_transaction(args, &transaction)
 }
 
 fn asset_recipient(args: &[String]) -> Result<Address, String> {
@@ -586,7 +677,8 @@ fn interactive_assets() -> Result<(), String> {
     println!("4. Burn");
     println!("5. Info");
     println!("6. Balance");
-    println!("7. Back");
+    println!("7. Consolidate Shares");
+    println!("8. Back");
 
     match prompt("Select")?.as_str() {
         "1" => {
@@ -607,28 +699,28 @@ fn interactive_assets() -> Result<(), String> {
         }
         "2" => {
             let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--asset".into(), prompt("Asset Hash")?]);
+            args.extend(["--asset".into(), prompt("Asset Contract")?]);
             args.extend(interactive_asset_recipient()?);
             args.extend(["--amount".into(), prompt("Asset amount")?]);
             asset_mint(&args)
         }
         "3" => {
             let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--asset".into(), prompt("Asset Hash")?]);
+            args.extend(["--asset".into(), prompt("Asset Contract")?]);
             args.extend(interactive_asset_recipient()?);
             args.extend(["--amount".into(), prompt("Asset amount")?]);
             asset_transfer(&args)
         }
         "4" => {
             let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--asset".into(), prompt("Asset Hash")?]);
+            args.extend(["--asset".into(), prompt("Asset Contract")?]);
             args.extend(["--amount".into(), prompt("Asset amount")?]);
             asset_burn(&args)
         }
         "5" => {
             let args = vec![
                 "--asset".into(),
-                prompt("Asset Hash")?,
+                prompt("Asset Contract")?,
                 "--rpc".into(),
                 prompt_default("RPC", DEFAULT_RPC_ADDR)?,
             ];
@@ -645,7 +737,12 @@ fn interactive_assets() -> Result<(), String> {
             ];
             asset_balance(&args)
         }
-        "7" | "back" => Ok(()),
+        "7" => {
+            let mut args = interactive_asset_wallet_rpc()?;
+            args.extend(["--asset".into(), prompt("Asset Contract")?]);
+            consolidate_asset_shares(&args)
+        }
+        "8" | "back" => Ok(()),
         choice => Err(format!("unknown asset selection `{choice}`")),
     }
 }
@@ -1386,10 +1483,7 @@ fn print_help() {
         "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--account account]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--account ACCOUNT]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet consolidate [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet version\n\nAll signature accounts are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 zeno per canonical transaction byte; manual --miner fee input is not supported. Consolidation merges selected XPQ UTXOs into one self-owned output and remains subject to archival burn and miner fee. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs.\nRunning without a command opens the interactive menu.\nWithout --input, spend selects active XPQ inputs and calculates change through node RPC."
     );
     println!(
-        "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply AMOUNT --initial-mint AMOUNT [--fixed-supply] [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset Hash --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset Hash --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset Hash --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-info --asset Hash [--rpc ADDRESS]\nwallet asset-balance --asset Hash [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts use the human decimal denomination declared by asset metadata. For decimals=8, 1.25 is encoded canonically as 125000000 Unit. Registration atomically credits the initial mint to the signing creator address."
-    );
-    println!(
-        "\nPool commands:\nwallet pools [--rpc ADDRESS]\nwallet pool-info --pool HASH [--rpc ADDRESS]\nwallet pool-shares [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\nwallet pool-create --x PAIR --y PAIR --amount-x RAW --amount-y RAW --fee-units N [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet pool-add --pool HASH --amount-x RAW --amount-y RAW --minimum-liquidity RAW [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet pool-remove --share HASH --minimum-x RAW --minimum-y RAW [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet pool-swap --pool HASH --input PAIR --amount-in RAW --minimum-out RAW [--wallet PATH] [--rpc ADDRESS] [--offline]\n\nPAIR is `coin` or a 64-character asset ID. Pool quantities are raw base units. Pool funding consumes exact-value XPQ UTXOs or asset shares; fee and protocol burn are selected from separate XPQ inputs."
+        "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply AMOUNT --initial-mint AMOUNT [--fixed-supply] [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset CONTRACT --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset CONTRACT --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset CONTRACT --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-consolidate --asset CONTRACT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet asset-info --asset CONTRACT [--rpc ADDRESS]\nwallet asset-balance --asset CONTRACT [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts use the human decimal denomination declared by asset metadata. For decimals=8, 1.25 is encoded canonically as 125000000 Unit. Asset consolidation merges shares of one contract into one self-owned share and pays its fee and protocol burn with XPQ. Registration atomically credits the initial mint to the signing creator address."
     );
 }
 

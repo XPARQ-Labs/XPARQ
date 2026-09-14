@@ -3,19 +3,19 @@
 use crate::{
     blockchain::Header,
     codec::block_header_bytes,
-    consensus::{ConsensusError, MAX_DIFFICULTY, MIN_DIFFICULTY},
+    consensus::{ConsensusError, PoWTarget},
 };
 
 use crypto::{
     CryptoError, Hash, HashDomain, PoWHash, PoWMemory, PreviousHash,
     argon2::{argon2id_pow_hash, argon2id_pow_hash_with_memory},
-    domain, hash_meets_difficulty,
+    domain,
 };
 
 pub const POW_ALGORITHM: &str = "xparq-argon2id-algorithm";
 
 // Consensus parameters. Do not change on an existing chain without a hard fork.
-pub const POW_ARGON2_MEMORY_KIB: u32 = 256 * 1024;
+pub const POW_ARGON2_MEMORY_KIB: u32 = 512 * 1024;
 pub const POW_ARGON2_ITERATIONS: u32 = 1;
 pub const POW_ARGON2_LANES: u32 = 1;
 
@@ -80,18 +80,29 @@ pub fn verify_pow_with_memory(
     )
 }
 
-fn validate_pow_claim(header: &Header, expected_difficulty: u32) -> Result<(), ConsensusError> {
-    if !(MIN_DIFFICULTY..=MAX_DIFFICULTY).contains(&expected_difficulty) {
+fn validate_pow_claim(
+    header: &Header,
+    expected_target_bits: u32,
+) -> Result<(), ConsensusError> {
+    if PoWTarget::from_compact(expected_target_bits).is_none() {
         return Err(ConsensusError::InvalidDifficulty);
     }
-    if header.difficulty != expected_difficulty {
+
+    if header.target_bits != expected_target_bits {
         return Err(ConsensusError::UnexpectedDifficulty);
     }
+
     Ok(())
 }
 
-fn verify_pow_hash(hash: PoWHash, expected_difficulty: u32) -> Result<(), ConsensusError> {
-    if hash_meets_difficulty(&hash, expected_difficulty) {
+fn verify_pow_hash(
+    hash: PoWHash,
+    expected_target_bits: u32,
+) -> Result<(), ConsensusError> {
+    let target = PoWTarget::from_compact(expected_target_bits)
+        .ok_or(ConsensusError::InvalidDifficulty)?;
+
+    if target.meets(&hash) {
         Ok(())
     } else {
         Err(ConsensusError::InsufficientPoW)

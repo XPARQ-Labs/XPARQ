@@ -14,6 +14,7 @@ mod header;
 mod policy;
 mod pow;
 mod transaction;
+mod target;
 
 pub use block::*;
 pub use crate::error::ConsensusError;
@@ -24,3 +25,8 @@ pub use pow::*;
 pub use transaction::*;
 
 pub use crate::native::coin::{DECIMALS, XPQ, Zeno};
+
+pub use target::{
+    PoWTarget,
+    hash_meets_target,
+};

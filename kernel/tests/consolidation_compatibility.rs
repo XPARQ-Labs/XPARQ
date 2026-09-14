@@ -2,23 +2,23 @@
 
 #[test]
 #[cfg(feature = "mainnet")]
-fn mainnet_genesis_is_unchanged_and_effect_rules_have_a_new_identity() {
+fn mainnet_genesis_and_chain_spec_match_the_current_structure() {
     use kernel::{codec, genesis};
     assert_eq!(
         genesis::genesis_hash().unwrap().into_bytes(),
         [
-            101, 64, 118, 68, 54, 86, 64, 225, 100, 102, 49, 159, 182, 7, 174, 208, 84, 59, 30, 75,
-            237, 239, 84, 225, 186, 104, 102, 129, 199, 140, 66, 159
+            212, 9, 99, 195, 104, 129, 74, 178, 35, 16, 87, 234, 192, 76, 226, 169, 187, 120, 36,
+            172, 185, 246, 186, 145, 237, 119, 232, 131, 179, 234, 188, 197
         ]
     );
-    // The current state-root and explicit coin burn separate this protocol from the old
-    // chain spec, while preserving the frozen genesis block and native IDs.
-    assert_eq!(genesis::CHAIN_SPEC_VERSION, 2);
+    // The target-bits header and current consensus parameters define a new chain
+    // identity while the native asset IDs below remain frozen independently.
+    assert_eq!(genesis::CHAIN_SPEC_VERSION, 1);
     assert_eq!(
         genesis::chain_spec_hash().unwrap().into_bytes(),
         [
-            76, 112, 241, 202, 189, 79, 237, 208, 176, 27, 83, 246, 124, 255, 76, 221, 5, 147, 76,
-            55, 149, 14, 184, 212, 189, 75, 174, 39, 171, 152, 191, 252
+            73, 19, 98, 10, 177, 15, 27, 246, 3, 192, 27, 148, 189, 244, 136, 217, 158, 39, 117,
+            79, 85, 171, 238, 57, 42, 100, 47, 147, 183, 91, 206, 40
         ]
     );
     assert_ne!(
@@ -32,7 +32,7 @@ fn mainnet_genesis_is_unchanged_and_effect_rules_have_a_new_identity() {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 125, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 255, 255, 127, 32, 125, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0,
     ];
     let block = genesis::genesis_block().unwrap();

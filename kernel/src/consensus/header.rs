@@ -103,7 +103,7 @@ pub fn verify_header_chain(
 
         let expected = expected_header_difficulty(previous, &recent)?;
 
-        if current.header.difficulty != expected {
+        if current.header.target_bits != expected {
             return Err(HeaderChainError::InvalidHeaderChain(
                 ForkChoiceError::InvalidDifficulty,
             ));
@@ -149,7 +149,7 @@ fn expected_header_difficulty(
 ) -> Result<u32, HeaderChainError> {
     let next_height = previous.height.0.saturating_add(1);
 
-    expected_difficulty_for_height(next_height, previous.header.difficulty, |height| {
+    expected_difficulty_for_height(next_height, previous.header.target_bits, |height| {
         recent
             .iter()
             .find(|candidate| candidate.height.0 == height)
@@ -254,7 +254,7 @@ fn verify_header_chain_extension_inner(
         }
 
         let expected_difficulty =
-            expected_difficulty_for_height(chain_header.height.0, previous.difficulty, |height| {
+            expected_difficulty_for_height(chain_header.height.0, previous.target_bits, |height| {
                 recent
                     .iter()
                     .find(|candidate| candidate.height.0 == height)
@@ -272,7 +272,7 @@ fn verify_header_chain_extension_inner(
                 ForkChoiceError::InvalidDifficulty,
             ))?;
 
-        if header.difficulty != expected_difficulty {
+        if header.target_bits != expected_difficulty {
             return Err(HeaderChainError::InvalidHeaderChain(
                 ForkChoiceError::InvalidDifficulty,
             ));

@@ -55,7 +55,12 @@ its parent `AssetHash`, and is owned by an address.
 ./target/release/wallet asset-register --name "Gold Token" --symbol GOLD --decimals 2 --max-supply 10000 --initial-mint 1000
 ./target/release/wallet asset-mint --asset ID --to ADDRESS --amount 5.50
 ./target/release/wallet asset-transfer --asset ID --to ADDRESS --amount 2.25
+./target/release/wallet asset-consolidate --asset ID
 ./target/release/wallet asset-burn --asset ID --amount 1
 ./target/release/wallet asset-info --asset ID
 ./target/release/wallet asset-balance --asset ID
 ```
+
+Asset consolidation consumes at least two shares of the selected asset and
+creates one share containing their combined amount at the wallet's own address.
+The transaction uses separate XPQ UTXOs to pay its miner fee and protocol burn.

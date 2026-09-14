@@ -2,7 +2,7 @@ use crate::{
     blockchain::{Block, MAX_BLOCK_SIZE},
     common::Height,
     consensus::{
-        Consensus, GENESIS_DIFFICULTY, MAX_DIFFICULTY, MIN_DIFFICULTY,
+        Consensus, GENESIS_TARGET_BITS, PoWTarget,
         expected_difficulty_for_height,
     },
 };
@@ -107,9 +107,9 @@ impl ForkChoice {
         }
 
         let difficulty_is_valid = if block.is_genesis() {
-            block.difficulty() == GENESIS_DIFFICULTY
+            block.target_bits() == GENESIS_TARGET_BITS
         } else {
-            (MIN_DIFFICULTY..=MAX_DIFFICULTY).contains(&block.difficulty())
+            PoWTarget::from_compact(block.target_bits()).is_some()
         };
         if !difficulty_is_valid {
             return Err(ForkChoiceError::InvalidDifficulty);
@@ -142,10 +142,10 @@ impl ForkChoice {
         };
         let expected_difficulty = self.expected_difficulty_for(&block, parent)?;
         if !block.is_genesis() {
-            if block.difficulty() != expected_difficulty {
+            if block.target_bits() != expected_difficulty {
                 return Err(ForkChoiceError::InvalidDifficulty);
             }
-            Consensus::validate_pow_at_difficulty(&block, expected_difficulty)
+            Consensus::validate_pow_at_target_bits(&block, expected_difficulty)
                 .map_err(ForkChoiceError::InvalidProofOfWork)?;
         }
 
@@ -259,7 +259,7 @@ impl ForkChoice {
         parent: BlockHash,
     ) -> Result<u32, ForkChoiceError> {
         if block.height() == Height(0) {
-            return Ok(GENESIS_DIFFICULTY);
+            return Ok(GENESIS_TARGET_BITS);
         }
         let parent_node = self
             .nodes
@@ -267,7 +267,7 @@ impl ForkChoice {
             .ok_or(ForkChoiceError::MissingParent)?;
         expected_difficulty_for_height(
             block.height().0,
-            parent_node.block.difficulty(),
+            parent_node.block.target_bits(),
             |height| {
                 self.ancestor_at_height(parent, Height(height))
                     .ok_or(ForkChoiceError::MissingParent)?

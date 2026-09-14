@@ -85,7 +85,7 @@ const MAX_HEADER_REQUESTS_PER_SESSION: usize =
     MAX_SYNC_HEADERS.div_ceil(MAX_HEADER_CHAIN_CHUNK_HEADERS) + 1;
 const MAX_GOSSIP_INVENTORY_ITEMS: usize = 1_024;
 const MAX_MEMPOOL_TRANSACTIONS: usize = MAX_GOSSIP_INVENTORY_ITEMS;
-const MIN_RELAY_FEE_ZENO_PER_BYTE: u64 = 1;
+const MIN_RELAY_FEE_ZENO_PER_BYTE: u64 = 8;
 const MAX_GOSSIP_INVENTORY_SIZE: usize = 64 * 1024;
 const GOSSIP_HEARTBEAT: Duration = Duration::from_secs(2);
 const MAX_INBOUND_CONNECTIONS: usize = 64;
@@ -1316,7 +1316,7 @@ fn status_response(ledger: &Ledger) -> Result<serde_json::Value, String> {
         .blocks()
         .filter(|block| !block.is_genesis())
         .fold(kernel::consensus::Work::ZERO, |work, block| {
-            work.saturating_add(kernel::consensus::block_work(block.difficulty()))
+            work.saturating_add(kernel::consensus::block_work(block.target_bits()))
         });
     let cumulative_weight = ledger
         .chain
@@ -1391,7 +1391,7 @@ fn block_response(ledger: &Ledger, block: &Block) -> Result<serde_json::Value, S
         "height": block.height().0,
         "hash": hex::encode(block.hash().map_err(|error| error.to_string())?.0),
         "previous_hash": hex::encode(block.previous_hash().0),
-        "difficulty": block.difficulty(),
+        "difficulty": block.target_bits(),
         "block_weight": block.block_weight(),
         "nonce": block.header.nonce.0,
         "transactions": block.transaction_count(),
@@ -2657,7 +2657,7 @@ fn validated_header_state(
         .iter()
         .skip(1)
         .fold(kernel::consensus::Work::ZERO, |work, header| {
-            work.saturating_add(kernel::consensus::block_work(header.header.difficulty))
+            work.saturating_add(kernel::consensus::block_work(header.header.target_bits))
         });
     let cumulative_weight = headers.iter().skip(1).fold(0_u64, |total, header| {
         total.saturating_add(u64::from(header.header.block_weight))

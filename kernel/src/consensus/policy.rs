@@ -7,16 +7,18 @@ use static_assertions::const_assert;
 use crate::{
     blockchain::Block,
     common::Height,
-    native::coin::{CoinOutput, XPQ, Zeno},
+    native::coin::{CoinOutput, Zeno},
+    consensus::PoWTarget,
 };
 
 use crypto::{ADDRESS_SIZE, Address, HASH_SIZE, Hash, HashDomain, canonical_bytes, domain};
 
-pub const WBDA_WINDOW: usize = 25_000;
-pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 1 * 1024 * 1024;
-pub const WBDA_LOW_UTILIZATION_PPM: u64 = 400_000;
-pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 600_000;
-pub const WBDA_DIFFICULTY_STEP: u32 = 1;
+pub const WBDA_WINDOW: usize = 2_500;
+pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 2 * 1024 * 1024;
+pub const WBDA_LOW_UTILIZATION_PPM: u64 = 800_000;
+pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 1_200_000;
+pub const WBDA_HARDER_PERCENT: u32 = 95;
+pub const WBDA_EASIER_PERCENT: u32 = 105;
 pub const DIFFICULTY_ALGORITHM: &str = "argon2id-wbda-algorithm";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,22 +70,47 @@ pub fn adjustment_for_window(block_weights: &[usize]) -> Option<WbdaAdjustment> 
 }
 
 pub fn next_difficulty_from_window(
-    previous_difficulty: u32,
+    previous_target_bits: u32,
     block_weights: &[usize],
 ) -> Option<u32> {
     let adjustment = adjustment_for_window(block_weights)?;
 
-    Some(
-        match adjustment {
-            WbdaAdjustment::Decrease => previous_difficulty.saturating_sub(WBDA_DIFFICULTY_STEP),
-            WbdaAdjustment::Keep => previous_difficulty,
-            WbdaAdjustment::Increase => previous_difficulty.saturating_add(WBDA_DIFFICULTY_STEP),
+    let previous =
+        PoWTarget::from_compact(previous_target_bits)?;
+
+    let pow_limit =
+        PoWTarget::from_compact(crate::consensus::TARGET_BITS_START)?;
+
+    let next = match adjustment {
+        // Old "Decrease difficulty" = easier.
+        // Easier means a larger target.
+        WbdaAdjustment::Decrease => {
+            previous.scale_ratio(
+                WBDA_EASIER_PERCENT,
+                100,
+            )?
         }
-        .clamp(
-            crate::consensus::MIN_DIFFICULTY,
-            crate::consensus::MAX_DIFFICULTY,
-        ),
-    )
+
+        WbdaAdjustment::Keep => previous,
+
+        // Old "Increase difficulty" = harder.
+        // Harder means a smaller target.
+        WbdaAdjustment::Increase => {
+            previous.scale_ratio(
+                WBDA_HARDER_PERCENT,
+                100,
+            )?
+        }
+    };
+
+    // Never become easier than the configured PoW limit.
+    let next = if next > pow_limit {
+        pow_limit
+    } else {
+        next
+    };
+
+    Some(next.to_compact())
 }
 
 pub fn expected_difficulty_from_window(
@@ -92,7 +119,7 @@ pub fn expected_difficulty_from_window(
     current_window: &[usize],
 ) -> Option<u32> {
     if next_height == 1 {
-        return Some(crate::consensus::DIFFICULTY_START);
+        return Some(crate::consensus::TARGET_BITS_START);
     }
 
     if !is_wbda_epoch_boundary(next_height) {
@@ -108,7 +135,7 @@ pub fn expected_difficulty_for_height<E>(
     mut weight_at: impl FnMut(u64) -> Result<usize, E>,
 ) -> Result<Option<u32>, E> {
     if next_height == 1 {
-        return Ok(Some(crate::consensus::DIFFICULTY_START));
+        return Ok(Some(crate::consensus::TARGET_BITS_START));
     }
 
     if !is_wbda_epoch_boundary(next_height) {
@@ -128,16 +155,23 @@ pub fn expected_difficulty_for_height<E>(
     ))
 }
 
-pub const BLOCK_EMISSION_START: u64 = 1_000_000;
-pub const MAX_BLOCK_EMISSION: u64 = 10_000_000;
-pub const TAIL_BLOCK_EMISSION: u64 = 500_000;
-pub const BLOCK_EMISSION_STEP: u64 = 500_000;
+pub const BLOCK_EMISSION_START: u64 = 156_250_000; // 1.562500 XPQ
+pub const MAX_BLOCK_EMISSION: u64 = 5_000_000_000; // 50 XPQ
+pub const TAIL_BLOCK_EMISSION: u64 = 78_125_000; // 0.781250 XPQ
+pub const EMISSION_RISING_STEPS: u64 = 5;
+pub const EMISSION_HALVINGS_TO_TAIL: u64 = 6;
+
 pub const EMISSION_INTERVAL: u64 = 50_000;
 
-const_assert!(BLOCK_EMISSION_START == XPQ::ZENO_PER_COIN);
-const_assert!(MAX_BLOCK_EMISSION == 10 * XPQ::ZENO_PER_COIN);
-const_assert!(TAIL_BLOCK_EMISSION == XPQ::ZENO_PER_COIN / 2);
-const_assert!(BLOCK_EMISSION_STEP == XPQ::ZENO_PER_COIN / 2);
+const_assert!(
+    BLOCK_EMISSION_START * (1_u64 << EMISSION_RISING_STEPS)
+        == MAX_BLOCK_EMISSION
+);
+
+const_assert!(
+    MAX_BLOCK_EMISSION / (1_u64 << EMISSION_HALVINGS_TO_TAIL)
+        == TAIL_BLOCK_EMISSION
+);
 
 pub const fn initial_block_emission() -> Zeno {
     Zeno::from_zeno(BLOCK_EMISSION_START)
@@ -147,21 +181,36 @@ pub const fn is_emission_epoch_boundary(height: u64) -> bool {
     height > 1 && (height - 1).is_multiple_of(EMISSION_INTERVAL)
 }
 
+
 pub fn block_emission_for_height(height: Height) -> Zeno {
-    let completed_intervals = height.0.saturating_sub(1) / EMISSION_INTERVAL;
+    let completed_intervals =
+        height.0.saturating_sub(1) / EMISSION_INTERVAL;
 
-    let rising_steps = (MAX_BLOCK_EMISSION - BLOCK_EMISSION_START) / BLOCK_EMISSION_STEP;
+    let emission = if completed_intervals <= EMISSION_RISING_STEPS {
+        // Reverse halving / doubling phase:
+        //
+        // 1.5625
+        // 3.125
+        // 6.25
+        // 12.5
+        // 25
+        // 50
+        let multiplier = 1_u64 << completed_intervals;
 
-    let emission = if completed_intervals <= rising_steps {
         BLOCK_EMISSION_START
-            .saturating_add(completed_intervals.saturating_mul(BLOCK_EMISSION_STEP))
+            .saturating_mul(multiplier)
             .min(MAX_BLOCK_EMISSION)
     } else {
-        let declining_steps = completed_intervals - rising_steps;
+        // Normal halving phase after peak.
+        let halvings =
+            completed_intervals - EMISSION_RISING_STEPS;
 
-        MAX_BLOCK_EMISSION
-            .saturating_sub(declining_steps.saturating_mul(BLOCK_EMISSION_STEP))
-            .max(TAIL_BLOCK_EMISSION)
+        if halvings >= EMISSION_HALVINGS_TO_TAIL {
+            TAIL_BLOCK_EMISSION
+        } else {
+            (MAX_BLOCK_EMISSION >> halvings)
+                .max(TAIL_BLOCK_EMISSION)
+        }
     };
 
     Zeno::from_zeno(emission)
@@ -262,7 +311,7 @@ pub fn expected_emission_for_height(height: Height) -> Zeno {
 }
 
 pub const STATE_BURN_ALGORITHM: &str = "xparq-canonical-archival-and-net-coin-state-growth-burn";
-pub const STATE_BURN_RATE_ZENO_PER_WEIGHT: u64 = 1;
+pub const STATE_BURN_RATE_ZENO_PER_WEIGHT: u64 = 8;
 
 const BORSH_OPTION_TAG_BYTES: usize = 1;
 const BORSH_VEC_LENGTH_BYTES: usize = core::mem::size_of::<u32>();

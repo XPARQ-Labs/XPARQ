@@ -305,30 +305,3 @@ pub fn domain(domain: HashDomain, bytes: &[u8]) -> Hash {
 pub fn domain_hash(domain: HashDomain, bytes: &[u8]) -> Hash {
     self::domain(domain, bytes)
 }
-
-pub fn hash_meets_difficulty(hash: &PoWHash, difficulty: u32) -> bool {
-    let bytes = hash.as_bytes();
-
-    let full_zero_bytes = (difficulty / 8) as usize;
-    let remaining_zero_bits = (difficulty % 8) as u8;
-
-    if full_zero_bytes > bytes.len() {
-        return false;
-    }
-
-    if !bytes.iter().take(full_zero_bytes).all(|byte| *byte == 0) {
-        return false;
-    }
-
-    if remaining_zero_bits == 0 {
-        return true;
-    }
-
-    let Some(next_byte) = bytes.get(full_zero_bytes) else {
-        return false;
-    };
-
-    let mask = 0xff << (8 - remaining_zero_bits);
-
-    next_byte & mask == 0
-}

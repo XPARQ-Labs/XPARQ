@@ -2,17 +2,17 @@ use crate::{
     blockchain::{Block, Chain},
     common::Height,
     consensus::{
-        ConsensusError, ValidatedEmission, authorize_emission, expected_difficulty_for_height,
+        ConsensusError, ValidatedEmission, PoWTarget, authorize_emission, expected_difficulty_for_height,
         verify_pow,
     },
 };
 
-use crypto::{BlockHash, HASH_SIZE, Hash, PoWHash, PoWMemory, hash_meets_difficulty};
+use crypto::{BlockHash, HASH_SIZE, Hash, PoWHash, PoWMemory};
 
-pub const MIN_DIFFICULTY: u32 = 1;
-pub const MAX_DIFFICULTY: u32 = (crypto::POW_HASH_SIZE * 8) as u32;
-pub const GENESIS_DIFFICULTY: u32 = crate::blockchain::GENESIS_BLOCK_DIFFICULTY;
-pub const DIFFICULTY_START: u32 = 1;
+pub const GENESIS_TARGET_BITS: u32 =
+    crate::blockchain::GENESIS_TARGET_BITS;
+
+pub const TARGET_BITS_START: u32 = 0x207f_ffff;
 
 pub trait ApplyBlockState {
     type Error: From<ConsensusError>;
@@ -111,8 +111,8 @@ fn validate_for_apply(
         let expected_difficulty = expected_difficulty(chain, block.height())?;
 
         if enforce_pow {
-            Consensus::validate_pow_at_difficulty(block, expected_difficulty)?;
-        } else if block.difficulty() != expected_difficulty {
+            Consensus::validate_pow_at_target_bits(block, expected_difficulty)?;
+        } else if block.target_bits() != expected_difficulty {
             return Err(ConsensusError::UnexpectedDifficulty);
         }
     }
@@ -131,14 +131,14 @@ fn validate_for_apply(
 
 fn expected_difficulty(chain: &Chain, height: Height) -> Result<u32, ConsensusError> {
     if height.0 == 0 {
-        return Ok(GENESIS_DIFFICULTY);
+        return Ok(GENESIS_TARGET_BITS);
     }
 
     let parent = chain
         .block(&Height(height.0 - 1))
         .ok_or(ConsensusError::InvalidPreviousHash)?;
 
-    expected_difficulty_for_height(height.0, parent.difficulty(), |height| {
+    expected_difficulty_for_height(height.0, parent.target_bits(), |height| {
         chain
             .block(&Height(height))
             .ok_or(ConsensusError::InvalidPreviousHash)?
@@ -161,24 +161,24 @@ pub fn expected_next_difficulty(chain: &Chain) -> Result<u32, ConsensusError> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConsensusConfig {
-    difficulty: u32,
+    target_bits: u32,
 }
 
 impl Default for ConsensusConfig {
     fn default() -> Self {
         Self {
-            difficulty: DIFFICULTY_START,
+            target_bits: TARGET_BITS_START,
         }
     }
 }
 
 impl ConsensusConfig {
-    pub const fn new(difficulty: u32) -> Self {
-        Self { difficulty }
+    pub const fn new(target_bits: u32) -> Self {
+        Self { target_bits }
     }
 
-    pub const fn difficulty(&self) -> u32 {
-        self.difficulty
+    pub const fn target_bits(&self) -> u32 {
+        self.target_bits
     }
 }
 
@@ -189,7 +189,7 @@ pub struct Consensus {
 
 impl Consensus {
     pub fn new(config: ConsensusConfig) -> Result<Self, ConsensusError> {
-        if !(MIN_DIFFICULTY..=MAX_DIFFICULTY).contains(&config.difficulty) {
+        if PoWTarget::from_compact(config.target_bits).is_none() {
             return Err(ConsensusError::InvalidDifficulty);
         }
 
@@ -199,21 +199,21 @@ impl Consensus {
     pub const fn with_default_config() -> Self {
         Self {
             config: ConsensusConfig {
-                difficulty: DIFFICULTY_START,
+                target_bits: TARGET_BITS_START,
             },
         }
     }
 
-    pub fn with_expected_difficulty(expected_difficulty: u32) -> Result<Self, ConsensusError> {
-        Self::new(ConsensusConfig::new(expected_difficulty))
+    pub fn with_expected_target_bits(expected_target_bits: u32) -> Result<Self, ConsensusError> {
+        Self::new(ConsensusConfig::new(expected_target_bits))
     }
 
     pub const fn config(&self) -> ConsensusConfig {
         self.config
     }
 
-    pub const fn difficulty(&self) -> u32 {
-        self.config.difficulty()
+    pub const fn target_bits(&self) -> u32 {
+        self.config.target_bits()
     }
 
     pub fn validate_genesis_block(&self, block: &Block) -> Result<(), ConsensusError> {
@@ -237,7 +237,7 @@ impl Consensus {
 
         self.validate_next_block_linkage(block, tip_height, tip_hash)?;
 
-        Self::validate_pow_at_difficulty(block, expected_difficulty)
+        Self::validate_pow_at_target_bits(block, expected_difficulty)
     }
 
     pub fn validate_next_block_with_tip(
@@ -287,42 +287,41 @@ impl Consensus {
     }
 
     pub fn validate_pow(&self, block: &Block) -> Result<(), ConsensusError> {
-        if block.difficulty() != self.difficulty() {
+        if block.target_bits() != self.target_bits() {
             return Err(ConsensusError::UnexpectedDifficulty);
         }
 
         self.validate_claimed_pow(block)
     }
 
-    pub fn validate_pow_at_difficulty(
+    pub fn validate_pow_at_target_bits(
         block: &Block,
-        expected_difficulty: u32,
+        expected_target_bits: u32,
     ) -> Result<(), ConsensusError> {
-        if block.difficulty() != expected_difficulty {
+        if block.target_bits() != expected_target_bits {
             return Err(ConsensusError::UnexpectedDifficulty);
         }
 
-        Self::with_expected_difficulty(expected_difficulty)?.validate_claimed_pow(block)
+        Self::with_expected_target_bits(expected_target_bits)?.validate_claimed_pow(block)
     }
 
     pub fn validate_claimed_pow(&self, block: &Block) -> Result<(), ConsensusError> {
-        verify_pow(&block.header, block.difficulty())
+        verify_pow(&block.header, block.target_bits())
     }
 
     pub fn validate_pow_hash(&self, hash: &PoWHash) -> Result<(), ConsensusError> {
-        self.validate_pow_hash_with_difficulty(hash, self.difficulty())
+        self.validate_pow_hash_with_target_bits(hash, self.target_bits())
     }
 
-    pub fn validate_pow_hash_with_difficulty(
+    pub fn validate_pow_hash_with_target_bits(
         &self,
         hash: &PoWHash,
-        difficulty: u32,
+        target_bits: u32,
     ) -> Result<(), ConsensusError> {
-        if !(MIN_DIFFICULTY..=MAX_DIFFICULTY).contains(&difficulty) {
-            return Err(ConsensusError::InvalidDifficulty);
-        }
+        let target = PoWTarget::from_compact(target_bits)
+            .ok_or(ConsensusError::InvalidDifficulty)?;
 
-        if hash_meets_difficulty(hash, difficulty) {
+        if target.meets(hash) {
             Ok(())
         } else {
             Err(ConsensusError::InsufficientPoW)
