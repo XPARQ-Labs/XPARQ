@@ -77,7 +77,6 @@ struct NodeBurnResponse {
 struct AccountAssetBalance {
     asset: String,
     name: String,
-    symbol: String,
     decimals: u8,
     max_supply: String,
     mint: String,
@@ -581,20 +580,6 @@ fn parse_asset_display_amount(value: &str, decimals: u8) -> Result<u128, String>
         .ok_or_else(|| "amount exceeds the u128 range".to_string())
 }
 
-fn format_asset_amount(value: &str, decimals: u8, symbol: &str) -> Result<String, String> {
-    let units = value
-        .parse::<u128>()
-        .map_err(|_| "node returned an invalid asset amount".to_string())?;
-    if decimals == 0 {
-        return Ok(format!("{units} {symbol}"));
-    }
-    let scale = 10_u128.pow(decimals as u32);
-    let whole = units / scale;
-    let fraction = units % scale;
-    let width = decimals as usize;
-    Ok(format!("{whole}.{fraction:0width$} {symbol}"))
-}
-
 fn interactive_menu() -> Result<(), String> {
     loop {
         println!();
@@ -665,14 +650,12 @@ fn interactive_assets() -> Result<(), String> {
         "1" => {
             let wallet_rpc_args = interactive_asset_wallet_rpc()?;
             let name = prompt("Asset Name")?;
-            let symbol = prompt("Asset Symbol")?;
             let decimals = prompt_default("Decimals", "0")?;
             let max_supply = prompt("Maximum Supply")?;
             let mint_amount = prompt("Initial Mint")?;
 
             let mut register_args = wallet_rpc_args.clone();
             register_args.extend(["--name".into(), name]);
-            register_args.extend(["--symbol".into(), symbol]);
             register_args.extend(["--decimals".into(), decimals]);
             register_args.extend(["--max-supply".into(), max_supply]);
             register_args.extend(["--initial-mint".into(), mint_amount]);
@@ -889,6 +872,28 @@ fn print_address(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn format_asset_amount(value: &str, decimals: u8) -> Result<String, String> {
+    let units = value
+        .parse::<u128>()
+        .map_err(|error| format!("invalid asset amount: {error}"))?;
+
+    if decimals == 0 {
+        return Ok(units.to_string());
+    }
+
+    let scale = 10_u128
+        .checked_pow(decimals as u32)
+        .ok_or("asset decimals are too large")?;
+
+    let whole = units / scale;
+    let fractional = units % scale;
+
+    Ok(format!(
+        "{whole}.{fractional:0width$}",
+        width = decimals as usize
+    ))
+}
+
 fn print_balance(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
@@ -905,20 +910,19 @@ fn print_balance(args: &[String]) -> Result<(), String> {
     println!("Total Burned: {}", format_amount(burn.total_burned));
     println!("Assets: {}", balance.assets.len());
     for asset in &balance.assets {
-        let max_supply = format_asset_amount(&asset.max_supply, asset.decimals, &asset.symbol)?;
-        let mint = format_asset_amount(&asset.mint, asset.decimals, &asset.symbol)?;
+        let max_supply = format_asset_amount(&asset.max_supply, asset.decimals)?;
+        let mint = format_asset_amount(&asset.mint, asset.decimals)?;
         println!(
-            "- asset: {} name: {} symbol: {} decimals: {} max_supply: {} mint: {} shares: {}",
+            "- asset: {} name: {} decimals: {} max_supply: {} mint: {} shares: {}",
             asset.asset,
             asset.name,
-            asset.symbol,
             asset.decimals,
             max_supply,
             mint,
             asset.shares.len(),
         );
         for share in &asset.shares {
-            let amount = format_asset_amount(&share.amount, asset.decimals, &asset.symbol)?;
+            let amount = format_asset_amount(&share.amount, asset.decimals)?;
             println!(
                 "  - share: {} amount: {} owner: {}",
                 share.share_id, amount, share.owner
@@ -1464,7 +1468,7 @@ fn print_help() {
         "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--account account]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--account ACCOUNT]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount XPQ [--change XPQ --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet consolidate [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet version\n\nAll signature accounts are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically pays the node policy fee of 1 zeno per canonical transaction byte; manual --miner fee input is not supported. Consolidation merges selected XPQ UTXOs into one self-owned output and remains subject to archival burn and miner fee. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs.\nRunning without a command opens the interactive menu.\nWithout --input, spend selects active XPQ inputs and calculates change through node RPC."
     );
     println!(
-        "\nAsset commands:\nwallet asset-register --name NAME --symbol SYMBOL --decimals N --max-supply AMOUNT --initial-mint AMOUNT [--fixed-supply] [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset CONTRACT --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset CONTRACT --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset CONTRACT --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-consolidate --asset CONTRACT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet asset-info --asset CONTRACT [--rpc ADDRESS]\nwallet asset-balance --asset CONTRACT [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts use the human decimal denomination declared by asset metadata. For decimals=8, 1.25 is encoded canonically as 125000000 Unit. Asset consolidation merges shares of one contract into one self-owned share and pays its fee and protocol burn with XPQ. Registration atomically credits the initial mint to the signing creator address."
+        "\nAsset commands:\nwallet asset-register --name NAME --decimals N --max-supply AMOUNT --initial-mint AMOUNT [--fixed-supply] [--wallet PATH] [--rpc ADDRESS]\nwallet asset-mint --asset CONTRACT --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-burn --asset CONTRACT --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-transfer --asset CONTRACT --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS]\nwallet asset-consolidate --asset CONTRACT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet asset-info --asset CONTRACT [--rpc ADDRESS]\nwallet asset-balance --asset CONTRACT [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts use the human decimal denomination declared by asset metadata. For decimals=8, 1.25 is encoded canonically as 125000000 Unit. Asset consolidation merges shares of one contract into one self-owned share and pays its fee and protocol burn with XPQ. Registration atomically credits the initial mint to the signing creator address."
     );
 }
 
@@ -1478,31 +1482,6 @@ mod tests {
         } else {
             "available"
         }
-    }
-
-    #[test]
-    fn asset_symbol_is_normalized_and_rejects_non_ascii_punctuation() {
-        assert_eq!(
-            normalize_asset_name(" Test Asset "),
-            Ok("Test Asset".into())
-        );
-        assert_eq!(normalize_asset_symbol("test"), Ok("TEST".into()));
-        assert!(normalize_asset_symbol("test-asset").is_err());
-        assert!(normalize_asset_symbol("").is_err());
-        let args = vec!["--amount".into(), "1000000000000000.00000000".into()];
-        assert_eq!(
-            parse_asset_amount(&args, "--amount", 8),
-            Ok(kernel::native::asset::Unit::from_units(
-                100_000_000_000_000_000_000_000_u128
-            ))
-        );
-        assert_eq!(parse_asset_display_amount("1.25", 8), Ok(125_000_000));
-        assert_eq!(parse_asset_display_amount("1", 8), Ok(100_000_000));
-        assert!(parse_asset_display_amount("1.000000001", 8).is_err());
-        assert_eq!(
-            format_asset_amount("125000000", 8, "TEST"),
-            Ok("1.25000000 TEST".into())
-        );
     }
 
     #[test]
