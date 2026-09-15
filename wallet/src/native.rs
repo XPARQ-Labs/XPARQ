@@ -25,7 +25,7 @@ use wallet::{
 use zeroize::{Zeroize, Zeroizing};
 
 const DEFAULT_WALLET_PATH: &str = "wallet.json";
-const AUTOMATIC_FEE_ZENO_PER_BYTE: u64 = 1;
+const AUTOMATIC_FEE_ZENO_PER_BYTE: u64 = 8;
 const MAX_FEE_CONVERGENCE_ROUNDS: usize = 8;
 
 struct LoadedWallet(AccountWallet);
@@ -167,7 +167,6 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
 
 fn asset_register(args: &[String]) -> Result<(), String> {
     let name = normalize_asset_name(option(args, "--name").ok_or("missing --name")?)?;
-    let symbol = normalize_asset_symbol(option(args, "--symbol").ok_or("missing --symbol")?)?;
     let decimals = option(args, "--decimals")
         .ok_or("missing --decimals")?
         .parse::<u8>()
@@ -183,7 +182,6 @@ fn asset_register(args: &[String]) -> Result<(), String> {
     let asset = Contract::derive(
         &kernel::native::asset::Metadata::new(
             name.clone(),
-            symbol.clone(),
             decimals,
             max_supply,
             authority,
@@ -196,7 +194,6 @@ fn asset_register(args: &[String]) -> Result<(), String> {
         args,
         AssetInstruction::Register {
             name,
-            symbol,
             decimals,
             max_supply,
             initial_mint,
@@ -218,22 +215,6 @@ fn normalize_asset_name(name: &str) -> Result<String, String> {
         return Err(format!(
             "invalid asset name; use 1-{} printable ASCII characters",
             kernel::native::asset::ASSET_NAME_MAX_LEN
-        ));
-    }
-    Ok(normalized)
-}
-
-fn normalize_asset_symbol(symbol: &str) -> Result<String, String> {
-    let normalized = symbol.to_ascii_uppercase();
-    if normalized.is_empty()
-        || normalized.len() > kernel::native::asset::ASSET_SYMBOL_MAX_LEN
-        || !normalized
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-    {
-        return Err(format!(
-            "invalid asset symbol; use 1-{} ASCII letters A-Z or digits",
-            kernel::native::asset::ASSET_SYMBOL_MAX_LEN
         ));
     }
     Ok(normalized)

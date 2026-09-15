@@ -4,7 +4,6 @@ use crypto::{Address, HASH_SIZE, Hash, HashDomain, HashParseError, domain, forma
 use std::{error::Error, fmt, str::FromStr};
 
 pub const ASSET_NAME_MAX_LEN: usize = 64;
-pub const ASSET_SYMBOL_MAX_LEN: usize = 16;
 pub const ASSET_DECIMALS_MAX: u8 = 18;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,7 +95,6 @@ impl fmt::Display for Unit {
 pub struct Metadata {
     // Rename to Metadata
     pub name: String,
-    pub symbol: String,
     pub decimals: u8,
     pub max_supply: Unit,
     pub creator: Address,
@@ -106,7 +104,6 @@ pub struct Metadata {
 impl Metadata {
     pub fn new(
         name: String,
-        symbol: String,
         decimals: u8,
         max_supply: Unit,
         creator: Address,
@@ -114,7 +111,6 @@ impl Metadata {
     ) -> Result<Self, AssetError> {
         let metadata = Self {
             name,
-            symbol,
             decimals,
             max_supply,
             creator,
@@ -128,7 +124,6 @@ impl Metadata {
 
     pub fn validate(&self) -> Result<(), AssetError> {
         validate_name(&self.name)?;
-        validate_symbol(&self.symbol)?;
 
         if self.decimals > ASSET_DECIMALS_MAX {
             return Err(AssetError::InvalidProgram);
@@ -153,19 +148,6 @@ fn validate_name(name: &str) -> Result<(), AssetError> {
         || !name
             .bytes()
             .all(|byte| byte == b' ' || byte.is_ascii_graphic())
-    {
-        return Err(AssetError::InvalidProgram);
-    }
-
-    Ok(())
-}
-
-fn validate_symbol(symbol: &str) -> Result<(), AssetError> {
-    if symbol.is_empty()
-        || symbol.len() > ASSET_SYMBOL_MAX_LEN
-        || !symbol
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
     {
         return Err(AssetError::InvalidProgram);
     }

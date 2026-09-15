@@ -639,7 +639,6 @@ fn account_asset_balances(
         response.push(serde_json::json!({
             "asset": asset.to_string(),
             "name": metadata.name,
-            "symbol": metadata.symbol,
             "decimals": metadata.decimals,
             "max_supply": metadata.max_supply.to_string(),
             "mint": mint.to_string(),
@@ -901,13 +900,12 @@ fn asset_transaction_response(
     let instruction = match &call.instruction {
         kernel::transaction::AssetInstruction::Register {
             name,
-            symbol,
             decimals,
             max_supply,
             initial_mint,
             mint_authority,
         } => serde_json::json!({
-            "type": "register", "name": name, "symbol": symbol, "decimals": decimals,
+            "type": "register", "name": name, "decimals": decimals,
             "max_supply": max_supply.to_string(), "initial_mint": initial_mint.to_string(),
             "mint_authority": asset_authority_response(*mint_authority),
             "recipient": kernel::crypto::address_to_string(&call.signer),
@@ -1187,7 +1185,6 @@ fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, Str
         return Ok(serde_json::json!({
             "asset": asset.to_string(),
             "name": metadata.name,
-            "symbol": metadata.symbol,
             "decimals": metadata.decimals,
             "max_supply": metadata.max_supply.to_string(),
             "supply": supply.to_string(),

@@ -210,7 +210,6 @@ impl AssetState {
         match &call.instruction {
             AssetInstruction::Register {
                 name,
-                symbol,
                 decimals,
                 max_supply,
                 initial_mint,
@@ -218,7 +217,6 @@ impl AssetState {
             } => {
                 let metadata = Metadata::new(
                     name.clone(),
-                    symbol.clone(),
                     *decimals,
                     *max_supply,
                     call.signer,
@@ -383,7 +381,6 @@ impl AssetState {
         match &call.instruction {
             AssetInstruction::Register {
                 name,
-                symbol,
                 decimals,
                 max_supply,
                 mint_authority,
@@ -391,7 +388,6 @@ impl AssetState {
             } => {
                 let metadata = Metadata::new(
                     name.clone(),
-                    symbol.clone(),
                     *decimals,
                     *max_supply,
                     call.signer,
@@ -684,7 +680,6 @@ mod tests {
         AssetIntent::new(
             AssetInstruction::Register {
                 name: "Nonce Asset".into(),
-                symbol: "NONCE".into(),
                 decimals: 0,
                 max_supply: Unit::from_units(100),
                 initial_mint: Unit::from_units(10),
