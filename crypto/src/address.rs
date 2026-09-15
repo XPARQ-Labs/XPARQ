@@ -84,8 +84,7 @@ pub fn address_from_string(value: &str) -> Result<Address, CryptoError> {
         .strip_prefix(ADDRESS_PREFIX)
         .ok_or(CryptoError::InvalidAddressEncoding)?;
 
-    let bytes =
-        hex::decode(encoded).map_err(|_| CryptoError::InvalidAddressEncoding)?;
+    let bytes = hex::decode(encoded).map_err(|_| CryptoError::InvalidAddressEncoding)?;
 
     if bytes.len() != ADDRESS_SIZE + ADDRESS_CHECKSUM_SIZE {
         return Err(CryptoError::InvalidAddressEncoding);
@@ -139,10 +138,7 @@ fn apply_checksum_case(lowercase_hex: &str) -> String {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     );
 
-    let digest = hash::domain(
-        HashDomain::AddressChecksum,
-        lowercase_hex.as_bytes(),
-    );
+    let digest = hash::domain(HashDomain::AddressChecksum, lowercase_hex.as_bytes());
 
     let hash_bytes = digest.as_bytes();
 
@@ -183,10 +179,7 @@ mod tests {
         assert!(encoded.starts_with(ADDRESS_PREFIX));
         assert_eq!(encoded.len(), ADDRESS_STRING_LEN);
 
-        assert_eq!(
-            address_from_string(&encoded),
-            Ok(address),
-        );
+        assert_eq!(address_from_string(&encoded), Ok(address),);
     }
 
     #[test]
@@ -236,10 +229,7 @@ mod tests {
         *last ^= 0x01;
 
         let lowercase = hex::encode(bytes);
-        let corrupted = format!(
-            "{ADDRESS_PREFIX}{}",
-            apply_checksum_case(&lowercase),
-        );
+        let corrupted = format!("{ADDRESS_PREFIX}{}", apply_checksum_case(&lowercase),);
 
         assert_eq!(
             address_from_string(&corrupted),
@@ -251,10 +241,7 @@ mod tests {
     fn address_without_checksum_is_rejected() {
         let address = Address([7; ADDRESS_SIZE]);
 
-        let raw = format!(
-            "{ADDRESS_PREFIX}{}",
-            hex::encode(address.as_bytes()),
-        );
+        let raw = format!("{ADDRESS_PREFIX}{}", hex::encode(address.as_bytes()),);
 
         assert_eq!(
             address_from_string(&raw),

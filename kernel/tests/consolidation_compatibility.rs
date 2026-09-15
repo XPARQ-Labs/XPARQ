@@ -17,8 +17,8 @@ fn mainnet_genesis_and_chain_spec_match_the_current_structure() {
     assert_eq!(
         genesis::chain_spec_hash().unwrap().into_bytes(),
         [
-            73, 19, 98, 10, 177, 15, 27, 246, 3, 192, 27, 148, 189, 244, 136, 217, 158, 39, 117,
-            79, 85, 171, 238, 57, 42, 100, 47, 147, 183, 91, 206, 40
+            106, 172, 21, 51, 120, 227, 180, 226, 161, 82, 13, 94, 88, 170, 110, 162, 74, 56, 17,
+            42, 48, 125, 206, 216, 159, 219, 133, 92, 46, 244, 133, 73
         ]
     );
     assert_ne!(
@@ -32,8 +32,8 @@ fn mainnet_genesis_and_chain_spec_match_the_current_structure() {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 255, 255, 127, 32, 125, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 255, 255, 127, 32, 125, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
     ];
     let block = genesis::genesis_block().unwrap();
     assert_eq!(codec::block_bytes(&block).unwrap(), expected);
@@ -50,7 +50,6 @@ fn native_asset_and_share_ids_are_frozen() {
     let parent = Contract::derive(
         &Metadata::new(
             "Test Asset".into(),
-            "TEST".into(),
             6,
             Unit::from_units(1_000_000),
             Address([7; ADDRESS_SIZE]),
@@ -62,10 +61,10 @@ fn native_asset_and_share_ids_are_frozen() {
     .unwrap();
     assert_eq!(
         parent.to_string(),
-        "e91c4dea105744cb320d7881bc55ce8bf492da026f19daa99be649b11939e87c"
+        "feed2b96c7334175274266e769fb4b306b4dd2c4d4796e18d2d062956fccbb86"
     );
     assert_eq!(
         Share::derive(parent, [9; 32], 3).to_string(),
-        "283647b427cd9a41c83845d7045e80a254b3ecf8cc998495179e2e972640f8b1"
+        "8adbbb49c5d709aaf9b4cce593527b9b46efd09f434e64e9fe72eef7006560ec"
     );
 }

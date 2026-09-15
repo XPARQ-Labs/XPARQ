@@ -106,17 +106,18 @@ impl Ledger {
                 id,
                 CoinUtxo {
                     amount: emission.miner_emission(),
-                    owner: block.miner_address(),
+                    owner: emission.recipient(),
                 },
             )?;
             state.coin.total_mined = state
-                 .coin
-                 .total_mined
-                 .checked_add(emission.subsidy())
-                 .ok_or(StateError::AmountOverflow)?;
+                .coin
+                .total_mined
+                .checked_add(emission.subsidy())
+                .ok_or(StateError::AmountOverflow)?;
 
             let mut spend = SpendRollbackJournal {
                 created_coin_ids: vec![id],
+                mined: emission.subsidy(),
                 ..SpendRollbackJournal::default()
             };
             state.record_protocol_burn(emission.protocol_burn(), &mut spend)?;
@@ -266,7 +267,11 @@ impl TransactionStateView for LedgerState {
 
 impl LedgerState {
     pub(crate) fn application_state_root(&self) -> Result<StateRoot, LedgerError> {
-        if self.assets.is_empty() && self.utxos.is_empty() && self.coin.total_mined.is_zero() && self.coin.total_burned.is_zero() {
+        if self.assets.is_empty()
+            && self.utxos.is_empty()
+            && self.coin.total_mined.is_zero()
+            && self.coin.total_burned.is_zero()
+        {
             return Ok(StateRoot::ZERO);
         }
 
@@ -384,5 +389,341 @@ impl From<ChainError> for LedgerError {
 impl From<crypto::CodecError> for LedgerError {
     fn from(_error: crypto::CodecError) -> Self {
         Self::Consensus(ConsensusError::Serialization)
+    }
+}
+
+#[cfg(test)]
+mod p3e_block_atomicity_tests {
+    use super::*;
+
+    use crate::{
+        blockchain::{Block, Emission},
+        common::Nonce,
+        consensus::{
+            ConsensusError, expected_emission_for_height, expected_next_difficulty,
+            initial_block_emission, validate_candidate_for_apply,
+        },
+        genesis,
+    };
+
+    fn ledger_bytes(ledger: &Ledger) -> Vec<u8> {
+        borsh::to_vec(ledger).expect("ledger must serialize canonically")
+    }
+
+    fn empty_next_candidate(ledger: &Ledger, miner: crypto::Address) -> Block {
+        let height = Height(
+            ledger
+                .tip_height()
+                .map_or(0, |height| height.0.saturating_add(1)),
+        );
+
+        let previous = ledger.tip_hash().expect("canonical tip");
+
+        let target_bits = expected_next_difficulty(&ledger.chain).expect("next target bits");
+
+        let subsidy = expected_emission_for_height(height);
+
+        Block::from_protocol_transactions(
+            height,
+            previous,
+            target_bits,
+            Nonce(0),
+            Some(Emission::new(miner, subsidy)),
+            vec![],
+        )
+        .expect("empty candidate")
+    }
+
+    fn commit_empty_block(ledger: &mut Ledger, miner: crypto::Address) -> Block {
+        let mut block = empty_next_candidate(ledger, miner);
+
+        let (state_root, block_weight) = ledger
+            .preview_block_commitments(&block)
+            .expect("preview commitments");
+
+        block.set_state_root(state_root);
+        block.set_block_weight(block_weight);
+
+        let validated =
+            validate_candidate_for_apply(&block, &ledger.chain).expect("valid candidate");
+
+        ledger
+            .apply_validated_block(validated)
+            .expect("commit block");
+
+        block
+    }
+
+    fn empty_height_one_candidate(ledger: &Ledger, miner: crypto::Address) -> Block {
+        let previous = ledger.tip_hash().expect("genesis tip");
+
+        let target_bits = expected_next_difficulty(&ledger.chain).expect("next target bits");
+
+        Block::from_protocol_transactions(
+            Height(1),
+            previous,
+            target_bits,
+            Nonce(0),
+            Some(Emission::new(miner, initial_block_emission())),
+            vec![],
+        )
+        .expect("height-one candidate")
+    }
+
+    #[test]
+    fn invalid_state_root_after_staging_does_not_mutate_ledger() {
+        let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
+
+        let miner = crypto::Address([0x41; crypto::ADDRESS_SIZE]);
+
+        let before = ledger_bytes(&ledger);
+
+        let before_tip = ledger.tip_hash();
+
+        let block = empty_height_one_candidate(&ledger, miner);
+
+        let validated = validate_candidate_for_apply(&block, &ledger.chain)
+            .expect("candidate must pass pre-application consensus");
+
+        assert!(matches!(
+            ledger.apply_validated_block(validated),
+            Err(LedgerError::InvalidStateRoot)
+        ));
+
+        assert_eq!(ledger_bytes(&ledger), before);
+
+        assert_eq!(ledger.tip_hash(), before_tip);
+
+        assert_eq!(ledger.tip_height(), Some(Height(0)));
+    }
+
+    #[test]
+    fn committed_block_then_rollback_restores_entire_ledger_byte_for_byte() {
+        let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
+
+        let miner = crypto::Address([0x42; crypto::ADDRESS_SIZE]);
+
+        let before = ledger_bytes(&ledger);
+
+        let before_tip = ledger.tip_hash();
+
+        let mut block = empty_height_one_candidate(&ledger, miner);
+
+        let (state_root, block_weight) = ledger
+            .preview_block_commitments(&block)
+            .expect("preview commitments");
+
+        block.set_state_root(state_root);
+        block.set_block_weight(block_weight);
+
+        let validated =
+            validate_candidate_for_apply(&block, &ledger.chain).expect("valid candidate");
+
+        ledger
+            .apply_validated_block(validated)
+            .expect("commit block");
+
+        assert_eq!(ledger.tip_height(), Some(Height(1)));
+
+        assert_ne!(ledger_bytes(&ledger), before);
+
+        let removed = ledger.rollback_tip().expect("rollback tip");
+
+        assert_eq!(removed, block);
+
+        assert_eq!(ledger.tip_hash(), before_tip);
+
+        assert_eq!(ledger.tip_height(), Some(Height(0)));
+
+        assert_eq!(ledger_bytes(&ledger), before);
+    }
+
+    #[test]
+    fn two_committed_blocks_then_two_rollbacks_restore_genesis_byte_for_byte() {
+        let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
+
+        let genesis_bytes = ledger_bytes(&ledger);
+
+        let genesis_tip = ledger.tip_hash();
+
+        let miner_one = crypto::Address([0x51; crypto::ADDRESS_SIZE]);
+
+        let miner_two = crypto::Address([0x52; crypto::ADDRESS_SIZE]);
+
+        let block_one = commit_empty_block(&mut ledger, miner_one);
+
+        assert_eq!(ledger.tip_height(), Some(Height(1)));
+
+        let height_one_bytes = ledger_bytes(&ledger);
+
+        let height_one_tip = ledger.tip_hash();
+
+        let block_two = commit_empty_block(&mut ledger, miner_two);
+
+        assert_eq!(ledger.tip_height(), Some(Height(2)));
+
+        assert_ne!(ledger_bytes(&ledger), height_one_bytes);
+
+        let removed_two = ledger.rollback_tip().expect("rollback height two");
+
+        assert_eq!(removed_two, block_two);
+
+        assert_eq!(ledger.tip_height(), Some(Height(1)));
+
+        assert_eq!(ledger.tip_hash(), height_one_tip);
+
+        assert_eq!(ledger_bytes(&ledger), height_one_bytes);
+
+        let removed_one = ledger.rollback_tip().expect("rollback height one");
+
+        assert_eq!(removed_one, block_one);
+
+        assert_eq!(ledger.tip_height(), Some(Height(0)));
+
+        assert_eq!(ledger.tip_hash(), genesis_tip);
+
+        assert_eq!(ledger_bytes(&ledger), genesis_bytes);
+    }
+
+    #[test]
+    fn failed_second_block_does_not_mutate_committed_first_block() {
+        let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
+
+        let miner_one = crypto::Address([0x61; crypto::ADDRESS_SIZE]);
+
+        let miner_two = crypto::Address([0x62; crypto::ADDRESS_SIZE]);
+
+        let block_one = commit_empty_block(&mut ledger, miner_one);
+
+        assert_eq!(ledger.tip_height(), Some(Height(1)));
+
+        let before = ledger_bytes(&ledger);
+
+        let before_tip = ledger.tip_hash();
+
+        let block_two = empty_next_candidate(&ledger, miner_two);
+
+        let validated = validate_candidate_for_apply(&block_two, &ledger.chain)
+            .expect("candidate must pass pre-application consensus");
+
+        assert!(matches!(
+            ledger.apply_validated_block(validated),
+            Err(LedgerError::InvalidStateRoot)
+        ));
+
+        assert_eq!(ledger.tip_height(), Some(Height(1)));
+
+        assert_eq!(ledger.tip_hash(), before_tip);
+
+        assert_eq!(ledger_bytes(&ledger), before);
+
+        let removed = ledger.rollback_tip().expect("height-one rollback");
+
+        assert_eq!(removed, block_one);
+
+        assert_eq!(ledger.tip_height(), Some(Height(0)));
+    }
+
+    #[test]
+    fn invalid_block_weight_after_staging_does_not_mutate_ledger() {
+        let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
+
+        let miner = crypto::Address([0x71; crypto::ADDRESS_SIZE]);
+
+        let before = ledger_bytes(&ledger);
+        let before_tip = ledger.tip_hash();
+
+        let mut block = empty_next_candidate(&ledger, miner);
+
+        let (state_root, block_weight) = ledger
+            .preview_block_commitments(&block)
+            .expect("preview commitments");
+
+        block.set_state_root(state_root);
+
+        //
+        // Keep the weight structurally plausible, but make it
+        // different from the canonical execution weight.
+        //
+        block.set_block_weight(
+            block_weight
+                .checked_add(1)
+                .expect("fixture block weight overflow"),
+        );
+
+        //
+        // The malformed weight is still large enough to satisfy
+        // block-local structural validation.
+        //
+        let validated = validate_candidate_for_apply(&block, &ledger.chain)
+            .expect("candidate must pass pre-application consensus");
+
+        assert!(matches!(
+            ledger.apply_validated_block(validated),
+            Err(LedgerError::InvalidBlockWeight)
+        ));
+
+        assert_eq!(ledger_bytes(&ledger), before);
+
+        assert_eq!(ledger.tip_hash(), before_tip);
+
+        assert_eq!(ledger.tip_height(), Some(Height(0)));
+    }
+
+    #[test]
+    fn invalid_next_height_is_rejected_without_mutating_ledger() {
+        let ledger = genesis::genesis_ledger().expect("genesis ledger");
+
+        let miner = crypto::Address([0x72; crypto::ADDRESS_SIZE]);
+
+        let before = ledger_bytes(&ledger);
+        let before_tip = ledger.tip_hash();
+
+        let mut block = empty_next_candidate(&ledger, miner);
+
+        //
+        // Genesis tip is height 0, therefore the only valid
+        // next block is height 1.
+        //
+        block.height = Height(2);
+
+        assert!(matches!(
+            validate_candidate_for_apply(&block, &ledger.chain,),
+            Err(ConsensusError::InvalidHeight)
+        ));
+
+        assert_eq!(ledger_bytes(&ledger), before);
+
+        assert_eq!(ledger.tip_hash(), before_tip);
+
+        assert_eq!(ledger.tip_height(), Some(Height(0)));
+    }
+    #[test]
+    fn invalid_previous_hash_is_rejected_without_mutating_ledger() {
+        let ledger = genesis::genesis_ledger().expect("genesis ledger");
+
+        let miner = crypto::Address([0x73; crypto::ADDRESS_SIZE]);
+
+        let before = ledger_bytes(&ledger);
+        let before_tip = ledger.tip_hash();
+
+        let mut block = empty_next_candidate(&ledger, miner);
+
+        let mut wrong_previous = ledger.tip_hash().expect("genesis tip").0;
+
+        wrong_previous[0] ^= 0xff;
+
+        block.header.previous_hash = crypto::PreviousHash(wrong_previous);
+
+        assert!(matches!(
+            validate_candidate_for_apply(&block, &ledger.chain,),
+            Err(ConsensusError::InvalidPreviousHash)
+        ));
+
+        assert_eq!(ledger_bytes(&ledger), before);
+
+        assert_eq!(ledger.tip_hash(), before_tip);
+
+        assert_eq!(ledger.tip_height(), Some(Height(0)));
     }
 }

@@ -89,19 +89,14 @@ impl BorshDeserialize for Block {
     }
 }
 
-fn deserialize_block_transactions<R: Read>(
-    reader: &mut R,
-) -> std::io::Result<Vec<Transaction>> {
+fn deserialize_block_transactions<R: Read>(reader: &mut R) -> std::io::Result<Vec<Transaction>> {
     let length = u32::deserialize_reader(reader)? as usize;
 
     let mut transactions = Vec::new();
 
     transactions
         .try_reserve(length.min(64))
-        .map_err(|_| IoError::new(
-            ErrorKind::OutOfMemory,
-            "block allocation failed",
-        ))?;
+        .map_err(|_| IoError::new(ErrorKind::OutOfMemory, "block allocation failed"))?;
 
     for _ in 0..length {
         transactions.push(Transaction::deserialize_reader(reader)?);
@@ -411,4 +406,76 @@ pub fn decode_block(bytes: &[u8]) -> Result<Block, CodecError> {
         .validate_structure()
         .map_err(|_| CodecError::InvalidBlock)?;
     Ok(block)
+}
+
+#[cfg(test)]
+mod p3e_replay_tests {
+    use super::*;
+
+    use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
+
+    use crate::{
+        common::ChainContext,
+        native::coin::{CoinOutput, XPQ, Zeno},
+        transaction::{
+            AccountAuthorization, AccountIntent, AuthorizedAccountIntent,
+            AuthorizedSpendTransaction, AuthorizedTransaction, SpendIntent,
+        },
+    };
+
+    fn duplicate_fixture() -> AuthorizedTransaction {
+        let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x51; 32]));
+
+        let signer = address_from_public_key(&seed.public_key());
+        let chain = ChainContext::new([0x71; crypto::HASH_SIZE]);
+
+        let intent = SpendIntent::coin(
+            signer,
+            vec![XPQ::from_bytes([0x31; crypto::HASH_SIZE])],
+            vec![CoinOutput::new(signer, Zeno::from_zeno(1))],
+        )
+        .expect("valid structural spend fixture");
+
+        let commitment = intent
+            .authorization_commitment(chain)
+            .expect("authorization commitment");
+
+        AuthorizedTransaction::Spend(Box::new(AuthorizedSpendTransaction {
+            spend: AuthorizedAccountIntent {
+                intent,
+                authorization: AccountAuthorization {
+                    public_key: seed.public_key(),
+                    signature: seed.sign(commitment.as_bytes()),
+                },
+            },
+            payment: None,
+        }))
+    }
+
+    #[test]
+    fn duplicate_transaction_id_is_rejected_by_block_structure() {
+        let transaction = duplicate_fixture();
+
+        assert_eq!(
+            transaction.transaction_id().unwrap(),
+            transaction.clone().transaction_id().unwrap()
+        );
+
+        let miner = Address([0x22; crypto::ADDRESS_SIZE]);
+
+        let block = Block::from_protocol_transactions(
+            Height(1),
+            PreviousHash::ZERO,
+            GENESIS_TARGET_BITS,
+            Nonce(0),
+            Some(Emission::new(miner, Zeno::from_zeno(1))),
+            vec![transaction.clone(), transaction],
+        )
+        .expect("block construction itself may contain duplicate txs");
+
+        assert!(matches!(
+            block.validate_structure(),
+            Err(BlockError::DuplicateTransaction)
+        ));
+    }
 }

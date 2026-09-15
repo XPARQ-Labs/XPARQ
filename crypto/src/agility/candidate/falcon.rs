@@ -1,51 +1,15 @@
-use borsh::{
-    BorshDeserialize,
-    BorshSerialize,
-};
+use borsh::{BorshDeserialize, BorshSerialize};
 use fn_dsa::{
-    DOMAIN_NONE,
-    FN_DSA_LOGN_512,
-    FN_DSA_LOGN_1024,
-    HASH_ID_RAW,
-    KeyPairGenerator,
-    KeyPairGenerator512,
-    KeyPairGenerator1024,
-    SigningKey,
-    SigningKey512,
-    SigningKey1024,
-    VerifyingKey,
-    VerifyingKey512,
-    VerifyingKey1024,
-    sign_key_size,
-    signature_size,
-    vrfy_key_size,
+    DOMAIN_NONE, FN_DSA_LOGN_512, FN_DSA_LOGN_1024, HASH_ID_RAW, KeyPairGenerator,
+    KeyPairGenerator512, KeyPairGenerator1024, SigningKey, SigningKey512, SigningKey1024,
+    VerifyingKey, VerifyingKey512, VerifyingKey1024, sign_key_size, signature_size, vrfy_key_size,
 };
-use rand_core_06::{
-    CryptoRng,
-    Error as RngError,
-    OsRng,
-    RngCore,
-};
-use sha3::{
-    Digest,
-    Sha3_256,
-};
+use rand_core_06::{CryptoRng, Error as RngError, OsRng, RngCore};
+use sha3::{Digest, Sha3_256};
 use std::fmt;
-use zeroize::{
-    Zeroize,
-    ZeroizeOnDrop,
-};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    BorshSerialize,
-    BorshDeserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
 pub enum FalconLevel {
     Level1,
     Level5,
@@ -72,14 +36,7 @@ impl FalconLevel {
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    BorshSerialize,
-    BorshDeserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct FalconPublicKey {
     level: FalconLevel,
     bytes: Vec<u8>,
@@ -102,14 +59,7 @@ impl FalconPublicKey {
     }
 }
 
-#[derive(
-    PartialEq,
-    Eq,
-    Zeroize,
-    ZeroizeOnDrop,
-    BorshSerialize,
-    BorshDeserialize,
-)]
+#[derive(PartialEq, Eq, Zeroize, ZeroizeOnDrop, BorshSerialize, BorshDeserialize)]
 pub struct FalconSecretKey {
     #[zeroize(skip)]
     level: FalconLevel,
@@ -139,14 +89,7 @@ impl FalconSecretKey {
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    BorshSerialize,
-    BorshDeserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct FalconSignature {
     level: FalconLevel,
     bytes: Vec<u8>,
@@ -169,23 +112,13 @@ impl FalconSignature {
     }
 }
 
-#[derive(
-    Debug,
-    PartialEq,
-    Eq,
-)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct FalconKeyPair {
     pub public_key: FalconPublicKey,
     pub secret_key: FalconSecretKey,
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FalconError {
     InvalidPublicKey,
     InvalidSecretKey,

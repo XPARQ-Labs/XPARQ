@@ -23,16 +23,7 @@ impl LedgerState {
     }
 }
 
-#[derive(
-    BorshSerialize,
-    BorshDeserialize,
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CoinRecord {
     pub total_mined: Zeno,
     pub total_burned: Zeno,

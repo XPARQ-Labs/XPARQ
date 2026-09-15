@@ -182,9 +182,9 @@ fn asset_register(args: &[String]) -> Result<(), String> {
     };
 
     let nonce = std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .map_err(|error| error.to_string())?
-    .as_nanos() as u64;
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos() as u64;
 
     let asset = Contract::derive(
         &kernel::native::asset::Metadata::new(
@@ -252,11 +252,9 @@ fn asset_burn(args: &[String]) -> Result<(), String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let asset = parse_asset(args)?;
 
-    let amount =
-        parse_asset_amount(args, "--amount", asset_decimals(args, asset)?)?;
+    let amount = parse_asset_amount(args, "--amount", asset_decimals(args, asset)?)?;
 
-    let (inputs, total) =
-        select_asset_inputs(rpc, wallet.address(), asset, amount.as_units())?;
+    let (inputs, total) = select_asset_inputs(rpc, wallet.address(), asset, amount.as_units())?;
 
     let output = total
         .checked_sub(amount.as_units())
@@ -752,10 +750,7 @@ fn interactive_asset_wallet_rpc() -> Result<Vec<String>, String> {
 
 fn prompt_signature_account() -> Result<String, String> {
     loop {
-        let value = prompt_default(
-            "Signature account (mldsa44, mldsa65, mldsa87)",
-            "mldsa44",
-        )?;
+        let value = prompt_default("Signature account (mldsa44, mldsa65, mldsa87)", "mldsa44")?;
         if value.parse::<Signature>().is_ok() {
             return Ok(value);
         }
@@ -879,10 +874,9 @@ fn restore_wallet(args: &[String]) -> Result<(), String> {
 fn signature_account_option(args: &[String]) -> Result<Option<Signature>, String> {
     option(args, "--account")
         .map(|value| {
-            value.parse::<Signature>().map_err(|_| {
-                "invalid --account; use mldsa44, mldsa65, or mldsa87"
-                    .to_string()
-            })
+            value
+                .parse::<Signature>()
+                .map_err(|_| "invalid --account; use mldsa44, mldsa65, or mldsa87".to_string())
         })
         .transpose()
 }
@@ -1015,11 +1009,7 @@ fn print_utxo_tracker(args: &[String]) -> Result<(), String> {
     let mut utxos = account.utxos.iter().collect::<Vec<_>>();
     utxos.sort_by(|left, right| left.id.cmp(&right.id));
     for utxo in utxos {
-        println!(
-            "- utxo: {}  {}",
-            utxo.id,
-            format_amount(utxo.amount),
-        );
+        println!("- utxo: {}  {}", utxo.id, format_amount(utxo.amount),);
     }
     Ok(())
 }

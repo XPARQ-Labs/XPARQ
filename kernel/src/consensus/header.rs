@@ -253,8 +253,10 @@ fn verify_header_chain_extension_inner(
             return Err(HeaderChainError::InvalidCommonAncestor);
         }
 
-        let expected_difficulty =
-            expected_difficulty_for_height(chain_header.height.0, previous.target_bits, |height| {
+        let expected_difficulty = expected_difficulty_for_height(
+            chain_header.height.0,
+            previous.target_bits,
+            |height| {
                 recent
                     .iter()
                     .find(|candidate| candidate.height.0 == height)
@@ -267,10 +269,11 @@ fn verify_header_chain_extension_inner(
                     .map_err(|_| {
                         HeaderChainError::InvalidHeaderChain(ForkChoiceError::InvalidDifficulty)
                     })
-            })?
-            .ok_or(HeaderChainError::InvalidHeaderChain(
-                ForkChoiceError::InvalidDifficulty,
-            ))?;
+            },
+        )?
+        .ok_or(HeaderChainError::InvalidHeaderChain(
+            ForkChoiceError::InvalidDifficulty,
+        ))?;
 
         if header.target_bits != expected_difficulty {
             return Err(HeaderChainError::InvalidHeaderChain(

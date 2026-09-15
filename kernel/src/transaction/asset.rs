@@ -3,8 +3,8 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
 
 use crate::native::asset::{
-    AssetError, AssetShare, Contract, Metadata, Share, Unit,
-    ensure_nonzero_asset_amount, ensure_unique_asset_inputs,
+    AssetError, AssetShare, Contract, Metadata, Share, Unit, ensure_nonzero_asset_amount,
+    ensure_unique_asset_inputs,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -70,10 +70,23 @@ impl AssetIntent {
         }
     }
 
-    pub fn commitment(&self, genesis_hash: [u8; HASH_SIZE]) -> Result<[u8; HASH_SIZE], AssetError> {
+    /// Semantic AssetIntent commitment.
+    ///
+    /// This identifies the unsigned asset-call semantics. Account signatures
+    /// must use `AccountIntent::authorization_commitment`, which additionally
+    /// binds the `AssetCall` authorization role.
+    pub fn semantic_commitment(
+        &self,
+        genesis_hash: [u8; HASH_SIZE],
+    ) -> Result<[u8; HASH_SIZE], AssetError> {
         self.validate_structure()?;
         let bytes = canonical_bytes(&(genesis_hash, self)).map_err(|_| AssetError::Encoding)?;
         Ok(domain(HashDomain::AssetIntent, &bytes).into_bytes())
+    }
+
+    /// Compatibility accessor. New code should use `semantic_commitment()`.
+    pub fn commitment(&self, genesis_hash: [u8; HASH_SIZE]) -> Result<[u8; HASH_SIZE], AssetError> {
+        self.semantic_commitment(genesis_hash)
     }
 
     pub fn validate_structure(&self) -> Result<(), AssetError> {
@@ -102,11 +115,7 @@ impl AssetIntent {
             AssetInstruction::Mint { amount, .. } => {
                 ensure_nonzero_asset_amount(*amount)?;
             }
-            AssetInstruction::Burn {
-                inputs,
-                amount,
-                ..
-            } => {
+            AssetInstruction::Burn { inputs, amount, .. } => {
                 if inputs.is_empty() {
                     return Err(AssetError::InvalidProgram);
                 }
@@ -150,7 +159,7 @@ impl AssetIntent {
                     weight,
                     HASH_SIZE,
                     &AssetShare {
-                        asset: asset,
+                        asset,
                         amount: *initial_mint,
                         owner: self.signer,
                     },
@@ -172,11 +181,7 @@ impl AssetIntent {
                     },
                 )?;
             }
-            AssetInstruction::Burn {
-                asset,
-                output,
-                ..
-            } => {
+            AssetInstruction::Burn { asset, output, .. } => {
                 if !output.is_zero() {
                     weight = checked_entry_weight(
                         weight,

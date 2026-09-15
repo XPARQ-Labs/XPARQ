@@ -547,11 +547,8 @@ fn account_response(
         .iter()
         .map(|(id, coin)| (*id, coin.amount, reserved.contains(id)))
         .collect::<Vec<_>>();
-    let utxo_snapshot_bytes = kernel::crypto::canonical_bytes(&(
-        address,
-        utxo_snapshot_entries,
-    ))
-    .map_err(|error| format!("encode account UTXO snapshot: {error}"))?;
+    let utxo_snapshot_bytes = kernel::crypto::canonical_bytes(&(address, utxo_snapshot_entries))
+        .map_err(|error| format!("encode account UTXO snapshot: {error}"))?;
     let utxo_snapshot = kernel::crypto::domain_hash(
         kernel::crypto::HashDomain::AccountState,
         &utxo_snapshot_bytes,
@@ -2659,12 +2656,13 @@ fn validated_header_state(
     {
         return Err("validated header chain has the wrong genesis".into());
     }
-    let cumulative_work = headers
-        .iter()
-        .skip(1)
-        .fold(kernel::consensus::Work::ZERO, |work, header| {
-            work.saturating_add(kernel::consensus::block_work(header.header.target_bits))
-        });
+    let cumulative_work =
+        headers
+            .iter()
+            .skip(1)
+            .fold(kernel::consensus::Work::ZERO, |work, header| {
+                work.saturating_add(kernel::consensus::block_work(header.header.target_bits))
+            });
     let cumulative_weight = headers.iter().skip(1).fold(0_u64, |total, header| {
         total.saturating_add(u64::from(header.header.block_weight))
     });
@@ -3513,14 +3511,13 @@ mod tests {
     #[test]
     fn explorer_address_response_is_aggregate_only() {
         let ledger = kernel::genesis::genesis_ledger().unwrap();
-        let response =
-            explorer_address_response(
-                &ledger,
-                &[],
-                Address([7; kernel::crypto::ADDRESS_SIZE]),
-                true,
-            )
-                .unwrap();
+        let response = explorer_address_response(
+            &ledger,
+            &[],
+            Address([7; kernel::crypto::ADDRESS_SIZE]),
+            true,
+        )
+        .unwrap();
         assert_eq!(response["balance"]["total"], 0);
         assert_eq!(response["activity_count"], 0);
         assert!(response.get("utxos").is_none());
@@ -3584,8 +3581,8 @@ mod tests {
                 Address([9; kernel::crypto::ADDRESS_SIZE]),
                 &block,
             )
-                .unwrap()
-                .is_none()
+            .unwrap()
+            .is_none()
         );
         assert_eq!(
             parse_hash(&hex::encode(transaction.id().unwrap())).unwrap(),

@@ -16,13 +16,17 @@ use crate::{
     transaction::IntentError,
 };
 
-/// Canonical commitment signed by an account for a spend intent.
+/// Canonical semantic commitment for a spend intent.
+///
+/// Account signatures should use `AccountIntent::authorization_commitment`
+/// from the authorization layer. That commitment additionally binds the
+/// authorization role.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
 )]
-pub struct SpendCommitment([u8; HASH_SIZE]);
+pub struct SpendIntentCommitment([u8; HASH_SIZE]);
 
-impl SpendCommitment {
+impl SpendIntentCommitment {
     pub const fn from_bytes(bytes: [u8; HASH_SIZE]) -> Self {
         Self(bytes)
     }
@@ -36,7 +40,12 @@ impl SpendCommitment {
     }
 }
 
-/// A account-authorized transfer.
+/// Compatibility alias for code that still imports `SpendCommitment`.
+/// New code should use `SpendIntentCommitment` for the plain semantic digest,
+/// and `AuthorizationCommitment` for account signatures.
+pub type SpendCommitment = SpendIntentCommitment;
+
+/// An account-authorized transfer.
 ///
 /// Register, mint, and burn remain native asset operations.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -133,16 +142,34 @@ impl SpendIntent {
         }
     }
 
-    pub fn signing_bytes(&self, chain: ChainContext) -> Result<Vec<u8>, IntentError> {
+    /// Canonical bytes of the unsigned SpendIntent semantics.
+    pub fn semantic_bytes(&self, chain: ChainContext) -> Result<Vec<u8>, IntentError> {
         self.validate()?;
         canonical_bytes(&(chain.genesis_hash, self)).map_err(|_| IntentError::Encoding)
     }
 
-    pub fn commitment(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
-        let bytes = self.signing_bytes(chain)?;
-        Ok(SpendCommitment::from_bytes(
+    /// Compatibility accessor. New code should use `semantic_bytes()`.
+    pub fn signing_bytes(&self, chain: ChainContext) -> Result<Vec<u8>, IntentError> {
+        self.semantic_bytes(chain)
+    }
+
+    /// Semantic SpendIntent commitment.
+    ///
+    /// This identifies the unsigned spend semantics. Account signatures must
+    /// use the role-bound `AuthorizationCommitment` instead.
+    pub fn semantic_commitment(
+        &self,
+        chain: ChainContext,
+    ) -> Result<SpendIntentCommitment, IntentError> {
+        let bytes = self.semantic_bytes(chain)?;
+        Ok(SpendIntentCommitment::from_bytes(
             domain(HashDomain::SpendIntent, &bytes).into_bytes(),
         ))
+    }
+
+    /// Compatibility accessor. New code should use `semantic_commitment()`.
+    pub fn commitment(&self, chain: ChainContext) -> Result<SpendIntentCommitment, IntentError> {
+        self.semantic_commitment(chain)
     }
 
     pub fn coin_parts(&self) -> Option<(&[XPQ], &[CoinOutput])> {
@@ -161,5 +188,74 @@ impl SpendIntent {
             } => Some((*asset, inputs, outputs)),
             Spend::Coin { .. } => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod conservation_tests {
+    use super::*;
+    use crate::native::{
+        asset::{AssetOutput, Contract, Share, Unit},
+        coin::{CoinOutput, XPQ, Zeno},
+    };
+
+    fn address(byte: u8) -> Address {
+        Address([byte; crypto::ADDRESS_SIZE])
+    }
+
+    #[test]
+    fn duplicate_coin_inputs_are_rejected_structurally() {
+        let input = XPQ::from_bytes([0x11; HASH_SIZE]);
+
+        let result = SpendIntent::coin(
+            address(1),
+            vec![input, input],
+            vec![CoinOutput::new(address(2), Zeno::from_zeno(1))],
+        );
+
+        assert!(matches!(result, Err(IntentError::DuplicateInput)));
+    }
+
+    #[test]
+    fn duplicate_asset_inputs_are_rejected_structurally() {
+        let input = Share::from_bytes([0x22; HASH_SIZE]);
+        let asset = Contract::from_bytes([0x33; HASH_SIZE]);
+
+        let result = SpendIntent::asset(
+            address(1),
+            asset,
+            vec![input, input],
+            vec![AssetOutput::new(address(2), Unit::from_units(1))],
+        );
+
+        assert!(matches!(result, Err(IntentError::InvalidAssetCall)));
+    }
+
+    #[test]
+    fn zero_value_coin_output_is_rejected_structurally() {
+        let input = XPQ::from_bytes([0x44; HASH_SIZE]);
+
+        let result = SpendIntent::coin(
+            address(1),
+            vec![input],
+            vec![CoinOutput::new(address(2), Zeno::ZERO)],
+        );
+
+        assert!(matches!(result, Err(IntentError::ZeroAmount)));
+    }
+
+    #[test]
+    fn zero_value_asset_output_is_rejected_structurally() {
+        let input = Share::from_bytes([0x55; HASH_SIZE]);
+        let asset = Contract::from_bytes([0x66; HASH_SIZE]);
+
+        let result = SpendIntent::asset(
+            address(1),
+            asset,
+            vec![input],
+            vec![AssetOutput::new(address(2), Unit::ZERO)],
+        );
+
+        assert!(matches!(result, Err(IntentError::InvalidAssetCall)));
     }
 }

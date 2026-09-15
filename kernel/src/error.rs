@@ -30,7 +30,9 @@ mod blockchain_errors {
                 Self::InvalidTransaction => f.write_str("block contains an invalid transaction"),
                 Self::DuplicateTransaction => f.write_str("block contains a duplicate transaction"),
                 Self::InvalidEmission => f.write_str("block emission is invalid"),
-                Self::InvalidMerkleRoot => f.write_str("block merkle root does not match transactions"),
+                Self::InvalidMerkleRoot => {
+                    f.write_str("block merkle root does not match transactions")
+                }
                 Self::InvalidStateRoot => f.write_str("block state root does not match ledger"),
                 Self::InvalidBlockWeight => {
                     f.write_str("block header weight does not cover canonical block size")
@@ -190,8 +192,12 @@ mod ledger_errors {
             match self {
                 Self::Utxo(error) => write!(formatter, "UTXO transition failed: {error}"),
                 Self::Asset(error) => write!(formatter, "asset transition failed: {error}"),
-                Self::InvalidTransaction => formatter.write_str("invalid transaction state transition"),
-                Self::OutputIndexOverflow => formatter.write_str("transaction output index overflow"),
+                Self::InvalidTransaction => {
+                    formatter.write_str("invalid transaction state transition")
+                }
+                Self::OutputIndexOverflow => {
+                    formatter.write_str("transaction output index overflow")
+                }
                 Self::BurnOverflow => formatter.write_str("total burned amount overflow"),
                 Self::BurnUnderflow => formatter.write_str("total burned amount underflow"),
                 Self::AmountOverflow => formatter.write_str("coin amount overflow"),

@@ -1,10 +1,7 @@
 use crate::{
     blockchain::{Block, MAX_BLOCK_SIZE},
     common::Height,
-    consensus::{
-        Consensus, GENESIS_TARGET_BITS, PoWTarget,
-        expected_difficulty_for_height,
-    },
+    consensus::{Consensus, GENESIS_TARGET_BITS, PoWTarget, expected_difficulty_for_height},
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};

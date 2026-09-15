@@ -2,15 +2,14 @@ use crate::{
     blockchain::{Block, Chain},
     common::Height,
     consensus::{
-        ConsensusError, ValidatedEmission, PoWTarget, authorize_emission, expected_difficulty_for_height,
-        verify_pow,
+        ConsensusError, PoWTarget, ValidatedEmission, authorize_emission,
+        expected_difficulty_for_height, verify_pow,
     },
 };
 
 use crypto::{BlockHash, HASH_SIZE, Hash, PoWHash, PoWMemory};
 
-pub const GENESIS_TARGET_BITS: u32 =
-    crate::blockchain::GENESIS_TARGET_BITS;
+pub const GENESIS_TARGET_BITS: u32 = crate::blockchain::GENESIS_TARGET_BITS;
 
 pub const TARGET_BITS_START: u32 = 0x207f_ffff;
 
@@ -318,8 +317,8 @@ impl Consensus {
         hash: &PoWHash,
         target_bits: u32,
     ) -> Result<(), ConsensusError> {
-        let target = PoWTarget::from_compact(target_bits)
-            .ok_or(ConsensusError::InvalidDifficulty)?;
+        let target =
+            PoWTarget::from_compact(target_bits).ok_or(ConsensusError::InvalidDifficulty)?;
 
         if target.meets(hash) {
             Ok(())

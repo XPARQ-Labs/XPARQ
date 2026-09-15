@@ -9,9 +9,9 @@ pub mod chain;
 pub mod merkle;
 
 pub use {
+    crate::error::{BlockError, ChainError, CodecError},
     block::*,
     chain::Chain,
-    crate::error::{BlockError, ChainError, CodecError},
     merkle::{MerkleHash, MerkleInclusionProof},
 };
 

@@ -80,10 +80,7 @@ pub fn verify_pow_with_memory(
     )
 }
 
-fn validate_pow_claim(
-    header: &Header,
-    expected_target_bits: u32,
-) -> Result<(), ConsensusError> {
+fn validate_pow_claim(header: &Header, expected_target_bits: u32) -> Result<(), ConsensusError> {
     if PoWTarget::from_compact(expected_target_bits).is_none() {
         return Err(ConsensusError::InvalidDifficulty);
     }
@@ -95,12 +92,9 @@ fn validate_pow_claim(
     Ok(())
 }
 
-fn verify_pow_hash(
-    hash: PoWHash,
-    expected_target_bits: u32,
-) -> Result<(), ConsensusError> {
-    let target = PoWTarget::from_compact(expected_target_bits)
-        .ok_or(ConsensusError::InvalidDifficulty)?;
+fn verify_pow_hash(hash: PoWHash, expected_target_bits: u32) -> Result<(), ConsensusError> {
+    let target =
+        PoWTarget::from_compact(expected_target_bits).ok_or(ConsensusError::InvalidDifficulty)?;
 
     if target.meets(&hash) {
         Ok(())

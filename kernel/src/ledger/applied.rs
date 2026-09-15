@@ -199,11 +199,7 @@ impl AssetState {
         let created_share = match &call.instruction {
             AssetInstruction::Register { .. } => Some(Share::derive(call.asset()?, commitment, 0)),
             AssetInstruction::Mint { asset, .. } => Some(Share::derive(*asset, commitment, 0)),
-            AssetInstruction::Burn {
-                asset,
-                output,
-                ..
-            } => {
+            AssetInstruction::Burn { asset, output, .. } => {
                 if output.is_zero() {
                     None
                 } else {
@@ -300,7 +296,12 @@ impl AssetState {
                     .map_err(|_| AssetError::ShareAlreadyExists)?;
             }
 
-            AssetInstruction::Burn { asset, inputs, amount, output } => {
+            AssetInstruction::Burn {
+                asset,
+                inputs,
+                amount,
+                output,
+            } => {
                 let total = self.validate_inputs(utxos, *asset, inputs)?;
                 let expected_total = amount
                     .checked_add(*output)
@@ -315,9 +316,9 @@ impl AssetState {
                     .checked_sub(*amount)
                     .ok_or(AssetError::SupplyOverflow)?;
                 record.total_burned = record
-                      .total_burned
-                      .checked_add(*amount)
-                      .ok_or(AssetError::SupplyOverflow)?;
+                    .total_burned
+                    .checked_add(*amount)
+                    .ok_or(AssetError::SupplyOverflow)?;
                 journal.assets.push((*asset, previous));
 
                 for input in inputs {
@@ -466,11 +467,7 @@ impl AssetState {
                     .ok_or(AssetError::SupplyOverflow)?;
             }
 
-            AssetInstruction::Burn {
-                asset,
-                inputs,
-                ..
-            } => {
+            AssetInstruction::Burn { asset, inputs, .. } => {
                 self.metadata(*asset).ok_or(AssetError::UnknownAsset)?;
                 self.validate_inputs(utxos, *asset, inputs)?;
             }
@@ -561,7 +558,7 @@ impl LedgerState {
         &mut self,
         journal: SpendRollbackJournal,
     ) -> Result<(), StateError> {
-        self.coin.total_mined =self
+        self.coin.total_mined = self
             .coin
             .total_mined
             .checked_sub(journal.mined)
@@ -731,6 +728,7 @@ mod tests {
                 max_supply: Unit::from_units(100),
                 initial_mint: Unit::from_units(10),
                 mint_authority: authority,
+                nonce: 0,
             },
             address(1),
         )
@@ -811,6 +809,8 @@ mod tests {
             AssetInstruction::Burn {
                 asset,
                 inputs: vec![initial_share],
+                amount: Unit::from_units(10),
+                output: Unit::ZERO,
             },
             address(1),
         );
@@ -831,5 +831,737 @@ mod tests {
             state.apply(&mut utxos, &mint, genesis_hash),
             Err(AssetError::SupplyOverflow)
         );
+    }
+}
+
+#[cfg(test)]
+mod invariant_tests {
+    use super::*;
+    use crate::native::coin::CoinOutput;
+
+    const GENESIS_HASH: [u8; 32] = [0x33; 32];
+
+    fn test_address(byte: u8) -> Address {
+        Address([byte; crypto::ADDRESS_SIZE])
+    }
+
+    fn register_intent(
+        creator: Address,
+        authority: Address,
+        name: &str,
+        nonce: u64,
+        max_supply: u128,
+        initial_mint: u128,
+    ) -> AssetIntent {
+        AssetIntent::new(
+            AssetInstruction::Register {
+                name: name.into(),
+                decimals: 0,
+                max_supply: Unit::from_units(max_supply),
+                initial_mint: Unit::from_units(initial_mint),
+                mint_authority: authority,
+                nonce,
+            },
+            creator,
+        )
+    }
+
+    fn setup_asset(
+        name: &str,
+        nonce: u64,
+        max_supply: u128,
+        initial_mint: u128,
+        creator_byte: u8,
+        authority_byte: u8,
+    ) -> (AssetState, utxo::UtxoSet, AssetIntent, Contract, Share) {
+        let creator = test_address(creator_byte);
+        let authority = test_address(authority_byte);
+        let register = register_intent(creator, authority, name, nonce, max_supply, initial_mint);
+        let asset = register.asset().unwrap();
+        let initial_share = Share::derive(asset, register.commitment(GENESIS_HASH).unwrap(), 0);
+
+        let mut state = AssetState::default();
+        let mut utxos = utxo::UtxoSet::default();
+
+        state.apply(&mut utxos, &register, GENESIS_HASH).unwrap();
+
+        (state, utxos, register, asset, initial_share)
+    }
+
+    #[test]
+    fn burn_with_change_conserves_value_and_tracks_only_burned_amount() {
+        let (mut state, mut utxos, register, asset, initial_share) =
+            setup_asset("Burn Change", 0, 100, 10, 1, 2);
+
+        let burn = AssetIntent::new(
+            AssetInstruction::Burn {
+                asset,
+                inputs: vec![initial_share],
+                amount: Unit::from_units(4),
+                output: Unit::from_units(6),
+            },
+            register.signer,
+        );
+
+        let change_share = Share::derive(asset, burn.commitment(GENESIS_HASH).unwrap(), 0);
+
+        state.apply(&mut utxos, &burn, GENESIS_HASH).unwrap();
+
+        assert_eq!(state.supply(asset), Unit::from_units(6));
+        assert_eq!(state.total_minted(asset), Some(Unit::from_units(10)));
+
+        let record = state.record(asset).unwrap();
+        assert_eq!(record.total_burned, Unit::from_units(4));
+
+        assert!(utxos.asset(&initial_share).is_none());
+
+        let change = utxos.asset(&change_share).expect("burn change share");
+        assert_eq!(change.asset, asset);
+        assert_eq!(change.amount, Unit::from_units(6));
+        assert_eq!(change.owner, register.signer);
+    }
+
+    #[test]
+    fn burn_rejects_amount_plus_change_that_does_not_equal_inputs_without_mutation() {
+        let (mut state, mut utxos, register, asset, initial_share) =
+            setup_asset("Bad Burn Sum", 0, 100, 10, 1, 2);
+
+        let before_state = state.clone();
+        let before_utxos = utxos.clone();
+
+        let burn = AssetIntent::new(
+            AssetInstruction::Burn {
+                asset,
+                inputs: vec![initial_share],
+                amount: Unit::from_units(4),
+                output: Unit::from_units(5),
+            },
+            register.signer,
+        );
+
+        assert_eq!(
+            state.apply(&mut utxos, &burn, GENESIS_HASH),
+            Err(AssetError::InvalidAmount)
+        );
+
+        assert_eq!(state, before_state);
+        assert_eq!(utxos, before_utxos);
+    }
+
+    #[test]
+    fn burn_rollback_restores_asset_record_and_exact_utxo_set() {
+        let (mut state, mut utxos, register, asset, initial_share) =
+            setup_asset("Burn Rollback", 0, 100, 10, 1, 2);
+
+        let before_state = state.clone();
+        let before_utxos = utxos.clone();
+
+        let burn = AssetIntent::new(
+            AssetInstruction::Burn {
+                asset,
+                inputs: vec![initial_share],
+                amount: Unit::from_units(4),
+                output: Unit::from_units(6),
+            },
+            register.signer,
+        );
+
+        let journal = state.apply(&mut utxos, &burn, GENESIS_HASH).unwrap();
+        assert_ne!(state, before_state);
+        assert_ne!(utxos, before_utxos);
+
+        state.rollback(&mut utxos, journal).unwrap();
+
+        assert_eq!(state, before_state);
+        assert_eq!(utxos, before_utxos);
+    }
+
+    #[test]
+    fn duplicate_asset_inputs_are_rejected_without_mutation() {
+        let (mut state, mut utxos, register, asset, initial_share) =
+            setup_asset("Duplicate Input", 0, 100, 10, 1, 2);
+
+        let before_state = state.clone();
+        let before_utxos = utxos.clone();
+
+        let burn = AssetIntent::new(
+            AssetInstruction::Burn {
+                asset,
+                inputs: vec![initial_share, initial_share],
+                amount: Unit::from_units(10),
+                output: Unit::ZERO,
+            },
+            register.signer,
+        );
+
+        assert_eq!(
+            state.apply(&mut utxos, &burn, GENESIS_HASH),
+            Err(AssetError::InvalidProgram)
+        );
+
+        assert_eq!(state, before_state);
+        assert_eq!(utxos, before_utxos);
+    }
+
+    #[test]
+    fn share_from_another_asset_is_rejected_without_mutation() {
+        let (mut state, mut utxos, register_a, asset_a, share_a) =
+            setup_asset("Asset A", 0, 100, 10, 1, 2);
+
+        let register_b = register_intent(test_address(3), test_address(4), "Asset B", 1, 100, 10);
+        let asset_b = register_b.asset().unwrap();
+
+        state.apply(&mut utxos, &register_b, GENESIS_HASH).unwrap();
+
+        let before_state = state.clone();
+        let before_utxos = utxos.clone();
+
+        let wrong_asset_burn = AssetIntent::new(
+            AssetInstruction::Burn {
+                asset: asset_b,
+                inputs: vec![share_a],
+                amount: Unit::from_units(10),
+                output: Unit::ZERO,
+            },
+            register_a.signer,
+        );
+
+        assert_eq!(
+            state.apply(&mut utxos, &wrong_asset_burn, GENESIS_HASH),
+            Err(AssetError::AssetMismatch)
+        );
+
+        assert_eq!(state, before_state);
+        assert_eq!(utxos, before_utxos);
+
+        // Ensure the original asset remains intact as well.
+        assert_eq!(state.supply(asset_a), Unit::from_units(10));
+    }
+
+    #[test]
+    fn asset_transfer_requires_exact_input_output_conservation() {
+        let (mut state, mut utxos, _register, asset, initial_share) =
+            setup_asset("Transfer Conservation", 0, 100, 10, 1, 2);
+
+        let before_state = state.clone();
+        let before_utxos = utxos.clone();
+
+        let outputs = vec![AssetOutput::new(test_address(7), Unit::from_units(9))];
+
+        assert_eq!(
+            state.apply_account_transfer(
+                &mut utxos,
+                asset,
+                &[initial_share],
+                &outputs,
+                [0x55; HASH_SIZE],
+            ),
+            Err(AssetError::InvalidAmount)
+        );
+
+        assert_eq!(state, before_state);
+        assert_eq!(utxos, before_utxos);
+    }
+
+    #[test]
+    fn successful_asset_transfer_and_rollback_restore_exact_state() {
+        let (mut state, mut utxos, _register, asset, initial_share) =
+            setup_asset("Transfer Rollback", 0, 100, 10, 1, 2);
+
+        let before_state = state.clone();
+        let before_utxos = utxos.clone();
+        let commitment = [0x66; HASH_SIZE];
+
+        let outputs = vec![
+            AssetOutput::new(test_address(7), Unit::from_units(4)),
+            AssetOutput::new(test_address(8), Unit::from_units(6)),
+        ];
+
+        let output_a = Share::derive(asset, commitment, 0);
+        let output_b = Share::derive(asset, commitment, 1);
+
+        let journal = state
+            .apply_account_transfer(&mut utxos, asset, &[initial_share], &outputs, commitment)
+            .unwrap();
+
+        assert!(utxos.asset(&initial_share).is_none());
+        assert_eq!(
+            utxos.asset(&output_a).map(|share| share.amount),
+            Some(Unit::from_units(4))
+        );
+        assert_eq!(
+            utxos.asset(&output_b).map(|share| share.amount),
+            Some(Unit::from_units(6))
+        );
+
+        state.rollback(&mut utxos, journal).unwrap();
+
+        assert_eq!(state, before_state);
+        assert_eq!(utxos, before_utxos);
+    }
+
+    #[test]
+    fn xpq_overspend_is_rejected_without_consuming_inputs() {
+        let sender = test_address(1);
+        let recipient = test_address(2);
+        let input = XPQ::from_bytes([0x11; HASH_SIZE]);
+
+        let mut ledger = LedgerState::default();
+        ledger
+            .utxos
+            .insert_coin(
+                input,
+                CoinUtxo {
+                    amount: Zeno::from_zeno(10),
+                    owner: sender,
+                },
+            )
+            .unwrap();
+
+        let before = ledger.clone();
+
+        let intent = SpendIntent::coin(
+            sender,
+            vec![input],
+            vec![CoinOutput::new(recipient, Zeno::from_zeno(11))],
+        )
+        .unwrap();
+
+        let result = ledger.apply_onchain_spend_with_commitment(
+            &intent,
+            SpendCommitment::from_bytes([0x77; HASH_SIZE]),
+            test_address(9),
+        );
+
+        assert!(matches!(result, Err(StateError::InvalidTransaction)));
+        assert_eq!(ledger, before);
+    }
+
+    #[test]
+    fn xpq_input_minus_outputs_is_exact_protocol_burn_and_rollback_is_exact() {
+        let sender = test_address(1);
+        let recipient = test_address(2);
+        let input = XPQ::from_bytes([0x22; HASH_SIZE]);
+        let commitment = SpendCommitment::from_bytes([0x88; HASH_SIZE]);
+
+        let mut ledger = LedgerState::default();
+        ledger
+            .utxos
+            .insert_coin(
+                input,
+                CoinUtxo {
+                    amount: Zeno::from_zeno(10),
+                    owner: sender,
+                },
+            )
+            .unwrap();
+
+        let before = ledger.clone();
+
+        let intent = SpendIntent::coin(
+            sender,
+            vec![input],
+            vec![CoinOutput::new(recipient, Zeno::from_zeno(7))],
+        )
+        .unwrap();
+
+        let journal = ledger
+            .apply_onchain_spend_with_commitment(&intent, commitment, test_address(9))
+            .unwrap();
+
+        assert_eq!(journal.burned, Zeno::from_zeno(3));
+        assert!(ledger.utxos.coin(&input).is_none());
+
+        let output = XPQ::from_output(commitment.as_bytes(), 0);
+        let created = ledger.utxos.coin(&output).expect("created XPQ output");
+        assert_eq!(created.amount, Zeno::from_zeno(7));
+        assert_eq!(created.owner, recipient);
+
+        ledger.rollback_spend(journal).unwrap();
+
+        assert_eq!(ledger, before);
+    }
+}
+
+#[cfg(test)]
+mod global_invariant_tests {
+    use super::*;
+
+    const GENESIS_HASH: [u8; HASH_SIZE] = [0x93; HASH_SIZE];
+
+    fn address(byte: u8) -> Address {
+        Address([byte; crypto::ADDRESS_SIZE])
+    }
+
+    fn ledger_bytes(ledger: &LedgerState) -> Vec<u8> {
+        borsh::to_vec(ledger).expect("ledger must have canonical Borsh encoding")
+    }
+
+    fn register_intent(
+        creator: Address,
+        authority: Address,
+        name: &str,
+        nonce: u64,
+        max_supply: u128,
+        initial_mint: u128,
+    ) -> AssetIntent {
+        AssetIntent::new(
+            AssetInstruction::Register {
+                name: name.into(),
+                decimals: 0,
+                max_supply: Unit::from_units(max_supply),
+                initial_mint: Unit::from_units(initial_mint),
+                mint_authority: authority,
+                nonce,
+            },
+            creator,
+        )
+    }
+
+    fn assert_global_asset_invariants(state: &AssetState, utxos: &utxo::UtxoSet) {
+        // Every registered asset must satisfy:
+        //
+        //     live supply = cumulative minted - cumulative burned
+        //
+        for (asset, _) in state.metadata_entries() {
+            let record = state
+                .record(asset)
+                .expect("metadata must have an asset record");
+
+            let expected_supply = record
+                .total_minted
+                .checked_sub(record.total_burned)
+                .expect("total_burned must never exceed total_minted");
+
+            assert_eq!(
+                record.supply, expected_supply,
+                "asset supply accounting diverged for {asset}"
+            );
+
+            let share_total = utxos
+                .assets()
+                .filter(|(_, share)| share.asset == asset)
+                .try_fold(Unit::ZERO, |total, (_, share)| {
+                    total.checked_add(share.amount)
+                })
+                .expect("asset UTXO sum overflow");
+
+            assert_eq!(
+                share_total, record.supply,
+                "live share UTXOs do not equal recorded supply for {asset}"
+            );
+        }
+
+        // Every share UTXO must belong to a registered asset.
+        for (_, share) in utxos.assets() {
+            assert!(
+                state.record(share.asset).is_some(),
+                "orphan share references an unregistered asset"
+            );
+        }
+    }
+
+    #[test]
+    fn register_mint_transfer_burn_preserves_global_asset_invariants() {
+        let creator = address(1);
+        let authority = address(2);
+        let mut ledger = LedgerState::default();
+
+        assert_global_asset_invariants(&ledger.assets, &ledger.utxos);
+
+        // 1. Register: supply = 10, total_minted = 10, total_burned = 0.
+        let register = register_intent(creator, authority, "Global Invariant", 0, 100, 10);
+        let asset = register.asset().unwrap();
+        let initial_share = Share::derive(asset, register.commitment(GENESIS_HASH).unwrap(), 0);
+
+        ledger
+            .assets
+            .apply(&mut ledger.utxos, &register, GENESIS_HASH)
+            .unwrap();
+
+        assert_eq!(ledger.assets.supply(asset), Unit::from_units(10));
+        assert_global_asset_invariants(&ledger.assets, &ledger.utxos);
+
+        // 2. Mint 5: supply = 15, total_minted = 15.
+        let mint = AssetIntent::new(
+            AssetInstruction::Mint {
+                asset,
+                nonce: 1,
+                recipient: creator,
+                amount: Unit::from_units(5),
+            },
+            authority,
+        );
+        let minted_share = Share::derive(asset, mint.commitment(GENESIS_HASH).unwrap(), 0);
+
+        ledger
+            .assets
+            .apply(&mut ledger.utxos, &mint, GENESIS_HASH)
+            .unwrap();
+
+        assert_eq!(ledger.assets.supply(asset), Unit::from_units(15));
+        assert_eq!(
+            ledger.assets.total_minted(asset),
+            Some(Unit::from_units(15))
+        );
+        assert_eq!(
+            ledger.utxos.asset(&minted_share).map(|share| share.amount),
+            Some(Unit::from_units(5))
+        );
+        assert_global_asset_invariants(&ledger.assets, &ledger.utxos);
+
+        // 3. Transfer the original 10 into 4 + 6. Supply must not change.
+        let transfer_commitment = [0x44; HASH_SIZE];
+        let outputs = vec![
+            AssetOutput::new(creator, Unit::from_units(4)),
+            AssetOutput::new(creator, Unit::from_units(6)),
+        ];
+
+        let transferred_a = Share::derive(asset, transfer_commitment, 0);
+        let transferred_b = Share::derive(asset, transfer_commitment, 1);
+
+        ledger
+            .assets
+            .apply_account_transfer(
+                &mut ledger.utxos,
+                asset,
+                &[initial_share],
+                &outputs,
+                transfer_commitment,
+            )
+            .unwrap();
+
+        assert_eq!(ledger.assets.supply(asset), Unit::from_units(15));
+        assert_eq!(
+            ledger.utxos.asset(&transferred_a).map(|share| share.amount),
+            Some(Unit::from_units(4))
+        );
+        assert_eq!(
+            ledger.utxos.asset(&transferred_b).map(|share| share.amount),
+            Some(Unit::from_units(6))
+        );
+        assert_global_asset_invariants(&ledger.assets, &ledger.utxos);
+
+        // 4. Burn 1 from the 4-unit share and return 3 as change.
+        //    Final supply = 14, total_minted = 15, total_burned = 1.
+        let burn = AssetIntent::new(
+            AssetInstruction::Burn {
+                asset,
+                inputs: vec![transferred_a],
+                amount: Unit::from_units(1),
+                output: Unit::from_units(3),
+            },
+            creator,
+        );
+        let burn_change = Share::derive(asset, burn.commitment(GENESIS_HASH).unwrap(), 0);
+
+        ledger
+            .assets
+            .apply(&mut ledger.utxos, &burn, GENESIS_HASH)
+            .unwrap();
+
+        let record = ledger.assets.record(asset).unwrap();
+        assert_eq!(record.supply, Unit::from_units(14));
+        assert_eq!(record.total_minted, Unit::from_units(15));
+        assert_eq!(record.total_burned, Unit::from_units(1));
+        assert_eq!(
+            ledger.utxos.asset(&burn_change).map(|share| share.amount),
+            Some(Unit::from_units(3))
+        );
+
+        assert_global_asset_invariants(&ledger.assets, &ledger.utxos);
+    }
+
+    #[test]
+    fn multi_step_asset_rollback_restores_entire_ledger_byte_for_byte() {
+        let creator = address(11);
+        let authority = address(12);
+        let mut ledger = LedgerState::default();
+        let initial_bytes = ledger_bytes(&ledger);
+
+        let register = register_intent(creator, authority, "Rollback Chain", 7, 1_000, 100);
+        let asset = register.asset().unwrap();
+        let initial_share = Share::derive(asset, register.commitment(GENESIS_HASH).unwrap(), 0);
+
+        let register_journal = ledger
+            .assets
+            .apply(&mut ledger.utxos, &register, GENESIS_HASH)
+            .unwrap();
+
+        let mint = AssetIntent::new(
+            AssetInstruction::Mint {
+                asset,
+                nonce: 1,
+                recipient: creator,
+                amount: Unit::from_units(50),
+            },
+            authority,
+        );
+
+        let mint_journal = ledger
+            .assets
+            .apply(&mut ledger.utxos, &mint, GENESIS_HASH)
+            .unwrap();
+
+        let transfer_commitment = [0x55; HASH_SIZE];
+        let transfer_journal = ledger
+            .assets
+            .apply_account_transfer(
+                &mut ledger.utxos,
+                asset,
+                &[initial_share],
+                &[
+                    AssetOutput::new(creator, Unit::from_units(40)),
+                    AssetOutput::new(creator, Unit::from_units(60)),
+                ],
+                transfer_commitment,
+            )
+            .unwrap();
+
+        let burn_input = Share::derive(asset, transfer_commitment, 0);
+        let burn = AssetIntent::new(
+            AssetInstruction::Burn {
+                asset,
+                inputs: vec![burn_input],
+                amount: Unit::from_units(10),
+                output: Unit::from_units(30),
+            },
+            creator,
+        );
+
+        let burn_journal = ledger
+            .assets
+            .apply(&mut ledger.utxos, &burn, GENESIS_HASH)
+            .unwrap();
+
+        assert_global_asset_invariants(&ledger.assets, &ledger.utxos);
+        assert_ne!(ledger_bytes(&ledger), initial_bytes);
+
+        // Roll back in exact reverse application order.
+        ledger
+            .assets
+            .rollback(&mut ledger.utxos, burn_journal)
+            .unwrap();
+        assert_global_asset_invariants(&ledger.assets, &ledger.utxos);
+
+        ledger
+            .assets
+            .rollback(&mut ledger.utxos, transfer_journal)
+            .unwrap();
+        assert_global_asset_invariants(&ledger.assets, &ledger.utxos);
+
+        ledger
+            .assets
+            .rollback(&mut ledger.utxos, mint_journal)
+            .unwrap();
+        assert_global_asset_invariants(&ledger.assets, &ledger.utxos);
+
+        ledger
+            .assets
+            .rollback(&mut ledger.utxos, register_journal)
+            .unwrap();
+
+        assert!(ledger.assets.is_empty());
+        assert!(ledger.utxos.is_empty());
+        assert_eq!(ledger_bytes(&ledger), initial_bytes);
+    }
+
+    #[test]
+    fn failed_transition_does_not_change_full_ledger_encoding() {
+        let creator = address(21);
+        let authority = address(22);
+        let mut ledger = LedgerState::default();
+
+        let register = register_intent(creator, authority, "Atomic Failure", 0, 100, 10);
+        let asset = register.asset().unwrap();
+        let initial_share = Share::derive(asset, register.commitment(GENESIS_HASH).unwrap(), 0);
+
+        ledger
+            .assets
+            .apply(&mut ledger.utxos, &register, GENESIS_HASH)
+            .unwrap();
+
+        assert_global_asset_invariants(&ledger.assets, &ledger.utxos);
+
+        let before = ledger_bytes(&ledger);
+
+        // Input is 10, but burned + change claims only 9.
+        let invalid_burn = AssetIntent::new(
+            AssetInstruction::Burn {
+                asset,
+                inputs: vec![initial_share],
+                amount: Unit::from_units(4),
+                output: Unit::from_units(5),
+            },
+            creator,
+        );
+
+        assert_eq!(
+            ledger
+                .assets
+                .apply(&mut ledger.utxos, &invalid_burn, GENESIS_HASH),
+            Err(AssetError::InvalidAmount)
+        );
+
+        assert_eq!(ledger_bytes(&ledger), before);
+        assert_global_asset_invariants(&ledger.assets, &ledger.utxos);
+    }
+
+    #[test]
+    fn two_assets_keep_independent_supply_and_utxo_accounting() {
+        let mut ledger = LedgerState::default();
+
+        let a = register_intent(address(31), address(32), "Asset One", 1, 100, 10);
+        let b = register_intent(address(41), address(42), "Asset Two", 2, 200, 20);
+
+        let asset_a = a.asset().unwrap();
+        let asset_b = b.asset().unwrap();
+
+        ledger
+            .assets
+            .apply(&mut ledger.utxos, &a, GENESIS_HASH)
+            .unwrap();
+        ledger
+            .assets
+            .apply(&mut ledger.utxos, &b, GENESIS_HASH)
+            .unwrap();
+
+        let mint_a = AssetIntent::new(
+            AssetInstruction::Mint {
+                asset: asset_a,
+                nonce: 1,
+                recipient: address(31),
+                amount: Unit::from_units(5),
+            },
+            address(32),
+        );
+
+        ledger
+            .assets
+            .apply(&mut ledger.utxos, &mint_a, GENESIS_HASH)
+            .unwrap();
+
+        assert_eq!(ledger.assets.supply(asset_a), Unit::from_units(15));
+        assert_eq!(ledger.assets.supply(asset_b), Unit::from_units(20));
+
+        let sum_a = ledger
+            .utxos
+            .assets()
+            .filter(|(_, share)| share.asset == asset_a)
+            .fold(Unit::ZERO, |total, (_, share)| {
+                total.checked_add(share.amount).unwrap()
+            });
+
+        let sum_b = ledger
+            .utxos
+            .assets()
+            .filter(|(_, share)| share.asset == asset_b)
+            .fold(Unit::ZERO, |total, (_, share)| {
+                total.checked_add(share.amount).unwrap()
+            });
+
+        assert_eq!(sum_a, Unit::from_units(15));
+        assert_eq!(sum_b, Unit::from_units(20));
+        assert_global_asset_invariants(&ledger.assets, &ledger.utxos);
     }
 }

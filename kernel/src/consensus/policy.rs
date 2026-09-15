@@ -7,8 +7,8 @@ use static_assertions::const_assert;
 use crate::{
     blockchain::Block,
     common::Height,
-    native::coin::{CoinOutput, Zeno},
     consensus::PoWTarget,
+    native::coin::{CoinOutput, Zeno},
 };
 
 use crypto::{ADDRESS_SIZE, Address, HASH_SIZE, Hash, HashDomain, canonical_bytes, domain};
@@ -75,40 +75,24 @@ pub fn next_difficulty_from_window(
 ) -> Option<u32> {
     let adjustment = adjustment_for_window(block_weights)?;
 
-    let previous =
-        PoWTarget::from_compact(previous_target_bits)?;
+    let previous = PoWTarget::from_compact(previous_target_bits)?;
 
-    let pow_limit =
-        PoWTarget::from_compact(crate::consensus::TARGET_BITS_START)?;
+    let pow_limit = PoWTarget::from_compact(crate::consensus::TARGET_BITS_START)?;
 
     let next = match adjustment {
         // Old "Decrease difficulty" = easier.
         // Easier means a larger target.
-        WbdaAdjustment::Decrease => {
-            previous.scale_ratio(
-                WBDA_EASIER_PERCENT,
-                100,
-            )?
-        }
+        WbdaAdjustment::Decrease => previous.scale_ratio(WBDA_EASIER_PERCENT, 100)?,
 
         WbdaAdjustment::Keep => previous,
 
         // Old "Increase difficulty" = harder.
         // Harder means a smaller target.
-        WbdaAdjustment::Increase => {
-            previous.scale_ratio(
-                WBDA_HARDER_PERCENT,
-                100,
-            )?
-        }
+        WbdaAdjustment::Increase => previous.scale_ratio(WBDA_HARDER_PERCENT, 100)?,
     };
 
     // Never become easier than the configured PoW limit.
-    let next = if next > pow_limit {
-        pow_limit
-    } else {
-        next
-    };
+    let next = if next > pow_limit { pow_limit } else { next };
 
     Some(next.to_compact())
 }
@@ -163,15 +147,9 @@ pub const EMISSION_HALVINGS_TO_TAIL: u64 = 6;
 
 pub const EMISSION_INTERVAL: u64 = 50_000;
 
-const_assert!(
-    BLOCK_EMISSION_START * (1_u64 << EMISSION_RISING_STEPS)
-        == MAX_BLOCK_EMISSION
-);
+const_assert!(BLOCK_EMISSION_START * (1_u64 << EMISSION_RISING_STEPS) == MAX_BLOCK_EMISSION);
 
-const_assert!(
-    MAX_BLOCK_EMISSION / (1_u64 << EMISSION_HALVINGS_TO_TAIL)
-        == TAIL_BLOCK_EMISSION
-);
+const_assert!(MAX_BLOCK_EMISSION / (1_u64 << EMISSION_HALVINGS_TO_TAIL) == TAIL_BLOCK_EMISSION);
 
 pub const fn initial_block_emission() -> Zeno {
     Zeno::from_zeno(BLOCK_EMISSION_START)
@@ -181,10 +159,8 @@ pub const fn is_emission_epoch_boundary(height: u64) -> bool {
     height > 1 && (height - 1).is_multiple_of(EMISSION_INTERVAL)
 }
 
-
 pub fn block_emission_for_height(height: Height) -> Zeno {
-    let completed_intervals =
-        height.0.saturating_sub(1) / EMISSION_INTERVAL;
+    let completed_intervals = height.0.saturating_sub(1) / EMISSION_INTERVAL;
 
     let emission = if completed_intervals <= EMISSION_RISING_STEPS {
         // Reverse halving / doubling phase:
@@ -202,14 +178,12 @@ pub fn block_emission_for_height(height: Height) -> Zeno {
             .min(MAX_BLOCK_EMISSION)
     } else {
         // Normal halving phase after peak.
-        let halvings =
-            completed_intervals - EMISSION_RISING_STEPS;
+        let halvings = completed_intervals - EMISSION_RISING_STEPS;
 
         if halvings >= EMISSION_HALVINGS_TO_TAIL {
             TAIL_BLOCK_EMISSION
         } else {
-            (MAX_BLOCK_EMISSION >> halvings)
-                .max(TAIL_BLOCK_EMISSION)
+            (MAX_BLOCK_EMISSION >> halvings).max(TAIL_BLOCK_EMISSION)
         }
     };
 

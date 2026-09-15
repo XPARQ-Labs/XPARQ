@@ -98,7 +98,9 @@ pub fn account_wallet_from_file_bytes(bytes: &[u8]) -> Result<AccountWallet, Str
             Zeroizing::new(hex::encode(&seed[..]))
         };
         if private_key != expected_private_key.as_str() {
-            return Err("wallet private key does not match its mnemonic and signature account".into());
+            return Err(
+                "wallet private key does not match its mnemonic and signature account".into(),
+            );
         }
     }
     wallet.mnemonic = Some(wallet_file.mnemonic.clone());
@@ -188,7 +190,7 @@ impl AccountWallet {
     ) -> Result<AuthorizedAccountIntent<T>, String> {
         let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
         let commitment = intent
-            .commitment(chain)
+            .authorization_commitment(chain)
             .map_err(|error| error.to_string())?;
         let signature = self.signing_seed.sign(commitment.as_bytes());
         let authorization = AccountAuthorization {
@@ -273,11 +275,7 @@ mod tests {
     #[test]
     fn mnemonic_derives_distinct_recoverable_account_addresses() {
         let mnemonic = encode_bip39_mnemonic(&[12; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
-        let accounts = [
-            Signature::MlDsa44,
-            Signature::MlDsa65,
-            Signature::MlDsa87,
-        ];
+        let accounts = [Signature::MlDsa44, Signature::MlDsa65, Signature::MlDsa87];
         let first =
             accounts.map(|account| account_wallet_from_bip39_mnemonic(&mnemonic, account).unwrap());
         let second =
@@ -295,11 +293,7 @@ mod tests {
     #[test]
     fn account_wallet_file_roundtrip_preserves_account_and_identity() {
         let mnemonic = encode_bip39_mnemonic(&[13; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
-        for account in [
-            Signature::MlDsa44,
-            Signature::MlDsa65,
-            Signature::MlDsa87,
-        ] {
+        for account in [Signature::MlDsa44, Signature::MlDsa65, Signature::MlDsa87] {
             let mut wallet = account_wallet_from_bip39_mnemonic(&mnemonic, account).unwrap();
             wallet.mnemonic = Some(mnemonic.clone());
             let bytes = account_wallet_file_bytes(&wallet).unwrap();
