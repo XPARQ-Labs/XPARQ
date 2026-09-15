@@ -13,13 +13,34 @@ use std::collections::BTreeMap;
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct LedgerState {
     pub utxos: utxo::UtxoSet,
+    pub coin: CoinRecord,
     pub assets: AssetState,
-    pub total_burned: Zeno,
 }
 
 impl LedgerState {
     pub const fn utxos(&self) -> &utxo::UtxoSet {
         &self.utxos
+    }
+}
+
+#[derive(
+    BorshSerialize,
+    BorshDeserialize,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+)]
+pub struct CoinRecord {
+    pub total_mined: Zeno,
+    pub total_burned: Zeno,
+}
+
+impl CoinRecord {
+    pub fn supply(&self) -> Option<Zeno> {
+        self.total_mined.checked_sub(self.total_burned)
     }
 }
 
@@ -29,6 +50,7 @@ pub struct AssetRecord {
     pub supply: Unit,
     pub total_minted: Unit,
     pub mint_nonce: u64,
+    pub total_burned: Unit,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -72,6 +94,7 @@ impl AssetState {
 pub struct SpendRollbackJournal {
     pub(crate) consumed_coins: Vec<(XPQ, CoinUtxo)>,
     pub(crate) created_coin_ids: Vec<XPQ>,
+    pub(crate) mined: Zeno,
     pub(crate) burned: Zeno,
 }
 

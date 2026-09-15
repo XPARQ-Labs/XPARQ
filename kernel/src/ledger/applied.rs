@@ -199,7 +199,17 @@ impl AssetState {
         let created_share = match &call.instruction {
             AssetInstruction::Register { .. } => Some(Share::derive(call.asset()?, commitment, 0)),
             AssetInstruction::Mint { asset, .. } => Some(Share::derive(*asset, commitment, 0)),
-            AssetInstruction::Burn { .. } => None,
+            AssetInstruction::Burn {
+                asset,
+                output,
+                ..
+            } => {
+                if output.is_zero() {
+                    None
+                } else {
+                    Some(Share::derive(*asset, commitment, 0))
+                }
+            }
         };
         if created_share.is_some_and(|share| utxos.asset(&share).is_some()) {
             return Err(AssetError::ShareAlreadyExists);
@@ -214,6 +224,7 @@ impl AssetState {
                 max_supply,
                 initial_mint,
                 mint_authority,
+                nonce,
             } => {
                 let metadata = Metadata::new(
                     name.clone(),
@@ -223,7 +234,7 @@ impl AssetState {
                     *mint_authority,
                 )?;
 
-                let asset = Contract::derive(&metadata)?;
+                let asset = Contract::derive(&metadata, *nonce)?;
 
                 let share = Share::derive(asset, commitment, 0);
 
@@ -239,6 +250,7 @@ impl AssetState {
                         supply: *initial_mint,
                         total_minted: *initial_mint,
                         mint_nonce: 0,
+                        total_burned: Unit::ZERO,
                     },
                 );
 
@@ -288,15 +300,24 @@ impl AssetState {
                     .map_err(|_| AssetError::ShareAlreadyExists)?;
             }
 
-            AssetInstruction::Burn { asset, inputs } => {
+            AssetInstruction::Burn { asset, inputs, amount, output } => {
                 let total = self.validate_inputs(utxos, *asset, inputs)?;
-
+                let expected_total = amount
+                    .checked_add(*output)
+                    .ok_or(AssetError::BalanceOverflow)?;
+                if total != expected_total {
+                    return Err(AssetError::InvalidAmount);
+                }
                 let previous = self.assets.get(asset).cloned();
                 let record = self.assets.get_mut(asset).ok_or(AssetError::UnknownAsset)?;
                 record.supply = record
                     .supply
-                    .checked_sub(total)
+                    .checked_sub(*amount)
                     .ok_or(AssetError::SupplyOverflow)?;
+                record.total_burned = record
+                      .total_burned
+                      .checked_add(*amount)
+                      .ok_or(AssetError::SupplyOverflow)?;
                 journal.assets.push((*asset, previous));
 
                 for input in inputs {
@@ -304,6 +325,20 @@ impl AssetState {
                     utxos
                         .consume_asset(input)
                         .map_err(|_| AssetError::UnknownObject)?;
+                }
+                if !output.is_zero() {
+                    let share = Share::derive(*asset, commitment, 0);
+                    journal.utxos.push((share, utxos.asset(&share).copied()));
+                    utxos
+                        .insert_asset(
+                            share,
+                            AssetShare {
+                                asset: *asset,
+                                amount: *output,
+                                owner: call.signer,
+                            },
+                        )
+                        .map_err(|_| AssetError::ShareAlreadyExists)?;
                 }
             }
         }
@@ -384,6 +419,7 @@ impl AssetState {
                 decimals,
                 max_supply,
                 mint_authority,
+                nonce,
                 ..
             } => {
                 let metadata = Metadata::new(
@@ -394,7 +430,7 @@ impl AssetState {
                     *mint_authority,
                 )?;
 
-                let id = Contract::derive(&metadata)?;
+                let id = Contract::derive(&metadata, *nonce)?;
 
                 if self.metadata(id).is_some() {
                     return Err(AssetError::AssetAlreadyExists);
@@ -430,9 +466,12 @@ impl AssetState {
                     .ok_or(AssetError::SupplyOverflow)?;
             }
 
-            AssetInstruction::Burn { asset, inputs } => {
+            AssetInstruction::Burn {
+                asset,
+                inputs,
+                ..
+            } => {
                 self.metadata(*asset).ok_or(AssetError::UnknownAsset)?;
-
                 self.validate_inputs(utxos, *asset, inputs)?;
             }
         }
@@ -522,7 +561,14 @@ impl LedgerState {
         &mut self,
         journal: SpendRollbackJournal,
     ) -> Result<(), StateError> {
-        self.total_burned = self
+        self.coin.total_mined =self
+            .coin
+            .total_mined
+            .checked_sub(journal.mined)
+            .ok_or(StateError::AmountOverflow)?;
+
+        self.coin.total_burned = self
+            .coin
             .total_burned
             .checked_sub(journal.burned)
             .ok_or(StateError::BurnUnderflow)?;
@@ -541,7 +587,8 @@ impl LedgerState {
         burned: Zeno,
         journal: &mut SpendRollbackJournal,
     ) -> Result<(), StateError> {
-        self.total_burned = self
+        self.coin.total_burned = self
+            .coin
             .total_burned
             .checked_add(burned)
             .ok_or(StateError::BurnOverflow)?;

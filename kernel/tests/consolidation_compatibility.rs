@@ -57,6 +57,7 @@ fn native_asset_and_share_ids_are_frozen() {
             Address([7; ADDRESS_SIZE]),
         )
         .unwrap(),
+        0,
     )
     .unwrap();
     assert_eq!(

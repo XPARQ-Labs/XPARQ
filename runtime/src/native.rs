@@ -904,11 +904,13 @@ fn asset_transaction_response(
             max_supply,
             initial_mint,
             mint_authority,
+            nonce,
         } => serde_json::json!({
             "type": "register", "name": name, "decimals": decimals,
             "max_supply": max_supply.to_string(), "initial_mint": initial_mint.to_string(),
             "mint_authority": asset_authority_response(*mint_authority),
             "recipient": kernel::crypto::address_to_string(&call.signer),
+            "nonce": nonce,
         }),
         kernel::transaction::AssetInstruction::Mint {
             recipient, amount, ..
@@ -1329,7 +1331,14 @@ fn status_response(ledger: &Ledger) -> Result<serde_json::Value, String> {
         "next_difficulty": next_difficulty,
         "cumulative_work": format_work(cumulative_work.to_be_limbs()),
         "cumulative_weight": cumulative_weight.to_string(),
-        "total_burned": ledger.state().total_burned.as_zeno(),
+        "total_mined": ledger.state().coin.total_mined.as_zeno(),
+        "total_burned": ledger.state().coin.total_burned.as_zeno(),
+        "supply": ledger
+              .state()
+              .coin
+              .supply()
+              .map(|value| value.as_zeno())
+              .unwrap_or(0),
     }))
 }
 

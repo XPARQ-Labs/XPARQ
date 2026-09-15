@@ -1,5 +1,5 @@
 use borsh::{BorshDeserialize, BorshSerialize};
-use crypto::{Address, HASH_SIZE, Hash, HashDomain, HashParseError, domain, format, parse};
+use crypto::{Address, HASH_SIZE, Hash, HashDomain, HashParseError, domain, format, parse, canonical_bytes};
 
 use std::{error::Error, fmt, str::FromStr};
 
@@ -164,12 +164,13 @@ fn validate_name(name: &str) -> Result<(), AssetError> {
 pub struct Contract(Hash); // Rename to Contract
 
 impl Contract {
-    pub fn derive(metadata: &Metadata) -> Result<Self, AssetError> {
-        metadata.validate()?;
+    pub fn derive(metadata: &Metadata, nonce: u64) -> Result<Self, AssetError> {
+        let bytes = canonical_bytes(&(metadata, nonce))
+            .map_err(|_| AssetError::Encoding)?;
 
-        let bytes = borsh::to_vec(metadata).map_err(|_| AssetError::Encoding)?;
-
-        Ok(Self(domain(HashDomain::Asset, &bytes)))
+        Ok(Self::from_hash(
+            domain(HashDomain::Asset, &bytes)
+        ))
     }
 
     pub const fn from_hash(hash: Hash) -> Self {

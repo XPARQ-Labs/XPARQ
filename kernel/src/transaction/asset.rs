@@ -15,6 +15,7 @@ pub enum AssetInstruction {
         max_supply: Unit,
         initial_mint: Unit,
         mint_authority: Address,
+        nonce: u64,
     },
     Mint {
         asset: Contract,
@@ -25,6 +26,8 @@ pub enum AssetInstruction {
     Burn {
         asset: Contract,
         inputs: Vec<Share>,
+        amount: Unit,
+        output: Unit,
     },
 }
 
@@ -49,6 +52,7 @@ impl AssetIntent {
                 decimals,
                 max_supply,
                 mint_authority,
+                nonce,
                 ..
             } => {
                 let metadata = Metadata::new(
@@ -58,7 +62,7 @@ impl AssetIntent {
                     self.signer,
                     *mint_authority,
                 )?;
-                Contract::derive(&metadata)
+                Contract::derive(&metadata, *nonce)
             }
             AssetInstruction::Mint { asset, .. } | AssetInstruction::Burn { asset, .. } => {
                 Ok(*asset)
@@ -80,6 +84,7 @@ impl AssetIntent {
                 max_supply,
                 initial_mint,
                 mint_authority,
+                ..
             } => {
                 Metadata::new(
                     name.clone(),
@@ -97,11 +102,17 @@ impl AssetIntent {
             AssetInstruction::Mint { amount, .. } => {
                 ensure_nonzero_asset_amount(*amount)?;
             }
-            AssetInstruction::Burn { inputs, .. } => {
+            AssetInstruction::Burn {
+                inputs,
+                amount,
+                ..
+            } => {
                 if inputs.is_empty() {
                     return Err(AssetError::InvalidProgram);
                 }
+
                 ensure_unique_asset_inputs(inputs)?;
+                ensure_nonzero_asset_amount(*amount)?;
             }
         }
 
@@ -119,6 +130,7 @@ impl AssetIntent {
                 max_supply,
                 initial_mint,
                 mint_authority,
+                nonce,
             } => {
                 let metadata = Metadata::new(
                     name.clone(),
@@ -127,12 +139,12 @@ impl AssetIntent {
                     self.signer,
                     *mint_authority,
                 )?;
-                let asset = Contract::derive(&metadata)?;
+                let asset = Contract::derive(&metadata, *nonce)?;
 
                 weight = checked_entry_weight(
                     weight,
                     HASH_SIZE,
-                    &(&metadata, initial_mint, initial_mint, 0_u64),
+                    &(&metadata, initial_mint, initial_mint, 0_u64, Unit::ZERO),
                 )?;
                 weight = checked_entry_weight(
                     weight,
@@ -160,7 +172,23 @@ impl AssetIntent {
                     },
                 )?;
             }
-            AssetInstruction::Burn { .. } => {}
+            AssetInstruction::Burn {
+                asset,
+                output,
+                ..
+            } => {
+                if !output.is_zero() {
+                    weight = checked_entry_weight(
+                        weight,
+                        HASH_SIZE,
+                        &AssetShare {
+                            asset: *asset,
+                            amount: *output,
+                            owner: self.signer,
+                        },
+                    )?;
+                }
+            }
         }
 
         Ok(weight)

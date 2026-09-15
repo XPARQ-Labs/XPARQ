@@ -109,6 +109,12 @@ impl Ledger {
                     owner: block.miner_address(),
                 },
             )?;
+            state.coin.total_mined = state
+                 .coin
+                 .total_mined
+                 .checked_add(emission.subsidy())
+                 .ok_or(StateError::AmountOverflow)?;
+
             let mut spend = SpendRollbackJournal {
                 created_coin_ids: vec![id],
                 ..SpendRollbackJournal::default()
@@ -260,11 +266,11 @@ impl TransactionStateView for LedgerState {
 
 impl LedgerState {
     pub(crate) fn application_state_root(&self) -> Result<StateRoot, LedgerError> {
-        if self.assets.is_empty() && self.utxos.is_empty() && self.total_burned.is_zero() {
+        if self.assets.is_empty() && self.utxos.is_empty() && self.coin.total_mined.is_zero() && self.coin.total_burned.is_zero() {
             return Ok(StateRoot::ZERO);
         }
 
-        let state = canonical_bytes(&(&self.utxos, &self.assets, self.total_burned))?;
+        let state = canonical_bytes(&(&self.utxos, &self.coin, &self.assets))?;
 
         Ok(StateRoot(
             domain(HashDomain::ProtocolState, &state).into_bytes(),

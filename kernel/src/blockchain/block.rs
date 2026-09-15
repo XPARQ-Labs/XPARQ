@@ -21,11 +21,6 @@ use crate::{
 pub const MAX_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 pub const GENESIS_TARGET_BITS: u32 = 0x207f_ffff;
 
-// Lower bound for a direct coin transaction with one input, one block-miner
-// output, and an empty known-account signature byte vector.
-const MIN_TRANSACTION_BYTES: usize = 79;
-const MAX_BLOCK_TRANSACTIONS: usize = MAX_BLOCK_SIZE / MIN_TRANSACTION_BYTES;
-
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Header {
     pub previous_hash: PreviousHash,
@@ -94,19 +89,19 @@ impl BorshDeserialize for Block {
     }
 }
 
-fn deserialize_block_transactions<R: Read>(reader: &mut R) -> std::io::Result<Vec<Transaction>> {
+fn deserialize_block_transactions<R: Read>(
+    reader: &mut R,
+) -> std::io::Result<Vec<Transaction>> {
     let length = u32::deserialize_reader(reader)? as usize;
-    if length > MAX_BLOCK_TRANSACTIONS {
-        return Err(IoError::new(
-            ErrorKind::InvalidData,
-            "block transaction count exceeds canonical bound",
-        ));
-    }
 
     let mut transactions = Vec::new();
+
     transactions
         .try_reserve(length.min(64))
-        .map_err(|_| IoError::new(ErrorKind::OutOfMemory, "block allocation failed"))?;
+        .map_err(|_| IoError::new(
+            ErrorKind::OutOfMemory,
+            "block allocation failed",
+        ))?;
 
     for _ in 0..length {
         transactions.push(Transaction::deserialize_reader(reader)?);

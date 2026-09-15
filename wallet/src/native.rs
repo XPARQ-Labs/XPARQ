@@ -6,7 +6,7 @@ use std::{
     str::FromStr,
 };
 
-use kernel::native::asset::Contract;
+use kernel::native::asset::{Contract, Unit};
 use kernel::native::coin::CoinOutput;
 use kernel::{
     codec::canonical_bytes,
@@ -70,7 +70,9 @@ struct BalanceResponse {
 
 #[derive(Deserialize)]
 struct NodeBurnResponse {
+    total_mined: u64,
     total_burned: u64,
+    supply: u64,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +180,12 @@ fn asset_register(args: &[String]) -> Result<(), String> {
     } else {
         authority
     };
+
+    let nonce = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_err(|error| error.to_string())?
+    .as_nanos() as u64;
+
     let asset = Contract::derive(
         &kernel::native::asset::Metadata::new(
             name.clone(),
@@ -187,6 +195,7 @@ fn asset_register(args: &[String]) -> Result<(), String> {
             mint_authority,
         )
         .map_err(|error| error.to_string())?,
+        nonce,
     )
     .map_err(|error| error.to_string())?;
     submit_asset_instruction(
@@ -197,6 +206,7 @@ fn asset_register(args: &[String]) -> Result<(), String> {
             max_supply,
             initial_mint,
             mint_authority,
+            nonce,
         },
     )?;
     println!("asset: {asset}");
@@ -241,12 +251,26 @@ fn asset_burn(args: &[String]) -> Result<(), String> {
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let asset = parse_asset(args)?;
-    let amount = parse_asset_amount(args, "--amount", asset_decimals(args, asset)?)?;
-    let (inputs, total) = select_asset_inputs(rpc, wallet.address(), asset, amount.as_units())?;
-    if total != amount.as_units() {
-        return Err("asset burn amount must exactly match selectable shares; transfer first to split a share".into());
-    }
-    submit_asset_instruction(args, AssetInstruction::Burn { asset, inputs })
+
+    let amount =
+        parse_asset_amount(args, "--amount", asset_decimals(args, asset)?)?;
+
+    let (inputs, total) =
+        select_asset_inputs(rpc, wallet.address(), asset, amount.as_units())?;
+
+    let output = total
+        .checked_sub(amount.as_units())
+        .ok_or("asset burn exceeds selected shares")?;
+
+    submit_asset_instruction(
+        args,
+        AssetInstruction::Burn {
+            asset,
+            inputs,
+            amount,
+            output: Unit::from_units(output),
+        },
+    )
 }
 
 fn asset_transfer(args: &[String]) -> Result<(), String> {
@@ -907,7 +931,9 @@ fn print_balance(args: &[String]) -> Result<(), String> {
     println!("Available: {}", format_amount(balance.total));
     println!("Reserved: {}", format_amount(balance.reserved));
     println!("UTXOs: {}", balance.utxo_count);
+    println!("Total Mined: {}", format_amount(burn.total_mined));
     println!("Total Burned: {}", format_amount(burn.total_burned));
+    println!("Supply: {}", format_amount(burn.supply));
     println!("Assets: {}", balance.assets.len());
     for asset in &balance.assets {
         let max_supply = format_asset_amount(&asset.max_supply, asset.decimals)?;
