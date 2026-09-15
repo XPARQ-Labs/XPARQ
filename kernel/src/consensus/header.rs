@@ -120,7 +120,11 @@ pub fn verify_header_chain(
             HeaderChainError::InvalidHeaderChain(ForkChoiceError::InvalidProofOfWork(error))
         })?;
 
-        cumulative_work = cumulative_work.saturating_add(block_work(expected));
+        let work = block_work(expected).ok_or(HeaderChainError::InvalidHeaderChain(
+            ForkChoiceError::InvalidDifficulty,
+        ))?;
+
+        cumulative_work = cumulative_work.saturating_add(work);
 
         previous = current;
         recent.push(current.clone());
@@ -292,7 +296,11 @@ fn verify_header_chain_extension_inner(
             HeaderChainError::InvalidHeaderChain(ForkChoiceError::InvalidProofOfWork(error))
         })?;
 
-        cumulative_work = cumulative_work.saturating_add(block_work(expected_difficulty));
+        let work = block_work(expected_difficulty).ok_or(HeaderChainError::InvalidHeaderChain(
+            ForkChoiceError::InvalidDifficulty,
+        ))?;
+
+        cumulative_work = cumulative_work.saturating_add(work);
 
         previous_hash = header.hash().map_err(|_| HeaderChainError::Serialization)?;
 

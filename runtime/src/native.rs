@@ -1311,9 +1311,21 @@ fn status_response(ledger: &Ledger) -> Result<serde_json::Value, String> {
         .chain
         .blocks()
         .filter(|block| !block.is_genesis())
-        .fold(kernel::consensus::Work::ZERO, |work, block| {
-            work.saturating_add(kernel::consensus::block_work(block.target_bits()))
-        });
+        .try_fold(
+            kernel::consensus::Work::ZERO,
+            |work, block| -> Result<_, String> {
+                let block_work =
+                    kernel::consensus::block_work(block.target_bits()).ok_or_else(|| {
+                        format!(
+                            "invalid target bits {:08x} at height {}",
+                            block.target_bits(),
+                            block.height().0,
+                        )
+                    })?;
+
+                Ok(work.saturating_add(block_work))
+            },
+        )?;
     let cumulative_weight = ledger
         .chain
         .blocks()
@@ -2656,13 +2668,20 @@ fn validated_header_state(
     {
         return Err("validated header chain has the wrong genesis".into());
     }
-    let cumulative_work =
-        headers
-            .iter()
-            .skip(1)
-            .fold(kernel::consensus::Work::ZERO, |work, header| {
-                work.saturating_add(kernel::consensus::block_work(header.header.target_bits))
-            });
+    let cumulative_work = headers.iter().skip(1).try_fold(
+        kernel::consensus::Work::ZERO,
+        |work, header| -> Result<_, String> {
+            let block_work =
+                kernel::consensus::block_work(header.header.target_bits).ok_or_else(|| {
+                    format!(
+                        "invalid target bits {:08x} at height {}",
+                        header.header.target_bits, header.height.0,
+                    )
+                })?;
+
+            Ok(work.saturating_add(block_work))
+        },
+    )?;
     let cumulative_weight = headers.iter().skip(1).fold(0_u64, |total, header| {
         total.saturating_add(u64::from(header.header.block_weight))
     });
