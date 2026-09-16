@@ -81,7 +81,7 @@ pub(super) fn load_or_initialize_uncached(path: &Path) -> Result<Ledger, String>
     let mut ledger = Ledger::new();
     kernel::consensus::apply_genesis(&mut ledger, block.clone(), EXPECTED_GENESIS_HASH)
         .map_err(|error| error.to_string())?;
-    append_block(path, &block)?;
+    persist_block_and_mempool(path, &block, &[])?;
     Ok(ledger)
 }
 
@@ -94,6 +94,13 @@ pub(super) struct HeaderStateCheckpoint {
     pub(super) cumulative_work: kernel::consensus::Work,
     pub(super) cumulative_weight: u64,
 }
+
+pub(super) type HeaderSnapshot = (
+    Arc<Ledger>,
+    Arc<Vec<HeaderStateCheckpoint>>,
+    kernel::consensus::Work,
+    u64,
+);
 
 pub(super) fn build_header_state_checkpoints(
     ledger: &Ledger,
@@ -249,19 +256,8 @@ pub(super) fn cached_ledger(path: &Path) -> Result<Option<Arc<Ledger>>, String> 
         .map(|cached| Arc::clone(&cached.ledger)))
 }
 
-pub(super) fn load_or_initialize_header_snapshot(
-    path: &Path,
-) -> Result<
-    (
-        Arc<Ledger>,
-        Arc<Vec<HeaderStateCheckpoint>>,
-        kernel::consensus::Work,
-        u64,
-    ),
-    String,
-> {
+pub(super) fn load_or_initialize_header_snapshot(path: &Path) -> Result<HeaderSnapshot, String> {
     let _ = load_or_initialize(path)?;
-
     let cache = ledger_cache()
         .read()
         .map_err(|_| "ledger cache read lock is poisoned")?;
@@ -285,12 +281,22 @@ pub(super) fn cached_canonical_block_bytes(
 ) -> Result<Option<Vec<u8>>, String> {
     let ledger = load_or_initialize(path)?;
 
-    ledger
+    let Some(height) = index::canonical_block_height(path, &ledger, hash)? else {
+        return Ok(None);
+    };
+
+    let block = ledger
         .chain
-        .blocks()
-        .find(|block| block.hash().is_ok_and(|candidate| candidate.0 == hash))
-        .map(|block| block_bytes(block).map_err(|error| error.to_string()))
-        .transpose()
+        .block(&height)
+        .ok_or("indexed canonical block is missing")?;
+
+    let actual_hash = block.hash().map_err(|error| error.to_string())?.0;
+
+    if actual_hash != hash {
+        return Err("block index does not match canonical chain".into());
+    }
+
+    Ok(Some(block_bytes(block).map_err(|error| error.to_string())?))
 }
 
 pub(super) fn cached_handshake(path: &Path) -> Result<Handshake, String> {
@@ -390,11 +396,6 @@ pub(super) fn read_blocks(path: &Path) -> Result<Vec<Block>, String> {
             decode_block(&bytes).map_err(|error| format!("decode stored block: {error}"))
         })
         .collect()
-}
-
-pub(super) fn append_block(path: &Path, block: &Block) -> Result<(), String> {
-    let bytes = block_bytes(block).map_err(|error| error.to_string())?;
-    crate::storage::append_block(path, block.height().0, &bytes)
 }
 
 pub(super) fn print_status(ledger: &Ledger, database: &Path) {

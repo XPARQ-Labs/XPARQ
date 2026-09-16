@@ -357,8 +357,9 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
         }
         archival_bytes = required;
     };
+    let transaction_hash = hex::encode(transaction.id().unwrap());
     let submitted = post_transaction(&a_rpc, &transaction);
-    assert_eq!(submitted["hash"], hex::encode(transaction.id().unwrap()));
+    assert_eq!(submitted["hash"], transaction_hash);
 
     wait_for_status(&c_rpc, |_| {
         account(&c_rpc, &sender_address).is_ok_and(|account| {
@@ -386,6 +387,30 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
         account(&c_rpc, &recipient_address)
             .is_ok_and(|account| account["total"] == included_balance)
     });
+
+    let transaction_response =
+        http_get(&c_rpc, &format!("/explorer/transaction/{transaction_hash}"))
+            .expect("transaction explorer lookup after restart");
+
+    assert_eq!(transaction_response["hash"], transaction_hash);
+    assert_eq!(transaction_response["status"], "confirmed");
+    assert_eq!(transaction_response["height"], 3);
+
+    let address_response = http_get(&c_rpc, &format!("/explorer/address/{recipient_address}"))
+        .expect("address explorer lookup after restart");
+
+    let activities = address_response["activities"]
+        .as_array()
+        .expect("address activities");
+
+    assert!(
+        activities.iter().any(|activity| {
+            activity["hash"] == transaction_hash
+                && activity["direction"] == "in"
+                && activity["amount"] == sent.as_zeno()
+        }),
+        "recipient transaction activity was not rebuilt after restart",
+    );
 
     drop(c_node);
     drop(b_node);

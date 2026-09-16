@@ -110,7 +110,6 @@ struct AccountUtxo {
 struct AddressHistoryResponse {
     address: String,
     tip_height: u64,
-    activity_count: usize,
     emission_count: usize,
     activities: Vec<AddressActivity>,
 }
@@ -472,10 +471,7 @@ fn asset_info(args: &[String]) -> Result<(), String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let response: serde_json::Value =
         http_get_json(rpc, &format!("/asset/{}", parse_asset(args)?))?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&response).map_err(|error| error.to_string())?
-    );
+    print_human_json(&response);
     Ok(())
 }
 
@@ -493,10 +489,7 @@ fn asset_balance(args: &[String]) -> Result<(), String> {
             kernel::crypto::address_to_string(&address)
         ),
     )?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&response).map_err(|error| error.to_string())?
-    );
+    print_human_json(&response);
     Ok(())
 }
 
@@ -812,10 +805,7 @@ fn interactive_block_explorer() -> Result<(), String> {
         }
         choice => return Err(format!("unknown explorer selection `{choice}`")),
     };
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&response).map_err(|error| error.to_string())?
-    );
+    print_human_json(&response);
     Ok(())
 }
 
@@ -886,7 +876,7 @@ fn print_address(args: &[String]) -> Result<(), String> {
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
     let address = wallet_address_from_file_bytes(&bytes)?;
-    println!("{}", kernel::crypto::address_to_string(&address));
+    println!("Address: {}", kernel::crypto::address_to_string(&address));
     Ok(())
 }
 
@@ -912,6 +902,94 @@ fn format_asset_amount(value: &str, decimals: u8) -> Result<String, String> {
     ))
 }
 
+fn human_label(key: &str) -> String {
+    key.split('_')
+        .map(|part| match part {
+            "id" => "ID".to_string(),
+            "tx" => "TX".to_string(),
+            "utxo" => "UTXO".to_string(),
+            "xpq" => "XPQ".to_string(),
+            other => {
+                let mut chars = other.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn print_human_json(value: &serde_json::Value) {
+    print_human_json_value(None, value, 0);
+}
+
+fn print_human_json_value(label: Option<&str>, value: &serde_json::Value, indent: usize) {
+    let padding = " ".repeat(indent);
+
+    match value {
+        serde_json::Value::Null => {
+            if let Some(label) = label {
+                println!("{padding}{}: -", human_label(label));
+            } else {
+                println!("{padding}-");
+            }
+        }
+        serde_json::Value::Bool(value) => {
+            if let Some(label) = label {
+                println!("{padding}{}: {value}", human_label(label));
+            } else {
+                println!("{padding}{value}");
+            }
+        }
+        serde_json::Value::Number(value) => {
+            if let Some(label) = label {
+                println!("{padding}{}: {value}", human_label(label));
+            } else {
+                println!("{padding}{value}");
+            }
+        }
+        serde_json::Value::String(value) => {
+            if let Some(label) = label {
+                println!("{padding}{}: {value}", human_label(label));
+            } else {
+                println!("{padding}{value}");
+            }
+        }
+        serde_json::Value::Array(values) => {
+            let child_indent = if let Some(label) = label {
+                println!("{padding}{}:", human_label(label));
+                indent + 2
+            } else {
+                indent
+            };
+
+            if values.is_empty() {
+                println!("{}None", " ".repeat(child_indent));
+                return;
+            }
+
+            for (index, value) in values.iter().enumerate() {
+                let item = format!("Item {}", index + 1);
+                print_human_json_value(Some(&item), value, child_indent);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            let child_indent = if let Some(label) = label {
+                println!("{padding}{}:", human_label(label));
+                indent + 2
+            } else {
+                indent
+            };
+
+            for (key, value) in values {
+                print_human_json_value(Some(key), value, child_indent);
+            }
+        }
+    }
+}
+
 fn print_balance(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
@@ -929,24 +1007,31 @@ fn print_balance(args: &[String]) -> Result<(), String> {
     println!("Total Burned: {}", format_amount(burn.total_burned));
     println!("Supply: {}", format_amount(burn.supply));
     println!("Assets: {}", balance.assets.len());
-    for asset in &balance.assets {
+    for (index, asset) in balance.assets.iter().enumerate() {
         let max_supply = format_asset_amount(&asset.max_supply, asset.decimals)?;
         let mint = format_asset_amount(&asset.mint, asset.decimals)?;
-        println!(
-            "- asset: {} name: {} decimals: {} max_supply: {} mint: {} shares: {}",
-            asset.asset,
-            asset.name,
-            asset.decimals,
-            max_supply,
-            mint,
-            asset.shares.len(),
-        );
-        for share in &asset.shares {
+
+        println!();
+        println!("Asset {}:", index + 1);
+        println!("  Contract: {}", asset.asset);
+        println!("  Name: {}", asset.name);
+        println!("  Decimals: {}", asset.decimals);
+        println!("  Max Supply: {max_supply}");
+        println!("  Mint: {mint}");
+        println!("  Shares: {}", asset.shares.len());
+
+        for (share_index, share) in asset.shares.iter().enumerate() {
             let amount = format_asset_amount(&share.amount, asset.decimals)?;
-            println!(
-                "  - share: {} amount: {} owner: {}",
-                share.share_id, amount, share.owner
-            );
+            let owner = share
+                .owner
+                .get("address")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+
+            println!("    Share {}:", share_index + 1);
+            println!("      ID: {}", share.share_id);
+            println!("      Amount: {amount}");
+            println!("      Owner: {owner}");
         }
     }
     Ok(())
@@ -963,34 +1048,38 @@ fn print_history(args: &[String]) -> Result<(), String> {
         &format!("/explorer/address/{address}?include_emissions=false"),
     )?;
 
-    println!("address: {}", history.address);
-    println!("tip height: {}", history.tip_height);
+    println!("Address: {}", history.address);
+    println!("Tip Height: {}", history.tip_height);
+
     let emission_count = history.emission_count;
     history
         .activities
         .retain(|activity| activity.hash.is_some());
-    println!("transactions: {}", history.activity_count);
-    println!("emissions hidden: {emission_count}");
+
+    println!("Transactions: {}", history.activities.len());
+    println!("Emissions Hidden: {emission_count}");
+
     if history.activities.is_empty() {
-        println!("no canonical transaction history");
+        println!("History: no canonical transactions");
         return Ok(());
     }
-    for activity in history.activities {
+
+    for (index, activity) in history.activities.into_iter().enumerate() {
         let confirmations = history
             .tip_height
             .saturating_sub(activity.height)
             .saturating_add(1);
-        println!(
-            "- height={} confirmations={} direction={} type={} amount={} size={} bytes tx={} block={}",
-            activity.height,
-            confirmations,
-            activity.direction,
-            activity.activity_type,
-            format_amount(activity.amount),
-            activity.size_bytes.unwrap_or(0),
-            activity.hash.as_deref().unwrap_or("emission"),
-            activity.block_hash,
-        );
+
+        println!();
+        println!("Transaction {}:", index + 1);
+        println!("  Tx Hash: {}", activity.hash.as_deref().unwrap_or("-"));
+        println!("  Block Hash: {}", activity.block_hash);
+        println!("  Height: {}", activity.height);
+        println!("  Confirmations: {confirmations}");
+        println!("  Direction: {}", activity.direction);
+        println!("  Type: {}", activity.activity_type);
+        println!("  Amount: {}", format_amount(activity.amount));
+        println!("  Size: {} bytes", activity.size_bytes.unwrap_or(0));
     }
     Ok(())
 }
@@ -1335,15 +1424,15 @@ fn submit_or_print_transaction(
 ) -> Result<(), String> {
     let transaction_bytes = canonical_bytes(transaction).map_err(|error| error.to_string())?;
     if has_flag(args, "--offline") {
-        println!("transaction: {}", hex::encode(&transaction_bytes));
-        eprintln!("byte: {}", transaction_bytes.len());
+        println!("Transaction Hex: {}", hex::encode(&transaction_bytes));
+        println!("Bytes: {}", transaction_bytes.len());
         return Ok(());
     }
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let response: SubmitTransactionResponse =
         http_post_bytes(rpc, "/transaction", &transaction_bytes)?;
-    println!("hash: {}", response.hash);
-    println!("byte: {}", transaction_bytes.len());
+    println!("Tx Hash: {}", response.hash);
+    println!("Bytes: {}", transaction_bytes.len());
     Ok(())
 }
 

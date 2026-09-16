@@ -115,9 +115,12 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
         }
         _ => {}
     }
-    let ledger = load_or_initialize(database)?;
+
+    let (ledger, _header_checkpoints, cumulative_work, cumulative_weight) =
+        load_or_initialize_header_snapshot(database)?;
+
     let response = match route {
-        "/status" => status_response(&ledger)?,
+        "/status" => status_response(&ledger, cumulative_work, cumulative_weight)?,
         "/fee-policy" => {
             let emission = expected_next_emission(&ledger)?;
             serde_json::json!({
@@ -193,24 +196,96 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
         }
         route if route.starts_with("/explorer/address/") => {
             let value = route.trim_start_matches("/explorer/address/");
-            let (address, include_emissions) = match value.split_once('?') {
-                None => (value, true),
-                Some((address, "include_emissions=false")) => (address, false),
-                Some(_) => return Err("invalid explorer address query".into()),
-            };
+            let (address, query) = value.split_once('?').unwrap_or((value, ""));
+
             if address.is_empty() || address.contains(['/', '#']) {
                 return Err("invalid explorer address route".into());
             }
+
+            let mut include_emissions = true;
+            let mut limit = DEFAULT_ADDRESS_ACTIVITY_LIMIT;
+            let mut before = None;
+
+            let mut seen_include_emissions = false;
+            let mut seen_limit = false;
+            let mut seen_before = false;
+
+            if !query.is_empty() {
+                for parameter in query.split('&') {
+                    let (name, value) = parameter
+                        .split_once('=')
+                        .ok_or("invalid explorer address query")?;
+
+                    match name {
+                        "include_emissions" => {
+                            if seen_include_emissions {
+                                return Err("duplicate include_emissions query".into());
+                            }
+
+                            seen_include_emissions = true;
+
+                            include_emissions = match value {
+                                "true" => true,
+                                "false" => false,
+                                _ => return Err("invalid include_emissions query".into()),
+                            };
+                        }
+
+                        "limit" => {
+                            if seen_limit {
+                                return Err("duplicate limit query".into());
+                            }
+
+                            seen_limit = true;
+
+                            limit = value
+                                .parse::<usize>()
+                                .map_err(|_| "invalid explorer address limit")?;
+
+                            if limit == 0 || limit > MAX_ADDRESS_ACTIVITY_LIMIT {
+                                return Err("explorer address limit is out of range".into());
+                            }
+                        }
+
+                        "before" => {
+                            if seen_before {
+                                return Err("duplicate before query".into());
+                            }
+
+                            seen_before = true;
+
+                            if value.len() != crate::storage::ADDRESS_ACTIVITY_CURSOR_SIZE * 2 {
+                                return Err("invalid explorer address cursor".into());
+                            }
+
+                            let bytes = hex::decode(value)
+                                .map_err(|_| "invalid explorer address cursor")?;
+
+                            let cursor: [u8; crate::storage::ADDRESS_ACTIVITY_CURSOR_SIZE] = bytes
+                                .try_into()
+                                .map_err(|_| "invalid explorer address cursor")?;
+
+                            before = Some(cursor);
+                        }
+
+                        _ => return Err("invalid explorer address query".into()),
+                    }
+                }
+            }
+
             explorer_address_response(
+                database,
                 &ledger,
                 &read_mempool(database)?,
                 parse_address(address)?,
                 include_emissions,
+                limit,
+                before,
             )?
         }
         route if route.starts_with("/explorer/transaction/") => {
             let hash = route.trim_start_matches("/explorer/transaction/");
-            explorer_transaction_response(&ledger, parse_hash(hash)?)?
+            explorer_transaction_response(database, &ledger, parse_hash(hash)?)?
         }
         _ => return Err("unknown RPC route".into()),
     };

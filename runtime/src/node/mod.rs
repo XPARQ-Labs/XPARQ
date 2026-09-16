@@ -182,6 +182,7 @@ mod chain_sync;
 mod config;
 mod explorer;
 mod gossip;
+mod index;
 mod mempool;
 mod mining;
 mod p2p;

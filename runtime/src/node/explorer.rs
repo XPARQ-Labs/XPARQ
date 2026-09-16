@@ -1,6 +1,9 @@
 use super::*;
 use super::{config::*, mempool::*, state::*, util::*};
 
+pub(super) const DEFAULT_ADDRESS_ACTIVITY_LIMIT: usize = 50;
+pub(super) const MAX_ADDRESS_ACTIVITY_LIMIT: usize = 250;
+
 pub(super) fn print_account(path: Option<&str>, address: &str) -> Result<(), String> {
     let database = database_path(path);
     let ledger = load_or_initialize(&database)?;
@@ -182,10 +185,13 @@ pub(super) fn account_asset_shares(
 }
 
 pub(super) fn explorer_address_response(
+    database: &Path,
     ledger: &Ledger,
     mempool: &[Transaction],
     address: Address,
     include_emissions: bool,
+    limit: usize,
+    before: Option<[u8; crate::storage::ADDRESS_ACTIVITY_CURSOR_SIZE]>,
 ) -> Result<serde_json::Value, String> {
     let reserved_ids = reserved_coin_inputs(mempool);
     let mut total = Zeno::from_zeno(0);
@@ -205,22 +211,39 @@ pub(super) fn explorer_address_response(
                 .ok_or("explorer reserved balance overflow")?;
         }
     }
-
+    let page = index::address_activity_page(database, ledger, address, before, limit)?;
     let mut activities = Vec::new();
     let mut emission_count = 0usize;
-    for block in ledger.chain.blocks() {
-        let block_hash = hex::encode(block.hash().map_err(|error| error.to_string())?.0);
-        if let Some(emission) = block.emission().filter(|emission| emission.to == address) {
-            emission_count = emission_count.saturating_add(1);
-            if include_emissions {
+    for location in &page.locations {
+        match *location {
+            index::ActivityLocation::Emission { height } => {
+                emission_count = emission_count.saturating_add(1);
+                if !include_emissions {
+                    continue;
+                }
+
+                let block = ledger
+                    .chain
+                    .block(&height)
+                    .ok_or("indexed emission block is missing from the canonical chain")?;
+
+                let emission = block
+                    .emission()
+                    .filter(|emission| emission.to == address)
+                    .ok_or("indexed emission does not match the canonical chain")?;
+
                 let protocol_burn = kernel::consensus::MINER_PROTOCOL_BURN;
+
                 let miner_emission = emission
                     .subsidy
                     .checked_sub(protocol_burn)
                     .ok_or("block emission is below its protocol burn")?;
+
                 activities.push(serde_json::json!({
                     "height": block.height().0,
-                    "block_hash": block_hash,
+                    "block_hash": hex::encode(
+                        block.hash().map_err(|error| error.to_string())?.0
+                    ),
                     "hash": serde_json::Value::Null,
                     "type": "emission",
                     "direction": "in",
@@ -230,14 +253,29 @@ pub(super) fn explorer_address_response(
                     "size_bytes": serde_json::Value::Null,
                 }));
             }
-        }
-        for transaction in block.transactions() {
-            if let Some(activity) = address_transaction_activity(transaction, address, block)? {
-                activities.push(activity);
+
+            index::ActivityLocation::Transaction {
+                height,
+                transaction_index,
+            } => {
+                let block = ledger
+                    .chain
+                    .block(&height)
+                    .ok_or("indexed activity block is missing from the canonical chain")?;
+
+                let transaction = block
+                    .transactions()
+                    .get(transaction_index)
+                    .ok_or("indexed activity transaction is missing from its block")?;
+
+                if let Some(activity) = address_transaction_activity(transaction, address, block)? {
+                    activities.push(activity);
+                }
             }
         }
     }
-    activities.reverse();
+
+    let next_cursor = page.next_cursor.map(hex::encode);
 
     Ok(serde_json::json!({
         "address": kernel::crypto::address_to_string(&address),
@@ -249,6 +287,7 @@ pub(super) fn explorer_address_response(
         "activity_count": activities.len(),
         "emission_count": emission_count,
         "activities": activities,
+        "next_cursor": next_cursor,
     }))
 }
 
@@ -314,38 +353,58 @@ pub(super) fn address_transaction_activity(
 }
 
 pub(super) fn explorer_transaction_response(
+    database: &Path,
     ledger: &Ledger,
     hash: [u8; 32],
 ) -> Result<serde_json::Value, String> {
     let tip_height = ledger.tip_height().map_or(0, |height| height.0);
-    for block in ledger.chain.blocks() {
-        let burns = ledger
-            .transaction_protocol_burns(block.height())
-            .ok_or("transaction execution receipts are missing")?;
-        for (index, transaction) in block.transactions().iter().enumerate() {
-            if transaction.id().map_err(|error| error.to_string())? == hash {
-                let protocol_burn = burns
-                    .get(index)
-                    .copied()
-                    .ok_or("transaction execution receipt is missing")?;
-                return Ok(serde_json::json!({
-                    "hash": hex::encode(hash),
-                    "type": transaction_kind(transaction),
-                    "status": "confirmed",
-                    "height": block.height().0,
-                    "block_hash": hex::encode(block.hash().map_err(|error| error.to_string())?.0),
-                    "confirmations": tip_height.saturating_sub(block.height().0).saturating_add(1),
-                    "size_bytes": canonical_bytes(transaction).map_err(|error| error.to_string())?.len(),
-                    "transaction": transaction_response(
-                        transaction,
-                        block.miner_address(),
-                        protocol_burn,
-                    ),
-                }));
-            }
-        }
+
+    let location = index::transaction_location(database, ledger, hash)?
+        .ok_or("transaction was not found in the canonical chain")?;
+
+    let block = ledger
+        .chain
+        .block(&location.height)
+        .ok_or("indexed transaction block is missing from the canonical chain")?;
+
+    let transaction = block
+        .transactions()
+        .get(location.transaction_index)
+        .ok_or("indexed transaction position is missing from its block")?;
+
+    if transaction.id().map_err(|error| error.to_string())? != hash {
+        return Err("transaction index does not match the canonical chain".into());
     }
-    Err("transaction was not found in the canonical chain".into())
+
+    let burns = ledger
+        .transaction_protocol_burns(location.height)
+        .ok_or("transaction execution receipts are missing")?;
+
+    let protocol_burn = burns
+        .get(location.transaction_index)
+        .copied()
+        .ok_or("transaction execution receipt is missing")?;
+
+    Ok(serde_json::json!({
+        "hash": hex::encode(hash),
+        "type": transaction_kind(transaction),
+        "status": "confirmed",
+        "height": block.height().0,
+        "block_hash": hex::encode(
+            block.hash().map_err(|error| error.to_string())?.0
+        ),
+        "confirmations": tip_height
+            .saturating_sub(block.height().0)
+            .saturating_add(1),
+        "size_bytes": canonical_bytes(transaction)
+            .map_err(|error| error.to_string())?
+            .len(),
+        "transaction": transaction_response(
+            transaction,
+            block.miner_address(),
+            protocol_burn,
+        ),
+    }))
 }
 
 pub(super) fn transaction_response(
@@ -575,37 +634,16 @@ pub(super) fn asset_authority_response(authority: Address) -> serde_json::Value 
     }
 }
 
-pub(super) fn status_response(ledger: &Ledger) -> Result<serde_json::Value, String> {
+pub(super) fn status_response(
+    ledger: &Ledger,
+    cumulative_work: Work,
+    cumulative_weight: u64,
+) -> Result<serde_json::Value, String> {
     let tip_height = ledger.tip_height().ok_or("canonical genesis is missing")?;
     let tip_hash = ledger.tip_hash().ok_or("canonical genesis is missing")?;
     let next_difficulty =
         expected_next_difficulty(&ledger.chain).map_err(|error| error.to_string())?;
-    let cumulative_work = ledger
-        .chain
-        .blocks()
-        .filter(|block| !block.is_genesis())
-        .try_fold(
-            kernel::consensus::Work::ZERO,
-            |work, block| -> Result<_, String> {
-                let block_work =
-                    kernel::consensus::block_work(block.target_bits()).ok_or_else(|| {
-                        format!(
-                            "invalid target bits {:08x} at height {}",
-                            block.target_bits(),
-                            block.height().0,
-                        )
-                    })?;
 
-                Ok(work.saturating_add(block_work))
-            },
-        )?;
-    let cumulative_weight = ledger
-        .chain
-        .blocks()
-        .filter(|block| !block.is_genesis())
-        .fold(0_u64, |total, block| {
-            total.saturating_add(u64::from(block.block_weight()))
-        });
     Ok(serde_json::json!({
         "tip_height": tip_height.0,
         "next_height": tip_height.0.saturating_add(1),

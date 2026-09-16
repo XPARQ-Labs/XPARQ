@@ -260,13 +260,23 @@ pub(super) fn persist_block_and_mempool(
     block: &Block,
     mempool: &[Transaction],
 ) -> Result<(), String> {
-    let block_bytes = block_bytes(block).map_err(|error| error.to_string())?;
-    crate::storage::append_block_and_replace_mempool(
-        path,
-        block.height().0,
-        &block_bytes,
-        &encode_mempool(mempool)?,
-    )
+    let stored = crate::storage::StoredCanonicalBlock {
+        height: block.height().0,
+
+        hash: block.hash().map_err(|error| error.to_string())?.0,
+
+        bytes: block_bytes(block).map_err(|error| error.to_string())?,
+
+        transactions: block
+            .transactions()
+            .iter()
+            .map(|transaction| transaction.id().map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()?,
+
+        activities: super::index::stored_address_activities(block)?,
+    };
+
+    crate::storage::append_block_and_replace_mempool(path, &stored, &encode_mempool(mempool)?)
 }
 
 pub(super) fn persist_chain_and_mempool(
@@ -278,10 +288,23 @@ pub(super) fn persist_chain_and_mempool(
         .chain
         .blocks()
         .map(|block| {
-            block_bytes(block)
-                .map(|bytes| (block.height().0, bytes))
-                .map_err(|error| error.to_string())
+            Ok(crate::storage::StoredCanonicalBlock {
+                height: block.height().0,
+
+                hash: block.hash().map_err(|error| error.to_string())?.0,
+
+                bytes: block_bytes(block).map_err(|error| error.to_string())?,
+
+                transactions: block
+                    .transactions()
+                    .iter()
+                    .map(|transaction| transaction.id().map_err(|error| error.to_string()))
+                    .collect::<Result<Vec<_>, String>>()?,
+
+                activities: super::index::stored_address_activities(block)?,
+            })
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, String>>()?;
+
     crate::storage::replace_blocks_and_mempool(path, &blocks, &encode_mempool(mempool)?)
 }
