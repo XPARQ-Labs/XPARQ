@@ -113,6 +113,9 @@ struct HeaderSyncResult {
 struct CachedLedger {
     database: PathBuf,
     ledger: Arc<Ledger>,
+    header_checkpoints: Arc<Vec<state::HeaderStateCheckpoint>>,
+    cumulative_work: Work,
+    cumulative_weight: u64,
 }
 
 static LEDGER_CACHE: OnceLock<RwLock<Option<CachedLedger>>> = OnceLock::new();
@@ -152,7 +155,7 @@ struct ConnectedPeer {
 
 struct HandshakeExchange {
     peer: Handshake,
-    local_headers: Vec<(Height, kernel::block::Header)>,
+    session_ledger: Arc<Ledger>,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]

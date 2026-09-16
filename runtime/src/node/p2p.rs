@@ -61,7 +61,7 @@ pub(super) fn handle_inbound_peer(database: &Path, mut stream: TcpStream) {
         .peer_addr()
         .map_or_else(|_| "unknown".into(), |value| value.to_string());
     match exchange_handshake(database, &mut stream).and_then(|exchange| {
-        let outcome = serve_peer_requests(database, &mut stream, &exchange.local_headers)?;
+        let outcome = serve_peer_requests(database, &mut stream, &exchange.session_ledger)?;
         if let PeerSessionOutcome::ReverseSync(inventory) = outcome {
             let peer = handshake_from_inventory(&exchange.peer, &inventory);
             let sync = synchronize_headers(database, &mut stream, &peer)?;
@@ -241,44 +241,85 @@ pub(super) fn connect_peer_database(database: &Path, peer: &str) -> Result<Conne
 pub(super) fn serve_peer_requests(
     database: &Path,
     stream: &mut TcpStream,
-    session_headers: &[(Height, kernel::block::Header)],
+    session_ledger: &Ledger,
 ) -> Result<PeerSessionOutcome, String> {
-    serve_header_requests(stream, session_headers)?;
+    let tip_height = session_ledger
+        .tip_height()
+        .ok_or("canonical chain has no tip")?;
+
+    serve_peer_requests_through(database, stream, session_ledger, tip_height)
+}
+
+pub(super) fn serve_peer_requests_through(
+    database: &Path,
+    stream: &mut TcpStream,
+    session_ledger: &Ledger,
+    tip_height: Height,
+) -> Result<PeerSessionOutcome, String> {
+    serve_header_requests(stream, session_ledger, tip_height)?;
     serve_block_requests(database, stream)
 }
 
 pub(super) fn serve_header_requests(
     stream: &mut TcpStream,
-    headers: &[(Height, kernel::block::Header)],
+    ledger: &Ledger,
+    tip_height: Height,
 ) -> Result<(), String> {
     let mut requests = 0_usize;
+
     loop {
         requests += 1;
+
         if requests > MAX_HEADER_REQUESTS_PER_SESSION {
             return Err("peer exceeded the header request limit".into());
         }
+
         let request = read_frame(stream, 2 + MAX_LOCATOR_HASHES * 32)?;
         let locator = decode_locator(&request)?;
-        let ancestor_index = headers
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, (_, header))| {
-                let hash = header.hash().ok()?.0;
-                locator.contains(&hash).then_some(index)
-            })
-            .ok_or("peer locator has no canonical common ancestor")?;
-        let ancestor_hash = headers[ancestor_index]
-            .1
-            .hash()
-            .map_err(|error| error.to_string())?
-            .0;
-        let extension = headers
-            .iter()
-            .skip(ancestor_index + 1)
-            .take(MAX_HEADER_CHAIN_CHUNK_HEADERS)
-            .map(|(height, header)| kernel::consensus::HeaderAtHeight::new(*height, header.clone()))
-            .collect::<Vec<_>>();
+        let mut height = tip_height;
+        let (ancestor_height, ancestor_hash) = loop {
+            let block = ledger
+                .chain
+                .block(&height)
+                .ok_or("canonical block is missing")?;
+
+            let hash = block.header.hash().map_err(|error| error.to_string())?.0;
+
+            if locator.contains(&hash) {
+                break (height, hash);
+            }
+
+            let Some(previous) = height.0.checked_sub(1) else {
+                return Err("peer locator has no canonical common ancestor".into());
+            };
+
+            height = Height(previous);
+        };
+
+        let mut extension = Vec::with_capacity(MAX_HEADER_CHAIN_CHUNK_HEADERS);
+
+        let mut next_height = ancestor_height.0.checked_add(1);
+
+        while let Some(value) = next_height {
+            if value > tip_height.0 || extension.len() >= MAX_HEADER_CHAIN_CHUNK_HEADERS {
+                break;
+            }
+
+            let height = Height(value);
+
+            let block = ledger
+                .chain
+                .block(&height)
+                .ok_or("canonical block is missing")?;
+
+            extension.push(kernel::consensus::HeaderAtHeight::new(
+                height,
+                block.header.clone(),
+            ));
+
+            next_height = value.checked_add(1);
+        }
+
         if extension.is_empty() {
             let mut response = Vec::with_capacity(33);
             response.push(HEADERS_COMPLETE_MESSAGE);
@@ -286,12 +327,16 @@ pub(super) fn serve_header_requests(
             write_frame(stream, &response)?;
             return Ok(());
         }
+
         let chunk = HeaderChainChunk::new(extension).map_err(|error| error.to_string())?;
+
         let chunk = canonical_bytes(&chunk).map_err(|error| error.to_string())?;
+
         let mut response = Vec::with_capacity(33 + chunk.len());
         response.push(HEADERS_MESSAGE);
         response.extend_from_slice(&ancestor_hash);
         response.extend_from_slice(&chunk);
+
         write_frame(stream, &response)?;
     }
 }

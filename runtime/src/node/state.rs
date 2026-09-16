@@ -85,6 +85,156 @@ pub(super) fn load_or_initialize_uncached(path: &Path) -> Result<Ledger, String>
     Ok(ledger)
 }
 
+const HEADER_STATE_CHECKPOINT_INTERVAL: u64 = 256;
+
+#[derive(Debug, Clone)]
+pub(super) struct HeaderStateCheckpoint {
+    pub(super) height: Height,
+    pub(super) hash: [u8; 32],
+    pub(super) cumulative_work: kernel::consensus::Work,
+    pub(super) cumulative_weight: u64,
+}
+
+pub(super) fn build_header_state_checkpoints(
+    ledger: &Ledger,
+) -> Result<(Vec<HeaderStateCheckpoint>, kernel::consensus::Work, u64), String> {
+    let mut checkpoints = Vec::new();
+
+    let mut cumulative_work = kernel::consensus::Work::ZERO;
+    let mut cumulative_weight = 0_u64;
+
+    for block in ledger.chain.blocks() {
+        let height = block.height();
+
+        let hash = block.hash().map_err(|error| error.to_string())?.0;
+
+        if height == Height(0) {
+            if hash != EXPECTED_GENESIS_HASH.0 {
+                return Err("canonical checkpoint chain has the wrong genesis".into());
+            }
+
+            checkpoints.push(HeaderStateCheckpoint {
+                height,
+                hash,
+                cumulative_work,
+                cumulative_weight,
+            });
+
+            continue;
+        }
+
+        let block_work = kernel::consensus::block_work(block.target_bits()).ok_or_else(|| {
+            format!(
+                "invalid target bits {:08x} at height {}",
+                block.target_bits(),
+                height.0,
+            )
+        })?;
+
+        cumulative_work = cumulative_work.saturating_add(block_work);
+
+        cumulative_weight = cumulative_weight.saturating_add(u64::from(block.block_weight()));
+
+        if height.0.is_multiple_of(HEADER_STATE_CHECKPOINT_INTERVAL) {
+            checkpoints.push(HeaderStateCheckpoint {
+                height,
+                hash,
+                cumulative_work,
+                cumulative_weight,
+            });
+        }
+    }
+
+    if checkpoints.is_empty() {
+        return Err("canonical chain has no genesis checkpoint".into());
+    }
+
+    Ok((checkpoints, cumulative_work, cumulative_weight))
+}
+
+fn updated_header_state_checkpoints(
+    path: &Path,
+    ledger: &Ledger,
+) -> Result<(Vec<HeaderStateCheckpoint>, kernel::consensus::Work, u64), String> {
+    let previous = {
+        let cache = ledger_cache()
+            .read()
+            .map_err(|_| "ledger cache read lock is poisoned")?;
+
+        cache
+            .as_ref()
+            .filter(|cached| cached.database == path)
+            .map(|cached| Arc::clone(&cached.header_checkpoints))
+    };
+
+    let Some(previous) = previous else {
+        return build_header_state_checkpoints(ledger);
+    };
+
+    let Some(tip_height) = ledger.tip_height() else {
+        return Err("canonical chain has no tip".into());
+    };
+
+    let anchor_index = previous.iter().rposition(|checkpoint| {
+        checkpoint.height <= tip_height
+            && ledger
+                .chain
+                .block(&checkpoint.height)
+                .and_then(|block| block.hash().ok())
+                .is_some_and(|hash| hash.0 == checkpoint.hash)
+    });
+
+    let Some(anchor_index) = anchor_index else {
+        return build_header_state_checkpoints(ledger);
+    };
+
+    let anchor = &previous[anchor_index];
+
+    let mut checkpoints = previous[..=anchor_index].to_vec();
+    let mut cumulative_work = anchor.cumulative_work;
+    let mut cumulative_weight = anchor.cumulative_weight;
+
+    let mut next_height = anchor.height.0.saturating_add(1);
+
+    while next_height <= tip_height.0 {
+        let height = Height(next_height);
+
+        let block = ledger
+            .chain
+            .block(&height)
+            .ok_or("canonical block is missing while updating checkpoints")?;
+
+        let block_work = kernel::consensus::block_work(block.target_bits()).ok_or_else(|| {
+            format!(
+                "invalid target bits {:08x} at height {}",
+                block.target_bits(),
+                height.0,
+            )
+        })?;
+
+        cumulative_work = cumulative_work.saturating_add(block_work);
+
+        cumulative_weight = cumulative_weight.saturating_add(u64::from(block.block_weight()));
+
+        if height.0.is_multiple_of(HEADER_STATE_CHECKPOINT_INTERVAL) {
+            checkpoints.push(HeaderStateCheckpoint {
+                height,
+                hash: block.hash().map_err(|error| error.to_string())?.0,
+                cumulative_work,
+                cumulative_weight,
+            });
+        }
+
+        let Some(next) = next_height.checked_add(1) else {
+            break;
+        };
+
+        next_height = next;
+    }
+
+    Ok((checkpoints, cumulative_work, cumulative_weight))
+}
+
 pub(super) fn ledger_cache() -> &'static RwLock<Option<CachedLedger>> {
     LEDGER_CACHE.get_or_init(|| RwLock::new(None))
 }
@@ -99,11 +249,34 @@ pub(super) fn cached_ledger(path: &Path) -> Result<Option<Arc<Ledger>>, String> 
         .map(|cached| Arc::clone(&cached.ledger)))
 }
 
-pub(super) fn cached_chain_headers(
+pub(super) fn load_or_initialize_header_snapshot(
     path: &Path,
-) -> Result<Vec<(Height, kernel::block::Header)>, String> {
-    let ledger = load_or_initialize(path)?;
-    Ok(ledger.chain.chain_headers())
+) -> Result<
+    (
+        Arc<Ledger>,
+        Arc<Vec<HeaderStateCheckpoint>>,
+        kernel::consensus::Work,
+        u64,
+    ),
+    String,
+> {
+    let _ = load_or_initialize(path)?;
+
+    let cache = ledger_cache()
+        .read()
+        .map_err(|_| "ledger cache read lock is poisoned")?;
+
+    let cached = cache
+        .as_ref()
+        .filter(|cached| cached.database == path)
+        .ok_or("ledger cache does not match database")?;
+
+    Ok((
+        Arc::clone(&cached.ledger),
+        Arc::clone(&cached.header_checkpoints),
+        cached.cumulative_work,
+        cached.cumulative_weight,
+    ))
 }
 
 pub(super) fn cached_canonical_block_bytes(
@@ -121,10 +294,10 @@ pub(super) fn cached_canonical_block_bytes(
 }
 
 pub(super) fn cached_handshake(path: &Path) -> Result<Handshake, String> {
-    let ledger = load_or_initialize(path)?;
-    let headers = ledger.chain.chain_headers();
+    let (ledger, _header_checkpoints, cumulative_work, cumulative_weight) =
+        load_or_initialize_header_snapshot(path)?;
 
-    local_handshake(path, &ledger, &headers)
+    local_handshake(path, &ledger, cumulative_work, cumulative_weight)
 }
 
 pub(super) fn load_or_create_node_id(database: &Path) -> Result<[u8; 32], String> {
@@ -141,19 +314,31 @@ pub(super) fn load_or_create_node_id(database: &Path) -> Result<[u8; 32], String
 }
 
 pub(super) fn update_ledger_cache(path: &Path, ledger: Ledger) -> Result<Arc<Ledger>, String> {
+    let (checkpoints, cumulative_work, cumulative_weight) =
+        updated_header_state_checkpoints(path, &ledger)?;
+
+    let checkpoints = Arc::new(checkpoints);
+
     let ledger = Arc::new(ledger);
+
     let mut cache = ledger_cache()
         .write()
         .map_err(|_| "ledger cache write lock is poisoned")?;
+
     *cache = Some(CachedLedger {
         database: path.to_path_buf(),
         ledger: Arc::clone(&ledger),
+        header_checkpoints: checkpoints,
+        cumulative_work,
+        cumulative_weight,
     });
+
     drop(cache);
 
     if let Err(error) = crate::snapshot::write_if_due(path, &ledger) {
         eprintln!("node: snapshot write failed: {error}");
     }
+
     Ok(ledger)
 }
 

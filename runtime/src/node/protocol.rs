@@ -1,5 +1,5 @@
+use super::state::*;
 use super::*;
-use super::{chain_sync::*, state::*};
 
 pub(super) fn write_frame(stream: &mut TcpStream, bytes: &[u8]) -> Result<(), String> {
     let length = u32::try_from(bytes.len()).map_err(|_| "P2P frame is too large")?;
@@ -33,9 +33,9 @@ pub(super) fn exchange_handshake(
         .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
         .and_then(|_| stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT)))
         .map_err(|error| format!("configure peer timeout: {error}"))?;
-    let ledger = load_or_initialize(database)?;
-    let local_headers = ledger.chain.chain_headers();
-    let local = local_handshake(database, &ledger, &local_headers)?;
+    let (ledger, _header_checkpoints, cumulative_work, cumulative_weight) =
+        load_or_initialize_header_snapshot(database)?;
+    let local = local_handshake(database, &ledger, cumulative_work, cumulative_weight)?;
     write_handshake(stream, &local)?;
     let peer = read_handshake(stream)?;
     validate_handshake(&peer)?;
@@ -44,23 +44,16 @@ pub(super) fn exchange_handshake(
     }
     Ok(HandshakeExchange {
         peer,
-        local_headers,
+        session_ledger: ledger,
     })
 }
 
 pub(super) fn local_handshake(
     database: &Path,
     ledger: &Ledger,
-    chain_headers: &[(Height, kernel::block::Header)],
+    cumulative_work: Work,
+    cumulative_weight: u64,
 ) -> Result<Handshake, String> {
-    let headers = chain_headers
-        .iter()
-        .cloned()
-        .map(|(height, header)| kernel::consensus::HeaderAtHeight::new(height, header))
-        .collect::<Vec<_>>();
-
-    let state = validated_header_state(&headers)?;
-
     Ok(Handshake {
         magic: P2P_MAGIC,
         protocol_version: P2P_PROTOCOL_VERSION,
@@ -73,8 +66,8 @@ pub(super) fn local_handshake(
             .tip_hash()
             .ok_or("local chain has no canonical tip")?
             .0,
-        cumulative_work: state.cumulative_work.to_be_limbs(),
-        cumulative_weight: state.cumulative_weight,
+        cumulative_work: cumulative_work.to_be_limbs(),
+        cumulative_weight,
     })
 }
 

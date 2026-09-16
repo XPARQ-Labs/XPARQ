@@ -1,17 +1,11 @@
 use super::*;
-use super::{chain_sync::*, mempool::*, p2p::*, protocol::*, state::*};
+use super::{mempool::*, p2p::*, protocol::*, state::*};
 
 pub(super) fn gossip_inventory(database: &Path) -> Result<GossipInventory, String> {
-    let ledger = load_or_initialize(database)?;
+    let (ledger, _header_checkpoints, cumulative_work, cumulative_weight) =
+        load_or_initialize_header_snapshot(database)?;
     let tip_height = ledger.tip_height().ok_or("canonical genesis is missing")?;
     let tip_hash = ledger.tip_hash().ok_or("canonical genesis is missing")?.0;
-    let headers = ledger
-        .chain
-        .chain_headers()
-        .into_iter()
-        .map(|(height, header)| kernel::consensus::HeaderAtHeight::new(height, header))
-        .collect::<Vec<_>>();
-    let state = validated_header_state(&headers)?;
     let transactions = read_mempool(database)?;
     let start = transactions
         .len()
@@ -23,8 +17,8 @@ pub(super) fn gossip_inventory(database: &Path) -> Result<GossipInventory, Strin
     Ok(GossipInventory {
         tip_height,
         tip_hash,
-        cumulative_work: state.cumulative_work.to_be_limbs(),
-        cumulative_weight: state.cumulative_weight,
+        cumulative_work: cumulative_work.to_be_limbs(),
+        cumulative_weight,
         hash,
     })
 }
@@ -123,18 +117,24 @@ pub(super) fn gossip_outbound_session(
         write_frame(stream, &[SYNC_COMPLETE_MESSAGE])?;
         return Ok(());
     }
+
     let mut generation = gossip_generation()?;
+
     loop {
         let local_before = gossip_inventory(database)?;
         let encoded = canonical_bytes(&local_before).map_err(|error| error.to_string())?;
+
         let mut message = Vec::with_capacity(1 + encoded.len());
         message.push(INVENTORY_MESSAGE);
         message.extend_from_slice(&encoded);
         write_frame(stream, &message)?;
+
         let response = read_frame(stream, 1 + MAX_GOSSIP_INVENTORY_SIZE)?;
+
         if response.first() != Some(&INVENTORY_MESSAGE) {
             return Err("peer returned an unexpected gossip inventory response".into());
         }
+
         let remote = decode_gossip_inventory(&response[1..])?;
 
         if remote.tip_hash != local_before.tip_hash {
@@ -144,19 +144,36 @@ pub(super) fn gossip_outbound_session(
                     generation = gossip_generation()?;
                     continue;
                 }
+
                 return Err(format!(
                     "{GOSSIP_RESYNC_PREFIX} peer announced a preferred chain"
                 ));
             }
+
             if inventory_preferred(&local_before, &remote) {
-                let headers = canonical_headers_through(database, local_before.tip_hash)?;
-                match serve_peer_requests(database, stream, &headers)? {
+                let ledger = load_or_initialize(database)?;
+                let tip_height = local_before.tip_height;
+
+                let advertised_tip_matches = ledger
+                    .chain
+                    .block(&tip_height)
+                    .and_then(|block| block.hash().ok())
+                    .is_some_and(|hash| hash.0 == local_before.tip_hash);
+
+                if !advertised_tip_matches {
+                    return Err(format!(
+                        "{GOSSIP_RESYNC_PREFIX} advertised local tip changed before reverse sync"
+                    ));
+                }
+
+                match serve_peer_requests_through(database, stream, &ledger, tip_height)? {
                     PeerSessionOutcome::Complete => return Ok(()),
                     PeerSessionOutcome::ReverseSync(_) => {
                         return Err("peer requested nested reverse synchronization".into());
                     }
                 }
             }
+
             return Err(format!(
                 "{GOSSIP_RESYNC_PREFIX} tips diverged; reconnecting for verified header sync"
             ));
@@ -165,23 +182,6 @@ pub(super) fn gossip_outbound_session(
         exchange_gossip_transactions(database, stream, &remote)?;
         generation = wait_for_gossip(generation)?;
     }
-}
-
-pub(super) fn canonical_headers_through(
-    database: &Path,
-    tip_hash: [u8; 32],
-) -> Result<Vec<(Height, kernel::block::Header)>, String> {
-    let mut headers = cached_chain_headers(database)?;
-    let Some(index) = headers
-        .iter()
-        .position(|(_, header)| header.hash().is_ok_and(|hash| hash.0 == tip_hash))
-    else {
-        return Err(format!(
-            "{GOSSIP_RESYNC_PREFIX} advertised local tip changed before reverse sync"
-        ));
-    };
-    headers.truncate(index + 1);
-    Ok(headers)
 }
 
 pub(super) fn request_and_accept_gossip_block(

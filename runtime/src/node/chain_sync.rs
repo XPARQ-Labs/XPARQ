@@ -6,56 +6,76 @@ pub(super) fn synchronize_headers(
     stream: &mut TcpStream,
     peer: &Handshake,
 ) -> Result<HeaderSyncResult, String> {
-    let local_headers = cached_chain_headers(database)?
-        .into_iter()
-        .map(|(height, header)| kernel::consensus::HeaderAtHeight::new(height, header))
-        .collect::<Vec<_>>();
-    let locator = header_locator(&local_headers)?;
+    let (ledger, header_checkpoints, local_cumulative_work, local_cumulative_weight) =
+        load_or_initialize_header_snapshot(database)?;
+
+    let local_locator = ledger_header_locator(&ledger)?;
+
     let mut validation_state = None;
     let mut ancestor_height = None;
     let mut ancestor_hash = None;
     let mut downloaded = Vec::new();
-    let mut request_locator = locator;
+
+    let mut request_locator = local_locator
+        .iter()
+        .map(|(hash, _)| *hash)
+        .collect::<Vec<_>>();
+
     let mut verified_headers = 0_usize;
     let mut pow_memory = None;
 
     loop {
         write_frame(stream, &encode_locator(&request_locator)?)?;
+
         let response = read_frame(stream, 33 + MAX_HEADER_CHAIN_CHUNK_SIZE)?;
+
         let (&message, body) = response.split_first().ok_or("empty header response")?;
+
         let ancestor: [u8; 32] = body
             .get(..32)
             .ok_or("header response has no ancestor")?
             .try_into()
             .map_err(|_| "invalid ancestor hash")?;
+
         if message == HEADERS_COMPLETE_MESSAGE {
             let state = match validation_state.take() {
                 Some(state) => state,
-                None => local_header_state_at_hash(&local_headers, ancestor)?
-                    .ok_or("common ancestor is not canonical locally")?,
+
+                None => {
+                    let height = local_locator
+                        .iter()
+                        .find_map(|(hash, height)| (*hash == ancestor).then_some(*height))
+                        .ok_or("common ancestor is not in the local locator")?;
+
+                    ledger_header_state_at_height(&ledger, header_checkpoints.as_slice(), height)?
+                }
             };
+
             if state.header.hash().map_err(|error| error.to_string())?.0 != ancestor {
                 return Err("peer completion does not match verified header tip".into());
             }
+
             if state.header.hash().map_err(|error| error.to_string())?.0 != peer.tip_hash
                 || state.cumulative_work.to_be_limbs() != peer.cumulative_work
                 || state.cumulative_weight != peer.cumulative_weight
             {
                 return Err("peer handshake tip/work does not match verified headers".into());
             }
-            let local = validated_header_state(&local_headers)?;
+
+            let local_hash = ledger.tip_hash().ok_or("local header chain has no tip")?.0;
             let peer_work = state.cumulative_work;
             let peer_weight = state.cumulative_weight;
-            let local_hash = local.header.hash().map_err(|error| error.to_string())?.0;
+
             let preferred = compare_chain_tips(
                 peer_work,
                 peer_weight,
                 BlockHash(peer.tip_hash),
-                local.cumulative_work,
-                local.cumulative_weight,
+                local_cumulative_work,
+                local_cumulative_weight,
                 BlockHash(local_hash),
             )
             .is_gt();
+
             return Ok(HeaderSyncResult {
                 ancestor_height: ancestor_height.unwrap_or(state.height),
                 ancestor_hash: BlockHash(ancestor_hash.unwrap_or(ancestor)),
@@ -65,45 +85,64 @@ pub(super) fn synchronize_headers(
                 preferred,
             });
         }
+
         if message != HEADERS_MESSAGE {
             return Err("unexpected P2P message during header sync".into());
         }
+
         let chunk = decode_header_chain_chunk(&body[32..]).map_err(|error| error.to_string())?;
+
         let current = match validation_state.take() {
             Some(current) => {
                 if current.header.hash().map_err(|error| error.to_string())?.0 != ancestor {
                     return Err("peer changed common ancestor during header sync".into());
                 }
+
                 current
             }
-            None => local_header_state_at_hash(&local_headers, ancestor)?
-                .ok_or("peer response ancestor is not canonical locally")?,
+
+            None => {
+                let height = local_locator
+                    .iter()
+                    .find_map(|(hash, height)| (*hash == ancestor).then_some(*height))
+                    .ok_or("peer response ancestor is not in the local locator")?;
+
+                ledger_header_state_at_height(&ledger, header_checkpoints.as_slice(), height)?
+            }
         };
+
         if ancestor_height.is_none() {
             ancestor_height = Some(current.height);
             ancestor_hash = Some(ancestor);
         }
+
         let advanced = kernel::consensus::advance_header_validation_state_with_memory(
             &current,
             &chunk.headers,
             pow_memory.get_or_insert_with(new_pow_memory),
         )
         .map_err(map_peer_header_error)?;
+
         verified_headers = verified_headers
             .checked_add(chunk.headers.len())
             .ok_or("verified header count overflow")?;
+
         if verified_headers > MAX_SYNC_HEADERS {
             return Err("header synchronization exceeds session limit".into());
         }
+
         if verified_headers.is_multiple_of(256) {
             println!(
                 "sync_progress: verified_headers={verified_headers} peer_height={}",
                 peer.tip_height.0
             );
         }
+
         let tip_hash = advanced.header.hash().map_err(|error| error.to_string())?.0;
+
         downloaded.extend(chunk.headers);
         validation_state = Some(advanced);
+
         request_locator = vec![tip_hash, EXPECTED_GENESIS_HASH.0];
     }
 }
@@ -170,7 +209,9 @@ pub(super) fn synchronize_blocks(
     let _mutation = state_mutation_lock()?
         .lock()
         .map_err(|_| "state mutation lock is poisoned")?;
-    let mut staged = load_or_initialize_owned(database)?;
+    let (cached_ledger, _header_checkpoints, current_cumulative_work, current_cumulative_weight) =
+        load_or_initialize_header_snapshot(database)?;
+    let mut staged = cached_ledger.as_ref().clone();
     let old_tip = staged.tip_hash();
     let new_tip = blocks
         .last()
@@ -178,20 +219,13 @@ pub(super) fn synchronize_blocks(
         .transpose()
         .map_err(|error| error.to_string())?
         .unwrap_or(sync.ancestor_hash);
-    let current_headers = staged
-        .chain
-        .chain_headers()
-        .into_iter()
-        .map(|(height, header)| kernel::consensus::HeaderAtHeight::new(height, header))
-        .collect::<Vec<_>>();
-    let current_state = validated_header_state(&current_headers)?;
     let current_tip = old_tip.ok_or("canonical chain has no tip during reorg")?;
     if !compare_chain_tips(
         sync.peer_work,
         sync.peer_weight,
         new_tip,
-        current_state.cumulative_work,
-        current_state.cumulative_weight,
+        current_cumulative_work,
+        current_cumulative_weight,
         current_tip,
     )
     .is_gt()
@@ -273,80 +307,162 @@ pub(super) fn synchronize_blocks(
     Ok(count)
 }
 
-pub(super) fn header_locator(
-    headers: &[kernel::consensus::HeaderAtHeight],
-) -> Result<Vec<[u8; 32]>, String> {
-    if headers.is_empty() {
-        return Err("local header chain is empty".into());
-    }
+pub(super) fn ledger_header_locator(ledger: &Ledger) -> Result<Vec<([u8; 32], Height)>, String> {
+    let tip = ledger.tip_height().ok_or("local header chain is empty")?;
+
     let mut locator = Vec::new();
-    let mut index = headers.len() - 1;
-    let mut step = 1_usize;
+    let mut height = tip.0;
+    let mut step = 1_u64;
+
     loop {
-        locator.push(headers[index].hash().map_err(|error| error.to_string())?.0);
-        if index == 0 || locator.len() == MAX_LOCATOR_HASHES - 1 {
+        let current = Height(height);
+
+        let block = ledger
+            .chain
+            .block(&current)
+            .ok_or("canonical header is missing")?;
+
+        let hash = block.header.hash().map_err(|error| error.to_string())?.0;
+
+        locator.push((hash, current));
+
+        if height == 0 || locator.len() == MAX_LOCATOR_HASHES - 1 {
             break;
         }
-        index = index.saturating_sub(step);
+
+        height = height.saturating_sub(step);
+
         if locator.len() >= 10 {
             step = step.saturating_mul(2);
         }
     }
-    if locator.last() != Some(&EXPECTED_GENESIS_HASH.0) {
-        locator.push(EXPECTED_GENESIS_HASH.0);
+
+    if locator
+        .last()
+        .is_none_or(|(hash, _)| *hash != EXPECTED_GENESIS_HASH.0)
+    {
+        locator.push((EXPECTED_GENESIS_HASH.0, Height(0)));
     }
+
     Ok(locator)
 }
 
-pub(super) fn local_header_state_at_hash(
-    headers: &[kernel::consensus::HeaderAtHeight],
-    hash: [u8; 32],
-) -> Result<Option<kernel::consensus::HeaderValidationState>, String> {
-    let Some(index) = headers
-        .iter()
-        .position(|header| header.hash().is_ok_and(|candidate| candidate.0 == hash))
-    else {
-        return Ok(None);
-    };
-    validated_header_state(&headers[..=index]).map(Some)
-}
-
-pub(super) fn validated_header_state(
-    headers: &[kernel::consensus::HeaderAtHeight],
+pub(super) fn ledger_header_state_at_height(
+    ledger: &Ledger,
+    checkpoints: &[HeaderStateCheckpoint],
+    target_height: Height,
 ) -> Result<kernel::consensus::HeaderValidationState, String> {
-    let tip = headers.last().ok_or("validated header chain is empty")?;
-    if headers[0].height != Height(0)
-        || headers[0].hash().map_err(|error| error.to_string())? != EXPECTED_GENESIS_HASH
-    {
-        return Err("validated header chain has the wrong genesis".into());
-    }
-    let cumulative_work = headers.iter().skip(1).try_fold(
-        kernel::consensus::Work::ZERO,
-        |work, header| -> Result<_, String> {
-            let block_work =
-                kernel::consensus::block_work(header.header.target_bits).ok_or_else(|| {
-                    format!(
-                        "invalid target bits {:08x} at height {}",
-                        header.header.target_bits, header.height.0,
-                    )
-                })?;
+    let target_block = ledger
+        .chain
+        .block(&target_height)
+        .ok_or("canonical ancestor height is missing")?;
 
-            Ok(work.saturating_add(block_work))
-        },
-    )?;
-    let cumulative_weight = headers.iter().skip(1).fold(0_u64, |total, header| {
-        total.saturating_add(u64::from(header.header.block_weight))
-    });
-    let start = headers
-        .len()
-        .saturating_sub(kernel::consensus::RECENT_HEADER_WINDOW);
+    let checkpoint = checkpoints
+        .iter()
+        .rfind(|checkpoint| checkpoint.height <= target_height)
+        .ok_or("no header state checkpoint covers target height")?;
+
+    let checkpoint_block = ledger
+        .chain
+        .block(&checkpoint.height)
+        .ok_or("checkpoint block is missing from canonical chain")?;
+
+    let checkpoint_hash = checkpoint_block
+        .hash()
+        .map_err(|error| error.to_string())?
+        .0;
+
+    if checkpoint_hash != checkpoint.hash {
+        return Err("header state checkpoint does not match canonical chain".into());
+    }
+
+    let mut cumulative_work = checkpoint.cumulative_work;
+    let mut cumulative_weight = checkpoint.cumulative_weight;
+
+    let mut next_height = checkpoint.height.0.checked_add(1);
+
+    while let Some(value) = next_height {
+        if value > target_height.0 {
+            break;
+        }
+
+        let height = Height(value);
+
+        let block = ledger
+            .chain
+            .block(&height)
+            .ok_or("canonical block is missing after checkpoint")?;
+
+        let block_work = kernel::consensus::block_work(block.target_bits()).ok_or_else(|| {
+            format!(
+                "invalid target bits {:08x} at height {}",
+                block.target_bits(),
+                height.0,
+            )
+        })?;
+
+        cumulative_work = cumulative_work.saturating_add(block_work);
+
+        cumulative_weight = cumulative_weight.saturating_add(u64::from(block.block_weight()));
+
+        next_height = value.checked_add(1);
+    }
+
+    let difficulty_anchor_height = if target_height.0 == 0 {
+        Height(0)
+    } else {
+        Height(1)
+    };
+
+    let difficulty_anchor_block = ledger
+        .chain
+        .block(&difficulty_anchor_height)
+        .ok_or("difficulty anchor is missing from canonical chain")?;
+
+    let difficulty_anchor = kernel::consensus::HeaderAtHeight::new(
+        difficulty_anchor_height,
+        difficulty_anchor_block.header.clone(),
+    );
+
+    let mut recent_headers = Vec::new();
+
+    if kernel::consensus::RECENT_HEADER_WINDOW > 0 {
+        let window = u64::try_from(kernel::consensus::RECENT_HEADER_WINDOW).unwrap_or(u64::MAX);
+
+        let start = target_height.0.saturating_add(1).saturating_sub(window);
+
+        let mut height = start;
+
+        loop {
+            let current = Height(height);
+
+            let block = ledger
+                .chain
+                .block(&current)
+                .ok_or("recent canonical header is missing")?;
+
+            recent_headers.push(kernel::consensus::HeaderAtHeight::new(
+                current,
+                block.header.clone(),
+            ));
+
+            if height == target_height.0 {
+                break;
+            }
+
+            height = height
+                .checked_add(1)
+                .ok_or("recent header height overflow")?;
+        }
+    }
+
     Ok(kernel::consensus::HeaderValidationState {
-        height: tip.height,
-        header: tip.header.clone(),
+        height: target_height,
+        header: target_block.header.clone(),
         cumulative_work,
         cumulative_weight,
-        difficulty_anchor: headers[usize::from(tip.height.0 > 0)].clone(),
-        recent_headers: headers[start..].to_vec(),
+        difficulty_anchor,
+        recent_headers,
     })
 }
 
