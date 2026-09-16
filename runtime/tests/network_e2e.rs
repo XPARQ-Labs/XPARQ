@@ -161,10 +161,10 @@ fn account(rpc: &str, address: &str) -> Result<Value, String> {
 fn wait_for_status(rpc: &str, predicate: impl Fn(&Value) -> bool) -> Value {
     let deadline = Instant::now() + WAIT;
     loop {
-        if let Ok(value) = status(rpc) {
-            if predicate(&value) {
-                return value;
-            }
+        if let Ok(value) = status(rpc)
+            && predicate(&value)
+        {
+            return value;
         }
         assert!(Instant::now() < deadline, "timed out waiting for {rpc}");
         thread::sleep(Duration::from_millis(100));
@@ -303,7 +303,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
 
     let sender = sender_wallet();
     let sender_address = address_to_string(&sender.address);
-    let recipient_keys = SigningSeed::new(Signature::MlDsa44, [43; 32]);
+    let recipient_keys = SigningSeed::new(Signature::MlDsa44, Box::new([43; 32]));
     let recipient = address_from_public_key(&recipient_keys.public_key());
     let recipient_address = address_to_string(&recipient);
     let sender_account = account(&a_rpc, &sender_address).unwrap();
@@ -349,7 +349,9 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
                 payment: None,
             },
         ));
-        let required = canonical_bytes(&transaction).unwrap().len() as u64;
+        let required = (canonical_bytes(&transaction).unwrap().len() as u64)
+            .checked_mul(8)
+            .unwrap();
         if required == archival_bytes {
             break transaction;
         }
