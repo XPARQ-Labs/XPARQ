@@ -33,10 +33,9 @@ pub(super) fn exchange_handshake(
         .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
         .and_then(|_| stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT)))
         .map_err(|error| format!("configure peer timeout: {error}"))?;
-    ensure_ledger_cache(database)?;
-    let ledger = cached_ledger(database)?.ok_or("ledger cache does not match database")?;
+    let ledger = load_or_initialize(database)?;
     let local_headers = ledger.chain.chain_headers();
-    let local = local_handshake(database, &ledger)?;
+    let local = local_handshake(database, &ledger, &local_headers)?;
     write_handshake(stream, &local)?;
     let peer = read_handshake(stream)?;
     validate_handshake(&peer)?;
@@ -49,14 +48,19 @@ pub(super) fn exchange_handshake(
     })
 }
 
-pub(super) fn local_handshake(database: &Path, ledger: &Ledger) -> Result<Handshake, String> {
-    let headers = ledger
-        .chain
-        .chain_headers()
-        .into_iter()
+pub(super) fn local_handshake(
+    database: &Path,
+    ledger: &Ledger,
+    chain_headers: &[(Height, kernel::block::Header)],
+) -> Result<Handshake, String> {
+    let headers = chain_headers
+        .iter()
+        .cloned()
         .map(|(height, header)| kernel::consensus::HeaderAtHeight::new(height, header))
         .collect::<Vec<_>>();
+
     let state = validated_header_state(&headers)?;
+
     Ok(Handshake {
         magic: P2P_MAGIC,
         protocol_version: P2P_PROTOCOL_VERSION,

@@ -102,44 +102,29 @@ pub(super) fn cached_ledger(path: &Path) -> Result<Option<Arc<Ledger>>, String> 
 pub(super) fn cached_chain_headers(
     path: &Path,
 ) -> Result<Vec<(Height, kernel::block::Header)>, String> {
-    ensure_ledger_cache(path)?;
-    let cache = ledger_cache()
-        .read()
-        .map_err(|_| "ledger cache read lock is poisoned")?;
-    let cached = cache
-        .as_ref()
-        .filter(|cached| cached.database == path)
-        .ok_or("ledger cache does not match database")?;
-    Ok(cached.ledger.chain.chain_headers())
+    let ledger = load_or_initialize(path)?;
+    Ok(ledger.chain.chain_headers())
 }
 
-pub(super) fn cached_canonical_block(path: &Path, hash: [u8; 32]) -> Result<Option<Block>, String> {
-    ensure_ledger_cache(path)?;
-    let cache = ledger_cache()
-        .read()
-        .map_err(|_| "ledger cache read lock is poisoned")?;
-    let cached = cache
-        .as_ref()
-        .filter(|cached| cached.database == path)
-        .ok_or("ledger cache does not match database")?;
-    Ok(cached
-        .ledger
+pub(super) fn cached_canonical_block_bytes(
+    path: &Path,
+    hash: [u8; 32],
+) -> Result<Option<Vec<u8>>, String> {
+    let ledger = load_or_initialize(path)?;
+
+    ledger
         .chain
         .blocks()
         .find(|block| block.hash().is_ok_and(|candidate| candidate.0 == hash))
-        .cloned())
+        .map(|block| block_bytes(block).map_err(|error| error.to_string()))
+        .transpose()
 }
 
 pub(super) fn cached_handshake(path: &Path) -> Result<Handshake, String> {
-    ensure_ledger_cache(path)?;
-    let cache = ledger_cache()
-        .read()
-        .map_err(|_| "ledger cache read lock is poisoned")?;
-    let cached = cache
-        .as_ref()
-        .filter(|cached| cached.database == path)
-        .ok_or("ledger cache does not match database")?;
-    local_handshake(path, &cached.ledger)
+    let ledger = load_or_initialize(path)?;
+    let headers = ledger.chain.chain_headers();
+
+    local_handshake(path, &ledger, &headers)
 }
 
 pub(super) fn load_or_create_node_id(database: &Path) -> Result<[u8; 32], String> {
@@ -153,18 +138,6 @@ pub(super) fn load_or_create_node_id(database: &Path) -> Result<[u8; 32], String
     crate::storage::auxiliary_get_or_insert(database, NODE_ID_FILE, &node_id)?
         .try_into()
         .map_err(|_| "stored node ID has invalid length".into())
-}
-
-pub(super) fn ensure_ledger_cache(path: &Path) -> Result<(), String> {
-    let present = ledger_cache()
-        .read()
-        .map_err(|_| "ledger cache read lock is poisoned")?
-        .as_ref()
-        .is_some_and(|cached| cached.database == path);
-    if !present {
-        let _ = load_or_initialize(path)?;
-    }
-    Ok(())
 }
 
 pub(super) fn update_ledger_cache(path: &Path, ledger: Ledger) -> Result<Arc<Ledger>, String> {

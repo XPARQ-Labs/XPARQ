@@ -411,9 +411,9 @@ pub(super) fn serve_block_requests(
         let requested: [u8; 32] = body
             .try_into()
             .map_err(|_| "invalid requested block hash")?;
-        let block = cached_canonical_block(database, requested)?
+        let encoded = cached_canonical_block_bytes(database, requested)?
             .ok_or("requested block is not canonical")?;
-        let encoded = block_bytes(&block).map_err(|error| error.to_string())?;
+
         let mut response = Vec::with_capacity(1 + encoded.len());
         response.push(BLOCK_MESSAGE);
         response.extend_from_slice(&encoded);
