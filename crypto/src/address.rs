@@ -3,12 +3,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::{HASH_SIZE, HashDomain, PublicKey, error::CryptoError, hash};
 
-pub const ADDRESS_SIZE: usize = 20;
-pub const ADDRESS_PREFIX: &str = "Qx";
+pub const ADDRESS_SIZE: usize = 21;
 pub const ADDRESS_CHECKSUM_SIZE: usize = 4;
 
-pub const ADDRESS_STRING_LEN: usize =
-    ADDRESS_PREFIX.len() + (ADDRESS_SIZE + ADDRESS_CHECKSUM_SIZE) * 2;
+const ADDRESS_PAYLOAD_SIZE: usize = ADDRESS_SIZE + ADDRESS_CHECKSUM_SIZE;
+
+/// 25 bytes = 200 bits.
+/// ceil(log_62(2^200)) = 34 characters.
+pub const ADDRESS_ENCODED_SIZE: usize = 34;
+
+pub const ADDRESS_STRING_LEN: usize = ADDRESS_ENCODED_SIZE;
+
+/// Canonical XPARQ address alphabet.
+///
+/// 0-9  = 0..9
+/// A-Z  = 10..35
+/// a-z  = 36..61
+const XPARQ_ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+const XPARQ_BASE: u16 = 62;
 
 #[derive(
     Debug,
@@ -56,6 +69,8 @@ fn address_from_key_material(key_material: &[u8]) -> Address {
 
     let mut address = [0_u8; ADDRESS_SIZE];
 
+    // Hash tetap HASH_SIZE / 32 byte.
+    // Address hanya mengambil 21 byte terakhir.
     address.copy_from_slice(&digest.as_bytes()[HASH_SIZE - ADDRESS_SIZE..]);
 
     Address(address)
@@ -64,15 +79,18 @@ fn address_from_key_material(key_material: &[u8]) -> Address {
 pub fn address_to_string(address: &Address) -> String {
     let checksum = address_checksum(address);
 
-    let lowercase = format!(
-        "{}{}",
-        hex::encode(address.as_bytes()),
-        hex::encode(checksum),
-    );
+    let mut payload = [0_u8; ADDRESS_PAYLOAD_SIZE];
 
-    let checksummed = apply_checksum_case(&lowercase);
+    payload[..ADDRESS_SIZE].copy_from_slice(address.as_bytes());
+    payload[ADDRESS_SIZE..].copy_from_slice(&checksum);
 
-    format!("{ADDRESS_PREFIX}{checksummed}")
+    let encoded = xparq_encode(&payload);
+
+    let mut output = String::with_capacity(ADDRESS_STRING_LEN);
+
+    output.push_str(&encoded);
+
+    output
 }
 
 pub fn address_from_string(value: &str) -> Result<Address, CryptoError> {
@@ -80,33 +98,20 @@ pub fn address_from_string(value: &str) -> Result<Address, CryptoError> {
         return Err(CryptoError::InvalidAddressEncoding);
     }
 
-    let encoded = value
-        .strip_prefix(ADDRESS_PREFIX)
-        .ok_or(CryptoError::InvalidAddressEncoding)?;
+    let payload = xparq_decode(value)?;
 
-    let bytes = hex::decode(encoded).map_err(|_| CryptoError::InvalidAddressEncoding)?;
+    let mut address_bytes = [0_u8; ADDRESS_SIZE];
+    address_bytes.copy_from_slice(&payload[..ADDRESS_SIZE]);
 
-    if bytes.len() != ADDRESS_SIZE + ADDRESS_CHECKSUM_SIZE {
-        return Err(CryptoError::InvalidAddressEncoding);
-    }
+    let address = Address::from_bytes(address_bytes);
 
-    let (address_bytes, checksum_bytes) = bytes.split_at(ADDRESS_SIZE);
-
-    let address = Address::from_bytes(
-        address_bytes
-            .try_into()
-            .map_err(|_| CryptoError::InvalidAddressEncoding)?,
-    );
-
-    let checksum: [u8; ADDRESS_CHECKSUM_SIZE] = checksum_bytes
-        .try_into()
-        .map_err(|_| CryptoError::InvalidAddressEncoding)?;
+    let mut checksum = [0_u8; ADDRESS_CHECKSUM_SIZE];
+    checksum.copy_from_slice(&payload[ADDRESS_SIZE..]);
 
     if checksum != address_checksum(&address) {
         return Err(CryptoError::InvalidAddressEncoding);
     }
 
-    // Mixed-case representation is part of the canonical address.
     if value != address_to_string(&address) {
         return Err(CryptoError::InvalidAddressEncoding);
     }
@@ -124,46 +129,87 @@ fn address_checksum(address: &Address) -> [u8; ADDRESS_CHECKSUM_SIZE] {
     checksum
 }
 
-/// Applies an EIP-55-like mixed-case checksum.
+/// XPARQ Base62 encoder.
 ///
-/// Input must be lowercase hexadecimal without the `Qx` prefix.
+/// Mengubah tepat 25 byte menjadi tepat 34 karakter.
 ///
-/// Each hexadecimal letter `a-f` is uppercased when the corresponding
-/// hash nibble is >= 8. Numeric characters remain unchanged.
-fn apply_checksum_case(lowercase_hex: &str) -> String {
-    debug_assert!(lowercase_hex.len() <= HASH_SIZE * 2);
-    debug_assert!(
-        lowercase_hex
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    );
+/// Implementasi fixed-width sengaja digunakan agar:
+///
+/// - leading zero tidak hilang,
+/// - tidak membutuhkan magic byte,
+/// - tidak membutuhkan BigUint,
+/// - tidak bergantung pada crate Base62,
+/// - setiap payload mempunyai satu representasi canonical.
+fn xparq_encode(payload: &[u8; ADDRESS_PAYLOAD_SIZE]) -> String {
+    let mut number = *payload;
 
-    let digest = hash::domain(HashDomain::AddressChecksum, lowercase_hex.as_bytes());
+    let mut encoded = [b'0'; ADDRESS_ENCODED_SIZE];
 
-    let hash_bytes = digest.as_bytes();
+    for position in (0..ADDRESS_ENCODED_SIZE).rev() {
+        let mut remainder = 0_u16;
 
-    let mut output = String::with_capacity(lowercase_hex.len());
+        for byte in &mut number {
+            let value = (remainder << 8) | (*byte as u16);
 
-    for (index, byte) in lowercase_hex.bytes().enumerate() {
-        if (b'a'..=b'f').contains(&byte) {
-            let hash_byte = hash_bytes[index / 2];
-
-            let nibble = if index % 2 == 0 {
-                hash_byte >> 4
-            } else {
-                hash_byte & 0x0f
-            };
-
-            if nibble >= 8 {
-                output.push((byte as char).to_ascii_uppercase());
-                continue;
-            }
+            *byte = (value / XPARQ_BASE) as u8;
+            remainder = value % XPARQ_BASE;
         }
 
-        output.push(byte as char);
+        encoded[position] = XPARQ_ALPHABET[remainder as usize];
     }
 
-    output
+    debug_assert!(number.iter().all(|byte| *byte == 0));
+
+    // Semua byte berasal dari ASCII alphabet di atas.
+    String::from_utf8(encoded.to_vec()).expect("XPARQ alphabet must be valid ASCII")
+}
+
+/// XPARQ Base62 decoder.
+///
+/// Mengubah tepat 34 karakter menjadi tepat 25 byte.
+///
+/// Decoder melakukan overflow checking sehingga string Base62
+/// yang nilainya lebih besar dari 200 bit ditolak.
+fn xparq_decode(encoded: &str) -> Result<[u8; ADDRESS_PAYLOAD_SIZE], CryptoError> {
+    if encoded.len() != ADDRESS_ENCODED_SIZE {
+        return Err(CryptoError::InvalidAddressEncoding);
+    }
+
+    let mut payload = [0_u8; ADDRESS_PAYLOAD_SIZE];
+
+    for character in encoded.bytes() {
+        let digit = xparq_digit(character).ok_or(CryptoError::InvalidAddressEncoding)?;
+
+        let mut carry = digit as u16;
+
+        // payload = payload * 62 + digit
+        for byte in payload.iter_mut().rev() {
+            let value = (*byte as u16) * XPARQ_BASE + carry;
+
+            *byte = value as u8;
+            carry = value >> 8;
+        }
+
+        // Nilai tidak muat dalam 25 byte / 200 bit.
+        if carry != 0 {
+            return Err(CryptoError::InvalidAddressEncoding);
+        }
+    }
+
+    Ok(payload)
+}
+
+#[inline]
+fn xparq_digit(character: u8) -> Option<u8> {
+    match character {
+        b'0'..=b'9' => Some(character - b'0'),
+
+        b'A'..=b'Z' => Some(10 + character - b'A'),
+
+        b'a'..=b'z' => Some(36 + character - b'a'),
+
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -171,50 +217,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_address_uses_mixed_case_checksum() {
+    fn address_roundtrip() {
         let address = Address([7; ADDRESS_SIZE]);
 
         let encoded = address_to_string(&address);
 
-        assert!(encoded.starts_with(ADDRESS_PREFIX));
-        assert_eq!(encoded.len(), ADDRESS_STRING_LEN);
+        assert_eq!(encoded.len(), ADDRESS_STRING_LEN,);
 
         assert_eq!(address_from_string(&encoded), Ok(address),);
     }
 
     #[test]
-    fn incorrect_case_is_rejected() {
-        let address = Address([7; ADDRESS_SIZE]);
+    fn zero_address_roundtrip() {
+        let address = Address::ZERO;
 
         let encoded = address_to_string(&address);
 
-        let mut corrupted = encoded.into_bytes();
+        assert_eq!(encoded.len(), ADDRESS_STRING_LEN,);
 
-        let position = corrupted
-            .iter()
-            .enumerate()
-            .skip(ADDRESS_PREFIX.len())
-            .find_map(|(index, byte)| {
-                if byte.is_ascii_alphabetic() {
-                    Some(index)
-                } else {
-                    None
-                }
-            })
-            .expect("address must contain hexadecimal letters");
+        assert_eq!(address_from_string(&encoded), Ok(address),);
+    }
 
-        corrupted[position] = if corrupted[position].is_ascii_uppercase() {
-            corrupted[position].to_ascii_lowercase()
-        } else {
-            corrupted[position].to_ascii_uppercase()
-        };
+    #[test]
+    fn base62_preserves_leading_zeroes() {
+        let mut payload = [0_u8; ADDRESS_PAYLOAD_SIZE];
 
-        let corrupted = std::str::from_utf8(&corrupted).unwrap();
+        payload[ADDRESS_PAYLOAD_SIZE - 1] = 1;
 
-        assert_eq!(
-            address_from_string(corrupted),
-            Err(CryptoError::InvalidAddressEncoding),
-        );
+        let encoded = xparq_encode(&payload);
+
+        assert_eq!(encoded.len(), ADDRESS_ENCODED_SIZE,);
+
+        assert_eq!(xparq_decode(&encoded).unwrap(), payload,);
+    }
+
+    #[test]
+    fn maximum_payload_roundtrip() {
+        let payload = [0xff_u8; ADDRESS_PAYLOAD_SIZE];
+
+        let encoded = xparq_encode(&payload);
+
+        assert_eq!(encoded.len(), ADDRESS_ENCODED_SIZE,);
+
+        assert_eq!(xparq_decode(&encoded).unwrap(), payload,);
     }
 
     #[test]
@@ -223,28 +268,14 @@ mod tests {
 
         let encoded = address_to_string(&address);
 
-        let mut bytes = hex::decode(&encoded[ADDRESS_PREFIX.len()..]).unwrap();
+        let mut payload = xparq_decode(&encoded).unwrap();
 
-        let last = bytes.last_mut().unwrap();
-        *last ^= 0x01;
+        payload[ADDRESS_SIZE] ^= 0x01;
 
-        let lowercase = hex::encode(bytes);
-        let corrupted = format!("{ADDRESS_PREFIX}{}", apply_checksum_case(&lowercase),);
+        let corrupted = xparq_encode(&payload);
 
         assert_eq!(
             address_from_string(&corrupted),
-            Err(CryptoError::InvalidAddressEncoding),
-        );
-    }
-
-    #[test]
-    fn address_without_checksum_is_rejected() {
-        let address = Address([7; ADDRESS_SIZE]);
-
-        let raw = format!("{ADDRESS_PREFIX}{}", hex::encode(address.as_bytes()),);
-
-        assert_eq!(
-            address_from_string(&raw),
             Err(CryptoError::InvalidAddressEncoding),
         );
     }
