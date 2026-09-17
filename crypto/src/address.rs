@@ -8,20 +8,13 @@ pub const ADDRESS_CHECKSUM_SIZE: usize = 4;
 
 const ADDRESS_PAYLOAD_SIZE: usize = ADDRESS_SIZE + ADDRESS_CHECKSUM_SIZE;
 
-/// 25 bytes = 200 bits.
-/// ceil(log_62(2^200)) = 34 characters.
 pub const ADDRESS_ENCODED_SIZE: usize = 34;
 
 pub const ADDRESS_STRING_LEN: usize = ADDRESS_ENCODED_SIZE;
 
-/// Canonical XPARQ address alphabet.
-///
-/// 0-9  = 0..9
-/// A-Z  = 10..35
-/// a-z  = 36..61
-const XPARQ_ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const CHARACTER: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-const XPARQ_BASE: u16 = 62;
+const TOTAL_CHARACTER: u16 = 62;
 
 #[derive(
     Debug,
@@ -69,8 +62,6 @@ fn address_from_key_material(key_material: &[u8]) -> Address {
 
     let mut address = [0_u8; ADDRESS_SIZE];
 
-    // Hash tetap HASH_SIZE / 32 byte.
-    // Address hanya mengambil 21 byte terakhir.
     address.copy_from_slice(&digest.as_bytes()[HASH_SIZE - ADDRESS_SIZE..]);
 
     Address(address)
@@ -129,17 +120,6 @@ fn address_checksum(address: &Address) -> [u8; ADDRESS_CHECKSUM_SIZE] {
     checksum
 }
 
-/// XPARQ Base62 encoder.
-///
-/// Mengubah tepat 25 byte menjadi tepat 34 karakter.
-///
-/// Implementasi fixed-width sengaja digunakan agar:
-///
-/// - leading zero tidak hilang,
-/// - tidak membutuhkan magic byte,
-/// - tidak membutuhkan BigUint,
-/// - tidak bergantung pada crate Base62,
-/// - setiap payload mempunyai satu representasi canonical.
 fn xparq_encode(payload: &[u8; ADDRESS_PAYLOAD_SIZE]) -> String {
     let mut number = *payload;
 
@@ -151,25 +131,17 @@ fn xparq_encode(payload: &[u8; ADDRESS_PAYLOAD_SIZE]) -> String {
         for byte in &mut number {
             let value = (remainder << 8) | (*byte as u16);
 
-            *byte = (value / XPARQ_BASE) as u8;
-            remainder = value % XPARQ_BASE;
+            *byte = (value / TOTAL_CHARACTER) as u8;
+            remainder = value % TOTAL_CHARACTER;
         }
 
-        encoded[position] = XPARQ_ALPHABET[remainder as usize];
+        encoded[position] = CHARACTER[remainder as usize];
     }
 
     debug_assert!(number.iter().all(|byte| *byte == 0));
-
-    // Semua byte berasal dari ASCII alphabet di atas.
     String::from_utf8(encoded.to_vec()).expect("XPARQ alphabet must be valid ASCII")
 }
 
-/// XPARQ Base62 decoder.
-///
-/// Mengubah tepat 34 karakter menjadi tepat 25 byte.
-///
-/// Decoder melakukan overflow checking sehingga string Base62
-/// yang nilainya lebih besar dari 200 bit ditolak.
 fn xparq_decode(encoded: &str) -> Result<[u8; ADDRESS_PAYLOAD_SIZE], CryptoError> {
     if encoded.len() != ADDRESS_ENCODED_SIZE {
         return Err(CryptoError::InvalidAddressEncoding);
@@ -184,13 +156,12 @@ fn xparq_decode(encoded: &str) -> Result<[u8; ADDRESS_PAYLOAD_SIZE], CryptoError
 
         // payload = payload * 62 + digit
         for byte in payload.iter_mut().rev() {
-            let value = (*byte as u16) * XPARQ_BASE + carry;
+            let value = (*byte as u16) * TOTAL_CHARACTER + carry;
 
             *byte = value as u8;
             carry = value >> 8;
         }
 
-        // Nilai tidak muat dalam 25 byte / 200 bit.
         if carry != 0 {
             return Err(CryptoError::InvalidAddressEncoding);
         }
