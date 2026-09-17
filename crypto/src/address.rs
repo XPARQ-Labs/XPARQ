@@ -3,12 +3,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{HASH_SIZE, HashDomain, PublicKey, error::CryptoError, hash};
 
-pub const ADDRESS_SIZE: usize = 21;
+pub const ADDRESS_SIZE: usize = 28;
 pub const ADDRESS_CHECKSUM_SIZE: usize = 4;
 
 const ADDRESS_PAYLOAD_SIZE: usize = ADDRESS_SIZE + ADDRESS_CHECKSUM_SIZE;
 
-pub const ADDRESS_ENCODED_SIZE: usize = 34;
+pub const ADDRESS_ENCODED_SIZE: usize = 43;
 
 pub const ADDRESS_STRING_LEN: usize = ADDRESS_ENCODED_SIZE;
 
