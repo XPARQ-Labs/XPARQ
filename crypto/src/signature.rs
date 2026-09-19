@@ -2,18 +2,12 @@ use std::io::{self, Read, Write};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crate::agility::{SignatureScheme, account_signature_scheme_active_at_height};
+use crate::agility::{SignatureScheme, account_signature_scheme_supported};
 use ml_dsa::{
     Keypair, MlDsa44, MlDsa65, MlDsa87, SignatureEncoding, Signer, SigningKey, Verifier,
     VerifyingKey,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
-
-pub const SIGNATURE_ACTIVATION_HEIGHT: u64 = 0;
-
-pub const ML_DSA_44_ACTIVATION_HEIGHT: u64 = SIGNATURE_ACTIVATION_HEIGHT;
-pub const ML_DSA_65_ACTIVATION_HEIGHT: u64 = SIGNATURE_ACTIVATION_HEIGHT;
-pub const ML_DSA_87_ACTIVATION_HEIGHT: u64 = SIGNATURE_ACTIVATION_HEIGHT;
 
 pub const ML_DSA_44_PUBLIC_KEY_SIZE: usize = 1312;
 pub const ML_DSA_65_PUBLIC_KEY_SIZE: usize = 1952;
@@ -79,16 +73,8 @@ impl AccountSignatureScheme {
         }
     }
 
-    pub const fn activation_height(self) -> u64 {
-        match self {
-            Self::MlDsa44 => ML_DSA_44_ACTIVATION_HEIGHT,
-            Self::MlDsa65 => ML_DSA_65_ACTIVATION_HEIGHT,
-            Self::MlDsa87 => ML_DSA_87_ACTIVATION_HEIGHT,
-        }
-    }
-
-    pub const fn active_at_height(self, height: u64) -> bool {
-        account_signature_scheme_active_at_height(self.registry_scheme(), height)
+    pub const fn supported(self) -> bool {
+        account_signature_scheme_supported(self.registry_scheme())
     }
 
     pub const fn public_key_size(self) -> usize {
@@ -408,13 +394,13 @@ mod tests {
     }
 
     #[test]
-    fn every_account_authorization_is_active_from_genesis() {
+    fn every_account_authorization_scheme_is_supported() {
         for account in [
             AccountSignatureScheme::MlDsa44,
             AccountSignatureScheme::MlDsa65,
             AccountSignatureScheme::MlDsa87,
         ] {
-            assert!(account.active_at_height(0));
+            assert!(account.supported());
         }
     }
 
@@ -658,14 +644,12 @@ mod hardening_tests {
     }
 
     #[test]
-    fn account_activation_matches_canonical_agility_registry() {
+    fn account_support_matches_canonical_agility_registry() {
         for scheme in schemes() {
-            for height in [0_u64, 1, 100, u64::MAX] {
-                assert_eq!(
-                    scheme.active_at_height(height),
-                    account_signature_scheme_active_at_height(scheme.registry_scheme(), height)
-                );
-            }
+            assert_eq!(
+                scheme.supported(),
+                account_signature_scheme_supported(scheme.registry_scheme())
+            );
         }
     }
 }

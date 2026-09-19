@@ -134,10 +134,7 @@ pub enum SignatureContext {
     RecoveryProof = 3,
 }
 
-pub const fn account_signature_scheme_active_at_height(
-    scheme: SignatureScheme,
-    _height: u64,
-) -> bool {
+pub const fn account_signature_scheme_supported(scheme: SignatureScheme) -> bool {
     matches!(
         scheme,
         SignatureScheme::MlDsa44 | SignatureScheme::MlDsa65 | SignatureScheme::MlDsa87
@@ -251,13 +248,13 @@ mod tests {
     }
 
     #[test]
-    fn only_ml_dsa_accounts_are_active() {
+    fn only_ml_dsa_accounts_are_supported() {
         for scheme in [
             SignatureScheme::MlDsa44,
             SignatureScheme::MlDsa65,
             SignatureScheme::MlDsa87,
         ] {
-            assert!(account_signature_scheme_active_at_height(scheme, 0));
+            assert!(account_signature_scheme_supported(scheme));
         }
     }
 }
