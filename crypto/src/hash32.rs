@@ -3,47 +3,18 @@ use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha3::{Digest, Sha3_256};
 use static_assertions::const_assert_eq;
-use std::{error::Error, fmt, str::FromStr};
+use std::{error::Error, fmt};
 
 pub const HASH_SIZE: usize = 32;
-pub const HASH16_SIZE: usize = 16;
 pub const POW_HASH_SIZE: usize = HASH_SIZE;
 const_assert_eq!(HASH_SIZE, 32);
-const_assert_eq!(HASH16_SIZE, 16);
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
-)]
-pub struct Hash16([u8; HASH16_SIZE]);
-
-impl Hash16 {
-    pub const ZERO: Self = Self([0; HASH16_SIZE]);
-
-    pub const fn from_bytes(bytes: [u8; HASH16_SIZE]) -> Self {
-        Self(bytes)
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; HASH16_SIZE] {
-        &self.0
-    }
-
-    pub const fn into_bytes(self) -> [u8; HASH16_SIZE] {
-        self.0
-    }
-
-    pub fn from_hash(hash: Hash) -> Self {
-        let mut bytes = [0_u8; HASH16_SIZE];
-        bytes.copy_from_slice(&hash.as_bytes()[..HASH16_SIZE]);
-        Self(bytes)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HashParseError;
 
 impl fmt::Display for HashParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("hash has invalid hexadecimal length or encoding")
+        formatter.write_str("hash must be exactly 32 bytes encoded as hexadecimal")
     }
 }
 
@@ -124,23 +95,6 @@ impl<'de> Deserialize<'de> for Hash {
     }
 }
 
-impl fmt::Display for Hash16 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.as_bytes() {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
-
-impl FromStr for Hash16 {
-    type Err = HashParseError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        parse16("", value)
-    }
-}
-
 pub fn format(prefix: &str, hash: &Hash, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     formatter.write_str(prefix)?;
 
@@ -163,42 +117,15 @@ pub fn parse(prefix: &str, value: &str) -> Result<Hash, HashParseError> {
 
     for (index, byte) in bytes.iter_mut().enumerate() {
         let offset = index * 2;
+
         let high = hex_nibble(encoded[offset]).ok_or(HashParseError)?;
+
         let low = hex_nibble(encoded[offset + 1]).ok_or(HashParseError)?;
+
         *byte = (high << 4) | low;
     }
 
     Ok(Hash::from_bytes(bytes))
-}
-
-pub fn format16(prefix: &str, hash: &Hash16, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-    formatter.write_str(prefix)?;
-
-    for byte in hash.as_bytes() {
-        write!(formatter, "{byte:02x}")?;
-    }
-
-    Ok(())
-}
-
-pub fn parse16(prefix: &str, value: &str) -> Result<Hash16, HashParseError> {
-    let encoded = value.strip_prefix(prefix).ok_or(HashParseError)?;
-
-    if encoded.len() != HASH16_SIZE * 2 {
-        return Err(HashParseError);
-    }
-
-    let encoded = encoded.as_bytes();
-    let mut bytes = [0_u8; HASH16_SIZE];
-
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        let offset = index * 2;
-        let high = hex_nibble(encoded[offset]).ok_or(HashParseError)?;
-        let low = hex_nibble(encoded[offset + 1]).ok_or(HashParseError)?;
-        *byte = (high << 4) | low;
-    }
-
-    Ok(Hash16::from_bytes(bytes))
 }
 
 const fn hex_nibble(byte: u8) -> Option<u8> {
@@ -377,13 +304,4 @@ pub fn domain(domain: HashDomain, bytes: &[u8]) -> Hash {
 
 pub fn domain_hash(domain: HashDomain, bytes: &[u8]) -> Hash {
     self::domain(domain, bytes)
-}
-
-/// SHA3-256 with the same XPARQ domain separation, truncated to 128 bits.
-/// Only use this for compact native object identifiers.
-pub fn domain16(domain: HashDomain, bytes: &[u8]) -> Hash16 {
-    let full = self::domain(domain, bytes);
-    let mut short = [0_u8; HASH16_SIZE];
-    short.copy_from_slice(&full.as_bytes()[..HASH16_SIZE]);
-    Hash16::from_bytes(short)
 }

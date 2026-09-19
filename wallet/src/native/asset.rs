@@ -189,11 +189,13 @@ pub(super) fn consolidate_asset_shares(args: &[String]) -> Result<(), String> {
         if change > 0 {
             fee_outputs.push(CoinOutput::new(wallet.address(), Zeno::from_zeno(change)));
         }
-        fee_outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
-        let payment = wallet.sign_onchain_spend(
-            SpendIntent::coin(wallet.address(), coin_inputs, fee_outputs)
-                .map_err(|error| error.to_string())?,
-        )?;
+        let payment_intent = SpendIntent::coin(wallet.address(), coin_inputs, fee_outputs)
+            .map_err(|error| error.to_string())?;
+
+        let payment = wallet
+            .0
+            .sign_asset_spend_payment(&spend.intent, payment_intent)?;
+
         Ok(AuthorizedTransaction::Spend(Box::new(
             AuthorizedSpendTransaction {
                 spend: spend.clone(),
@@ -253,10 +255,12 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
             fee_outputs.push(CoinOutput::new(wallet.address(), Zeno::from_zeno(change)));
         }
         fee_outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
-        let payment = wallet.sign_onchain_spend(
-            SpendIntent::coin(wallet.address(), coin_inputs, fee_outputs)
-                .map_err(|e| e.to_string())?,
-        )?;
+        let payment_intent = SpendIntent::coin(wallet.address(), coin_inputs, fee_outputs)
+            .map_err(|error| error.to_string())?;
+
+        let payment = wallet
+            .0
+            .sign_asset_spend_payment(&spend.intent, payment_intent)?;
         Ok(AuthorizedTransaction::Spend(Box::new(
             AuthorizedSpendTransaction {
                 spend: spend.clone(),
@@ -358,7 +362,7 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
         outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
         let fee_intent = SpendIntent::coin(wallet.address(), inputs, outputs)
             .map_err(|error| error.to_string())?;
-        let fee = wallet.sign_onchain_spend(fee_intent)?;
+        let fee = wallet.0.sign_asset_call_payment(&call.intent, fee_intent)?;
         Ok(AuthorizedTransaction::Asset(Box::new(
             AuthorizedAssetTransaction {
                 call: call.clone(),

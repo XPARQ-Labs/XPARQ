@@ -1,5 +1,5 @@
 use borsh::{BorshDeserialize, BorshSerialize};
-use crypto::{Address, HASH_SIZE, HASH16_SIZE, Hash16, HashDomain, HashParseError, domain};
+use crypto::{Address, HASH_SIZE, Hash, HashDomain, HashParseError, domain, format, parse};
 use std::{fmt, str::FromStr};
 
 use crate::common::Recipient;
@@ -55,14 +55,14 @@ impl Zeno {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
 )]
-pub struct XPARQCoin(Hash16);
+pub struct XPARQCoin(Hash);
 
 impl XPARQCoin {
-    pub const SIZE: usize = HASH16_SIZE;
+    pub const SIZE: usize = HASH_SIZE;
     pub const ZENO_PER_COIN: u64 = 10u64.pow(DECIMALS as u32);
 
     pub fn from_emission_origin(origin: &[u8; HASH_SIZE]) -> Self {
-        Self(Hash16::from_hash(domain(HashDomain::Emission, origin)))
+        Self(domain(HashDomain::Emission, origin))
     }
 
     pub fn from_output(commitment: &[u8; HASH_SIZE], index: u32) -> Self {
@@ -71,41 +71,41 @@ impl XPARQCoin {
         bytes[..HASH_SIZE].copy_from_slice(commitment);
         bytes[HASH_SIZE..].copy_from_slice(&index.to_le_bytes());
 
-        Self(Hash16::from_hash(domain(HashDomain::Output, &bytes)))
+        Self(domain(HashDomain::Output, &bytes))
     }
 
-    pub const fn from_hash(hash: Hash16) -> Self {
+    pub const fn from_hash(hash: Hash) -> Self {
         Self(hash)
     }
 
-    pub const fn from_bytes(bytes: [u8; HASH16_SIZE]) -> Self {
-        Self(Hash16::from_bytes(bytes))
+    pub const fn from_bytes(bytes: [u8; HASH_SIZE]) -> Self {
+        Self(Hash::from_bytes(bytes))
     }
 
-    pub const fn as_hash(&self) -> &Hash16 {
+    pub const fn as_hash(&self) -> &Hash {
         &self.0
     }
 
-    pub const fn into_hash(self) -> Hash16 {
+    pub const fn into_hash(self) -> Hash {
         self.0
     }
 
-    pub const fn as_bytes(&self) -> &[u8; HASH16_SIZE] {
+    pub const fn as_bytes(&self) -> &[u8; HASH_SIZE] {
         self.0.as_bytes()
     }
 
-    pub const fn into_bytes(self) -> [u8; HASH16_SIZE] {
+    pub const fn into_bytes(self) -> [u8; HASH_SIZE] {
         self.0.into_bytes()
     }
 }
 
-impl From<Hash16> for XPARQCoin {
-    fn from(hash: Hash16) -> Self {
+impl From<Hash> for XPARQCoin {
+    fn from(hash: Hash) -> Self {
         Self(hash)
     }
 }
 
-impl From<XPARQCoin> for Hash16 {
+impl From<XPARQCoin> for Hash {
     fn from(coin: XPARQCoin) -> Self {
         coin.0
     }
@@ -113,7 +113,7 @@ impl From<XPARQCoin> for Hash16 {
 
 impl fmt::Display for XPARQCoin {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
+        format("", &self.0, formatter)
     }
 }
 
@@ -121,7 +121,7 @@ impl FromStr for XPARQCoin {
     type Err = HashParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse::<Hash16>().map(Self)
+        parse("", value).map(Self)
     }
 }
 
@@ -131,8 +131,8 @@ mod tests {
 
     #[test]
     fn coin_id_text_is_unprefixed_hex() {
-        let coin = XPARQCoin::from_bytes([0xab; HASH16_SIZE]);
-        let encoded = "ab".repeat(HASH16_SIZE);
+        let coin = XPARQCoin::from_bytes([0xab; HASH_SIZE]);
+        let encoded = "ab".repeat(HASH_SIZE);
 
         assert_eq!(coin.to_string(), encoded);
         assert_eq!(encoded.parse::<XPARQCoin>(), Ok(coin));

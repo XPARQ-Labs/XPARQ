@@ -246,15 +246,30 @@ pub(super) fn submit_or_print_transaction(
     args: &[String],
     transaction: &AuthorizedTransaction,
 ) -> Result<(), String> {
+    let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
+
+    let authorization_valid = transaction
+        .verify_authorizations(chain, 0)
+        .map_err(|error| format!("local authorization verification failed: {error}"))?;
+
+    println!("Local Authorization Valid: {authorization_valid}");
+
+    if !authorization_valid {
+        return Err("wallet produced an invalid transaction authorization".into());
+    }
+
     let transaction_bytes = canonical_bytes(transaction).map_err(|error| error.to_string())?;
+
     if has_flag(args, "--offline") {
         println!("Transaction Hex: {}", hex::encode(&transaction_bytes));
         println!("Bytes: {}", transaction_bytes.len());
         return Ok(());
     }
+
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let response: SubmitTransactionResponse =
         http_post_bytes(rpc, "/transaction", &transaction_bytes)?;
+
     println!("Tx Hash: {}", response.hash);
     println!("Bytes: {}", transaction_bytes.len());
     Ok(())

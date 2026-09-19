@@ -4,8 +4,12 @@ use kernel::{
         Address, PublicKey, Signature, SigningSeed, address_from_public_key, address_from_string,
         address_to_string, hash_bytes,
     },
-    transaction::{AccountAuthorization, AccountIntent, AuthorizedAccountIntent},
+    transaction::{
+        AccountAuthorization, AccountIntent, AssetIntent, AuthorizedAccountIntent, SpendIntent,
+        asset_call_payment_commitment, asset_spend_payment_commitment,
+    },
 };
+
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -208,6 +212,48 @@ impl AccountWallet {
         action: kernel::transaction::AssetInstruction,
     ) -> Result<AuthorizedAccountIntent<kernel::transaction::AssetIntent>, String> {
         self.sign_account_intent(kernel::transaction::AssetIntent::new(action, self.address))
+    }
+
+    pub fn sign_asset_call_payment(
+        &self,
+        parent: &AssetIntent,
+        payment: SpendIntent,
+    ) -> Result<AuthorizedAccountIntent<SpendIntent>, String> {
+        let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
+
+        let commitment = asset_call_payment_commitment(parent, &payment, chain)
+            .map_err(|error| error.to_string())?;
+
+        let signature = self.signing_seed.sign(commitment.as_bytes());
+
+        Ok(AuthorizedAccountIntent {
+            intent: payment,
+            authorization: AccountAuthorization {
+                public_key: self.public_key.clone(),
+                signature,
+            },
+        })
+    }
+
+    pub fn sign_asset_spend_payment(
+        &self,
+        parent: &SpendIntent,
+        payment: SpendIntent,
+    ) -> Result<AuthorizedAccountIntent<SpendIntent>, String> {
+        let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
+
+        let commitment = asset_spend_payment_commitment(parent, &payment, chain)
+            .map_err(|error| error.to_string())?;
+
+        let signature = self.signing_seed.sign(commitment.as_bytes());
+
+        Ok(AuthorizedAccountIntent {
+            intent: payment,
+            authorization: AccountAuthorization {
+                public_key: self.public_key.clone(),
+                signature,
+            },
+        })
     }
 }
 
