@@ -18,9 +18,7 @@ use crate::{
 
 use borsh::BorshSerialize;
 
-use crypto::{
-    ADDRESS_SIZE, BlockHash, HASH_SIZE, Hash, HashDomain, SIGNATURE_ACTIVATION_HEIGHT, domain_hash,
-};
+use crypto::{ADDRESS_SIZE, BlockHash, HASH_SIZE, Hash, HashDomain, domain_hash};
 
 // -----------------------------------------------------------------------------
 // Mainnet
@@ -109,9 +107,6 @@ struct ChainSpecIdentity<'a> {
     address_encoding: &'a str,
     hash_size: u32,
 
-    // Signature activation
-    signature_profile_activation_height: u64,
-
     // Native protocol identity
     native_asset_program: &'a str,
     transaction_format: &'a str,
@@ -158,9 +153,6 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         address_size: ADDRESS_SIZE as u32,
         address_encoding: "xparq-0x-sha3-checksum",
         hash_size: HASH_SIZE as u32,
-
-        // Signature activation
-        signature_profile_activation_height: SIGNATURE_ACTIVATION_HEIGHT,
 
         // Native protocol identity
         native_asset_program: "xparq-native-asset-record-nonce-v1",

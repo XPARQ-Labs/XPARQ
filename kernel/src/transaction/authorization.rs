@@ -180,8 +180,8 @@ impl AccountAuthorization {
         self.has_matching_scheme()
     }
 
-    pub fn active_at_height(&self, height: u64) -> bool {
-        self.has_matching_scheme() && self.public_key.scheme().active_at_height(height)
+    pub fn active_at_height(&self, _height: u64) -> bool {
+        self.has_matching_scheme() && self.public_key.scheme().supported()
     }
 
     /// Verify one already-constructed authorization commitment.
