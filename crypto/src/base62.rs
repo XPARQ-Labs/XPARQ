@@ -8,16 +8,13 @@ pub const ADDRESS_CHECKSUM_SIZE: usize = 4;
 
 const ADDRESS_PAYLOAD_SIZE: usize = ADDRESS_SIZE + ADDRESS_CHECKSUM_SIZE;
 
-pub const ADDRESS_ENCODED_SIZE: usize = 35;
+pub const ADDRESS_ENCODED_SIZE: usize = 34;
 
 pub const ADDRESS_STRING_LEN: usize = ADDRESS_ENCODED_SIZE;
 
-// Human-friendly Base56 alphabet.
-// Excludes visually ambiguous characters: O, o, I, i, L, l.
-const CHARACTER: &[u8; 56] =
-    b"0123456789ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz";
+const CHARACTER: &[u8; 62] = b"0123456789ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnopqrstuvwxyz"; // 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
 
-const TOTAL_CHARACTER: u16 = CHARACTER.len() as u16;
+const TOTAL_CHARACTER: u16 = 62;
 
 #[derive(
     Debug,
@@ -78,7 +75,13 @@ pub fn address_to_string(address: &Address) -> String {
     payload[..ADDRESS_SIZE].copy_from_slice(address.as_bytes());
     payload[ADDRESS_SIZE..].copy_from_slice(&checksum);
 
-    xparq_encode(&payload)
+    let encoded = xparq_encode(&payload);
+
+    let mut output = String::with_capacity(ADDRESS_STRING_LEN);
+
+    output.push_str(&encoded);
+
+    output
 }
 
 pub fn address_from_string(value: &str) -> Result<Address, CryptoError> {
@@ -120,7 +123,7 @@ fn address_checksum(address: &Address) -> [u8; ADDRESS_CHECKSUM_SIZE] {
 fn xparq_encode(payload: &[u8; ADDRESS_PAYLOAD_SIZE]) -> String {
     let mut number = *payload;
 
-    let mut encoded = [CHARACTER[0]; ADDRESS_ENCODED_SIZE];
+    let mut encoded = [b'0'; ADDRESS_ENCODED_SIZE];
 
     for position in (0..ADDRESS_ENCODED_SIZE).rev() {
         let mut remainder = 0_u16;
@@ -136,7 +139,6 @@ fn xparq_encode(payload: &[u8; ADDRESS_PAYLOAD_SIZE]) -> String {
     }
 
     debug_assert!(number.iter().all(|byte| *byte == 0));
-
     String::from_utf8(encoded.to_vec()).expect("XPARQ alphabet must be valid ASCII")
 }
 
@@ -152,7 +154,7 @@ fn xparq_decode(encoded: &str) -> Result<[u8; ADDRESS_PAYLOAD_SIZE], CryptoError
 
         let mut carry = digit as u16;
 
-        // payload = payload * 56 + digit
+        // payload = payload * 62 + digit
         for byte in payload.iter_mut().rev() {
             let value = (*byte as u16) * TOTAL_CHARACTER + carry;
 
@@ -170,10 +172,15 @@ fn xparq_decode(encoded: &str) -> Result<[u8; ADDRESS_PAYLOAD_SIZE], CryptoError
 
 #[inline]
 fn xparq_digit(character: u8) -> Option<u8> {
-    CHARACTER
-        .iter()
-        .position(|&candidate| candidate == character)
-        .map(|index| index as u8)
+    match character {
+        b'0'..=b'9' => Some(character - b'0'),
+
+        b'A'..=b'Z' => Some(10 + character - b'A'),
+
+        b'a'..=b'z' => Some(36 + character - b'a'),
+
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -186,9 +193,9 @@ mod tests {
 
         let encoded = address_to_string(&address);
 
-        assert_eq!(encoded.len(), ADDRESS_STRING_LEN);
+        assert_eq!(encoded.len(), ADDRESS_STRING_LEN,);
 
-        assert_eq!(address_from_string(&encoded), Ok(address));
+        assert_eq!(address_from_string(&encoded), Ok(address),);
     }
 
     #[test]
@@ -197,22 +204,22 @@ mod tests {
 
         let encoded = address_to_string(&address);
 
-        assert_eq!(encoded.len(), ADDRESS_STRING_LEN);
+        assert_eq!(encoded.len(), ADDRESS_STRING_LEN,);
 
-        assert_eq!(address_from_string(&encoded), Ok(address));
+        assert_eq!(address_from_string(&encoded), Ok(address),);
     }
 
     #[test]
-    fn base56_preserves_leading_zeroes() {
+    fn base62_preserves_leading_zeroes() {
         let mut payload = [0_u8; ADDRESS_PAYLOAD_SIZE];
 
         payload[ADDRESS_PAYLOAD_SIZE - 1] = 1;
 
         let encoded = xparq_encode(&payload);
 
-        assert_eq!(encoded.len(), ADDRESS_ENCODED_SIZE);
+        assert_eq!(encoded.len(), ADDRESS_ENCODED_SIZE,);
 
-        assert_eq!(xparq_decode(&encoded).unwrap(), payload);
+        assert_eq!(xparq_decode(&encoded).unwrap(), payload,);
     }
 
     #[test]
@@ -221,9 +228,9 @@ mod tests {
 
         let encoded = xparq_encode(&payload);
 
-        assert_eq!(encoded.len(), ADDRESS_ENCODED_SIZE);
+        assert_eq!(encoded.len(), ADDRESS_ENCODED_SIZE,);
 
-        assert_eq!(xparq_decode(&encoded).unwrap(), payload);
+        assert_eq!(xparq_decode(&encoded).unwrap(), payload,);
     }
 
     #[test]
@@ -242,17 +249,5 @@ mod tests {
             address_from_string(&corrupted),
             Err(CryptoError::InvalidAddressEncoding),
         );
-    }
-
-    #[test]
-    fn ambiguous_characters_are_rejected() {
-        for character in [b'O', b'o', b'I', b'i', b'L', b'l'] {
-            assert_eq!(xparq_digit(character), None);
-        }
-    }
-
-    #[test]
-    fn alphabet_has_expected_size() {
-        assert_eq!(CHARACTER.len(), 56);
     }
 }

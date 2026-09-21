@@ -24,7 +24,7 @@ use wallet::{
 use zeroize::{Zeroize, Zeroizing};
 
 const DEFAULT_WALLET_PATH: &str = "wallet.json";
-const AUTOMATIC_FEE_ZENO_PER_BYTE: u64 = 8;
+const AUTOMATIC_FEE_ZENO_PER_BYTE: u64 = 1;
 const MAX_FEE_CONVERGENCE_ROUNDS: usize = 8;
 const DEFAULT_HISTORY_LIMIT: usize = 50;
 const MAX_HISTORY_LIMIT: usize = 250;
