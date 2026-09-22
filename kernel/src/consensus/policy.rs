@@ -139,9 +139,9 @@ pub fn expected_difficulty_for_height<E>(
     ))
 }
 
-pub const BLOCK_EMISSION_START: u64 = 1_562_500; // 1.562500 XPQ
-pub const MAX_BLOCK_EMISSION: u64 = 50_000_000; // 50 XPQ
-pub const TAIL_BLOCK_EMISSION: u64 = 781_250; // 0.781250 XPQ
+pub const BLOCK_EMISSION_START: u64 = 1_562_500_000; // 1.562500 XPQ
+pub const MAX_BLOCK_EMISSION: u64 = 50_000_000_000; // 50 XPQ
+pub const TAIL_BLOCK_EMISSION: u64 = 781_250_000; // 0.781250 XPQ
 pub const EMISSION_RISING_STEPS: u64 = 5;
 pub const EMISSION_HALVINGS_TO_TAIL: u64 = 6;
 

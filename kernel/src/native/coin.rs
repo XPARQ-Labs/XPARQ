@@ -4,7 +4,7 @@ use std::{fmt, str::FromStr};
 
 use crate::common::Recipient;
 
-pub const DECIMALS: u8 = 6;
+pub const DECIMALS: u8 = 9;
 
 #[derive(
     Debug,
