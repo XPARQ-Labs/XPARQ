@@ -1,5 +1,6 @@
 use super::cli::format_asset_amount;
 use super::*;
+use kernel::native::asset::ASSET_DECIMALS;
 
 pub(super) fn print_balance(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
@@ -19,20 +20,20 @@ pub(super) fn print_balance(args: &[String]) -> Result<(), String> {
     println!("Supply: {}", format_amount(burn.supply));
     println!("Assets: {}", balance.assets.len());
     for (index, asset) in balance.assets.iter().enumerate() {
-        let max_supply = format_asset_amount(&asset.max_supply, asset.decimals)?;
-        let mint = format_asset_amount(&asset.mint, asset.decimals)?;
+        let max_supply = format_asset_amount(&asset.max_supply, ASSET_DECIMALS)?;
+        let mint = format_asset_amount(&asset.mint, ASSET_DECIMALS)?;
 
         println!();
         println!("Asset {}:", index + 1);
         println!("  Contract: {}", asset.asset);
         println!("  Name: {}", asset.name);
-        println!("  Decimals: {}", asset.decimals);
+        println!("  Decimals: {}", ASSET_DECIMALS);
         println!("  Max Supply: {max_supply}");
         println!("  Mint: {mint}");
         println!("  Shares: {}", asset.shares.len());
 
         for (share_index, share) in asset.shares.iter().enumerate() {
-            let amount = format_asset_amount(&share.amount, asset.decimals)?;
+            let amount = format_asset_amount(&share.amount, ASSET_DECIMALS)?;
             let owner = share
                 .owner
                 .get("address")

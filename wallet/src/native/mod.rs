@@ -81,7 +81,6 @@ struct NodeBurnResponse {
 struct AccountAssetBalance {
     asset: String,
     name: String,
-    decimals: u8,
     max_supply: String,
     mint: String,
     #[serde(default)]
@@ -97,7 +96,6 @@ struct AccountAssetShare {
 
 #[derive(Deserialize)]
 struct AssetMetadataResponse {
-    decimals: u8,
     mint_nonce: u64,
 }
 

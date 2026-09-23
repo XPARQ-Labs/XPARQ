@@ -4,12 +4,12 @@ use super::transaction::{
     submit_or_print_transaction,
 };
 use super::*;
+use kernel::native::asset::ASSET_DECIMALS;
 
 pub(super) fn asset_register(args: &[String]) -> Result<(), String> {
     let name = normalize_asset_name(option(args, "--name").ok_or("missing --name")?)?;
-    let decimals = kernel::native::asset::ASSET_DECIMALS;
-    let max_supply = parse_asset_amount(args, "--max-supply", decimals)?;
-    let initial_mint = parse_asset_amount(args, "--initial-mint", decimals)?;
+    let max_supply = parse_asset_amount(args, "--max-supply")?;
+    let initial_mint = parse_asset_amount(args, "--initial-mint")?;
     let authority = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?.address();
     let mint_authority = if has_flag(args, "--fixed-supply") {
         Address::ZERO
@@ -76,7 +76,7 @@ pub(super) fn asset_mint(args: &[String]) -> Result<(), String> {
             asset,
             nonce,
             recipient: asset_recipient(args)?,
-            amount: parse_asset_amount(args, "--amount", metadata.decimals)?,
+            amount: parse_asset_amount(args, "--amount")?,
         },
     )
 }
@@ -86,7 +86,7 @@ pub(super) fn asset_burn(args: &[String]) -> Result<(), String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let asset = parse_asset(args)?;
 
-    let amount = parse_asset_amount(args, "--amount", asset_decimals(args, asset)?)?;
+    let amount = parse_asset_amount(args, "--amount")?;
 
     let (inputs, total) = select_asset_inputs(rpc, wallet.address(), asset, amount.as_units())?;
 
@@ -211,7 +211,7 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let asset = parse_asset(args)?;
-    let amount = parse_asset_amount(args, "--amount", asset_decimals(args, asset)?)?;
+    let amount = parse_asset_amount(args, "--amount")?;
     let (inputs, total) = select_asset_inputs(rpc, wallet.address(), asset, amount.as_units())?;
     let mut outputs = vec![kernel::native::asset::AssetOutput { recipient, amount }];
     if total > amount.as_units() {
@@ -375,9 +375,6 @@ fn parse_asset(args: &[String]) -> Result<Contract, String> {
         .map_err(|_| "invalid --asset id".to_string())
 }
 
-fn asset_decimals(args: &[String], asset: Contract) -> Result<u8, String> {
-    Ok(asset_metadata(args, asset)?.decimals)
-}
 
 fn asset_metadata(args: &[String], asset: Contract) -> Result<AssetMetadataResponse, String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
@@ -387,10 +384,9 @@ fn asset_metadata(args: &[String], asset: Contract) -> Result<AssetMetadataRespo
 fn parse_asset_amount(
     args: &[String],
     option_name: &str,
-    decimals: u8,
 ) -> Result<kernel::native::asset::Unit, String> {
     let value = option(args, option_name).ok_or_else(|| format!("missing {option_name}"))?;
-    parse_asset_display_amount(value, decimals)
+    parse_asset_display_amount(value, ASSET_DECIMALS)
         .map(kernel::native::asset::Unit::from_units)
         .map_err(|error| format!("invalid {option_name}: {error}"))
 }
