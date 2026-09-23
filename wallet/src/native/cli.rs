@@ -71,13 +71,11 @@ fn interactive_assets() -> Result<(), String> {
         "1" => {
             let wallet_rpc_args = interactive_asset_wallet_rpc()?;
             let name = prompt("Asset Name")?;
-            let decimals = prompt_default("Decimals", "0")?;
             let max_supply = prompt("Maximum Supply")?;
             let mint_amount = prompt("Initial Mint")?;
 
             let mut register_args = wallet_rpc_args.clone();
             register_args.extend(["--name".into(), name]);
-            register_args.extend(["--decimals".into(), decimals]);
             register_args.extend(["--max-supply".into(), max_supply]);
             register_args.extend(["--initial-mint".into(), mint_amount]);
             asset_register(&register_args)

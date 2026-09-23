@@ -216,7 +216,6 @@ impl AssetState {
         match &call.instruction {
             AssetInstruction::Register {
                 name,
-                decimals,
                 max_supply,
                 initial_mint,
                 mint_authority,
@@ -224,7 +223,6 @@ impl AssetState {
             } => {
                 let metadata = Metadata::new(
                     name.clone(),
-                    *decimals,
                     *max_supply,
                     call.signer,
                     *mint_authority,
@@ -417,7 +415,6 @@ impl AssetState {
         match &call.instruction {
             AssetInstruction::Register {
                 name,
-                decimals,
                 max_supply,
                 mint_authority,
                 nonce,
@@ -425,7 +422,6 @@ impl AssetState {
             } => {
                 let metadata = Metadata::new(
                     name.clone(),
-                    *decimals,
                     *max_supply,
                     call.signer,
                     *mint_authority,

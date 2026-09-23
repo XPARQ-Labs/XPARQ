@@ -7,10 +7,7 @@ use super::*;
 
 pub(super) fn asset_register(args: &[String]) -> Result<(), String> {
     let name = normalize_asset_name(option(args, "--name").ok_or("missing --name")?)?;
-    let decimals = option(args, "--decimals")
-        .ok_or("missing --decimals")?
-        .parse::<u8>()
-        .map_err(|_| "invalid --decimals")?;
+    let decimals = kernel::native::asset::ASSET_DECIMALS;
     let max_supply = parse_asset_amount(args, "--max-supply", decimals)?;
     let initial_mint = parse_asset_amount(args, "--initial-mint", decimals)?;
     let authority = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?.address();
@@ -28,7 +25,6 @@ pub(super) fn asset_register(args: &[String]) -> Result<(), String> {
     let asset = Contract::derive(
         &kernel::native::asset::Metadata::new(
             name.clone(),
-            decimals,
             max_supply,
             authority,
             mint_authority,
@@ -41,7 +37,6 @@ pub(super) fn asset_register(args: &[String]) -> Result<(), String> {
         args,
         AssetInstruction::Register {
             name,
-            decimals,
             max_supply,
             initial_mint,
             mint_authority,

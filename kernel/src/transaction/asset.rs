@@ -11,7 +11,6 @@ use crate::native::asset::{
 pub enum AssetInstruction {
     Register {
         name: String,
-        decimals: u8,
         max_supply: Unit,
         initial_mint: Unit,
         mint_authority: Address,
@@ -49,7 +48,6 @@ impl AssetIntent {
         match &self.instruction {
             AssetInstruction::Register {
                 name,
-                decimals,
                 max_supply,
                 mint_authority,
                 nonce,
@@ -57,7 +55,6 @@ impl AssetIntent {
             } => {
                 let metadata = Metadata::new(
                     name.clone(),
-                    *decimals,
                     *max_supply,
                     self.signer,
                     *mint_authority,
@@ -93,7 +90,6 @@ impl AssetIntent {
         match &self.instruction {
             AssetInstruction::Register {
                 name,
-                decimals,
                 max_supply,
                 initial_mint,
                 mint_authority,
@@ -101,7 +97,6 @@ impl AssetIntent {
             } => {
                 Metadata::new(
                     name.clone(),
-                    *decimals,
                     *max_supply,
                     self.signer,
                     *mint_authority,
@@ -135,7 +130,6 @@ impl AssetIntent {
         match &self.instruction {
             AssetInstruction::Register {
                 name,
-                decimals,
                 max_supply,
                 initial_mint,
                 mint_authority,
@@ -143,7 +137,6 @@ impl AssetIntent {
             } => {
                 let metadata = Metadata::new(
                     name.clone(),
-                    *decimals,
                     *max_supply,
                     self.signer,
                     *mint_authority,

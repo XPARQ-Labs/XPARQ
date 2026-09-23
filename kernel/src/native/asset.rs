@@ -6,7 +6,7 @@ use crypto::{
 use std::{error::Error, fmt, str::FromStr};
 
 pub const ASSET_NAME_MAX_LEN: usize = 64;
-pub const ASSET_DECIMALS_MAX: u8 = 18;
+pub const ASSET_DECIMALS: u8 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AssetError {
@@ -97,7 +97,6 @@ impl fmt::Display for Unit {
 pub struct Metadata {
     // Rename to Metadata
     pub name: String,
-    pub decimals: u8,
     pub max_supply: Unit,
     pub creator: Address,
     pub mint_authority: Address,
@@ -106,14 +105,12 @@ pub struct Metadata {
 impl Metadata {
     pub fn new(
         name: String,
-        decimals: u8,
         max_supply: Unit,
         creator: Address,
         mint_authority: Address,
     ) -> Result<Self, AssetError> {
         let metadata = Self {
             name,
-            decimals,
             max_supply,
             creator,
             mint_authority,
@@ -126,10 +123,6 @@ impl Metadata {
 
     pub fn validate(&self) -> Result<(), AssetError> {
         validate_name(&self.name)?;
-
-        if self.decimals > ASSET_DECIMALS_MAX {
-            return Err(AssetError::InvalidProgram);
-        }
 
         if self.max_supply.is_zero() {
             return Err(AssetError::InvalidProgram);
