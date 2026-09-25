@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crypto::{Address, HASH_SIZE};
 
 use crate::monetary::{
-    asset::{Contract, Unit},
+    asset::{AssetContract, Unit},
     coin::Zeno,
 };
 
@@ -70,7 +70,7 @@ impl Recipient {
 pub enum Value {
     Coin(Zeno),
 
-    Asset { asset: Contract, amount: Unit },
+    Asset { asset: AssetContract, amount: Unit },
 }
 
 impl Value {
@@ -81,7 +81,7 @@ impl Value {
         }
     }
 
-    pub const fn asset(self) -> Option<(Contract, Unit)> {
+    pub const fn asset(self) -> Option<(AssetContract, Unit)> {
         match self {
             Self::Coin(_) => None,
             Self::Asset { asset, amount } => Some((asset, amount)),

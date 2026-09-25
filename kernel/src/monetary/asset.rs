@@ -157,8 +157,8 @@ fn validate_name(name: &str) -> Result<(), AssetError> {
 #[derive(
     BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
-pub struct Contract(Hash); // Rename to Contract
-impl Contract {
+pub struct AssetContract(Hash);
+impl AssetContract {
     pub fn derive(metadata: &Metadata, nonce: u64) -> Result<Self, AssetError> {
         let bytes = canonical_bytes(&(metadata, nonce)).map_err(|_| AssetError::Encoding)?;
 
@@ -190,25 +190,25 @@ impl Contract {
     }
 }
 
-impl From<Hash> for Contract {
+impl From<Hash> for AssetContract {
     fn from(hash: Hash) -> Self {
         Self(hash)
     }
 }
 
-impl From<Contract> for Hash {
-    fn from(contract: Contract) -> Self {
+impl From<AssetContract> for Hash {
+    fn from(contract: AssetContract) -> Self {
         contract.0
     }
 }
 
-impl fmt::Display for Contract {
+impl fmt::Display for AssetContract {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         crypto::hash::format("", &self.0, formatter)
     }
 }
 
-impl FromStr for Contract {
+impl FromStr for AssetContract {
     type Err = HashParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
@@ -216,11 +216,11 @@ impl FromStr for Contract {
     }
 }
 
-/// Unique identifier of one concrete native Contract share/UTXO.
+/// Unique identifier of one concrete native AssetContract share/UTXO.
 ///
 /// A share ID is derived from:
 ///
-/// - asset Contract
+/// - asset AssetContract
 /// - transaction/output commitment
 /// - output index
 #[derive(
@@ -229,7 +229,7 @@ impl FromStr for Contract {
 pub struct Share(Hash16);
 
 impl Share {
-    pub fn derive(asset: Contract, commitment: [u8; HASH_SIZE], output_index: u32) -> Self {
+    pub fn derive(asset: AssetContract, commitment: [u8; HASH_SIZE], output_index: u32) -> Self {
         let mut bytes = [0_u8; HASH_SIZE + HASH_SIZE + 4];
 
         bytes[..HASH_SIZE].copy_from_slice(asset.as_bytes());
@@ -301,19 +301,19 @@ mod identifier_tests {
         let contract_encoded = "cd".repeat(HASH_SIZE);
         let share_encoded = "cd".repeat(HASH16_SIZE);
 
-        let contract = Contract::from_bytes([0xcd; HASH_SIZE]);
+        let contract = AssetContract::from_bytes([0xcd; HASH_SIZE]);
         let share = Share::from_bytes([0xcd; HASH16_SIZE]);
 
         assert_eq!(contract.to_string(), contract_encoded);
         assert_eq!(share.to_string(), share_encoded);
 
-        assert_eq!(contract_encoded.parse::<Contract>(), Ok(contract));
+        assert_eq!(contract_encoded.parse::<AssetContract>(), Ok(contract));
 
         assert_eq!(share_encoded.parse::<Share>(), Ok(share));
 
         assert!(
             format!("asset:{contract_encoded}")
-                .parse::<Contract>()
+                .parse::<AssetContract>()
                 .is_err()
         );
 
@@ -328,13 +328,13 @@ mod identifier_tests {
     BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
 pub struct AssetShare {
-    pub asset: Contract,
+    pub asset: AssetContract,
     pub amount: Unit,
     pub owner: Address,
 }
 
 impl AssetShare {
-    pub const fn new(asset: Contract, amount: Unit, owner: Address) -> Self {
+    pub const fn new(asset: AssetContract, amount: Unit, owner: Address) -> Self {
         Self {
             asset,
             amount,

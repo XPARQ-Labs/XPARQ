@@ -5,7 +5,7 @@ use std::{
     str::FromStr,
 };
 
-use kernel::monetary::asset::{Contract, Unit};
+use kernel::monetary::asset::{AssetContract, Unit};
 use kernel::monetary::coin::{CoinOutput, CoinShare, Zeno};
 use kernel::{
     codec::canonical_bytes,

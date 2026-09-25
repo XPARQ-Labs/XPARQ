@@ -3,7 +3,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
 
 use crate::monetary::asset::{
-    AssetError, AssetShare, Contract, Metadata, Share, Unit, ensure_nonzero_asset_amount,
+    AssetError, AssetShare, AssetContract, Metadata, Share, Unit, ensure_nonzero_asset_amount,
     ensure_unique_asset_inputs,
 };
 
@@ -17,13 +17,13 @@ pub enum AssetInstruction {
         nonce: u64,
     },
     Mint {
-        asset: Contract,
+        asset: AssetContract,
         nonce: u64,
         recipient: Address,
         amount: Unit,
     },
     Burn {
-        asset: Contract,
+        asset: AssetContract,
         inputs: Vec<Share>,
         amount: Unit,
         output: Unit,
@@ -44,7 +44,7 @@ impl AssetIntent {
         }
     }
 
-    pub fn asset(&self) -> Result<Contract, AssetError> {
+    pub fn asset(&self) -> Result<AssetContract, AssetError> {
         match &self.instruction {
             AssetInstruction::Register {
                 name,
@@ -55,7 +55,7 @@ impl AssetIntent {
             } => {
                 let metadata =
                     Metadata::new(name.clone(), *max_supply, self.signer, *mint_authority)?;
-                Contract::derive(&metadata, *nonce)
+                AssetContract::derive(&metadata, *nonce)
             }
             AssetInstruction::Mint { asset, .. } | AssetInstruction::Burn { asset, .. } => {
                 Ok(*asset)
@@ -128,7 +128,7 @@ impl AssetIntent {
             } => {
                 let metadata =
                     Metadata::new(name.clone(), *max_supply, self.signer, *mint_authority)?;
-                let asset = Contract::derive(&metadata, *nonce)?;
+                let asset = AssetContract::derive(&metadata, *nonce)?;
 
                 weight = checked_entry_weight(
                     weight,

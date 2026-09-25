@@ -12,10 +12,10 @@ use crate::{
         StateError, StateRollbackJournal, utxo,
     },
     monetary::{
-        asset::{AssetError, AssetOutput, AssetShare, Contract, Metadata, Share, Unit},
+        asset::{AssetError, AssetOutput, AssetShare, AssetContract, Metadata, Share, Unit},
         coin::{CoinShare, Zeno},
     },
-    transaction::{AssetInstruction, AssetIntent, SpendIntentCommitment, SpendIntent},
+    transaction::{AssetInstruction, AssetIntent, SpendIntent, SpendIntentCommitment},
 };
 
 //
@@ -224,7 +224,7 @@ impl AssetState {
                 let metadata =
                     Metadata::new(name.clone(), *max_supply, call.signer, *mint_authority)?;
 
-                let asset = Contract::derive(&metadata, *nonce)?;
+                let asset = AssetContract::derive(&metadata, *nonce)?;
 
                 let share = Share::derive(asset, commitment, 0);
 
@@ -344,7 +344,7 @@ impl AssetState {
     pub fn apply_account_transfer(
         &mut self,
         utxos: &mut utxo::UtxoSet,
-        asset: Contract,
+        asset: AssetContract,
         inputs: &[Share],
         outputs: &[AssetOutput],
         commitment: [u8; HASH_SIZE],
@@ -419,7 +419,7 @@ impl AssetState {
                 let metadata =
                     Metadata::new(name.clone(), *max_supply, call.signer, *mint_authority)?;
 
-                let id = Contract::derive(&metadata, *nonce)?;
+                let id = AssetContract::derive(&metadata, *nonce)?;
 
                 if self.metadata(id).is_some() {
                     return Err(AssetError::AssetAlreadyExists);
@@ -467,7 +467,7 @@ impl AssetState {
     fn validate_inputs(
         &self,
         utxos: &utxo::UtxoSet,
-        asset: Contract,
+        asset: AssetContract,
         inputs: &[Share],
     ) -> Result<Unit, AssetError> {
         if inputs.is_empty() {
@@ -502,7 +502,7 @@ impl AssetState {
     pub fn account_transfer_created_state_weight(
         &self,
         utxos: &utxo::UtxoSet,
-        asset: Contract,
+        asset: AssetContract,
         inputs: &[Share],
         outputs: &[AssetOutput],
     ) -> Result<u64, AssetError> {
@@ -631,7 +631,10 @@ fn output_index(index: usize) -> Result<u32, StateError> {
     u32::try_from(index).map_err(|_| StateError::OutputIndexOverflow)
 }
 
-fn coin_output_id(commitment: SpendIntentCommitment, index: usize) -> Result<CoinShare, StateError> {
+fn coin_output_id(
+    commitment: SpendIntentCommitment,
+    index: usize,
+) -> Result<CoinShare, StateError> {
     Ok(CoinShare::from_output(
         commitment.as_bytes(),
         output_index(index)?,
@@ -861,7 +864,7 @@ mod invariant_tests {
         initial_mint: u128,
         creator_byte: u8,
         authority_byte: u8,
-    ) -> (AssetState, utxo::UtxoSet, AssetIntent, Contract, Share) {
+    ) -> (AssetState, utxo::UtxoSet, AssetIntent, AssetContract, Share) {
         let creator = test_address(creator_byte);
         let authority = test_address(authority_byte);
         let register = register_intent(creator, authority, name, nonce, max_supply, initial_mint);

@@ -165,7 +165,7 @@ pub(super) fn account_asset_balances(
 
 pub(super) fn account_asset_shares(
     ledger: &Ledger,
-    asset: kernel::monetary::asset::Contract,
+    asset: kernel::monetary::asset::AssetContract,
     address: Address,
 ) -> Vec<serde_json::Value> {
     ledger
@@ -577,7 +577,7 @@ pub(super) fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json:
     let asset = parts
         .first()
         .ok_or("missing asset id")?
-        .parse::<kernel::monetary::asset::Contract>()
+        .parse::<kernel::monetary::asset::AssetContract>()
         .map_err(|_| "invalid asset id")?;
     if parts.len() == 1 {
         let metadata = ledger

@@ -3,7 +3,7 @@
 use super::utxo::{self, CoinUtxo};
 
 use crate::monetary::{
-    asset::{AssetShare, Contract, Metadata, Share, Unit},
+    asset::{AssetShare, AssetContract, Metadata, Share, Unit},
     coin::{CoinShare, Zeno},
 };
 
@@ -46,7 +46,7 @@ pub struct AssetRecord {
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AssetState {
-    pub(crate) assets: BTreeMap<Contract, AssetRecord>,
+    pub(crate) assets: BTreeMap<AssetContract, AssetRecord>,
 }
 
 impl AssetState {
@@ -54,29 +54,29 @@ impl AssetState {
         self.assets.is_empty()
     }
 
-    pub fn record(&self, id: Contract) -> Option<&AssetRecord> {
+    pub fn record(&self, id: AssetContract) -> Option<&AssetRecord> {
         self.assets.get(&id)
     }
 
-    pub fn metadata(&self, id: Contract) -> Option<&Metadata> {
+    pub fn metadata(&self, id: AssetContract) -> Option<&Metadata> {
         self.record(id).map(|record| &record.metadata)
     }
 
-    pub fn metadata_entries(&self) -> impl Iterator<Item = (Contract, &Metadata)> + '_ {
+    pub fn metadata_entries(&self) -> impl Iterator<Item = (AssetContract, &Metadata)> + '_ {
         self.assets
             .iter()
             .map(|(&id, record)| (id, &record.metadata))
     }
 
-    pub fn supply(&self, id: Contract) -> Unit {
+    pub fn supply(&self, id: AssetContract) -> Unit {
         self.record(id).map_or(Unit::ZERO, |record| record.supply)
     }
 
-    pub fn total_minted(&self, id: Contract) -> Option<Unit> {
+    pub fn total_minted(&self, id: AssetContract) -> Option<Unit> {
         self.record(id).map(|record| record.total_minted)
     }
 
-    pub fn mint_nonce(&self, id: Contract) -> Option<u64> {
+    pub fn mint_nonce(&self, id: AssetContract) -> Option<u64> {
         self.record(id).map(|record| record.mint_nonce)
     }
 }
@@ -91,7 +91,7 @@ pub struct SpendRollbackJournal {
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AssetRollbackJournal {
-    pub(crate) assets: Vec<(Contract, Option<AssetRecord>)>,
+    pub(crate) assets: Vec<(AssetContract, Option<AssetRecord>)>,
     pub(crate) utxos: Vec<(Share, Option<AssetShare>)>,
 }
 

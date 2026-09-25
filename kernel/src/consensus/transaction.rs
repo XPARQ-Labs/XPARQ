@@ -14,7 +14,7 @@ use crate::{
     },
     transaction::{
         AssetInstruction, AssetIntent, AuthorizedAccountIntent, AuthorizedTransaction, IntentError,
-        Spend, SpendIntentCommitment, SpendIntent, Transaction as OnChainTransaction,
+        Spend, SpendIntent, SpendIntentCommitment, Transaction as OnChainTransaction,
     },
 };
 

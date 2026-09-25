@@ -9,7 +9,7 @@ use crate::common::ChainContext;
 use crate::{
     monetary::{
         asset::{
-            AssetOutput, Contract, Share, ensure_nonzero_asset_amount, ensure_unique_asset_inputs,
+            AssetOutput, AssetContract, Share, ensure_nonzero_asset_amount, ensure_unique_asset_inputs,
         },
         coin::{CoinOutput, CoinShare, Zeno},
     },
@@ -50,7 +50,7 @@ pub enum Spend {
         outputs: Vec<CoinOutput>,
     },
     Asset {
-        asset: Contract,
+        asset: AssetContract,
         inputs: Vec<Share>,
         outputs: Vec<AssetOutput>,
     },
@@ -78,7 +78,7 @@ impl SpendIntent {
 
     pub fn asset(
         signer: Address,
-        asset: Contract,
+        asset: AssetContract,
         inputs: Vec<Share>,
         outputs: Vec<AssetOutput>,
     ) -> Result<Self, IntentError> {
@@ -174,7 +174,7 @@ impl SpendIntent {
         }
     }
 
-    pub fn asset_parts(&self) -> Option<(Contract, &[Share], &[AssetOutput])> {
+    pub fn asset_parts(&self) -> Option<(AssetContract, &[Share], &[AssetOutput])> {
         match &self.spend {
             Spend::Asset {
                 asset,
@@ -190,7 +190,7 @@ impl SpendIntent {
 mod conservation_tests {
     use super::*;
     use crate::monetary::{
-        asset::{AssetOutput, Contract, Share, Unit},
+        asset::{AssetOutput, AssetContract, Share, Unit},
         coin::{CoinOutput, CoinShare, Zeno},
     };
 
@@ -214,7 +214,7 @@ mod conservation_tests {
     #[test]
     fn duplicate_asset_inputs_are_rejected_structurally() {
         let input = Share::from_bytes([0x22; HASH16_SIZE]);
-        let asset = Contract::from_bytes([0x33; HASH16_SIZE]);
+        let asset = AssetContract::from_bytes([0x33; HASH16_SIZE]);
 
         let result = SpendIntent::asset(
             address(1),
@@ -242,7 +242,7 @@ mod conservation_tests {
     #[test]
     fn zero_value_asset_output_is_rejected_structurally() {
         let input = Share::from_bytes([0x55; HASH16_SIZE]);
-        let asset = Contract::from_bytes([0x66; HASH16_SIZE]);
+        let asset = AssetContract::from_bytes([0x66; HASH16_SIZE]);
 
         let result = SpendIntent::asset(
             address(1),

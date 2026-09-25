@@ -132,15 +132,40 @@ impl CoinShare {
     pub const SIZE: usize = HASH16_SIZE;
     pub const ZENO_PER_COIN: u64 = 10u64.pow(DECIMALS as u32);
 
+    /// Derive an XPQ share created by protocol emission.
+    ///
+    /// CoinShare = H16(
+    ///     XPQ CoinContract
+    ///     || emission origin
+    /// )
     pub fn from_emission_origin(origin: &[u8; HASH_SIZE]) -> Self {
-        Self(domain16(HashDomain::Emission, origin))
+        let contract = CoinContract::derive();
+
+        let mut bytes = [0_u8; HASH_SIZE + HASH_SIZE];
+
+        bytes[..HASH_SIZE].copy_from_slice(contract.as_bytes());
+        bytes[HASH_SIZE..].copy_from_slice(origin);
+
+        Self(domain16(HashDomain::Emission, &bytes))
     }
 
+    /// Derive an XPQ share created by a normal transaction output.
+    ///
+    /// CoinShare = H16(
+    ///     XPQ CoinContract
+    ///     || SpendIntentCommitment
+    ///     || output index
+    /// )
     pub fn from_output(commitment: &[u8; HASH_SIZE], index: u32) -> Self {
-        let mut bytes = [0_u8; HASH_SIZE + 4];
+        let contract = CoinContract::derive();
 
-        bytes[..HASH_SIZE].copy_from_slice(commitment);
-        bytes[HASH_SIZE..].copy_from_slice(&index.to_le_bytes());
+        let mut bytes = [0_u8; HASH_SIZE + HASH_SIZE + 4];
+
+        bytes[..HASH_SIZE].copy_from_slice(contract.as_bytes());
+
+        bytes[HASH_SIZE..HASH_SIZE + HASH_SIZE].copy_from_slice(commitment);
+
+        bytes[HASH_SIZE + HASH_SIZE..].copy_from_slice(&index.to_le_bytes());
 
         Self(domain16(HashDomain::Output, &bytes))
     }
@@ -217,6 +242,34 @@ mod tests {
         assert_eq!(encoded.parse::<CoinShare>(), Ok(share));
         assert!(format!("XPQ:{encoded}").parse::<CoinShare>().is_err());
     }
+}
+
+#[test]
+fn coin_share_derivation_is_deterministic() {
+    let origin = [0x11; HASH_SIZE];
+
+    let a = CoinShare::from_emission_origin(&origin);
+    let b = CoinShare::from_emission_origin(&origin);
+
+    assert_eq!(a, b);
+}
+
+#[test]
+fn different_emission_origins_create_different_shares() {
+    let a = CoinShare::from_emission_origin(&[0x11; HASH_SIZE]);
+    let b = CoinShare::from_emission_origin(&[0x22; HASH_SIZE]);
+
+    assert_ne!(a, b);
+}
+
+#[test]
+fn different_output_indexes_create_different_shares() {
+    let commitment = [0x33; HASH16_SIZE];
+
+    let a = CoinShare::from_output(&commitment, 0);
+    let b = CoinShare::from_output(&commitment, 1);
+
+    assert_ne!(a, b);
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]

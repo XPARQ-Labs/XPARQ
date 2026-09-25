@@ -22,7 +22,7 @@ pub(super) fn asset_register(args: &[String]) -> Result<(), String> {
         .map_err(|error| error.to_string())?
         .as_nanos() as u64;
 
-    let asset = Contract::derive(
+    let asset = AssetContract::derive(
         &kernel::monetary::asset::Metadata::new(
             name.clone(),
             max_supply,
@@ -269,7 +269,7 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
 fn select_asset_inputs(
     rpc: &str,
     owner: Address,
-    asset: Contract,
+    asset: AssetContract,
     required: u128,
 ) -> Result<(Vec<kernel::monetary::asset::Share>, u128), String> {
     let address = kernel::crypto::address_to_string(&owner);
@@ -368,14 +368,14 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
     submit_or_print_transaction(args, &transaction)
 }
 
-fn parse_asset(args: &[String]) -> Result<Contract, String> {
+fn parse_asset(args: &[String]) -> Result<AssetContract, String> {
     option(args, "--asset")
         .ok_or_else(|| "missing --asset".to_string())?
-        .parse::<Contract>()
+        .parse::<AssetContract>()
         .map_err(|_| "invalid --asset id".to_string())
 }
 
-fn asset_metadata(args: &[String], asset: Contract) -> Result<AssetMetadataResponse, String> {
+fn asset_metadata(args: &[String], asset: AssetContract) -> Result<AssetMetadataResponse, String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     http_get_json(rpc, &format!("/asset/{asset}"))
 }
