@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use crypto::{Address, HASH_SIZE};
 
-use crate::native::{
-    asset::{Contract, Share, Unit},
-    coin::{XPQ, Zeno},
+use crate::monetary::{
+    asset::{Contract, Unit},
+    coin::Zeno,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
@@ -62,30 +62,6 @@ impl Recipient {
         match self {
             Self::Address(address) => address,
             Self::BlockMiner => block_miner,
-        }
-    }
-}
-
-#[derive(
-    BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
-)]
-pub enum Input {
-    Coin(XPQ),
-    Asset(Share),
-}
-
-impl Input {
-    pub const fn coin(self) -> Option<XPQ> {
-        match self {
-            Self::Coin(id) => Some(id),
-            Self::Asset(_) => None,
-        }
-    }
-
-    pub const fn asset(self) -> Option<Share> {
-        match self {
-            Self::Coin(_) => None,
-            Self::Asset(id) => Some(id),
         }
     }
 }

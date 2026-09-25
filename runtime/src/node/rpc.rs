@@ -179,7 +179,7 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                     "utxo_after" => {
                         utxo_after = Some(
                             value
-                                .parse::<kernel::native::coin::XPQ>()
+                                .parse::<kernel::monetary::coin::CoinShare>()
                                 .map_err(|_| "invalid account UTXO cursor")?,
                         );
                     }

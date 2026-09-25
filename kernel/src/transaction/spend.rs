@@ -7,11 +7,11 @@ use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
 use crate::common::ChainContext;
 
 use crate::{
-    native::{
+    monetary::{
         asset::{
             AssetOutput, Contract, Share, ensure_nonzero_asset_amount, ensure_unique_asset_inputs,
         },
-        coin::{CoinOutput, XPQ, Zeno},
+        coin::{CoinOutput, CoinShare, Zeno},
     },
     transaction::IntentError,
 };
@@ -40,18 +40,13 @@ impl SpendIntentCommitment {
     }
 }
 
-/// Compatibility alias for code that still imports `SpendCommitment`.
-/// New code should use `SpendIntentCommitment` for the plain semantic digest,
-/// and `AuthorizationCommitment` for account signatures.
-pub type SpendCommitment = SpendIntentCommitment;
-
 /// An account-authorized transfer.
 ///
-/// Register, mint, and burn remain native asset operations.
+/// Register, mint, and burn remain monetary asset operations.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Spend {
     Coin {
-        inputs: Vec<XPQ>,
+        inputs: Vec<CoinShare>,
         outputs: Vec<CoinOutput>,
     },
     Asset {
@@ -70,7 +65,7 @@ pub struct SpendIntent {
 impl SpendIntent {
     pub fn coin(
         signer: Address,
-        inputs: Vec<XPQ>,
+        inputs: Vec<CoinShare>,
         outputs: Vec<CoinOutput>,
     ) -> Result<Self, IntentError> {
         let intent = Self {
@@ -172,7 +167,7 @@ impl SpendIntent {
         self.semantic_commitment(chain)
     }
 
-    pub fn coin_parts(&self) -> Option<(&[XPQ], &[CoinOutput])> {
+    pub fn coin_parts(&self) -> Option<(&[CoinShare], &[CoinOutput])> {
         match &self.spend {
             Spend::Coin { inputs, outputs } => Some((inputs, outputs)),
             Spend::Asset { .. } => None,
@@ -194,9 +189,9 @@ impl SpendIntent {
 #[cfg(test)]
 mod conservation_tests {
     use super::*;
-    use crate::native::{
+    use crate::monetary::{
         asset::{AssetOutput, Contract, Share, Unit},
-        coin::{CoinOutput, XPQ, Zeno},
+        coin::{CoinOutput, CoinShare, Zeno},
     };
 
     fn address(byte: u8) -> Address {
@@ -205,7 +200,7 @@ mod conservation_tests {
 
     #[test]
     fn duplicate_coin_inputs_are_rejected_structurally() {
-        let input = XPQ::from_bytes([0x11; HASH_SIZE]);
+        let input = CoinShare::from_bytes([0x11; HASH16_SIZE]);
 
         let result = SpendIntent::coin(
             address(1),
@@ -218,8 +213,8 @@ mod conservation_tests {
 
     #[test]
     fn duplicate_asset_inputs_are_rejected_structurally() {
-        let input = Share::from_bytes([0x22; HASH_SIZE]);
-        let asset = Contract::from_bytes([0x33; HASH_SIZE]);
+        let input = Share::from_bytes([0x22; HASH16_SIZE]);
+        let asset = Contract::from_bytes([0x33; HASH16_SIZE]);
 
         let result = SpendIntent::asset(
             address(1),
@@ -233,7 +228,7 @@ mod conservation_tests {
 
     #[test]
     fn zero_value_coin_output_is_rejected_structurally() {
-        let input = XPQ::from_bytes([0x44; HASH_SIZE]);
+        let input = CoinShare::from_bytes([0x44; HASH16_SIZE]);
 
         let result = SpendIntent::coin(
             address(1),
@@ -246,8 +241,8 @@ mod conservation_tests {
 
     #[test]
     fn zero_value_asset_output_is_rejected_structurally() {
-        let input = Share::from_bytes([0x55; HASH_SIZE]);
-        let asset = Contract::from_bytes([0x66; HASH_SIZE]);
+        let input = Share::from_bytes([0x55; HASH16_SIZE]);
+        let asset = Contract::from_bytes([0x66; HASH16_SIZE]);
 
         let result = SpendIntent::asset(
             address(1),

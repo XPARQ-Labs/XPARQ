@@ -11,7 +11,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
     let amount = parse_amount(option(args, "--amount").ok_or("missing --amount")?)?;
     let inputs = repeated_options(args, "--input")
         .into_iter()
-        .map(kernel::native::coin::XPQ::from_str)
+        .map(kernel::monetary::coin::CoinShare::from_str)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "invalid --input coin id".to_string())?;
     let wallet = load_wallet(path)?;
@@ -82,7 +82,7 @@ pub(super) fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
     let wallet = load_wallet(path)?;
     let mut candidates = account_input_candidates(rpc, &wallet)?;
     if candidates.len() < 2 {
-        return Err("consolidation requires at least two available XPQ UTXOs".into());
+        return Err("consolidation requires at least two available CoinShare UTXOs".into());
     }
     candidates.sort_by(|left, right| {
         left.amount
@@ -93,7 +93,7 @@ pub(super) fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
     let inputs = candidates
         .iter()
         .map(|utxo| {
-            kernel::native::coin::XPQ::from_str(&utxo.id)
+            kernel::monetary::coin::CoinShare::from_str(&utxo.id)
                 .map_err(|_| "node returned an invalid coin id".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -163,13 +163,13 @@ pub(super) fn select_account_inputs_with_state_burn(
     created_coin_without_change: u64,
     created_state_weight: u64,
     archival_burn: u64,
-) -> Result<(Vec<kernel::native::coin::XPQ>, u64, u64, u64), String> {
+) -> Result<(Vec<kernel::monetary::coin::CoinShare>, u64, u64, u64), String> {
     let candidates = account_input_candidates(rpc, wallet)?;
     let mut selected = Vec::new();
     let mut total = 0_u64;
     for utxo in candidates {
         selected.push(
-            kernel::native::coin::XPQ::from_str(&utxo.id)
+            kernel::monetary::coin::CoinShare::from_str(&utxo.id)
                 .map_err(|_| "node returned an invalid coin id".to_string())?,
         );
         total = total

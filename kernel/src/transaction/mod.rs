@@ -7,9 +7,8 @@ pub use asset::{AssetInstruction, AssetIntent};
 pub use authorization::{
     AccountAuthorization, AccountIntent, AuthorizationCommitment, AuthorizationRole,
     AuthorizedAccountIntent, AuthorizedAssetTransaction, AuthorizedSpendTransaction,
-    AuthorizedTransaction, IntentId, TransactionId, asset_call_payment_commitment,
-    asset_spend_payment_commitment,
+    AuthorizedTransaction, IntentId, TransactionId, payment_commitment,
 };
-pub use spend::{Spend, SpendCommitment, SpendIntent, SpendIntentCommitment};
+pub use spend::{Spend, SpendIntent, SpendIntentCommitment};
 
 pub type Transaction = AuthorizedTransaction;

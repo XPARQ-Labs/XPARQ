@@ -14,7 +14,7 @@ use crate::{
     blockchain::merkle::{MerkleInclusionProof, merkle_root},
     common::{Height, Nonce},
     error::{BlockError, CodecError},
-    native::coin::Zeno,
+    monetary::coin::Zeno,
     transaction::Transaction,
 };
 
@@ -416,7 +416,7 @@ mod p3e_replay_tests {
 
     use crate::{
         common::ChainContext,
-        native::coin::{CoinOutput, XPQ, Zeno},
+        monetary::coin::{CoinOutput, XPQ, Zeno},
         transaction::{
             AccountAuthorization, AccountIntent, AuthorizedAccountIntent,
             AuthorizedSpendTransaction, AuthorizedTransaction, SpendIntent,
@@ -431,7 +431,7 @@ mod p3e_replay_tests {
 
         let intent = SpendIntent::coin(
             signer,
-            vec![XPQ::from_bytes([0x31; crypto::HASH_SIZE])],
+            vec![XPQ::from_bytes([0x31; crypto::HASH16_SIZE])],
             vec![CoinOutput::new(signer, Zeno::from_zeno(1))],
         )
         .expect("valid structural spend fixture");

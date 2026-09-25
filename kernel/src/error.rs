@@ -173,7 +173,7 @@ mod ledger_errors {
     //! Ledger state-transition errors.
 
     use crate::ledger::utxo;
-    use crate::native::asset::AssetError;
+    use crate::monetary::asset::AssetError;
     use std::{error::Error as StdError, fmt};
 
     #[derive(Debug, Clone, PartialEq, Eq)]

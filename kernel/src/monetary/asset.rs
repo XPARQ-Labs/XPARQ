@@ -1,6 +1,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{
-    Address, HASH_SIZE, HASH16_SIZE, Hash16, HashDomain, HashParseError, canonical_bytes, domain,
+    Address, HASH_SIZE, HASH16_SIZE, Hash, Hash16, HashDomain, HashParseError, canonical_bytes,
+    domain, domain16,
 };
 
 use std::{error::Error, fmt, str::FromStr};
@@ -156,58 +157,54 @@ fn validate_name(name: &str) -> Result<(), AssetError> {
 #[derive(
     BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
-pub struct Contract(Hash16); // Rename to Contract
-
+pub struct Contract(Hash); // Rename to Contract
 impl Contract {
     pub fn derive(metadata: &Metadata, nonce: u64) -> Result<Self, AssetError> {
         let bytes = canonical_bytes(&(metadata, nonce)).map_err(|_| AssetError::Encoding)?;
 
-        Ok(Self::from_hash(Hash16::from_hash(domain(
-            HashDomain::Asset,
-            &bytes,
-        ))))
+        Ok(Self::from_hash(domain(HashDomain::Asset, &bytes)))
     }
 
-    pub const fn from_hash(hash: Hash16) -> Self {
+    pub const fn from_hash(hash: Hash) -> Self {
         Self(hash)
     }
 
-    pub const fn from_bytes(bytes: [u8; HASH16_SIZE]) -> Self {
-        Self(Hash16::from_bytes(bytes))
+    pub const fn from_bytes(bytes: [u8; HASH_SIZE]) -> Self {
+        Self(Hash::from_bytes(bytes))
     }
 
-    pub const fn as_hash(&self) -> &Hash16 {
+    pub const fn as_hash(&self) -> &Hash {
         &self.0
     }
 
-    pub const fn into_hash(self) -> Hash16 {
+    pub const fn into_hash(self) -> Hash {
         self.0
     }
 
-    pub const fn as_bytes(&self) -> &[u8; HASH16_SIZE] {
+    pub const fn as_bytes(&self) -> &[u8; HASH_SIZE] {
         self.0.as_bytes()
     }
 
-    pub const fn into_bytes(self) -> [u8; HASH16_SIZE] {
+    pub const fn into_bytes(self) -> [u8; HASH_SIZE] {
         self.0.into_bytes()
     }
 }
 
-impl From<Hash16> for Contract {
-    fn from(hash: Hash16) -> Self {
+impl From<Hash> for Contract {
+    fn from(hash: Hash) -> Self {
         Self(hash)
     }
 }
 
-impl From<Contract> for Hash16 {
-    fn from(asset: Contract) -> Self {
-        asset.0
+impl From<Contract> for Hash {
+    fn from(contract: Contract) -> Self {
+        contract.0
     }
 }
 
 impl fmt::Display for Contract {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
+        crypto::hash::format("", &self.0, formatter)
     }
 }
 
@@ -215,7 +212,7 @@ impl FromStr for Contract {
     type Err = HashParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse::<Hash16>().map(Self)
+        crypto::hash::parse("", value).map(Self)
     }
 }
 
@@ -233,13 +230,15 @@ pub struct Share(Hash16);
 
 impl Share {
     pub fn derive(asset: Contract, commitment: [u8; HASH_SIZE], output_index: u32) -> Self {
-        let mut bytes = [0_u8; HASH16_SIZE + HASH_SIZE + 4];
+        let mut bytes = [0_u8; HASH_SIZE + HASH_SIZE + 4];
 
-        bytes[..HASH16_SIZE].copy_from_slice(asset.as_bytes());
-        bytes[HASH16_SIZE..HASH16_SIZE + HASH_SIZE].copy_from_slice(&commitment);
-        bytes[HASH16_SIZE + HASH_SIZE..].copy_from_slice(&output_index.to_le_bytes());
+        bytes[..HASH_SIZE].copy_from_slice(asset.as_bytes());
 
-        Self(Hash16::from_hash(domain(HashDomain::Share, &bytes)))
+        bytes[HASH_SIZE..HASH_SIZE * 2].copy_from_slice(&commitment);
+
+        bytes[HASH_SIZE * 2..].copy_from_slice(&output_index.to_le_bytes());
+
+        Self(domain16(HashDomain::Share, &bytes))
     }
 
     pub const fn from_hash(hash: Hash16) -> Self {
@@ -298,20 +297,29 @@ mod identifier_tests {
     use super::*;
 
     #[test]
-    fn asset_and_share_text_are_unprefixed_hex() {
-        let encoded = "cd".repeat(HASH16_SIZE);
-        let asset = Contract::from_bytes([0xcd; HASH16_SIZE]);
+    fn contract_and_share_text_are_unprefixed_hex() {
+        let contract_encoded = "cd".repeat(HASH_SIZE);
+        let share_encoded = "cd".repeat(HASH16_SIZE);
+
+        let contract = Contract::from_bytes([0xcd; HASH_SIZE]);
         let share = Share::from_bytes([0xcd; HASH16_SIZE]);
 
-        assert_eq!(asset.to_string(), encoded);
-        assert_eq!(share.to_string(), encoded);
-        assert_eq!(encoded.parse::<Contract>(), Ok(asset));
-        assert_eq!(encoded.parse::<Share>(), Ok(share));
-        assert!(format!("asset:{encoded}").parse::<Contract>().is_err());
-        assert!(format!("share:{encoded}").parse::<Share>().is_err());
+        assert_eq!(contract.to_string(), contract_encoded);
+        assert_eq!(share.to_string(), share_encoded);
+
+        assert_eq!(contract_encoded.parse::<Contract>(), Ok(contract));
+
+        assert_eq!(share_encoded.parse::<Share>(), Ok(share));
+
+        assert!(
+            format!("asset:{contract_encoded}")
+                .parse::<Contract>()
+                .is_err()
+        );
+
+        assert!(format!("share:{share_encoded}").parse::<Share>().is_err());
     }
 }
-
 /// One concrete live native asset share.
 ///
 /// `Share` is its unique UTXO identifier, while `AssetShare`

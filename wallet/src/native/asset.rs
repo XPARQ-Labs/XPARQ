@@ -4,7 +4,7 @@ use super::transaction::{
     submit_or_print_transaction,
 };
 use super::*;
-use kernel::native::asset::ASSET_DECIMALS;
+use kernel::monetary::asset::ASSET_DECIMALS;
 
 pub(super) fn asset_register(args: &[String]) -> Result<(), String> {
     let name = normalize_asset_name(option(args, "--name").ok_or("missing --name")?)?;
@@ -23,7 +23,7 @@ pub(super) fn asset_register(args: &[String]) -> Result<(), String> {
         .as_nanos() as u64;
 
     let asset = Contract::derive(
-        &kernel::native::asset::Metadata::new(
+        &kernel::monetary::asset::Metadata::new(
             name.clone(),
             max_supply,
             authority,
@@ -50,14 +50,14 @@ pub(super) fn asset_register(args: &[String]) -> Result<(), String> {
 fn normalize_asset_name(name: &str) -> Result<String, String> {
     let normalized = name.trim().to_string();
     if normalized.is_empty()
-        || normalized.len() > kernel::native::asset::ASSET_NAME_MAX_LEN
+        || normalized.len() > kernel::monetary::asset::ASSET_NAME_MAX_LEN
         || !normalized
             .bytes()
             .all(|byte| byte == b' ' || byte.is_ascii_graphic())
     {
         return Err(format!(
             "invalid asset name; use 1-{} printable ASCII characters",
-            kernel::native::asset::ASSET_NAME_MAX_LEN
+            kernel::monetary::asset::ASSET_NAME_MAX_LEN
         ));
     }
     Ok(normalized)
@@ -139,7 +139,7 @@ pub(super) fn consolidate_asset_shares(args: &[String]) -> Result<(), String> {
         .map(|share| {
             share
                 .share_id
-                .parse::<kernel::native::asset::Share>()
+                .parse::<kernel::monetary::asset::Share>()
                 .map_err(|_| "node returned an invalid asset share id".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -152,18 +152,18 @@ pub(super) fn consolidate_asset_shares(args: &[String]) -> Result<(), String> {
             .checked_add(amount)
             .ok_or_else(|| "asset consolidation amount overflow".to_string())
     })?;
-    let output = kernel::native::asset::AssetOutput {
+    let output = kernel::monetary::asset::AssetOutput {
         recipient: wallet.address(),
-        amount: kernel::native::asset::Unit::from_units(total),
+        amount: kernel::monetary::asset::Unit::from_units(total),
     };
     let spend = wallet.sign_onchain_spend(
         SpendIntent::asset(wallet.address(), asset, inputs, vec![output.clone()])
             .map_err(|error| error.to_string())?,
     )?;
-    let asset_weight = kernel::native::asset::checked_asset_entry_weight(
+    let asset_weight = kernel::monetary::asset::checked_asset_entry_weight(
         0,
         32,
-        &kernel::native::asset::AssetShare {
+        &kernel::monetary::asset::AssetShare {
             asset,
             amount: output.amount,
             owner: output.recipient,
@@ -213,11 +213,11 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
     let asset = parse_asset(args)?;
     let amount = parse_asset_amount(args, "--amount")?;
     let (inputs, total) = select_asset_inputs(rpc, wallet.address(), asset, amount.as_units())?;
-    let mut outputs = vec![kernel::native::asset::AssetOutput { recipient, amount }];
+    let mut outputs = vec![kernel::monetary::asset::AssetOutput { recipient, amount }];
     if total > amount.as_units() {
-        outputs.push(kernel::native::asset::AssetOutput {
+        outputs.push(kernel::monetary::asset::AssetOutput {
             recipient: wallet.address(),
-            amount: kernel::native::asset::Unit::from_units(total - amount.as_units()),
+            amount: kernel::monetary::asset::Unit::from_units(total - amount.as_units()),
         });
     }
     let spend = wallet.sign_onchain_spend(
@@ -225,10 +225,10 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
             .map_err(|e| e.to_string())?,
     )?;
     let asset_weight = outputs.iter().try_fold(0_u64, |weight, output| {
-        kernel::native::asset::checked_asset_entry_weight(
+        kernel::monetary::asset::checked_asset_entry_weight(
             weight,
             32,
-            &kernel::native::asset::AssetShare {
+            &kernel::monetary::asset::AssetShare {
                 asset: asset,
                 amount: output.amount,
                 owner: output.recipient,
@@ -271,7 +271,7 @@ fn select_asset_inputs(
     owner: Address,
     asset: Contract,
     required: u128,
-) -> Result<(Vec<kernel::native::asset::Share>, u128), String> {
+) -> Result<(Vec<kernel::monetary::asset::Share>, u128), String> {
     let address = kernel::crypto::address_to_string(&owner);
     let balance: BalanceResponse = http_get_json(rpc, &format!("/balance/{address}"))?;
     let entry = balance
@@ -375,7 +375,6 @@ fn parse_asset(args: &[String]) -> Result<Contract, String> {
         .map_err(|_| "invalid --asset id".to_string())
 }
 
-
 fn asset_metadata(args: &[String], asset: Contract) -> Result<AssetMetadataResponse, String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     http_get_json(rpc, &format!("/asset/{asset}"))
@@ -384,10 +383,10 @@ fn asset_metadata(args: &[String], asset: Contract) -> Result<AssetMetadataRespo
 fn parse_asset_amount(
     args: &[String],
     option_name: &str,
-) -> Result<kernel::native::asset::Unit, String> {
+) -> Result<kernel::monetary::asset::Unit, String> {
     let value = option(args, option_name).ok_or_else(|| format!("missing {option_name}"))?;
     parse_asset_display_amount(value, ASSET_DECIMALS)
-        .map(kernel::native::asset::Unit::from_units)
+        .map(kernel::monetary::asset::Unit::from_units)
         .map_err(|error| format!("invalid {option_name}: {error}"))
 }
 

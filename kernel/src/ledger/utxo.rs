@@ -3,9 +3,9 @@ use std::{collections::BTreeMap, error::Error as StdError, fmt};
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::Address;
 
-use crate::native::{
+use crate::monetary::{
     asset::{AssetShare, Share},
-    coin::{XPQ, Zeno},
+    coin::{CoinShare, Zeno},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -16,16 +16,16 @@ pub struct CoinUtxo {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct UtxoSet {
-    coins: BTreeMap<XPQ, CoinUtxo>,
+    coins: BTreeMap<CoinShare, CoinUtxo>,
     shares: BTreeMap<Share, AssetShare>,
 }
 
 impl UtxoSet {
-    pub fn coin(&self, id: &XPQ) -> Option<&CoinUtxo> {
+    pub fn coin(&self, id: &CoinShare) -> Option<&CoinUtxo> {
         self.coins.get(id)
     }
 
-    pub fn insert_coin(&mut self, id: XPQ, coin: CoinUtxo) -> Result<(), Error> {
+    pub fn insert_coin(&mut self, id: CoinShare, coin: CoinUtxo) -> Result<(), Error> {
         if self.coins.contains_key(&id) {
             return Err(Error::CoinCollision);
         }
@@ -33,11 +33,11 @@ impl UtxoSet {
         Ok(())
     }
 
-    pub fn consume_coin(&mut self, id: &XPQ) -> Result<CoinUtxo, Error> {
+    pub fn consume_coin(&mut self, id: &CoinShare) -> Result<CoinUtxo, Error> {
         self.coins.remove(id).ok_or(Error::NotFound)
     }
 
-    pub fn coins(&self) -> impl Iterator<Item = (XPQ, &CoinUtxo)> + '_ {
+    pub fn coins(&self) -> impl Iterator<Item = (CoinShare, &CoinUtxo)> + '_ {
         self.coins.iter().map(|(&id, coin)| (id, coin))
     }
 

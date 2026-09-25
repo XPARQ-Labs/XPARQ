@@ -4,7 +4,7 @@ pub mod consensus;
 pub mod error;
 pub mod genesis;
 pub mod ledger;
-pub mod native;
+pub mod monetary;
 pub mod transaction;
 
 pub mod block {

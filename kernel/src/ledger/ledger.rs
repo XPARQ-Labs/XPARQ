@@ -12,7 +12,7 @@ use crate::{
         TransactionStateView, ValidatedBlock, validate_emission, validate_transaction,
     },
     ledger::{CoinUtxo, LedgerState, SpendRollbackJournal, StateError, StateRollbackJournal},
-    native::coin::XPQ,
+    monetary::coin::CoinShare,
 };
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -57,7 +57,7 @@ impl Ledger {
     pub fn transaction_protocol_burns(
         &self,
         height: Height,
-    ) -> Option<Vec<crate::native::coin::Zeno>> {
+    ) -> Option<Vec<crate::monetary::coin::Zeno>> {
         let block = self.chain.block(&height)?;
         let journals = self.journals.get(&height)?;
         let offset = usize::from(block.emission().is_some());
@@ -101,7 +101,7 @@ impl Ledger {
 
         if !block.is_genesis() {
             let emission = validate_emission(block)?;
-            let id = XPQ::from_emission_origin(&emission.origin().0);
+            let id = CoinShare::from_emission_origin(&emission.origin().0);
             state.utxos.insert_coin(
                 id,
                 CoinUtxo {
@@ -223,7 +223,7 @@ impl ApplyBlockState for Ledger {
 //
 
 impl TransactionStateView for LedgerState {
-    fn coin(&self, id: XPQ) -> Option<CoinInputState> {
+    fn coin(&self, id: CoinShare) -> Option<CoinInputState> {
         self.utxos.coin(&id).map(|coin| CoinInputState {
             amount: coin.amount,
             owner: coin.owner,
@@ -232,18 +232,18 @@ impl TransactionStateView for LedgerState {
 
     fn asset_share(
         &self,
-        id: crate::native::asset::Share,
-    ) -> Option<crate::native::asset::AssetShare> {
+        id: crate::monetary::asset::Share,
+    ) -> Option<crate::monetary::asset::AssetShare> {
         self.utxos.asset(&id).copied()
     }
 
     fn asset_spend_created_state_weight(
         &self,
         intent: &crate::transaction::SpendIntent,
-    ) -> Result<u64, crate::native::asset::AssetError> {
+    ) -> Result<u64, crate::monetary::asset::AssetError> {
         let (asset, inputs, outputs) = intent
             .asset_parts()
-            .ok_or(crate::native::asset::AssetError::InvalidProgram)?;
+            .ok_or(crate::monetary::asset::AssetError::InvalidProgram)?;
 
         self.assets
             .account_transfer_created_state_weight(&self.utxos, asset, inputs, outputs)
@@ -253,7 +253,7 @@ impl TransactionStateView for LedgerState {
         &self,
         call: &crate::transaction::AssetIntent,
         genesis_hash: [u8; 32],
-    ) -> Result<u64, crate::native::asset::AssetError> {
+    ) -> Result<u64, crate::monetary::asset::AssetError> {
         self.assets
             .validate_transition(&self.utxos, call, genesis_hash)?;
 

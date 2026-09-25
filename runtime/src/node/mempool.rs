@@ -117,7 +117,7 @@ pub(super) fn reconcile_mempool(
 
 pub(super) fn reserved_coin_inputs(
     transactions: &[Transaction],
-) -> BTreeSet<kernel::native::coin::XPQ> {
+) -> BTreeSet<kernel::monetary::coin::CoinShare> {
     transactions
         .iter()
         .flat_map(|transaction| match transaction {

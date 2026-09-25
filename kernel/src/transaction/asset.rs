@@ -2,7 +2,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
 
-use crate::native::asset::{
+use crate::monetary::asset::{
     AssetError, AssetShare, Contract, Metadata, Share, Unit, ensure_nonzero_asset_amount,
     ensure_unique_asset_inputs,
 };
@@ -53,12 +53,8 @@ impl AssetIntent {
                 nonce,
                 ..
             } => {
-                let metadata = Metadata::new(
-                    name.clone(),
-                    *max_supply,
-                    self.signer,
-                    *mint_authority,
-                )?;
+                let metadata =
+                    Metadata::new(name.clone(), *max_supply, self.signer, *mint_authority)?;
                 Contract::derive(&metadata, *nonce)
             }
             AssetInstruction::Mint { asset, .. } | AssetInstruction::Burn { asset, .. } => {
@@ -95,12 +91,7 @@ impl AssetIntent {
                 mint_authority,
                 ..
             } => {
-                Metadata::new(
-                    name.clone(),
-                    *max_supply,
-                    self.signer,
-                    *mint_authority,
-                )?;
+                Metadata::new(name.clone(), *max_supply, self.signer, *mint_authority)?;
 
                 ensure_nonzero_asset_amount(*initial_mint)?;
                 if *initial_mint > *max_supply {
@@ -135,12 +126,8 @@ impl AssetIntent {
                 mint_authority,
                 nonce,
             } => {
-                let metadata = Metadata::new(
-                    name.clone(),
-                    *max_supply,
-                    self.signer,
-                    *mint_authority,
-                )?;
+                let metadata =
+                    Metadata::new(name.clone(), *max_supply, self.signer, *mint_authority)?;
                 let asset = Contract::derive(&metadata, *nonce)?;
 
                 weight = checked_entry_weight(

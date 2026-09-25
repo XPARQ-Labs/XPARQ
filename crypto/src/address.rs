@@ -14,8 +14,7 @@ pub const ADDRESS_STRING_LEN: usize = ADDRESS_ENCODED_SIZE;
 
 // Human-friendly Base56 alphabet.
 // Excludes visually ambiguous characters: O, o, I, i, L, l.
-const CHARACTER: &[u8; 56] =
-    b"0123456789ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz";
+const CHARACTER: &[u8; 56] = b"0123456789ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz";
 
 const TOTAL_CHARACTER: u16 = CHARACTER.len() as u16;
 

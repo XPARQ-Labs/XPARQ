@@ -21,7 +21,7 @@ pub(super) fn account_response(
     mempool: &[Transaction],
     address: Address,
     utxo_offset: usize,
-    utxo_after: Option<kernel::native::coin::XPQ>,
+    utxo_after: Option<kernel::monetary::coin::CoinShare>,
 ) -> Result<serde_json::Value, String> {
     let next_height = ledger
         .tip_height()
@@ -165,7 +165,7 @@ pub(super) fn account_asset_balances(
 
 pub(super) fn account_asset_shares(
     ledger: &Ledger,
-    asset: kernel::native::asset::Contract,
+    asset: kernel::monetary::asset::Contract,
     address: Address,
 ) -> Vec<serde_json::Value> {
     ledger
@@ -577,7 +577,7 @@ pub(super) fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json:
     let asset = parts
         .first()
         .ok_or("missing asset id")?
-        .parse::<kernel::native::asset::Contract>()
+        .parse::<kernel::monetary::asset::Contract>()
         .map_err(|_| "invalid asset id")?;
     if parts.len() == 1 {
         let metadata = ledger
@@ -606,7 +606,7 @@ pub(super) fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json:
             .utxos
             .assets()
             .filter(|(_, share)| share.asset == asset && share.owner == address)
-            .try_fold(kernel::native::asset::Unit::ZERO, |total, (_, share)| {
+            .try_fold(kernel::monetary::asset::Unit::ZERO, |total, (_, share)| {
                 total
                     .checked_add(share.amount)
                     .ok_or("asset balance overflow")

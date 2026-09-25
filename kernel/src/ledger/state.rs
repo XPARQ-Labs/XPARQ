@@ -2,9 +2,9 @@
 
 use super::utxo::{self, CoinUtxo};
 
-use crate::native::{
+use crate::monetary::{
     asset::{AssetShare, Contract, Metadata, Share, Unit},
-    coin::{XPQ, Zeno},
+    coin::{CoinShare, Zeno},
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -83,8 +83,8 @@ impl AssetState {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct SpendRollbackJournal {
-    pub(crate) consumed_coins: Vec<(XPQ, CoinUtxo)>,
-    pub(crate) created_coin_ids: Vec<XPQ>,
+    pub(crate) consumed_coins: Vec<(CoinShare, CoinUtxo)>,
+    pub(crate) created_coin_ids: Vec<CoinShare>,
     pub(crate) mined: Zeno,
     pub(crate) burned: Zeno,
 }

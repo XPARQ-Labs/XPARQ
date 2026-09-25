@@ -5,11 +5,11 @@ use std::{
     str::FromStr,
 };
 
-use kernel::native::asset::{Contract, Unit};
-use kernel::native::coin::CoinOutput;
+use kernel::monetary::asset::{Contract, Unit};
+use kernel::monetary::coin::{CoinOutput, CoinShare, Zeno};
 use kernel::{
     codec::canonical_bytes,
-    consensus::{DECIMALS, StateTransitionWeight, XPQ, Zeno},
+    consensus::{DECIMALS, StateTransitionWeight},
     crypto::{Address, Signature, address_from_string},
     transaction::{
         AssetInstruction, AuthorizedAssetTransaction, AuthorizedSpendTransaction,
@@ -24,7 +24,7 @@ use wallet::{
 use zeroize::{Zeroize, Zeroizing};
 
 const DEFAULT_WALLET_PATH: &str = "wallet.json";
-const AUTOMATIC_FEE_ZENO_PER_BYTE: u64 = 1;
+const AUTOMATIC_FEE_ZENO_PER_BYTE: u64 = 8;
 const MAX_FEE_CONVERGENCE_ROUNDS: usize = 8;
 const DEFAULT_HISTORY_LIMIT: usize = 50;
 const MAX_HISTORY_LIMIT: usize = 250;

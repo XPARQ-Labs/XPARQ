@@ -8,19 +8,19 @@ use crate::{
         BurnError, ProtocolBurn, StateTransitionWeight, created_coin_output_count,
         validate_exact_burn,
     },
-    native::{
+    monetary::{
         asset::{AssetError, AssetShare, Share},
-        coin::{CoinOutput, XPQ, Zeno},
+        coin::{CoinOutput, CoinShare, Zeno},
     },
     transaction::{
         AssetInstruction, AssetIntent, AuthorizedAccountIntent, AuthorizedTransaction, IntentError,
-        Spend, SpendCommitment, SpendIntent, Transaction as OnChainTransaction,
+        Spend, SpendIntentCommitment, SpendIntent, Transaction as OnChainTransaction,
     },
 };
 
 pub trait ConsensusIntent: Clone {
     fn validate_structure(&self) -> Result<(), IntentError>;
-    fn commitment_for(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError>;
+    fn commitment_for(&self, chain: ChainContext) -> Result<SpendIntentCommitment, IntentError>;
 }
 
 impl ConsensusIntent for SpendIntent {
@@ -28,7 +28,7 @@ impl ConsensusIntent for SpendIntent {
         self.validate()
     }
 
-    fn commitment_for(&self, chain: ChainContext) -> Result<SpendCommitment, IntentError> {
+    fn commitment_for(&self, chain: ChainContext) -> Result<SpendIntentCommitment, IntentError> {
         self.commitment(chain)
     }
 }
@@ -36,7 +36,7 @@ impl ConsensusIntent for SpendIntent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructurallyValidated<T> {
     intent: T,
-    commitment: SpendCommitment,
+    commitment: SpendIntentCommitment,
 }
 
 impl<T> StructurallyValidated<T> {
@@ -44,7 +44,7 @@ impl<T> StructurallyValidated<T> {
         &self.intent
     }
 
-    pub const fn commitment(&self) -> SpendCommitment {
+    pub const fn commitment(&self) -> SpendIntentCommitment {
         self.commitment
     }
 
@@ -71,7 +71,7 @@ pub fn validate_intent<T: ConsensusIntent>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizationValidated<T> {
     intent: T,
-    commitment: SpendCommitment,
+    commitment: SpendIntentCommitment,
 }
 
 impl<T> AuthorizationValidated<T> {
@@ -79,7 +79,7 @@ impl<T> AuthorizationValidated<T> {
         &self.intent
     }
 
-    pub const fn commitment(&self) -> SpendCommitment {
+    pub const fn commitment(&self) -> SpendIntentCommitment {
         self.commitment
     }
 }
@@ -116,7 +116,7 @@ pub struct CoinInputState {
 }
 
 pub trait TransactionStateView {
-    fn coin(&self, id: XPQ) -> Option<CoinInputState>;
+    fn coin(&self, id: CoinShare) -> Option<CoinInputState>;
 
     fn asset_share(&self, _id: Share) -> Option<AssetShare> {
         None
@@ -306,7 +306,9 @@ fn count_inputs(len: usize) -> Result<u64, TransactionConsensusError> {
     u64::try_from(len).map_err(|_| TransactionConsensusError::Burn(BurnError::WeightOverflow))
 }
 
-fn coin_parts(intent: &SpendIntent) -> Result<(&[XPQ], &[CoinOutput]), TransactionConsensusError> {
+fn coin_parts(
+    intent: &SpendIntent,
+) -> Result<(&[CoinShare], &[CoinOutput]), TransactionConsensusError> {
     intent.coin_parts().ok_or(TransactionConsensusError::Intent(
         IntentError::InvalidAssetCall,
     ))
@@ -338,7 +340,7 @@ fn prepare_asset_intent(
         .validate_structure()
         .map_err(TransactionConsensusError::Asset)?;
 
-    let commitment = SpendCommitment::from_bytes(
+    let commitment = SpendIntentCommitment::from_bytes(
         authorized
             .intent
             .semantic_commitment(chain.genesis_hash)
@@ -367,7 +369,7 @@ fn prepare_spend_intent(
 }
 
 fn validate_coin_inputs(
-    inputs: &[XPQ],
+    inputs: &[CoinShare],
     outputs: &[CoinOutput],
     signer: Address,
     state: &impl TransactionStateView,
@@ -427,7 +429,7 @@ fn validate_share_ownership(
 }
 
 fn ensure_unique_coin_ids(
-    ids: impl IntoIterator<Item = XPQ>,
+    ids: impl IntoIterator<Item = CoinShare>,
 ) -> Result<(), TransactionConsensusError> {
     let mut unique = BTreeSet::new();
 
@@ -477,7 +479,7 @@ impl fmt::Display for TransactionConsensusError {
             Self::ValueMismatch => {
                 formatter.write_str("transaction outputs exceed canonical input value")
             }
-            Self::Asset(error) => write!(formatter, "invalid native asset transaction: {error}"),
+            Self::Asset(error) => write!(formatter, "invalid monetary asset transaction: {error}"),
             Self::Burn(error) => write!(formatter, "invalid protocol burn: {error}"),
         }
     }
@@ -498,7 +500,7 @@ mod p3e_authorization_gate_tests {
     use crypto::{AccountSignatureScheme, HASH_SIZE, SigningSeed, address_from_public_key};
 
     use crate::{
-        native::{
+        monetary::{
             asset::{AssetOutput, Contract, Share, Unit},
             coin::{CoinOutput, Zeno},
         },
@@ -528,7 +530,7 @@ mod p3e_authorization_gate_tests {
 
         SpendIntent::coin(
             owner,
-            vec![XPQ::from_bytes([input_tag; HASH_SIZE])],
+            vec![CoinShare::from_bytes([input_tag; HASH16_SIZE])],
             vec![CoinOutput::new(owner, Zeno::from_zeno(amount))],
         )
         .expect("valid coin fixture")
@@ -544,8 +546,8 @@ mod p3e_authorization_gate_tests {
 
         SpendIntent::asset(
             owner,
-            Contract::from_bytes([asset_tag; HASH_SIZE]),
-            vec![Share::from_bytes([share_tag; HASH_SIZE])],
+            Contract::from_bytes([asset_tag; HASH16_SIZE]),
+            vec![Share::from_bytes([share_tag; HASH16_SIZE])],
             vec![AssetOutput::new(owner, Unit::from_units(amount))],
         )
         .expect("valid asset-spend fixture")

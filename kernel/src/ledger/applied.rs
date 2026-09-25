@@ -11,11 +11,11 @@ use crate::{
         AssetRecord, AssetRollbackJournal, AssetState, CoinUtxo, LedgerState, SpendRollbackJournal,
         StateError, StateRollbackJournal, utxo,
     },
-    native::{
+    monetary::{
         asset::{AssetError, AssetOutput, AssetShare, Contract, Metadata, Share, Unit},
-        coin::{XPQ, Zeno},
+        coin::{CoinShare, Zeno},
     },
-    transaction::{AssetInstruction, AssetIntent, SpendCommitment, SpendIntent},
+    transaction::{AssetInstruction, AssetIntent, SpendIntentCommitment, SpendIntent},
 };
 
 //
@@ -111,7 +111,7 @@ impl LedgerState {
     fn apply_onchain_spend_with_commitment(
         &mut self,
         intent: &SpendIntent,
-        commitment: SpendCommitment,
+        commitment: SpendIntentCommitment,
         block_miner: Address,
     ) -> Result<SpendRollbackJournal, StateError> {
         let mut journal = SpendRollbackJournal::default();
@@ -139,7 +139,7 @@ impl LedgerState {
                 .ok_or(StateError::InvalidTransaction)?;
 
             //
-            // Consume existing XPQ objects.
+            // Consume existing CoinShare objects.
             //
             for id in inputs {
                 let coin = self.utxos.consume_coin(id)?;
@@ -147,7 +147,7 @@ impl LedgerState {
             }
 
             //
-            // Create new XPQ objects.
+            // Create new CoinShare objects.
             //
             for (index, output) in outputs.iter().enumerate() {
                 let id = coin_output_id(commitment, index)?;
@@ -221,12 +221,8 @@ impl AssetState {
                 mint_authority,
                 nonce,
             } => {
-                let metadata = Metadata::new(
-                    name.clone(),
-                    *max_supply,
-                    call.signer,
-                    *mint_authority,
-                )?;
+                let metadata =
+                    Metadata::new(name.clone(), *max_supply, call.signer, *mint_authority)?;
 
                 let asset = Contract::derive(&metadata, *nonce)?;
 
@@ -420,12 +416,8 @@ impl AssetState {
                 nonce,
                 ..
             } => {
-                let metadata = Metadata::new(
-                    name.clone(),
-                    *max_supply,
-                    call.signer,
-                    *mint_authority,
-                )?;
+                let metadata =
+                    Metadata::new(name.clone(), *max_supply, call.signer, *mint_authority)?;
 
                 let id = Contract::derive(&metadata, *nonce)?;
 
@@ -639,8 +631,8 @@ fn output_index(index: usize) -> Result<u32, StateError> {
     u32::try_from(index).map_err(|_| StateError::OutputIndexOverflow)
 }
 
-fn coin_output_id(commitment: SpendCommitment, index: usize) -> Result<XPQ, StateError> {
-    Ok(XPQ::from_output(
+fn coin_output_id(commitment: SpendIntentCommitment, index: usize) -> Result<CoinShare, StateError> {
+    Ok(CoinShare::from_output(
         commitment.as_bytes(),
         output_index(index)?,
     ))
@@ -833,7 +825,7 @@ mod tests {
 #[cfg(test)]
 mod invariant_tests {
     use super::*;
-    use crate::native::coin::CoinOutput;
+    use crate::monetary::coin::CoinOutput;
 
     const GENESIS_HASH: [u8; 32] = [0x33; 32];
 
@@ -1097,10 +1089,10 @@ mod invariant_tests {
     }
 
     #[test]
-    fn xpq_overspend_is_rejected_without_consuming_inputs() {
+    fn CoinShare_overspend_is_rejected_without_consuming_inputs() {
         let sender = test_address(1);
         let recipient = test_address(2);
-        let input = XPQ::from_bytes([0x11; HASH_SIZE]);
+        let input = CoinShare::from_bytes([0x11; HASH16_SIZE]);
 
         let mut ledger = LedgerState::default();
         ledger
@@ -1125,7 +1117,7 @@ mod invariant_tests {
 
         let result = ledger.apply_onchain_spend_with_commitment(
             &intent,
-            SpendCommitment::from_bytes([0x77; HASH_SIZE]),
+            SpendIntentCommitment::from_bytes([0x77; HASH16_SIZE]),
             test_address(9),
         );
 
@@ -1134,11 +1126,11 @@ mod invariant_tests {
     }
 
     #[test]
-    fn xpq_input_minus_outputs_is_exact_protocol_burn_and_rollback_is_exact() {
+    fn CoinShare_input_minus_outputs_is_exact_protocol_burn_and_rollback_is_exact() {
         let sender = test_address(1);
         let recipient = test_address(2);
-        let input = XPQ::from_bytes([0x22; HASH_SIZE]);
-        let commitment = SpendCommitment::from_bytes([0x88; HASH_SIZE]);
+        let input = CoinShare::from_bytes([0x22; HASH16_SIZE]);
+        let commitment = SpendIntentCommitment::from_bytes([0x88; HASH16_SIZE]);
 
         let mut ledger = LedgerState::default();
         ledger
@@ -1168,8 +1160,11 @@ mod invariant_tests {
         assert_eq!(journal.burned, Zeno::from_zeno(3));
         assert!(ledger.utxos.coin(&input).is_none());
 
-        let output = XPQ::from_output(commitment.as_bytes(), 0);
-        let created = ledger.utxos.coin(&output).expect("created XPQ output");
+        let output = CoinShare::from_output(commitment.as_bytes(), 0);
+        let created = ledger
+            .utxos
+            .coin(&output)
+            .expect("created CoinShare output");
         assert_eq!(created.amount, Zeno::from_zeno(7));
         assert_eq!(created.owner, recipient);
 

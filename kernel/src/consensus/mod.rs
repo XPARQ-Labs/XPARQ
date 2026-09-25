@@ -24,6 +24,6 @@ pub use policy::*;
 pub use pow::*;
 pub use transaction::*;
 
-pub use crate::native::coin::{DECIMALS, XPQ, Zeno};
+pub use crate::monetary::coin::{DECIMALS, Zeno};
 
 pub use target::{PoWTarget, hash_meets_target};

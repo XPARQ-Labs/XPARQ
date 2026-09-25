@@ -6,4 +6,4 @@ pub use asset::{
     checked_asset_entry_weight, ensure_nonzero_asset_amount, ensure_unique_asset_inputs,
 };
 
-pub use coin::{CoinOutput, DECIMALS, XPARQCoin, XPQ, Zeno};
+pub use coin::{CoinContract, CoinOutput, CoinShare, DECIMALS, Zeno};

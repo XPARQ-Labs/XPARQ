@@ -1,6 +1,6 @@
 use super::cli::format_asset_amount;
 use super::*;
-use kernel::native::asset::ASSET_DECIMALS;
+use kernel::monetary::asset::ASSET_DECIMALS;
 
 pub(super) fn print_balance(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);

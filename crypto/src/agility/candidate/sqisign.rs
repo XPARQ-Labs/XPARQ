@@ -1,16 +1,10 @@
-//! SQIsign Level 5 replacement for the core signature API.
-//!
-//! This module is selected only by `sqisign-blockchain-test`. Its wire format
-//! is deliberately incompatible with the default ML-DSA-44 chain.
-
-use crate::error::CryptoError;
 use borsh::{BorshDeserialize, BorshSerialize};
 use chacha20::ChaCha12Rng;
 
 use rand_10::{SeedableRng, rand_core::UnwrapErr, rngs::SysRng};
 
 use serde::{
-    Deserialize, Serialize, Serializer,
+    Deserialize, Deserializer, Serialize, Serializer,
     de::{Error as DeError, Visitor},
 };
 
@@ -28,6 +22,8 @@ use std::{
 };
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+use crate::error::CryptoError;
 
 type XparqSigningKey = SqisignSigningKey<Level5>;
 type XparqVerifyingKey = SqisignPublicKey<Level5>;

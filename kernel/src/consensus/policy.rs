@@ -8,7 +8,7 @@ use crate::{
     blockchain::Block,
     common::Height,
     consensus::PoWTarget,
-    native::coin::{CoinOutput, Zeno},
+    monetary::coin::{CoinOutput, Zeno},
 };
 
 use crypto::{ADDRESS_SIZE, Address, HASH_SIZE, Hash, HashDomain, canonical_bytes, domain};
@@ -285,7 +285,7 @@ pub fn expected_emission_for_height(height: Height) -> Zeno {
 }
 
 pub const STATE_BURN_ALGORITHM: &str = "xparq-canonical-archival-and-net-coin-state-growth-burn";
-pub const STATE_BURN_RATE_ZENO_PER_WEIGHT: u64 = 1;
+pub const STATE_BURN_RATE_ZENO_PER_WEIGHT: u64 = 8;
 
 const BORSH_OPTION_TAG_BYTES: usize = 1;
 const BORSH_VEC_LENGTH_BYTES: usize = core::mem::size_of::<u32>();
@@ -301,7 +301,7 @@ pub const EMPTY_BLOCK_ARCHIVAL_BYTES: u64 = (3 * HASH_SIZE
 
 /// Canonical coin UTXO: XPQ key + amount + owner.
 pub const COIN_UTXO_STATE_WEIGHT: u64 =
-    (crate::native::coin::XPARQCoin::SIZE + core::mem::size_of::<u64>() + ADDRESS_SIZE) as u64;
+    (crate::monetary::coin::CoinShare::SIZE + core::mem::size_of::<u64>() + ADDRESS_SIZE) as u64;
 
 pub const EMISSION_UTXO_STATE_GROWTH_BURN: Zeno =
     Zeno::from_zeno(COIN_UTXO_STATE_WEIGHT * STATE_BURN_RATE_ZENO_PER_WEIGHT);
