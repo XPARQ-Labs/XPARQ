@@ -3,71 +3,75 @@ use crypto::{POW_HASH_SIZE, PoWHash};
 const COMPACT_MANTISSA_MASK: u32 = 0x007f_ffff;
 const COMPACT_SIGN_MASK: u32 = 0x0080_0000;
 
+/// Canonical 256-bit proof-of-work target.
+///
+/// The target is stored in big-endian byte order.
+///
+/// A proof-of-work hash is valid when:
+///
+/// ```text
+/// hash <= target
+/// ```
+///
+/// Therefore:
+///
+/// - smaller target = harder PoW
+/// - larger target  = easier PoW
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PoWTarget([u8; POW_HASH_SIZE]);
 
 impl PoWTarget {
-    pub const fn new(bytes: [u8; POW_HASH_SIZE]) -> Self {
-        Self(bytes)
+    /// Constructs a target from canonical big-endian bytes.
+    ///
+    /// A zero target is rejected because it would make proof-of-work
+    /// effectively impossible.
+    pub fn from_bytes(bytes: [u8; POW_HASH_SIZE]) -> Option<Self> {
+        let target = Self(bytes);
+
+        if target.is_zero() {
+            None
+        } else {
+            Some(target)
+        }
     }
 
+    /// Returns the canonical big-endian target bytes.
     pub const fn as_bytes(&self) -> &[u8; POW_HASH_SIZE] {
         &self.0
     }
 
-    pub fn is_zero(&self) -> bool {
+    /// Returns true when this target is zero.
+    fn is_zero(&self) -> bool {
         self.0.iter().all(|byte| *byte == 0)
     }
 
     /// Returns true when the PoW hash is numerically less than or equal
     /// to this target.
     ///
-    /// Both values use canonical big-endian byte ordering.
+    /// Both values use canonical big-endian byte ordering, therefore
+    /// lexicographic byte comparison is equivalent to numeric comparison.
     pub fn meets(self, hash: &PoWHash) -> bool {
         hash.as_bytes() <= self.as_bytes()
     }
 
-    /// Compatibility conversion for the old XPARQ leading-zero difficulty.
-    ///
-    /// difficulty 1 -> 0x7fff...
-    /// difficulty 2 -> 0x3fff...
-    /// difficulty 8 -> 0x00ff...
-    ///
-    /// Remove this after all legacy difficulty-based consensus code
-    /// has been migrated to compact targets.
-    pub fn from_leading_zero_bits(difficulty: u32) -> Option<Self> {
-        let total_bits = (POW_HASH_SIZE * 8) as u32;
-
-        if difficulty > total_bits {
-            return None;
-        }
-
-        let mut bytes = [0xff_u8; POW_HASH_SIZE];
-
-        let full_zero_bytes = (difficulty / 8) as usize;
-        let remaining_zero_bits = (difficulty % 8) as u8;
-
-        for byte in bytes.iter_mut().take(full_zero_bytes) {
-            *byte = 0;
-        }
-
-        if remaining_zero_bits != 0 {
-            let byte = bytes.get_mut(full_zero_bytes)?;
-            *byte = 0xff >> remaining_zero_bits;
-        }
-
-        Some(Self(bytes))
-    }
-
     /// Scales this 256-bit target by a small rational value.
+    ///
+    /// This operation is used by XPARQ's weight-based difficulty policy.
     ///
     /// Examples:
     ///
+    /// ```text
     /// 95 / 100  -> smaller target -> harder PoW
+    /// 100 / 100 -> unchanged
     /// 105 / 100 -> larger target  -> easier PoW
+    /// ```
     ///
-    /// A 33-byte intermediate is used so multiplication can temporarily
-    /// exceed 256 bits before division.
+    /// XPARQ intentionally limits numerator and denominator to 8-bit
+    /// values because the consensus policy uses small percentage-based
+    /// adjustments rather than timestamp-based timespan ratios.
+    ///
+    /// A 33-byte intermediate is sufficient because multiplying a
+    /// 256-bit target by an 8-bit value may require at most 264 bits.
     pub fn scale_ratio(self, numerator: u32, denominator: u32) -> Option<Self> {
         if numerator == 0
             || denominator == 0
@@ -82,10 +86,17 @@ impl PoWTarget {
 
         // Multiply the 256-bit big-endian target by numerator.
         for index in (0..POW_HASH_SIZE).rev() {
-            let product = u32::from(self.0[index]) * numerator + carry;
+            let product = u32::from(self.0[index])
+                .checked_mul(numerator)?
+                .checked_add(carry)?;
 
             wide[index + 1] = (product & 0xff) as u8;
             carry = product >> 8;
+        }
+
+        // Because numerator <= 255, the remaining carry fits in one byte.
+        if carry > u8::MAX as u32 {
+            return None;
         }
 
         wide[0] = carry as u8;
@@ -100,7 +111,7 @@ impl PoWTarget {
             remainder = value % denominator;
         }
 
-        // Final result must fit into 256 bits.
+        // Final result must fit back into 256 bits.
         if wide[0] != 0 {
             return None;
         }
@@ -108,8 +119,9 @@ impl PoWTarget {
         let mut bytes = [0_u8; POW_HASH_SIZE];
         bytes.copy_from_slice(&wide[1..]);
 
-        // A zero target would make PoW impossible.
-        // Clamp to the smallest non-zero target instead.
+        // Integer division could theoretically reduce a very small target
+        // to zero. Consensus must never use a zero target, so saturate at
+        // the smallest valid non-zero target.
         if bytes.iter().all(|byte| *byte == 0) {
             bytes[POW_HASH_SIZE - 1] = 1;
         }
@@ -121,13 +133,17 @@ impl PoWTarget {
     ///
     /// Layout:
     ///
-    /// [ exponent: 8 bits ][ mantissa: 23 bits ]
+    /// ```text
+    /// [ exponent: 8 bits ][ sign: 1 bit ][ mantissa: 23 bits ]
+    /// ```
     ///
-    /// The compact sign bit is rejected because PoW targets are unsigned.
+    /// XPARQ PoW targets are unsigned, therefore the compact sign bit
+    /// is rejected.
     pub fn from_compact(compact: u32) -> Option<Self> {
         let size = (compact >> 24) as usize;
         let mantissa = compact & COMPACT_MANTISSA_MASK;
 
+        // Negative compact targets are invalid.
         if compact & COMPACT_SIGN_MASK != 0 {
             return None;
         }
@@ -138,7 +154,9 @@ impl PoWTarget {
 
         // Bitcoin-style 256-bit overflow limits.
         let overflow =
-            size > 34 || (mantissa > 0xff && size > 33) || (mantissa > 0xffff && size > 32);
+            size > 34
+                || (mantissa > 0xff && size > 33)
+                || (mantissa > 0xffff && size > 32);
 
         if overflow {
             return None;
@@ -153,7 +171,8 @@ impl PoWTarget {
             for index in 0..size {
                 let value_shift = 8 * (size - 1 - index);
 
-                bytes[POW_HASH_SIZE - size + index] = ((value >> value_shift) & 0xff) as u8;
+                bytes[POW_HASH_SIZE - size + index] =
+                    ((value >> value_shift) & 0xff) as u8;
             }
         } else {
             let mantissa_bytes = [
@@ -167,9 +186,9 @@ impl PoWTarget {
             for (offset, byte) in mantissa_bytes.into_iter().enumerate() {
                 let index = base + offset as isize;
 
+                // Compact targets with exponent 33 or 34 may begin outside
+                // the 256-bit buffer. Those bytes must be zero.
                 if index < 0 {
-                    // Compact values with exponent 33/34 may begin outside
-                    // the 256-bit buffer, but those bytes must be zero.
                     if byte != 0 {
                         return None;
                     }
@@ -185,17 +204,19 @@ impl PoWTarget {
             }
         }
 
-        let target = Self(bytes);
-
-        if target.is_zero() { None } else { Some(target) }
+        Self::from_bytes(bytes)
     }
 
     /// Encodes this 256-bit target into Bitcoin-style compact form.
     ///
     /// Compact representation stores only the most significant 23 bits,
-    /// so arbitrary targets may lose low-order precision.
+    /// therefore arbitrary targets may lose low-order precision.
     pub fn to_compact(self) -> u32 {
-        let Some(first_nonzero) = self.0.iter().position(|byte| *byte != 0) else {
+        let Some(first_nonzero) =
+            self.0.iter().position(|byte| *byte != 0)
+        else {
+            // Normally unreachable because zero targets cannot be
+            // constructed through the public constructors.
             return 0;
         };
 
@@ -229,8 +250,10 @@ impl PoWTarget {
             (first << 16) | (second << 8) | third
         };
 
-        // Bit 23 is the compact sign bit.
-        // Shift right one byte if the mantissa would set it.
+        // Bit 23 is reserved as the compact sign bit.
+        //
+        // If the mantissa would set it, shift the mantissa right by one
+        // byte and increase the exponent.
         if mantissa & COMPACT_SIGN_MASK != 0 {
             mantissa >>= 8;
             size += 1;
@@ -240,6 +263,8 @@ impl PoWTarget {
     }
 }
 
+/// Returns true when `hash` satisfies `target`.
+#[inline]
 pub fn hash_meets_target(hash: &PoWHash, target: PoWTarget) -> bool {
     target.meets(hash)
 }
@@ -252,15 +277,21 @@ mod tests {
     fn bitcoin_genesis_compact_target_roundtrip() {
         let bits = 0x1d00_ffff;
 
-        let target = PoWTarget::from_compact(bits).expect("valid compact target");
+        let target =
+            PoWTarget::from_compact(bits).expect("valid compact target");
 
         assert_eq!(target.to_compact(), bits);
 
         assert_eq!(
             target.as_bytes(),
             &[
-                0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                0xff, 0xff, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
                 0x00, 0x00, 0x00, 0x00,
             ]
         );
@@ -270,33 +301,47 @@ mod tests {
     fn xparq_pow_limit_roundtrip() {
         let bits = 0x207f_ffff;
 
-        let target = PoWTarget::from_compact(bits).expect("valid XPARQ PoW limit");
+        let target =
+            PoWTarget::from_compact(bits).expect("valid XPARQ PoW limit");
 
         assert_eq!(target.to_compact(), bits);
     }
 
     #[test]
     fn rejects_negative_compact_target() {
-        assert!(PoWTarget::from_compact(0x1d80_ffff).is_none());
+        assert!(
+            PoWTarget::from_compact(0x1d80_ffff).is_none()
+        );
     }
 
     #[test]
     fn rejects_zero_compact_target() {
-        assert!(PoWTarget::from_compact(0).is_none());
+        assert!(
+            PoWTarget::from_compact(0).is_none()
+        );
     }
 
     #[test]
-    fn leading_zero_compatibility() {
-        let target = PoWTarget::from_leading_zero_bits(8).expect("valid difficulty");
+    fn rejects_zero_raw_target() {
+        assert!(
+            PoWTarget::from_bytes([0_u8; POW_HASH_SIZE]).is_none()
+        );
+    }
 
-        assert_eq!(target.as_bytes()[0], 0x00);
+    #[test]
+    fn accepts_smallest_nonzero_raw_target() {
+        let mut bytes = [0_u8; POW_HASH_SIZE];
+        bytes[POW_HASH_SIZE - 1] = 1;
 
-        assert!(target.as_bytes()[1..].iter().all(|byte| *byte == 0xff));
+        assert!(
+            PoWTarget::from_bytes(bytes).is_some()
+        );
     }
 
     #[test]
     fn target_scaling_harder_reduces_target() {
-        let target = PoWTarget::from_compact(0x207f_ffff).expect("valid target");
+        let target =
+            PoWTarget::from_compact(0x207f_ffff).expect("valid target");
 
         let harder = target
             .scale_ratio(95, 100)
@@ -307,7 +352,8 @@ mod tests {
 
     #[test]
     fn target_scaling_easier_increases_target() {
-        let target = PoWTarget::from_compact(0x2007_ffff).expect("valid target");
+        let target =
+            PoWTarget::from_compact(0x2007_ffff).expect("valid target");
 
         let easier = target
             .scale_ratio(105, 100)
@@ -317,13 +363,68 @@ mod tests {
     }
 
     #[test]
-    fn target_scaling_keep_preserves_target() {
-        let target = PoWTarget::from_compact(0x2007_ffff).expect("valid target");
+    fn target_scaling_identity_preserves_target() {
+        let target =
+            PoWTarget::from_compact(0x2007_ffff).expect("valid target");
 
         let same = target
             .scale_ratio(100, 100)
             .expect("target scaling succeeds");
 
         assert_eq!(same, target);
+    }
+
+    #[test]
+    fn target_scaling_rejects_large_ratio_values() {
+        let target =
+            PoWTarget::from_compact(0x2007_ffff).expect("valid target");
+
+        assert!(target.scale_ratio(256, 100).is_none());
+        assert!(target.scale_ratio(100, 256).is_none());
+    }
+
+    #[test]
+    fn target_scaling_rejects_zero_ratio_values() {
+        let target =
+            PoWTarget::from_compact(0x2007_ffff).expect("valid target");
+
+        assert!(target.scale_ratio(0, 100).is_none());
+        assert!(target.scale_ratio(100, 0).is_none());
+    }
+
+    #[test]
+    fn minimum_target_never_scales_to_zero() {
+        let mut bytes = [0_u8; POW_HASH_SIZE];
+        bytes[POW_HASH_SIZE - 1] = 1;
+
+        let target =
+            PoWTarget::from_bytes(bytes).expect("valid minimum target");
+
+        let harder = target
+            .scale_ratio(95, 100)
+            .expect("scaling succeeds");
+
+        assert_eq!(harder, target);
+    }
+
+    #[test]
+    fn canonical_compact_targets_roundtrip() {
+        let targets = [
+            0x1d00_ffff,
+            0x207f_ffff,
+            0x2007_ffff,
+            0x1f12_3456,
+        ];
+
+        for bits in targets {
+            let target =
+                PoWTarget::from_compact(bits).expect("valid compact target");
+
+            assert_eq!(
+                target.to_compact(),
+                bits,
+                "compact target {bits:#010x} did not roundtrip"
+            );
+        }
     }
 }
