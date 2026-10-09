@@ -236,20 +236,13 @@ impl PartialEq<PreviousHash> for BlockHash {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HashDomain {
     Transaction,
-    TransactionCommit,
     Operation,
     CoinTransition,
     AssetIntent,
-    Block,
     Header,
-    ChainParams,
     ChainSpec,
     MerkleNode,
     AccountState,
-    AuthorizationProof,
-    StateNode,
-    BlockStateCommitment,
-    XPQState,
     XPARQArtifact,
     ProtocolState,
     PoWSeed,
@@ -266,20 +259,13 @@ impl HashDomain {
     fn tag(self) -> &'static [u8] {
         match self {
             HashDomain::Transaction => b"XPARQ_HASH_TX",
-            HashDomain::TransactionCommit => b"XPARQ_HASH_TX_COMMIT",
             HashDomain::Operation => b"XPARQ_HASH_OPERATION",
             HashDomain::CoinTransition => b"XPARQ_COIN_TRANSITION",
             HashDomain::AssetIntent => b"XPARQ_ASSET_INTENT",
-            HashDomain::Block => b"XPARQ_HASH_BLOCK",
             HashDomain::Header => b"XPARQ_HASH_BLOCK_HEADER",
-            HashDomain::ChainParams => b"XPARQ_HASH_CHAIN_PARAMS",
             HashDomain::ChainSpec => b"XPARQ_HASH_CHAIN_SPEC",
             HashDomain::MerkleNode => b"XPARQ_HASH_MERKLE_NODE",
             HashDomain::AccountState => b"XPARQ_HASH_ACCOUNT_STATE",
-            HashDomain::AuthorizationProof => b"XPARQ_HASH_AUTHORIZATION_PROOF",
-            HashDomain::StateNode => b"XPARQ_HASH_STATE_NODE",
-            HashDomain::BlockStateCommitment => b"XPARQ_HASH_BLOCK_STATE_COMMITMENT",
-            HashDomain::XPQState => b"XPARQ_HASH_XPQ_STATE",
             HashDomain::XPARQArtifact => b"XPARQ_HASH_ARTIFACT",
             HashDomain::ProtocolState => b"XPARQ_HASH_PROTOCOL_STATE",
             HashDomain::PoWSeed => b"XPARQ_POW_SEED",
@@ -311,10 +297,6 @@ pub fn domain(domain: HashDomain, bytes: &[u8]) -> Hash {
     hash.copy_from_slice(&digest);
 
     Hash(hash)
-}
-
-pub fn domain_hash(domain: HashDomain, bytes: &[u8]) -> Hash {
-    self::domain(domain, bytes)
 }
 
 /// Hash canonical serialization with the historical domain/length framing.
@@ -370,6 +352,88 @@ pub fn domain_serialized<T: BorshSerialize>(
 mod streaming_tests {
     use super::*;
     use crate::{CodecError, canonical_bytes, canonical_length};
+    #[test]
+    fn active_domains_keep_frozen_legacy_hashes() {
+        let payload = b"xparq:hash-audit:v1";
+        let vectors = [
+            (
+                HashDomain::Transaction,
+                "25143851ebbbef05db4dc4f4aa129b19ee500011d96f253521b8212a68dcfebc",
+            ),
+            (
+                HashDomain::Operation,
+                "694c0e1a1550af0f98d8a1a8b3c706bc7b377d9a63abb625fe086540dce34c38",
+            ),
+            (
+                HashDomain::CoinTransition,
+                "61b1b2015f4cd044f48af26bc9da55b51a983fb85a6e5af3070d02ddd6f4579d",
+            ),
+            (
+                HashDomain::AssetIntent,
+                "48679f2816860f429c6d7f0270e62c9a25ffac102b3ca9a29a67e4fb52737637",
+            ),
+            (
+                HashDomain::Header,
+                "d37c83d65123e75a55f4abc8f14b4698f9cc2b230a78e6126e68d52ef125c22c",
+            ),
+            (
+                HashDomain::ChainSpec,
+                "6a7310d72c784b0c843f78c875f2f423f48f92fc0fca4e4aeefb59d6ca982f06",
+            ),
+            (
+                HashDomain::MerkleNode,
+                "e300738c188726c052078f354c66269c8b44b8ac7c3d935f1e10854efb099ae8",
+            ),
+            (
+                HashDomain::AccountState,
+                "7030104f0e2fceb1ac4916000ac40afc6909bcfffc28254b3814a77f2e330493",
+            ),
+            (
+                HashDomain::XPARQArtifact,
+                "ca780cc21637463a1064bbb430aea4971535beb8e740920883c8aff2655f06c1",
+            ),
+            (
+                HashDomain::ProtocolState,
+                "9fbc27ae488f89e834bd6220db07b6d88b57309eaa3da76ec3e31c49338ffb09",
+            ),
+            (
+                HashDomain::PoWSeed,
+                "52f581dcaeab2966fc5faed563bb84524bcdd684d0bde9af6f24867b38a29ef9",
+            ),
+            (
+                HashDomain::PoWSalt,
+                "634699460038131b4da162c1aba737f4b857d85f3490a1df907cc34e78117873",
+            ),
+            (
+                HashDomain::ProgramAccount,
+                "1f21b257e6b450cdd1d8e95a93abe3b88c486b987c5fd608956fe3598e1e28ac",
+            ),
+            (
+                HashDomain::Asset,
+                "802aafa7dce85a218ef97d5c2282730d1e641838e84111a630e6b465bcfb422a",
+            ),
+            (
+                HashDomain::Share,
+                "37301b1acdda033234a7ba249976ca2b19c74d2e69d26576c232d3678970083b",
+            ),
+            (
+                HashDomain::Output,
+                "04f3aca6a6f6d176c5ef168ab9b4610ef74c7c40e3359e599a59fd0f09391882",
+            ),
+            (
+                HashDomain::Emission,
+                "e218bc4b9add904bbd70ddf9cefe0ee46a3ef4a79d80e87ea7f0ecc346f9a083",
+            ),
+            (
+                HashDomain::Raw,
+                "7019ed5277524a2e8f8a14bcf338e5b07e29a13be0fb214ed44efce96ecbdeed",
+            ),
+        ];
+        for (context, expected) in vectors {
+            assert_eq!(domain(context, payload), expected.parse::<Hash>().unwrap());
+        }
+    }
+
     #[test]
     fn streaming_matches_original_and_rejects_wrong_lengths() {
         for len in [0, 1, 31, 65535, 65536, 65537, 1_048_576] {

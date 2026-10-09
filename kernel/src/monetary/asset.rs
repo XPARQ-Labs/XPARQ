@@ -21,7 +21,6 @@ pub enum AssetError {
     InvalidMintNonce,
     SupplyOverflow,
     BalanceOverflow,
-    InsufficientBalance,
     Encoding,
 }
 

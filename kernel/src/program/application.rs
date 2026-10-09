@@ -12,7 +12,7 @@ use super::system::{
     },
     coin_program::{CoinHost, TransferError},
 };
-use crate::{ledger::StateError, monetary::coin::CoinShare};
+use crate::{error::StateError, monetary::coin::CoinShare};
 
 /// A host bound to one authenticated asset instruction. Applications cannot
 /// obtain the ledger or substitute another instruction through this interface.
@@ -39,7 +39,7 @@ pub trait ApplicationExecutor: Send + Sync {
 }
 
 #[derive(Clone)]
-pub struct Applications(pub(crate) Arc<dyn ApplicationExecutor>);
+pub struct Applications(Arc<dyn ApplicationExecutor>);
 
 impl Applications {
     pub fn new(executor: impl ApplicationExecutor + 'static) -> Self {

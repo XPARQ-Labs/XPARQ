@@ -27,7 +27,7 @@ use kernel::{
         expected_next_difficulty, new_pow_memory,
     },
     crypto::{
-        ProgramId, BlockHash, PoWMemory, program_id_from_string, canonical_bytes, canonical_decode,
+        BlockHash, PoWMemory, ProgramId, canonical_bytes, canonical_decode, program_id_from_string,
     },
     genesis::{EXPECTED_GENESIS_HASH, chain_spec_hash, genesis_block},
     ledger::Ledger,
@@ -223,7 +223,21 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         None => run_automatic(&[]),
         Some("run") => run_automatic(&args[1..]),
         Some("info") => config::print_network_info(),
-        Some("check") => state::check_database(args.get(1).map(String::as_str)),
+        Some("check") => {
+            let mut path = None;
+            let mut full = false;
+            for argument in &args[1..] {
+                match argument.as_str() {
+                    "--full" => full = true,
+                    value if value.starts_with("--") => {
+                        return Err(format!("unknown check option: {value}"));
+                    }
+                    value if path.is_none() => path = Some(value),
+                    _ => return Err("usage: node check [database] [--full]".into()),
+                }
+            }
+            state::check_database(path, full)
+        }
         Some("submit-block") => state::submit_block(
             args.get(1).map(String::as_str),
             args.get(2).ok_or("missing block hex")?,

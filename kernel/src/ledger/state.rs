@@ -1,6 +1,8 @@
 //! Canonical ledger state and rollback journal types.
 
 use super::utxo::{self, CoinUtxo};
+#[cfg(test)]
+use crate::ledger::utxo::ExecutionContext;
 
 use crate::{
     monetary::coin::{CoinShare, Zeno},
@@ -11,20 +13,36 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::StateRoot;
 use std::sync::{Arc, Mutex};
 
+/// Detached canonical state data; public accessors expose immutable components.
+/// Decoding this type does not install it into a live `Ledger`.
+///
+/// ```compile_fail
+/// use kernel::ledger::LedgerState;
+/// use kernel::monetary::coin::Zeno;
+/// let mut state = LedgerState::default();
+/// state.coin.total_mined = Zeno::from_zeno(100);
+/// ```
+///
+/// ```compile_fail
+/// use kernel::ledger::LedgerState;
+/// use kernel::ledger::utxo::UtxoSet;
+/// let mut state = LedgerState::default();
+/// *state.utxos() = UtxoSet::default();
+/// ```
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct LedgerState {
-    pub utxos: utxo::UtxoSet,
-    pub coin: CoinRecord,
-    pub programs: ProgramRegistry,
-    pub extensions: crate::program::system::script::state::ExtensionState,
+    pub(crate) utxos: utxo::UtxoSet,
+    pub(crate) coin: CoinRecord,
+    pub(crate) programs: ProgramRegistry,
+    pub(crate) extensions: crate::program::system::script::state::ExtensionState,
     /// Derived memoization only; excluded from canonical bytes and equality.
     #[borsh(skip)]
     #[doc(hidden)]
-    pub root_cache: StateRootCache,
+    pub(crate) root_cache: StateRootCache,
 }
 
 #[derive(Clone, Default)]
-pub struct StateRootCache(Arc<Mutex<Option<CachedStateRoot>>>);
+pub(crate) struct StateRootCache(Arc<Mutex<Option<CachedStateRoot>>>);
 
 struct CachedStateRoot {
     // Retained roots force later mutations to detach and prevent pointer reuse.
@@ -47,6 +65,11 @@ impl std::fmt::Debug for StateRootCache {
 }
 
 impl LedgerState {
+    /// Hash this detached state; a root alone is not proof of valid execution.
+    pub fn state_root(&self) -> Result<StateRoot, super::LedgerError> {
+        self.application_state_root()
+    }
+
     pub(crate) fn cached_state_root(&self) -> Option<StateRoot> {
         // Exhaustive destructuring forces future state fields to be considered.
         let Self {
@@ -82,6 +105,16 @@ impl LedgerState {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(cached);
     }
+    pub const fn coin(&self) -> &CoinRecord {
+        &self.coin
+    }
+    pub const fn programs(&self) -> &ProgramRegistry {
+        &self.programs
+    }
+    pub const fn extensions(&self) -> &crate::program::system::script::state::ExtensionState {
+        &self.extensions
+    }
+
     pub const fn utxos(&self) -> &utxo::UtxoSet {
         &self.utxos
     }
@@ -109,9 +142,9 @@ pub struct CoinRollbackJournal {
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct StateRollbackJournal {
-    pub coin: Option<CoinRollbackJournal>,
+    pub(crate) coin: Option<CoinRollbackJournal>,
     pub program: Option<ProgramJournal>,
-    pub extension: Option<crate::program::system::asset_program::state::AssetJournal>,
+    pub extension: Option<crate::ledger::utxo::AssetJournal>,
 }
 
 impl StateRollbackJournal {
@@ -128,7 +161,6 @@ mod extension_commitment_tests {
     use super::*;
     use crate::program::system::asset_program::{
         asset::Unit,
-        state::ExecutionContext,
         type_::{AssetCall, Register},
     };
     use crypto::{ProgramId, StateRoot};
@@ -169,7 +201,7 @@ mod extension_commitment_tests {
             .map(|(&id, &share)| (id, share))
             .collect::<std::collections::BTreeMap<_, _>>();
         shares.values_mut().next().unwrap().amount = Unit::from_units(9);
-        state.extensions.assets = crate::monetary::asset_state::AssetState::try_from_slice(
+        state.extensions.assets = crate::ledger::utxo::AssetState::try_from_slice(
             &borsh::to_vec(&(state.extensions.assets.records(), shares)).unwrap(),
         )
         .unwrap();
@@ -187,10 +219,7 @@ mod root_cache_tests {
     use crate::{
         common::{Height, Owner},
         monetary::asset::{AssetOutput, Unit},
-        program::system::asset_program::{
-            state::ExecutionContext,
-            type_::{AssetCall, Burn, Mint, Register, Transfer},
-        },
+        program::system::asset_program::type_::{AssetCall, Burn, Mint, Register, Transfer},
         program::{DeployProgram, deploy_program, rollback_program},
     };
     use crypto::{HashDomain, ProgramId, canonical_bytes, domain};

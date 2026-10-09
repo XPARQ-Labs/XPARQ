@@ -1,12 +1,13 @@
 use crypto::{HASH_SIZE, ProgramId};
+use kernel::ledger::utxo::AssetState;
 use kernel::{
-    ledger::{CoinUtxo, LedgerError, LedgerState},
+    ledger::{CoinUtxo, LedgerError},
     monetary::coin::{CoinShare, Zeno},
 };
 
 #[test]
 fn coin_utxos_must_equal_recorded_live_supply() {
-    let mut state = LedgerState::default();
+    let mut state = StateFixture::default();
     let id = CoinShare::from_bytes([1; HASH_SIZE]);
     state.coin.total_mined = Zeno::from_zeno(100);
     state.coin.total_burned = Zeno::from_zeno(10);
@@ -31,11 +32,8 @@ fn coin_utxos_must_equal_recorded_live_supply() {
     ));
 }
 // Corrupt serialized fixtures deliberately: production mutation stays private.
-fn asset_fixture() -> LedgerState {
-    use kernel::monetary::{
-        asset::{AssetContract, AssetRecord, AssetShare, Metadata, Share, Unit},
-        asset_state::AssetState,
-    };
+fn asset_fixture() -> StateFixture {
+    use kernel::monetary::asset::{AssetContract, AssetRecord, AssetShare, Metadata, Share, Unit};
     let owner = ProgramId([3; crypto::PROGRAM_ID_SIZE]);
     let metadata = Metadata::new(
         "Guard Test".into(),
@@ -65,7 +63,7 @@ fn asset_fixture() -> LedgerState {
     )]);
     let assets: AssetState =
         borsh::from_slice(&borsh::to_vec(&(records, shares)).unwrap()).unwrap();
-    let mut state = LedgerState::default();
+    let mut state = StateFixture::default();
     state.extensions.assets = assets;
     state
 }
@@ -158,7 +156,7 @@ fn deep_coin_audit_rejects_forged_cache_and_balanced_zero_utxo() {
             amount: Zeno::from_zeno(90),
         },
     )]);
-    let mut state = LedgerState::default();
+    let mut state = StateFixture::default();
     state.coin.total_mined = Zeno::from_zeno(100);
     state.utxos =
         borsh::from_slice(&borsh::to_vec(&(&coins, Zeno::from_zeno(100))).unwrap()).unwrap();
@@ -264,11 +262,32 @@ fn aggregate_overflow_and_impossible_accounting_are_rejected() {
             },
         ),
     ]);
-    state = LedgerState::default();
+    state = StateFixture::default();
     state.utxos =
         borsh::from_slice(&borsh::to_vec(&(coins, Zeno::from_zeno(u64::MAX))).unwrap()).unwrap();
     assert!(matches!(
         state.audit_coin_supply(),
         Err(LedgerError::SupplyOverflow)
     ));
+}
+
+// Deliberately untrusted serialized data for invariant tests, never a live ledger.
+#[derive(Clone, Default, borsh::BorshSerialize)]
+struct StateFixture {
+    utxos: kernel::ledger::utxo::UtxoSet,
+    coin: kernel::ledger::CoinRecord,
+    programs: kernel::program::ProgramRegistry,
+    extensions: kernel::program::system::script::state::ExtensionState,
+}
+
+impl StateFixture {
+    fn decode(&self) -> kernel::ledger::LedgerState {
+        borsh::from_slice(&borsh::to_vec(self).unwrap()).unwrap()
+    }
+    fn validate_supply_invariants(&self) -> Result<(), LedgerError> {
+        self.decode().validate_supply_invariants()
+    }
+    fn audit_coin_supply(&self) -> Result<(), LedgerError> {
+        self.decode().audit_coin_supply()
+    }
 }

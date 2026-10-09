@@ -141,8 +141,8 @@ pub fn fixtures(shares_per_key: usize) -> (Ledger, Vec<SigningSeed>, ChainContex
     let emission = candidate(&ledger, owners[0], vec![]);
     apply_block_with_pow_memory(&mut ledger, emission, &mut memory).unwrap();
     let (input, coin) = ledger
-        .state
-        .utxos
+        .state()
+        .utxos()
         .coins_by_owner(Owner::Program(owners[0]))
         .next()
         .unwrap();
@@ -160,6 +160,6 @@ pub fn fixtures(shares_per_key: usize) -> (Ledger, Vec<SigningSeed>, ChainContex
     );
     let block = candidate(&ledger, miner, vec![funding]);
     apply_block_with_pow_memory(&mut ledger, block, &mut memory).unwrap();
-    ledger.state.audit_coin_supply().unwrap();
+    ledger.state().audit_coin_supply().unwrap();
     (ledger, keys, chain, miner)
 }

@@ -1,10 +1,7 @@
 //! Canonical UTXO ledger state.
 
-pub mod applied;
-#[path = "ledger.rs"]
+mod applied;
 pub mod canonical;
-// Preserve the existing public module path for downstream Rust callers.
-pub use canonical as ledger;
 mod state;
 pub mod utxo;
 

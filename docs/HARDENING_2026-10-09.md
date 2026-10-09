@@ -126,7 +126,8 @@ x86_64 Linux, default compiler CPU target and mainnet features.
 Resolved the 19 initial kernel library warnings and six additional test warnings.
 Kernel Clippy passes for all targets with `-D warnings`, without suppressing those
 kernel warnings. Equivalent code changes preserve frozen encoding checks. The
-public `kernel::ledger::ledger` path is retained as an alias to the canonical module.
+public ledger module path is `kernel::ledger::canonical`; the former
+`kernel::ledger::ledger` alias has been removed.
 
 The [independent-review handoff](INDEPENDENT_SECURITY_REVIEW.md) is prepared for
 a separate reviewer. No independent audit, NIST module validation or formal

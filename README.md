@@ -1,6 +1,6 @@
 # XPARQ
 
-**XPARQ** is an experimental post-quantum Layer 1 blockchain written in Rust.
+**XPARQ** is a post-quantum Layer 1 blockchain written in Rust.
 
 The project is organized around a small set of components:
 
@@ -600,7 +600,7 @@ Run:
 ./target/release/node
 ```
 
-#### Experimental litep2p devnet transport
+#### litep2p devnet transport
 
 Install `protoc` (the Protocol Buffers compiler) before building `litep2p`.
 This transport uses its own protocol and port; legacy TCP peers cannot connect to it.
@@ -628,7 +628,7 @@ logic as the legacy transport. It also relays new blocks and mempool transaction
 Its devnet protocol names are `/xparq/devnet/blocks/2` and
 `/xparq/devnet/announce/2`.
 
-The experimental transport stages block bodies in a resumable redb download cache,
+The litep2p transport stages block bodies in a resumable redb download cache,
 with up to 100,000 verified headers and an 8 GiB logical body budget by default.
 Use `node run --litep2p --sync-staging-mib 16384` to select a 16 GiB budget.
 Canonical branch application and persistence consume bodies as a stream. Request
@@ -732,14 +732,31 @@ Or specify a data directory:
 ./target/release/node check /path/to/xparq-data
 ```
 
+For an imported database or a full historical execution check, bypass snapshots:
+
+```bash
+./target/release/node check /path/to/xparq-data --full
+```
+
 ### Local ledger snapshots
 
-The node writes a ledger snapshot every 1,000 blocks and after a sync that
-applies at least 1,000 blocks. It retains the two newest snapshots. On startup,
-the node verifies a snapshot against the local canonical block log, restores
-ledger state and rollback journals, then replays blocks after the snapshot.
-If no stored snapshot matches, it replays the chain from genesis. New snapshots use version 3. The loader also accepts the legacy version 1
-representation when decoding and chain/schema checks succeed; version 2 is not
+The node writes a ledger snapshot every 1,000 blocks, after a sync that applies
+at least 1,000 blocks, and after startup replay. It retains the two newest
+snapshots. Snapshot and validation checkpoint publication is atomic. The
+checkpoint binds the exact encoded history prefix and snapshot to the genesis,
+chain specification, validation version, height and tip hash.
+
+For its own trusted local database, startup checks that fingerprint, snapshot
+identity, state root, supply, registry and journals without repeating historical
+PoW. Blocks after the snapshot still undergo full admission. Missing or
+incompatible checkpoints require full genesis replay once; successful replay
+publishes a new checkpoint. Recovery snapshot restore retains historical PoW
+verification. This local trust policy does not authenticate a copied database;
+use `check --full` for imported data. Restore logs report stage timings and the
+number of PoW checks. See [restart validation](docs/RESTART_VALIDATION.md).
+
+New snapshots use version 3. Legacy snapshots trigger full replay on production
+startup; version 2 is not
 accepted. A snapshot must match chain identity, checksum and canonical state.
 The canonical block log remains required for startup and reorganization.
 
@@ -961,7 +978,7 @@ XPARQ/
 
 ## Security
 
-XPARQ is experimental software and has not reached a stable production release.
+XPARQ is under active development and has not reached a stable production release.
 
 If you discover a security issue, avoid publishing exploit details before maintainers have had an opportunity to investigate it.
 

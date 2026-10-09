@@ -2,7 +2,6 @@ pub mod asset {
     pub use crate::monetary::asset::*;
 }
 pub mod opcode;
-pub mod state;
 #[path = "type.rs"]
 pub mod type_;
 

@@ -54,7 +54,7 @@ pub(super) fn account_response(
 
     let account_utxos = ledger
         .state()
-        .utxos
+        .utxos()
         .coins_by_owner(Owner::Program(program_id))
         .collect::<Vec<_>>();
 
@@ -103,15 +103,15 @@ pub(super) fn account_response(
     let utxo_snapshot_bytes = kernel::crypto::canonical_bytes(&(program_id, utxo_snapshot_entries))
         .map_err(|error| format!("encode account UTXO snapshot: {error}"))?;
 
-    let utxo_snapshot = kernel::crypto::domain_hash(
+    let utxo_snapshot = kernel::crypto::domain(
         kernel::crypto::HashDomain::AccountState,
         &utxo_snapshot_bytes,
     );
 
-    let record = ledger.state().programs.program(&program_id);
+    let record = ledger.state().programs().program(&program_id);
     let mut owned_asset_shares: Vec<_> = ledger
         .state()
-        .extensions
+        .extensions()
         .assets
         .shares_by_owner(Owner::Program(program_id))
         .collect();
@@ -164,7 +164,7 @@ pub(super) fn balance_response(
 
     for utxo in ledger
         .state()
-        .utxos
+        .utxos()
         .coins_by_owner(Owner::Program(program_id))
     {
         total = total
@@ -228,7 +228,7 @@ pub(super) fn explorer_program_response(
 
     for utxo in ledger
         .state()
-        .utxos
+        .utxos()
         .coins_by_owner(Owner::Program(program_id))
     {
         total = total
@@ -581,15 +581,15 @@ pub(super) fn status_response(
 
         "cumulative_weight": cumulative_weight.to_string(),
 
-        "total_mined": ledger.state().coin.total_mined.as_zeno(),
+        "total_mined": ledger.state().coin().total_mined.as_zeno(),
 
-        "total_burned": ledger.state().coin.total_burned.as_zeno(),
+        "total_burned": ledger.state().coin().total_burned.as_zeno(),
 
         "supply": ledger
 
               .state()
 
-              .coin
+              .coin()
 
               .supply()
 
@@ -793,7 +793,7 @@ fn program_shares(
 
     program_id: ProgramId,
 ) -> Vec<serde_json::Value> {
-    ledger.state().extensions.assets.shares_by_owner_asset(Owner::Program(program_id), asset)
+    ledger.state().extensions().assets.shares_by_owner_asset(Owner::Program(program_id), asset)
 
         .map(|(id, s)| serde_json::json!({"share_id": id.to_string(), "amount": s.amount.to_string(), "owner": asset_owner_response(s.owner)})).collect()
 }
@@ -803,7 +803,7 @@ pub(super) fn program_account_assets(
 
     program_id: ProgramId,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let state = &ledger.state().extensions.assets;
+    let state = &ledger.state().extensions().assets;
 
     let mut result = Vec::new();
 
@@ -839,7 +839,7 @@ pub(super) fn program_asset_response(
 
     let record = ledger
         .state()
-        .extensions
+        .extensions()
         .assets
         .records()
         .get(&asset)
@@ -858,7 +858,7 @@ pub(super) fn program_asset_response(
 
         let total = ledger
             .state()
-            .extensions
+            .extensions()
             .assets
             .shares_by_owner_asset(Owner::Program(program_id), asset)
             .try_fold(
@@ -1073,7 +1073,7 @@ pub(super) fn program_state_response(
     let key = hex::decode(key).map_err(|_| "invalid storage key hex")?;
     let record = ledger
         .state()
-        .programs
+        .programs()
         .program(&id)
         .ok_or("deployed program was not found")?;
     Ok(

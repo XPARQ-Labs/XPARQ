@@ -123,8 +123,8 @@ fn main() {
     let mut count = 1;
     while count < config.state_utxos {
         let (input, coin) = ledger
-            .state
-            .utxos
+            .state()
+            .utxos()
             .coins_by_owner(Owner::Program(owner))
             .max_by_key(|(_, coin)| coin.amount)
             .unwrap();
@@ -143,7 +143,7 @@ fn main() {
         let (_, ms) =
             timed(|| storage::append_block_and_replace_mempool(&database.0, &record, &[]).unwrap());
         writes.push(ms);
-        count = ledger.state.utxos.len();
+        count = ledger.state().utxos().len();
         println!("# fixture: height={}, UTXOs={count}", block.height().0);
     }
     for i in 0..config.blocks {
@@ -157,27 +157,26 @@ fn main() {
             println!("# fixture: additional block {i}/{}", config.blocks);
         }
     }
-    ledger.state.audit_supply_invariants().unwrap();
+    ledger.state().audit_supply_invariants().unwrap();
     drop(memory_buffer);
     memory("fixture complete (includes mining setup)");
     report("history", "storage_append_per_block", &writes);
     let expected_root = ledger.state_root().unwrap();
     let expected_tip = ledger.tip_hash();
-    let state_bytes = canonical_bytes(&ledger.state).unwrap();
+    let state_bytes = canonical_bytes(ledger.state()).unwrap();
     println!(
         "# fixture: tip={}, live_utxos={}, state_bytes={}",
         ledger.tip_height().unwrap().0,
-        ledger.state.utxos.len(),
+        ledger.state().utxos().len(),
         state_bytes.len()
     );
     let mut rows: [Vec<f64>; 9] = std::array::from_fn(|_| Vec::new());
     for sample in 0..=config.samples {
-        let (_, serialize_ms) = timed(|| canonical_bytes(&ledger.state).unwrap());
+        let (_, serialize_ms) = timed(|| canonical_bytes(ledger.state()).unwrap());
         let (hash, hash_ms) =
             timed(|| StateRoot(domain(HashDomain::ProtocolState, &state_bytes).into_bytes()));
         assert_eq!(hash, expected_root);
-        let mut cold = ledger.clone();
-        cold.state.root_cache = Default::default();
+        let cold: kernel::ledger::LedgerState = borsh::from_slice(&state_bytes).unwrap();
         let (root, root_ms) = timed(|| cold.state_root().unwrap());
         assert_eq!(root, expected_root);
         let (snapshot, snapshot_ms) = timed(|| canonical_bytes(&ledger.snapshot()).unwrap());
@@ -213,7 +212,7 @@ fn main() {
         });
         assert_eq!(replay.tip_hash(), expected_tip);
         assert_eq!(replay.state_root().unwrap(), expected_root);
-        replay.state.audit_supply_invariants().unwrap();
+        replay.state().audit_supply_invariants().unwrap();
         drop(buffer);
         drop(reader);
         drop(replay);

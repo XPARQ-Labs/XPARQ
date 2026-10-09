@@ -6,7 +6,7 @@ use crypto::{
 };
 
 use crate::common::ChainContext;
-use crate::program::{CoinTransition, IntentError, ProgramEncodingError};
+use crate::program::{CoinTransition, IntentError};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
@@ -174,17 +174,17 @@ pub enum AuthorizedProgramEnvelope {
 }
 
 impl AuthorizedProgramEnvelope {
-    pub fn program_invocation_id(&self) -> Result<ProgramInvocationId, ProgramEncodingError> {
-        let bytes = canonical_bytes(self).map_err(|_| ProgramEncodingError::Encoding)?;
+    pub fn program_invocation_id(&self) -> Result<ProgramInvocationId, IntentError> {
+        let bytes = canonical_bytes(self).map_err(|_| IntentError::Encoding)?;
 
         Ok(ProgramInvocationId::from_bytes(
             domain(HashDomain::Transaction, &bytes).into_bytes(),
         ))
     }
 
-    pub fn intent_id(&self) -> Result<ProgramIntentId, ProgramEncodingError> {
+    pub fn intent_id(&self) -> Result<ProgramIntentId, IntentError> {
         self.validate_structure()
-            .map_err(|_| ProgramEncodingError::Encoding)?;
+            .map_err(|_| IntentError::Encoding)?;
 
         let bytes = match self {
             Self::Program(tx) => canonical_bytes(&(
@@ -195,14 +195,14 @@ impl AuthorizedProgramEnvelope {
                 &tx.payment,
             )),
         }
-        .map_err(|_| ProgramEncodingError::Encoding)?;
+        .map_err(|_| IntentError::Encoding)?;
 
         Ok(ProgramIntentId::from_bytes(
             domain(HashDomain::Transaction, &bytes).into_bytes(),
         ))
     }
 
-    pub fn id(&self) -> Result<[u8; HASH_SIZE], ProgramEncodingError> {
+    pub fn id(&self) -> Result<[u8; HASH_SIZE], IntentError> {
         Ok(self.program_invocation_id()?.into_bytes())
     }
 

@@ -1,6 +1,6 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crate::program::system::asset_program::state::AssetState;
+use crate::ledger::utxo::AssetState;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ExtensionState {

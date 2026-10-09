@@ -1,9 +1,20 @@
 use super::*;
 use super::{config::*, gossip::*, mempool::*, protocol::*};
 
-pub(super) fn check_database(path: Option<&str>) -> Result<(), String> {
+pub(super) fn check_database(path: Option<&str>, full: bool) -> Result<(), String> {
     let database = database_path(path);
-    let ledger = load_existing(&database)?;
+    let start = std::time::Instant::now();
+    let ledger = if full {
+        replay_from_genesis(&database)?
+    } else {
+        load_existing(&database)?
+    };
+    if full {
+        println!(
+            "database: full replay verified elapsed_ms={:.3}",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     print_status(&ledger, &database);
     println!("database: valid");
     Ok(())
@@ -412,19 +423,37 @@ pub(super) fn update_ledger_cache(path: &Path, mut ledger: Ledger) -> Result<Arc
 pub(super) fn load_existing(path: &Path) -> Result<Ledger, String> {
     match crate::snapshot::load_streamed(path, BODY_CACHE_BYTES, BODY_CACHE_BLOCKS) {
         Ok(Some((ledger, next))) => match replay_body_stream(path, ledger, next) {
-            Ok(ledger) => return Ok(ledger),
+            Ok(ledger) => {
+                if ledger.tip_height().is_some_and(|height| height.0 >= next) {
+                    if let Err(error) = crate::snapshot::write(path, &ledger) {
+                        eprintln!("node: replayed restart checkpoint write failed: {error}");
+                    }
+                }
+                return Ok(ledger);
+            }
             Err(error) => eprintln!("node: snapshot replay failed, using full replay: {error}"),
         },
         Ok(None) => {}
         Err(error) => eprintln!("node: snapshot ignored, using full replay: {error}"),
     }
+    replay_from_genesis(path)
+}
+
+fn replay_from_genesis(path: &Path) -> Result<Ledger, String> {
     let mut reader = crate::storage::CanonicalBodyReader::new(path)?;
     let genesis = decode_block(&reader.next().ok_or("database has no genesis block")??)
         .map_err(|error| format!("decode stored genesis: {error}"))?;
     let mut ledger = Ledger::new().with_applications(extension::SystemApplications);
     kernel::consensus::apply_genesis(&mut ledger, genesis, EXPECTED_GENESIS_HASH)
         .map_err(|error| format!("invalid stored genesis: {error}"))?;
-    replay_body_reader(path, ledger, reader)
+    let ledger = replay_body_reader(path, ledger, reader)?;
+    // A full replay admits every transition under the current rules. Publish
+    // its checkpoint even below the periodic snapshot interval, so an older
+    // database needs this expensive migration only once.
+    if let Err(error) = crate::snapshot::write(path, &ledger) {
+        eprintln!("node: validated restart checkpoint write failed: {error}");
+    }
+    Ok(ledger)
 }
 
 fn replay_body_stream(path: &Path, ledger: Ledger, next: u64) -> Result<Ledger, String> {
@@ -473,5 +502,5 @@ pub(super) fn print_status(ledger: &Ledger, database: &Path) {
     println!("genesis: {}", hex::encode(EXPECTED_GENESIS_HASH.0));
     println!("height: {}", height.0);
     println!("tip: {tip}");
-    println!("utxos: {}", ledger.state().utxos.len());
+    println!("utxos: {}", ledger.state().utxos().len());
 }

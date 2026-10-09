@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, time::Instant};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use kernel::{
@@ -35,7 +35,24 @@ struct LegacySnapshotPayload {
     chain_spec_hash: [u8; 32],
     height: Height,
     tip_hash: BlockHash,
-    ledger: Ledger,
+    ledger: LegacyLedgerData,
+}
+
+// Legacy wire data is untrusted; decode it separately from the live Ledger API.
+#[cfg(test)]
+#[derive(BorshSerialize, BorshDeserialize)]
+struct LegacyLedgerData {
+    chain: kernel::blockchain::Chain,
+    state: kernel::ledger::LedgerState,
+    journals: std::collections::BTreeMap<Height, Vec<kernel::ledger::StateRollbackJournal>>,
+    chain_context: Option<kernel::common::ChainContext>,
+}
+
+#[cfg(test)]
+impl LegacyLedgerData {
+    fn from_ledger(ledger: &Ledger) -> Self {
+        canonical_decode(&canonical_bytes(ledger).unwrap()).unwrap()
+    }
 }
 
 pub fn write_if_due(database: &Path, ledger: &Ledger) -> Result<bool, String> {
@@ -83,7 +100,21 @@ pub(crate) fn write(database: &Path, ledger: &Ledger) -> Result<(), String> {
     bytes.extend_from_slice(&payload);
     bytes.extend_from_slice(&checksum.0);
 
-    crate::storage::put_snapshot(database, height.0, &bytes)?;
+    if ledger.state_root().map_err(|error| error.to_string())?
+        != ledger
+            .chain
+            .header(&height)
+            .ok_or("snapshot tip header is missing")?
+            .state_root
+    {
+        return Err("snapshot state root does not match its canonical tip".into());
+    }
+    crate::storage::put_validated_snapshot(
+        database,
+        height.0,
+        &bytes,
+        &ledger.chain.chain_headers(),
+    )?;
     println!(
         "snapshot: saved height={} tip={}",
         height.0,
@@ -116,7 +147,7 @@ pub fn load_streamed(
     max_body_bytes: usize,
     max_body_blocks: usize,
 ) -> Result<Option<(Ledger, u64)>, String> {
-    load_streamed_through(database, max_body_bytes, max_body_blocks, u64::MAX)
+    load_streamed_mode(database, max_body_bytes, max_body_blocks, u64::MAX, true)
 }
 
 /// Recovery may use only local snapshots at or before the common ancestor.
@@ -126,12 +157,30 @@ pub(crate) fn load_streamed_through(
     max_body_blocks: usize,
     maximum_height: u64,
 ) -> Result<Option<(Ledger, u64)>, String> {
+    load_streamed_mode(
+        database,
+        max_body_bytes,
+        max_body_blocks,
+        maximum_height,
+        false,
+    )
+}
+
+fn load_streamed_mode(
+    database: &Path,
+    max_body_bytes: usize,
+    max_body_blocks: usize,
+    maximum_height: u64,
+    allow_checkpoint: bool,
+) -> Result<Option<(Ledger, u64)>, String> {
     let mut errors = Vec::new();
     for (stored_height, bytes) in crate::storage::snapshots_descending(database)? {
         if stored_height > maximum_height {
             continue;
         }
         let attempt = (|| {
+            let total_start = Instant::now();
+            let decode_start = Instant::now();
             if bytes.len() <= CHECKSUM_SIZE {
                 return Err("snapshot is truncated".to_string());
             }
@@ -152,7 +201,32 @@ pub(crate) fn load_streamed_through(
             {
                 return Err("snapshot identity does not match this node or table key".into());
             }
+            let decode_elapsed = decode_start.elapsed();
             let mut reader = crate::storage::CanonicalBodyReader::new(database)?;
+            // The record is read from the same pinned generation as its history.
+            // A malformed/missing/old record simply uses the full PoW path.
+            let checkpoint = if allow_checkpoint {
+                reader
+                    .snapshot_checkpoint(stored_height)
+                    .ok()
+                    .flatten()
+                    .filter(|record| {
+                        record.version == crate::storage::SNAPSHOT_VALIDATION_VERSION
+                            && record.genesis_hash == snapshot.genesis_hash.0
+                            && record.chain_spec_hash == snapshot.chain_spec_hash
+                            && record.height == snapshot.height.0
+                            && record.tip_hash == snapshot.tip_hash.0
+                            && record.snapshot_hash == hash_bytes(&bytes).0
+                    })
+            } else {
+                None
+            };
+            if allow_checkpoint && checkpoint.is_none() {
+                println!("snapshot: validation checkpoint unavailable; full replay required");
+                return Ok(None);
+            }
+            let trusted = checkpoint.is_some();
+            let mut history_digest = [0; 32];
             let mut local_error = None;
             let mut next_height = 0_u64;
             let blocks = std::iter::from_fn(|| {
@@ -163,7 +237,16 @@ pub(crate) fn load_streamed_through(
                     .next()
                     .ok_or_else(|| "snapshot extends beyond local body log".to_string())
                     .and_then(|bytes| bytes)
-                    .and_then(|bytes| decode_snapshot_block(&bytes));
+                    .and_then(|bytes| {
+                        if trusted {
+                            history_digest = crate::storage::advance_history_digest(
+                                history_digest,
+                                next_height,
+                                &bytes,
+                            );
+                        }
+                        decode_snapshot_block(&bytes)
+                    });
                 match result {
                     Ok(block) => {
                         next_height += 1;
@@ -175,18 +258,30 @@ pub(crate) fn load_streamed_through(
                     }
                 }
             });
-            let restored = Ledger::from_snapshot_with_body_cache(
-                snapshot.ledger,
-                blocks,
-                max_body_bytes,
-                max_body_blocks,
-            );
+            let restored = if trusted {
+                Ledger::from_trusted_snapshot_with_body_cache_measured(
+                    snapshot.ledger,
+                    blocks,
+                    max_body_bytes,
+                    max_body_blocks,
+                )
+            } else {
+                Ledger::from_snapshot_with_body_cache_measured(
+                    snapshot.ledger,
+                    blocks,
+                    max_body_bytes,
+                    max_body_blocks,
+                )
+            };
             if let Some(error) = local_error {
                 return Err(error);
             }
-            let ledger = restored
-                .map_err(|error| format!("restore local snapshot: {error}"))?
-                .with_applications(extension::SystemApplications);
+            if checkpoint.is_some_and(|record| record.history_digest != history_digest) {
+                return Err("snapshot validated history digest does not match local bodies".into());
+            }
+            let (ledger, metrics) =
+                restored.map_err(|error| format!("restore local snapshot: {error}"))?;
+            let ledger = ledger.with_applications(extension::SystemApplications);
             if ledger.tip_height() != Some(snapshot.height)
                 || ledger.tip_hash() != Some(snapshot.tip_hash)
                 || ledger
@@ -197,6 +292,23 @@ pub(crate) fn load_streamed_through(
             {
                 return Err("snapshot does not match canonical body history".into());
             }
+            println!(
+                "snapshot: restore mode={} blocks={} pow_checks={} decode_ms={:.3} history_ms={:.3} pow_ms={:.3} supply_ms={:.3} registry_ms={:.3} root_ms={:.3} total_ms={:.3}",
+                if trusted {
+                    "trusted-local"
+                } else {
+                    "verify-pow"
+                },
+                metrics.blocks,
+                metrics.pow_checks,
+                decode_elapsed.as_secs_f64() * 1000.0,
+                metrics.history.as_secs_f64() * 1000.0,
+                metrics.proof_of_work.as_secs_f64() * 1000.0,
+                metrics.supply_audit.as_secs_f64() * 1000.0,
+                metrics.registry.as_secs_f64() * 1000.0,
+                metrics.state_root.as_secs_f64() * 1000.0,
+                total_start.elapsed().as_secs_f64() * 1000.0,
+            );
             Ok(Some((ledger, next_height)))
         })();
         match attempt {
@@ -288,7 +400,28 @@ fn load_bytes(
     let ledger = match (compact, legacy) {
         (Some(snapshot), None) => Ledger::from_snapshot(snapshot, &blocks[..=index])
             .map_err(|error| format!("restore snapshot: {error}"))?,
-        (None, Some(ledger)) => ledger,
+        (None, Some(data)) => {
+            if data.chain.blocks().count() != index + 1
+                || !data
+                    .chain
+                    .blocks()
+                    .zip(&blocks[..=index])
+                    .all(|(saved, stored)| saved == stored)
+                || data.chain_context
+                    != Some(kernel::common::ChainContext::new(
+                        EXPECTED_GENESIS_HASH.into_bytes(),
+                    ))
+            {
+                return Err("legacy snapshot block log does not match the canonical chain".into());
+            }
+            let snapshot: LedgerSnapshot = canonical_decode(
+                &canonical_bytes(&(data.state, data.journals))
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            Ledger::from_snapshot(snapshot, &blocks[..=index])
+                .map_err(|error| format!("restore legacy snapshot: {error}"))?
+        }
         _ => return Err("snapshot format is invalid".into()),
     };
     let ledger = ledger.with_applications(extension::SystemApplications);
@@ -330,6 +463,58 @@ mod tests {
         genesis::genesis_block,
     };
     use std::fs;
+
+    fn write(database: &Path, ledger: &Ledger) -> Result<(), String> {
+        for block in ledger.chain.blocks() {
+            if crate::storage::read_block_at_height(database, block.height().0)?.is_none() {
+                crate::storage::append_block_and_replace_mempool(
+                    database,
+                    &crate::storage::StoredCanonicalBlock {
+                        height: block.height().0,
+                        hash: block.hash().map_err(|error| error.to_string())?.0,
+                        bytes: kernel::codec::block_bytes(block)
+                            .map_err(|error| error.to_string())?,
+                        transactions: vec![],
+                        activities: vec![],
+                    },
+                    &[],
+                )?;
+            }
+        }
+        super::write(database, ledger)
+    }
+
+    #[test]
+    fn uncertified_snapshot_requires_replay_but_recovery_keeps_full_restore() {
+        let directory = test_directory("uncertified");
+        let ledger = kernel::genesis::genesis_ledger()
+            .unwrap()
+            .with_applications(extension::SystemApplications);
+        write(&directory, &ledger).unwrap();
+        let (restored, next) = load_streamed(&directory, usize::MAX, usize::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored, ledger);
+        assert_eq!(next, 1);
+        let bytes = crate::storage::snapshots_descending(&directory)
+            .unwrap()
+            .remove(0)
+            .1;
+        // Overwriting snapshot data clears the validation checkpoint atomically.
+        crate::storage::put_snapshot(&directory, 0, &bytes).unwrap();
+        assert!(
+            load_streamed(&directory, usize::MAX, usize::MAX)
+                .unwrap()
+                .is_none()
+        );
+        let (recovery, next) = load_streamed_through(&directory, usize::MAX, usize::MAX, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovery, ledger);
+        assert_eq!(next, 1);
+        crate::storage::release_cached_database(&directory);
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     fn test_directory(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -386,7 +571,7 @@ mod tests {
             chain_spec_hash: chain_spec_hash().unwrap().0,
             height: Height(0),
             tip_hash: EXPECTED_GENESIS_HASH,
-            ledger: ledger.clone(),
+            ledger: LegacyLedgerData::from_ledger(&ledger),
         };
         let legacy_bytes = canonical_bytes(&legacy).unwrap();
         assert!(compact.len() < legacy_bytes.len() + CHECKSUM_SIZE);
@@ -409,11 +594,37 @@ mod tests {
         let mut canonical = Ledger::new().with_applications(extension::SystemApplications);
         apply_genesis(&mut canonical, genesis.clone(), EXPECTED_GENESIS_HASH).unwrap();
         let canonical_bytes = borsh::to_vec(&canonical).unwrap();
-        let mut altered = canonical.clone();
-        altered.state.coin.total_mined = kernel::monetary::coin::Zeno::from_zeno(1);
-        altered.state.coin.total_burned = kernel::monetary::coin::Zeno::from_zeno(1);
-
-        write(&directory, &altered).unwrap();
+        let (_, journals): (
+            kernel::ledger::LedgerState,
+            std::collections::BTreeMap<Height, Vec<kernel::ledger::StateRollbackJournal>>,
+        ) = borsh::from_slice(&borsh::to_vec(&canonical.snapshot()).unwrap()).unwrap();
+        let state = canonical.state();
+        let forged_state: kernel::ledger::LedgerState = borsh::from_slice(
+            &borsh::to_vec(&(
+                state.utxos(),
+                kernel::ledger::CoinRecord {
+                    total_mined: kernel::monetary::coin::Zeno::from_zeno(1),
+                    total_burned: kernel::monetary::coin::Zeno::from_zeno(1),
+                },
+                state.programs(),
+                state.extensions(),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let payload = SnapshotPayload {
+            magic: SNAPSHOT_MAGIC,
+            version: SNAPSHOT_VERSION,
+            genesis_hash: EXPECTED_GENESIS_HASH,
+            chain_spec_hash: chain_spec_hash().unwrap().0,
+            height: Height(0),
+            tip_hash: EXPECTED_GENESIS_HASH,
+            ledger: borsh::from_slice(&borsh::to_vec(&(forged_state, journals)).unwrap()).unwrap(),
+        };
+        let mut stored = borsh::to_vec(&payload).unwrap();
+        let checksum = hash_bytes(&stored);
+        stored.extend_from_slice(&checksum.0);
+        crate::storage::put_snapshot(&directory, 0, &stored).unwrap();
         assert!(
             load(&directory, &[genesis])
                 .unwrap_err()
@@ -480,7 +691,7 @@ mod tests {
             chain_spec_hash: chain_spec_hash().unwrap().0,
             height: Height(2),
             tip_hash: ledger.tip_hash().unwrap(),
-            ledger: ledger.clone(),
+            ledger: LegacyLedgerData::from_ledger(&ledger),
         };
         let legacy_size = canonical_bytes(&legacy).unwrap().len() + CHECKSUM_SIZE;
         println!(

@@ -23,6 +23,31 @@ const META: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("canonical_blocks");
 const MEMPOOL: TableDefinition<u64, &[u8]> = TableDefinition::new("mempool");
 const SNAPSHOTS: TableDefinition<u64, &[u8]> = TableDefinition::new("ledger_snapshots");
+const SNAPSHOT_CHECKPOINTS: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("snapshot_validation_checkpoints");
+// Bump when admission rules change without a chain-spec hash change.
+pub(crate) const SNAPSHOT_VALIDATION_VERSION: u32 = 1;
+
+#[derive(BorshSerialize, BorshDeserialize)]
+pub(crate) struct SnapshotValidationCheckpoint {
+    pub version: u32,
+    pub genesis_hash: [u8; 32],
+    pub chain_spec_hash: [u8; 32],
+    pub height: u64,
+    pub tip_hash: [u8; 32],
+    pub snapshot_hash: [u8; 32],
+    pub history_digest: [u8; 32],
+}
+
+/// Non-consensus integrity fingerprint over every encoded body in a prefix.
+pub(crate) fn advance_history_digest(previous: [u8; 32], height: u64, body: &[u8]) -> [u8; 32] {
+    let mut frame = Vec::with_capacity(96);
+    frame.extend_from_slice(b"xparq:validated-history:v1");
+    frame.extend_from_slice(&previous);
+    frame.extend_from_slice(&height.to_le_bytes());
+    frame.extend_from_slice(&kernel::crypto::hash_bytes(body).0);
+    kernel::crypto::hash_bytes(&frame).0
+}
 const AUXILIARY: TableDefinition<&str, &[u8]> = TableDefinition::new("auxiliary");
 
 // Rebuildable, non-consensus runtime indexes.
@@ -955,6 +980,9 @@ fn initialize(database: &Database) -> Result<(), String> {
         transaction
             .open_table(SNAPSHOTS)
             .map_err(|error| format!("open snapshots table: {error}"))?;
+        transaction
+            .open_table(SNAPSHOT_CHECKPOINTS)
+            .map_err(|error| format!("open snapshot checkpoints: {error}"))?;
 
         transaction
             .open_table(AUXILIARY)
@@ -1031,6 +1059,25 @@ pub struct CanonicalBodyReader {
 }
 
 impl CanonicalBodyReader {
+    /// Read checkpoint metadata from the same pinned generation as the bodies.
+    pub(crate) fn snapshot_checkpoint(
+        &self,
+        height: u64,
+    ) -> Result<Option<SnapshotValidationCheckpoint>, String> {
+        let table = self
+            .transaction
+            .open_table(SNAPSHOT_CHECKPOINTS)
+            .map_err(|error| format!("open snapshot checkpoint read: {error}"))?;
+        table
+            .get(height)
+            .map_err(|error| format!("read snapshot checkpoint: {error}"))?
+            .map(|bytes| {
+                borsh::from_slice(bytes.value())
+                    .map_err(|error| format!("decode snapshot checkpoint: {error}"))
+            })
+            .transpose()
+    }
+
     pub fn new(directory: &Path) -> Result<Self, String> {
         let database = open(directory)?;
         let transaction = database
@@ -1418,7 +1465,16 @@ where
         snapshots
             .retain(|height, _| common_height.is_some_and(|last| height <= last))
             .map_err(|error| format!("discard snapshots from replaced branch: {error}"))?;
+        let mut checkpoints = transaction
+            .open_table(SNAPSHOT_CHECKPOINTS)
+            .map_err(|error| format!("open reorg snapshot checkpoints: {error}"))?;
+        checkpoints
+            .retain(|height, _| common_height.is_some_and(|last| height <= last))
+            .map_err(|error| format!("discard replaced snapshot checkpoints: {error}"))?;
         if let Some((height, bytes)) = snapshot {
+            checkpoints
+                .remove(height)
+                .map_err(|error| format!("invalidate recovery snapshot checkpoint: {error}"))?;
             if height != tip_height {
                 return Err("recovery snapshot height does not match canonical tip".into());
             }
@@ -1517,17 +1573,97 @@ fn replace_ordered_values(
     Ok(())
 }
 
+#[cfg(test)]
 pub fn put_snapshot(directory: &Path, height: u64, bytes: &[u8]) -> Result<(), String> {
+    put_snapshot_inner(directory, height, bytes, None)
+}
+
+/// Called only for a locally admitted ledger. Header comparison ties the write
+/// transaction's exact body prefix to that ledger before checkpoint publication.
+pub(crate) fn put_validated_snapshot(
+    directory: &Path,
+    height: u64,
+    bytes: &[u8],
+    headers: &[(Height, kernel::blockchain::Header)],
+) -> Result<(), String> {
+    put_snapshot_inner(directory, height, bytes, Some(headers))
+}
+
+fn put_snapshot_inner(
+    directory: &Path,
+    height: u64,
+    bytes: &[u8],
+    headers: Option<&[(Height, kernel::blockchain::Header)]>,
+) -> Result<(), String> {
     let database = open(directory)?;
 
     let transaction = database
         .begin_write()
         .map_err(|error| format!("begin snapshot write: {error}"))?;
 
+    let checkpoint = if let Some(headers) = headers {
+        if u64::try_from(headers.len()).ok() != height.checked_add(1) {
+            return Err("snapshot validation header prefix is incomplete".into());
+        }
+        let bodies = transaction
+            .open_table(BLOCKS)
+            .map_err(|error| format!("open snapshot body prefix: {error}"))?;
+        let mut digest = [0; 32];
+        for (index, (expected_height, header)) in headers.iter().enumerate() {
+            let index = index as u64;
+            if expected_height.0 != index {
+                return Err("snapshot validation header heights are not contiguous".into());
+            }
+            let body = bodies
+                .get(index)
+                .map_err(|error| format!("read snapshot body prefix: {error}"))?
+                .ok_or_else(|| format!("snapshot body prefix missing at height {index}"))?;
+            let decoded = kernel::codec::decode_block(body.value())
+                .map_err(|error| format!("decode snapshot body prefix: {error}"))?;
+            if decoded.height() != *expected_height || &decoded.header != header {
+                return Err(format!("snapshot body prefix changed at height {index}"));
+            }
+            digest = advance_history_digest(digest, index, body.value());
+        }
+        let tip_hash = headers
+            .last()
+            .ok_or("empty snapshot body prefix")?
+            .1
+            .hash()
+            .map_err(|error| error.to_string())?
+            .0;
+        let checkpoint = SnapshotValidationCheckpoint {
+            version: SNAPSHOT_VALIDATION_VERSION,
+            genesis_hash: kernel::genesis::EXPECTED_GENESIS_HASH.0,
+            chain_spec_hash: kernel::genesis::chain_spec_hash()
+                .map_err(|error| error.to_string())?
+                .0,
+            height,
+            tip_hash,
+            snapshot_hash: kernel::crypto::hash_bytes(bytes).0,
+            history_digest: digest,
+        };
+        Some(borsh::to_vec(&checkpoint).map_err(|error| error.to_string())?)
+    } else {
+        None
+    };
+
     {
         let mut table = transaction
             .open_table(SNAPSHOTS)
             .map_err(|error| format!("open snapshots table: {error}"))?;
+
+        let mut checkpoints = transaction
+            .open_table(SNAPSHOT_CHECKPOINTS)
+            .map_err(|error| format!("open snapshot checkpoints write: {error}"))?;
+        checkpoints
+            .remove(height)
+            .map_err(|error| format!("invalidate snapshot checkpoint: {error}"))?;
+        if let Some(checkpoint) = &checkpoint {
+            checkpoints
+                .insert(height, checkpoint.as_slice())
+                .map_err(|error| format!("publish snapshot checkpoint: {error}"))?;
+        }
 
         table
             .insert(height, bytes)
@@ -1547,6 +1683,9 @@ pub fn put_snapshot(directory: &Path, height: u64, bytes: &[u8]) -> Result<(), S
                 table
                     .remove(oldest)
                     .map_err(|error| format!("remove old snapshot: {error}"))?;
+                checkpoints
+                    .remove(oldest)
+                    .map_err(|error| format!("remove old snapshot checkpoint: {error}"))?;
             }
         }
     }
@@ -1770,5 +1909,132 @@ pub(crate) fn release_cached_database(directory: &Path) {
                 *cache = None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod snapshot_checkpoint_tests {
+    use super::*;
+
+    fn fixture(
+        label: &str,
+    ) -> (
+        PathBuf,
+        StoredCanonicalBlock,
+        Vec<(Height, kernel::blockchain::Header)>,
+    ) {
+        let directory = std::env::temp_dir().join(format!(
+            "xparq-checkpoint-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let genesis = kernel::genesis::genesis_block().unwrap();
+        let stored = StoredCanonicalBlock {
+            height: 0,
+            hash: genesis.hash().unwrap().0,
+            bytes: kernel::codec::block_bytes(&genesis).unwrap(),
+            transactions: vec![],
+            activities: vec![],
+        };
+        append_block_and_replace_mempool(&directory, &stored, &[]).unwrap();
+        (directory, stored, vec![(Height(0), genesis.header)])
+    }
+
+    #[test]
+    fn checkpoint_and_snapshot_publish_atomically_and_reject_changed_prefix() {
+        let (directory, stored, headers) = fixture("atomic");
+        put_validated_snapshot(&directory, 0, b"first", &headers).unwrap();
+        let pinned = CanonicalBodyReader::new(&directory).unwrap();
+        let checkpoint = pinned.snapshot_checkpoint(0).unwrap().unwrap();
+        assert_eq!(
+            checkpoint.snapshot_hash,
+            kernel::crypto::hash_bytes(b"first").0
+        );
+        assert_eq!(
+            checkpoint.history_digest,
+            advance_history_digest([0; 32], 0, &stored.bytes)
+        );
+        let mut wrong = headers.clone();
+        wrong[0].1.nonce.0 += 1;
+        assert!(put_validated_snapshot(&directory, 0, b"second", &wrong).is_err());
+        assert_eq!(
+            snapshots_descending(&directory).unwrap(),
+            vec![(0, b"first".to_vec())]
+        );
+        assert_eq!(
+            CanonicalBodyReader::new(&directory)
+                .unwrap()
+                .snapshot_checkpoint(0)
+                .unwrap()
+                .unwrap()
+                .snapshot_hash,
+            checkpoint.snapshot_hash
+        );
+        // A plain snapshot overwrite cannot keep an earlier validation record.
+        put_snapshot(&directory, 0, b"unvalidated").unwrap();
+        assert!(
+            CanonicalBodyReader::new(&directory)
+                .unwrap()
+                .snapshot_checkpoint(0)
+                .unwrap()
+                .is_none()
+        );
+        // A pinned reader still sees the exact old checkpoint/body generation.
+        assert_eq!(
+            pinned
+                .snapshot_checkpoint(0)
+                .unwrap()
+                .unwrap()
+                .snapshot_hash,
+            checkpoint.snapshot_hash
+        );
+        drop(pinned);
+        release_cached_database(&directory);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_snapshot_publication_invalidates_earlier_checkpoint() {
+        let (directory, stored, headers) = fixture("recovery");
+        put_validated_snapshot(&directory, 0, b"first", &headers).unwrap();
+        assert!(
+            replace_blocks_mempool_and_snapshot_stream(
+                &directory,
+                || std::iter::once(Ok(stored.clone())),
+                &[],
+                Some((1, b"wrong height")),
+            )
+            .is_err()
+        );
+        assert!(
+            CanonicalBodyReader::new(&directory)
+                .unwrap()
+                .snapshot_checkpoint(0)
+                .unwrap()
+                .is_some()
+        );
+        replace_blocks_mempool_and_snapshot_stream(
+            &directory,
+            || std::iter::once(Ok(stored.clone())),
+            &[],
+            Some((0, b"recovered")),
+        )
+        .unwrap();
+        assert!(
+            CanonicalBodyReader::new(&directory)
+                .unwrap()
+                .snapshot_checkpoint(0)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            snapshots_descending(&directory).unwrap(),
+            vec![(0, b"recovered".to_vec())]
+        );
+        release_cached_database(&directory);
+        fs::remove_dir_all(directory).unwrap();
     }
 }

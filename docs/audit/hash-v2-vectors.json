@@ -1,0 +1,259 @@
+{
+  "status": "proposal, not activated",
+  "domain_ascii": "XPARQ_HASH",
+  "version": 2,
+  "vectors": [
+    {
+      "context": "Transaction",
+      "context_id": 1,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f48415348020001000000000000000000",
+      "sha3_256": "e3c74abecf1edbaeb9f0833426fe4ffc169ed555eff3f6eedb62a7131c71f5b9"
+    },
+    {
+      "context": "Transaction",
+      "context_id": 1,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000100130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "5651ee5035165e3a44ed20f56cd09694ab05fcf0a053230c7322eb01a62f1182"
+    },
+    {
+      "context": "Operation",
+      "context_id": 2,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f48415348020002000000000000000000",
+      "sha3_256": "2f30a27b01746a1489a879d50e899cb0fac63347eaecf3f0215972ca13ca395a"
+    },
+    {
+      "context": "Operation",
+      "context_id": 2,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000200130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "d70b9d63c69835b6911c8f344c6de3a4dd14abc42c7fdad3f7d67bfd9bdf0260"
+    },
+    {
+      "context": "CoinTransition",
+      "context_id": 3,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f48415348020003000000000000000000",
+      "sha3_256": "fbfd90da920b7be6dbeea74116614193f4d190c7c1b1af56b8e4d888f40e9505"
+    },
+    {
+      "context": "CoinTransition",
+      "context_id": 3,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000300130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "c2576f8daa5be9f240521a094955c3aa3c1f21a3da877222e215e5875576b57d"
+    },
+    {
+      "context": "AssetIntent",
+      "context_id": 4,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f48415348020004000000000000000000",
+      "sha3_256": "8254badb07572405684900560e36cd5dd67dd1e61fa9751cfa59811dbe65aade"
+    },
+    {
+      "context": "AssetIntent",
+      "context_id": 4,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000400130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "b6077759c43837b1282072327eac358c5d5002436e77bfc1f851b21ceb68b5e1"
+    },
+    {
+      "context": "Header",
+      "context_id": 5,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f48415348020005000000000000000000",
+      "sha3_256": "b09b100fd6f667ddc5aab3af3aa08995b553e6d9dd7aea2793c96334bb80c08f"
+    },
+    {
+      "context": "Header",
+      "context_id": 5,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000500130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "45277561c8627302f96c58f150b493d76f714aa40a0d3578f63bbc062b5ee038"
+    },
+    {
+      "context": "ChainSpec",
+      "context_id": 6,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f48415348020006000000000000000000",
+      "sha3_256": "5fbecbb98d52d89de257880c65463c1947b2377bf71a182da6cc15ffa9a70a4a"
+    },
+    {
+      "context": "ChainSpec",
+      "context_id": 6,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000600130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "698ee9ef821b3b17a424c2539a7243008a9a35fdc53f290813edd3becfdfcd96"
+    },
+    {
+      "context": "MerkleNode",
+      "context_id": 7,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f48415348020007000000000000000000",
+      "sha3_256": "76bd2f5373ad5f1988d1199031e7bc59e47868e883bc1b1541f25be80c8fa368"
+    },
+    {
+      "context": "MerkleNode",
+      "context_id": 7,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000700130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "46658c30e3f4c346f0bf42ba23edadefd98af36d7ba2e9272ba84a9bd75ae5f3"
+    },
+    {
+      "context": "AccountState",
+      "context_id": 8,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f48415348020008000000000000000000",
+      "sha3_256": "cec4d841a24aab5365b2f65db23272890a74a1e4dd58ed87279a0ef5768122bb"
+    },
+    {
+      "context": "AccountState",
+      "context_id": 8,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000800130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "16b0dfa706fbab913c722ac4f5d5374163094031ebbc4bfd6e209c932fad4a41"
+    },
+    {
+      "context": "Artifact",
+      "context_id": 9,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f48415348020009000000000000000000",
+      "sha3_256": "7bb7b298d7d51a787b24950db19450f175380f3203c88cef3c6236abe2a82a5b"
+    },
+    {
+      "context": "Artifact",
+      "context_id": 9,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000900130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "9949db251b398aff07d9dc6150a9461006997ec427af6324462efc57da6487e0"
+    },
+    {
+      "context": "ProtocolState",
+      "context_id": 10,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f4841534802000a000000000000000000",
+      "sha3_256": "41d8128ba06162e3bd437a1bbdf4d5ab3264788fb1a97a4300030e257c70d1e1"
+    },
+    {
+      "context": "ProtocolState",
+      "context_id": 10,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000a00130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "6321add0376e6d6e50b38220df877ebabe7d3b2b6cf3a107ed9dbfe7fe78cf2c"
+    },
+    {
+      "context": "PoWSeed",
+      "context_id": 11,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f4841534802000b000000000000000000",
+      "sha3_256": "795a424640e7a60dab7b2c31845a2ef1eb5c0e5956d10e3dd2016bf0c3a01d70"
+    },
+    {
+      "context": "PoWSeed",
+      "context_id": 11,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000b00130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "608094cb0063140cf9d13de5a4768e3828e8050a112b75a3476aa5c62d5dcaa8"
+    },
+    {
+      "context": "PoWSalt",
+      "context_id": 12,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f4841534802000c000000000000000000",
+      "sha3_256": "1547720d43e15f4408b28e90b019ccad288a9c959bf7baf9c2381c6df9ce6341"
+    },
+    {
+      "context": "PoWSalt",
+      "context_id": 12,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000c00130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "f18c5242672d33a38f55b18e4d169aab46172fd1517f201a54a9db98cf529102"
+    },
+    {
+      "context": "ProgramAccount",
+      "context_id": 13,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f4841534802000d000000000000000000",
+      "sha3_256": "9bbcf049ba4b3e1378770914c1ab747492a18aa5cb9a9e6a0aa2de9d965c3c1f"
+    },
+    {
+      "context": "ProgramAccount",
+      "context_id": 13,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000d00130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "618ccfa0cb78b5b472dbcf1691685f9e713f876d76fc29a8c15d5eeddd47ad93"
+    },
+    {
+      "context": "Asset",
+      "context_id": 14,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f4841534802000e000000000000000000",
+      "sha3_256": "c0b352e3b45dd93e11cab851a70ee61b83ffd659be10db7521a2e149ad54fc91"
+    },
+    {
+      "context": "Asset",
+      "context_id": 14,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000e00130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "ce694fcbfe9c6019d74e20f0a80071e1f79294c5d6687e662cea42df14d0164e"
+    },
+    {
+      "context": "Share",
+      "context_id": 15,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f4841534802000f000000000000000000",
+      "sha3_256": "ac28f88149d3799755553b80ff6f47dfe46405d70802a4d3d173244eacad03eb"
+    },
+    {
+      "context": "Share",
+      "context_id": 15,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802000f00130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "ae023bbd98f4b788871480d30f4883f83367df6245418f2fff503f65c0a110d5"
+    },
+    {
+      "context": "Output",
+      "context_id": 16,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f48415348020010000000000000000000",
+      "sha3_256": "1d6bf5cdc06743f1691c6e0a720d44465532db82bc1b52333795dbea51b9cdbd"
+    },
+    {
+      "context": "Output",
+      "context_id": 16,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802001000130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "7ecb2bef55cc95456cf39aaa8eb6e186739aa5c45bcb02f1cf4c0c33934171f2"
+    },
+    {
+      "context": "Emission",
+      "context_id": 17,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f48415348020011000000000000000000",
+      "sha3_256": "37b266fb67902c56015db9c2adf2c7d5c55e9410ca734f85bbc3a810a812a2ec"
+    },
+    {
+      "context": "Emission",
+      "context_id": 17,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802001100130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "f5ae6ec0dac1c4a1e5f3b8f26a24a7cd6719e1b319ffa772b3d0e65df21c2dfa"
+    },
+    {
+      "context": "Raw",
+      "context_id": 18,
+      "payload_hex": "",
+      "framed_input_hex": "58504152515f48415348020012000000000000000000",
+      "sha3_256": "0861be6555654f3da78e5584ce06f0e06a547455bffd3f1b5096500d63e1b88f"
+    },
+    {
+      "context": "Raw",
+      "context_id": 18,
+      "payload_hex": "78706172713a686173682d61756469743a7632",
+      "framed_input_hex": "58504152515f4841534802001200130000000000000078706172713a686173682d61756469743a7632",
+      "sha3_256": "7a163baf127cdda516abeccb7df66f6b2218e9e7b3b9324a39d97b699261bc97"
+    }
+  ]
+}

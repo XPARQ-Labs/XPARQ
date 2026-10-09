@@ -337,24 +337,8 @@ fn failed_reorg_root_check_keeps_persisted_canonical_chain() {
     ));
 
     let original_blocks = crate::storage::read_blocks(&database).unwrap();
-    let mut altered = load_or_initialize_owned(&database).unwrap();
-    let original_tip = altered.tip_hash().unwrap();
-    let (coin_id, coin) = altered.state.utxos.coins().next().expect("emission coin");
-    let mut coin = *coin;
-    coin.owner = kernel::common::Owner::Program(ProgramId([0xa2; kernel::crypto::PROGRAM_ID_SIZE]));
-    // Forge a serialized fixture without exposing ledger mutation APIs.
-    let mut coins: std::collections::BTreeMap<_, _> = altered
-        .state
-        .utxos
-        .coins()
-        .map(|(id, coin)| (id, *coin))
-        .collect();
-    coins.insert(coin_id, coin);
-    altered.state.utxos =
-        borsh::from_slice(&borsh::to_vec(&(coins, altered.state.utxos.total_value())).unwrap())
-            .unwrap();
-    assert!(altered.state.validate_supply_invariants().is_ok());
-    update_ledger_cache(&database, altered).unwrap();
+    let canonical = load_or_initialize_owned(&database).unwrap();
+    let original_tip = canonical.tip_hash().unwrap();
 
     let genesis = kernel::genesis::genesis_block().unwrap();
     let genesis_hash = genesis.hash().unwrap();
@@ -409,7 +393,7 @@ fn failed_reorg_root_check_keeps_persisted_canonical_chain() {
     };
 
     let error = apply_verified_branch(&database, sync, vec![alternative_one, alternative_two])
-        .expect_err("corrupt active state must abort reorg");
+        .expect_err("invalid alternative state root must abort reorg");
     assert!(error.contains("state root"), "{error}");
     assert_eq!(
         crate::storage::read_blocks(&database).unwrap(),
@@ -1739,7 +1723,7 @@ fn deploy_operation_is_mined_persisted_and_replayed() {
         }
     }
     let replayed = load_existing(&database).unwrap();
-    assert!(replayed.state().programs.contains(&program_id));
+    assert!(replayed.state().programs().contains(&program_id));
     assert!(
         replayed
             .chain
@@ -2597,27 +2581,97 @@ fn chain_minimums_guard_branch_commit_and_unannounced_block_relay() {
 
 #[test]
 fn program_storage_rpc_bounds_keys_and_reports_missing_entries() {
-    let mut ledger = kernel::genesis::genesis_ledger().unwrap();
+    let seed = kernel::crypto::SigningSeed::new(
+        kernel::crypto::AccountSignatureScheme::MlDsa44,
+        Box::new([0x73; 32]),
+    );
+    let owner = kernel::crypto::program_id_from_public_key(&seed.public_key()).unwrap();
+    let mut ledger = kernel::genesis::genesis_ledger()
+        .unwrap()
+        .with_applications(extension::SystemApplications);
+    let mut memory = new_pow_memory();
+    let mut commit = |ledger: &mut Ledger, operations| {
+        let height = Height(ledger.tip_height().unwrap().0 + 1);
+        let mut block = Block::from_protocol_operations(
+            height,
+            ledger.tip_hash().unwrap(),
+            expected_next_difficulty(&ledger.chain).unwrap(),
+            Nonce(0),
+            Some(Emission::new(owner, expected_emission_for_height(height))),
+            operations,
+        )
+        .unwrap();
+        let (root, weight) = ledger.preview_block_commitments(&block).unwrap();
+        block.set_state_root(root);
+        block.set_block_weight(weight);
+        assert!(
+            crate::miner::mine_range(
+                &mut block,
+                crate::miner::MiningRange {
+                    start_nonce: 0,
+                    attempts: 1_000_000
+                },
+                &mut memory,
+            )
+            .unwrap()
+            .is_some()
+        );
+        kernel::consensus::apply_block(ledger, block).unwrap();
+    };
+    commit(&mut ledger, vec![]);
+    let (input, coin) = ledger
+        .state()
+        .utxos()
+        .coins_by_owner(kernel::common::Owner::Program(owner))
+        .next()
+        .unwrap();
+    let amount = coin.amount.as_zeno();
     let mut code = b"XPVM".to_vec();
     code.extend([4, 1, 0, 1, 0, 0, 0, 0, 0]);
     code.push(1);
     code.extend(0u128.to_le_bytes());
     code.push(3);
-    let (id, _) = kernel::program::deploy_program(
-        &mut ledger.state.programs,
-        kernel::program::DeployProgram {
-            owner: ProgramId::ZERO,
-            nonce: 1,
-            code: code.into(),
-        },
-        Height(0),
-    )
-    .unwrap();
+    let deploy = kernel::program::DeployProgram {
+        owner,
+        nonce: 1,
+        code: code.into(),
+    };
+    let chain = kernel::genesis::chain_context().unwrap();
+    let make = |burn| {
+        let payment = kernel::program::CoinTransition::coin(
+            owner,
+            vec![input],
+            vec![kernel::monetary::coin::CoinOutput::new(
+                owner,
+                Zeno::from_zeno(amount - burn),
+            )],
+        )
+        .unwrap();
+        let mut signed = kernel::operation::AuthorizedDeployProgram {
+            deploy: deploy.clone(),
+            payment,
+            authorization: kernel::program::AccountAuthorization {
+                salt: [0; 32],
+                public_key: seed.public_key(),
+                signature: seed.sign(&[0; 32]),
+            },
+        };
+        signed.authorization.signature = seed.sign(signed.commitment(chain).unwrap().as_bytes());
+        signed
+    };
+    let (id, burn) =
+        kernel::consensus::quote_deploy_burn(&make(0), Height(2), ledger.state()).unwrap();
+    commit(
+        &mut ledger,
+        vec![kernel::operation::BlockOperation::DeployProgram(Box::new(
+            make(burn.as_zeno()),
+        ))],
+    );
     let prefix = format!("/program/state/{}", hex::encode(id.into_bytes()));
     let response = explorer::program_state_response(&ledger, &format!("{prefix}/0102")).unwrap();
     assert_eq!(response["key"], "0102");
     assert!(response["value"].is_null());
-    assert_eq!(response["height"], 0);
+    assert_eq!(response["height"], 2);
     for suffix in [
         "".into(),
         "zz".into(),

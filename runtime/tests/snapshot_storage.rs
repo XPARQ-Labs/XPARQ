@@ -114,6 +114,36 @@ fn node_restarts_from_a_compact_snapshot() {
     .unwrap();
     snapshot::write_after_large_sync(&directory, &ledger, snapshot::SNAPSHOT_INTERVAL as usize)
         .unwrap();
+    // Measure both paths over identical, already admitted history. Counts prove
+    // that the trusted path does not repeat the expensive historical PoW.
+    let history = [genesis.clone(), block.clone()];
+    let encoded_snapshot = kernel::crypto::canonical_bytes(&ledger.snapshot()).unwrap();
+    let fresh_snapshot = || borsh::from_slice(&encoded_snapshot).unwrap();
+    let (verified, full) = Ledger::from_snapshot_with_body_cache_measured(
+        fresh_snapshot(),
+        history.clone(),
+        usize::MAX,
+        usize::MAX,
+    )
+    .unwrap();
+    let (trusted, fast) = Ledger::from_trusted_snapshot_with_body_cache_measured(
+        fresh_snapshot(),
+        history,
+        usize::MAX,
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(verified, trusted);
+    assert_eq!(trusted, ledger);
+    assert_eq!(full.pow_checks, 1);
+    assert_eq!(fast.pow_checks, 0);
+    println!(
+        "restore comparison: full_pow_ms={:.3} trusted_history_ms={:.3} supply_ms={:.3} root_ms={:.3}",
+        full.proof_of_work.as_secs_f64() * 1000.0,
+        fast.history.as_secs_f64() * 1000.0,
+        fast.supply_audit.as_secs_f64() * 1000.0,
+        fast.state_root.as_secs_f64() * 1000.0
+    );
     // The storage module caches its last redb handle; switch it away before
     // opening the fixture in a separate node process.
     let spare = directory.with_extension("cache-release");
@@ -128,10 +158,59 @@ fn node_restarts_from_a_compact_snapshot() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    let startup = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        startup.contains("mode=trusted-local blocks=2 pow_checks=0"),
+        "{startup}"
+    );
     let output = String::from_utf8(result.stdout).unwrap();
     assert!(output.contains("snapshot: loaded height=1"), "{output}");
     assert!(output.contains("height: 1"), "{output}");
     assert!(output.contains("database: valid"), "{output}");
+
+    let full_check = std::process::Command::new(env!("CARGO_BIN_EXE_node"))
+        .arg("check")
+        .arg(&directory)
+        .arg("--full")
+        .output()
+        .unwrap();
+    assert!(
+        full_check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&full_check.stderr)
+    );
+    let full_output = String::from_utf8_lossy(&full_check.stdout);
+    assert!(
+        full_output.contains("database: full replay verified"),
+        "{full_output}"
+    );
+    assert!(!full_output.contains("mode=trusted-local"), "{full_output}");
+
+    // Simulate changing a structurally valid body without updating the local
+    // validation record. The newest snapshot must not be trusted anymore.
+    storage::release_cached_database(&directory);
+    {
+        let database = redb::Database::open(directory.join("xparq.redb")).unwrap();
+        let transaction = database.begin_write().unwrap();
+        {
+            let mut table = transaction
+                .open_table(redb::TableDefinition::<u64, &[u8]>::new("canonical_blocks"))
+                .unwrap();
+            let mut changed = block.clone();
+            changed.header.nonce.0 += 1;
+            let bytes = block_bytes(&changed).unwrap();
+            table.insert(1, bytes.as_slice()).unwrap();
+        }
+        transaction.commit().unwrap();
+    }
+    let (fallback, next) = snapshot::load_streamed(&directory, usize::MAX, usize::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        next, 1,
+        "changed prefix must discard the height-one checkpoint"
+    );
+    assert_eq!(fallback, genesis_ledger);
 
     let replacement = Block::from_protocol_operations(
         height,

@@ -1,6 +1,7 @@
 //! Frozen canonical bytes for a mainnet execution and asset lifecycle.
 
 use super::*;
+use crate::ledger::utxo::ExecutionContext;
 
 use crypto::{
     AccountSignatureScheme, ProgramId, SigningSeed, canonical_bytes, program_id_from_public_key,
@@ -25,7 +26,6 @@ use crate::program::system::{
     asset_program::{
         asset::{AssetOutput, Unit},
         opcode::AssetOpcode,
-        state::ExecutionContext,
         type_::{AssetCall, Burn, Mint, Register, Transfer},
     },
     script::call::{ProgramCall, SystemProgramId},
@@ -308,7 +308,7 @@ fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
         .state
         .extensions
         .assets
-        .records
+        .records()
         .keys()
         .next()
         .unwrap();
@@ -387,7 +387,7 @@ fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
     record(
         &mut vectors,
         "program_counters_after_burn",
-        &program_ledger.state.extensions.assets.records[&asset],
+        &program_ledger.state.extensions.assets.records()[&asset],
     );
     program_ledger.state.validate_supply_invariants().unwrap();
     let mut replay = genesis::genesis_ledger().unwrap();

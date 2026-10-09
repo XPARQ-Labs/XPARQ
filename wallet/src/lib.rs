@@ -529,10 +529,9 @@ mod tests {
 
     #[test]
     fn salted_accounts_spend_and_deploy_end_to_end_without_cross_account_authority() {
-        use borsh::BorshDeserialize;
         use kernel::{
             common::{Height, Owner},
-            ledger::{CoinUtxo, LedgerState, UtxoSet},
+            ledger::{CoinUtxo, LedgerState},
             monetary::coin::{CoinOutput, CoinShare, Zeno},
             operation::BlockOperation,
             program::{CoinTransition, DeployProgram},
@@ -561,11 +560,20 @@ mod tests {
                 },
             ),
         ]);
-        let mut state = LedgerState::default();
-        state.utxos =
-            UtxoSet::try_from_slice(&borsh::to_vec(&(coins, Zeno::from_zeno(2_000_000))).unwrap())
-                .unwrap();
-        state.coin.total_mined = Zeno::from_zeno(2_000_000);
+        let empty = LedgerState::default();
+        let mut state: LedgerState = borsh::from_slice(
+            &borsh::to_vec(&(
+                (coins, Zeno::from_zeno(2_000_000)),
+                kernel::ledger::CoinRecord {
+                    total_mined: Zeno::from_zeno(2_000_000),
+                    total_burned: Zeno::ZERO,
+                },
+                empty.programs(),
+                empty.extensions(),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
         state.audit_supply_invariants().unwrap();
         let chain = kernel::genesis::chain_context().unwrap();
         let payment = |signer, amount| {
@@ -633,9 +641,9 @@ mod tests {
                 &extension::SystemApplications,
             )
             .unwrap();
-        assert!(state.utxos.coin(&input_a).is_none());
+        assert!(state.utxos().coin(&input_a).is_none());
         assert_eq!(
-            state.utxos.coin(&input_b).unwrap().owner,
+            state.utxos().coin(&input_b).unwrap().owner,
             Owner::Program(bob.program_id)
         );
         state.audit_supply_invariants().unwrap();
@@ -677,7 +685,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            deployed.programs.program(&id).unwrap().owner,
+            deployed.programs().program(&id).unwrap().owner,
             alice.program_id
         );
         deployed.audit_supply_invariants().unwrap();
@@ -685,7 +693,7 @@ mod tests {
         let program_b = DeployProgram {
             owner: bob.program_id,
             nonce: 1,
-            code: deployed.programs.program(&id).unwrap().code.clone(),
+            code: deployed.programs().program(&id).unwrap().code.clone(),
         };
         let payment_b = |amount| {
             CoinTransition::coin(
@@ -714,7 +722,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            deployed.programs.program(&id_b).unwrap().owner,
+            deployed.programs().program(&id_b).unwrap().owner,
             bob.program_id
         );
         deployed.audit_supply_invariants().unwrap();

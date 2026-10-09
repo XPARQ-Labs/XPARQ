@@ -20,7 +20,7 @@ use crate::{
 
 use borsh::BorshSerialize;
 
-use crypto::{BlockHash, HASH_SIZE, Hash, HashDomain, PROGRAM_ID_SIZE, domain_hash};
+use crypto::{BlockHash, HASH_SIZE, Hash, HashDomain, PROGRAM_ID_SIZE, domain};
 
 // -----------------------------------------------------------------------------
 // Mainnet
@@ -231,7 +231,7 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 
     let bytes = crypto::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
 
-    Ok(domain_hash(HashDomain::ChainSpec, &bytes))
+    Ok(domain(HashDomain::ChainSpec, &bytes))
 }
 
 #[cfg(all(test, feature = "mainnet"))]

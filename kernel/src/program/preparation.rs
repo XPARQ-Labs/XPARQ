@@ -1,13 +1,11 @@
 //! Program invocation preparation and read-only state growth quotes.
 
+use crate::ledger::utxo::ExecutionContext;
 use crate::{
     common::{ChainContext, Owner},
-    program::system::{
-        asset_program::state::ExecutionContext,
-        script::{
-            execute::{DecodedProgramCall, decode_program},
-            state::ExtensionState,
-        },
+    program::system::script::{
+        execute::{DecodedProgramCall, decode_program},
+        state::ExtensionState,
     },
 };
 use crypto::{HashDomain, canonical_bytes, domain};

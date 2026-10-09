@@ -190,7 +190,7 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
         let weight = kernel::program::program_created_state_weight_with_applications(
             &tx,
             chain,
-            &ledger.state().extensions,
+            ledger.state().extensions(),
             &extension::SystemApplications,
         )
         .map_err(|e| e.to_string())?;

@@ -60,11 +60,11 @@ pub(super) fn mine_block_database(
     if ledger.tip_hash().map(|hash| hash.0) != Some(block.previous_hash().0) {
         return Err("mined candidate became stale while mining".into());
     }
-    let burned_before = ledger.state.coin.total_burned;
+    let burned_before = ledger.state().coin().total_burned;
     apply_block(&mut ledger, block.clone()).map_err(|error| error.to_string())?;
     let state_burn = ledger
-        .state
-        .coin
+        .state()
+        .coin()
         .total_burned
         .checked_sub(burned_before)
         .ok_or("block burn accounting decreased unexpectedly")?

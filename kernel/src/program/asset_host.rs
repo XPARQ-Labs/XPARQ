@@ -5,10 +5,11 @@ use super::{
     application::{ApplicationExecutor, AssetHost},
     system::asset_program::{
         asset::AssetError,
-        state::{AssetJournal, AssetState, ExecutionContext},
         type_::{AssetCall, Burn, Mint, Register, Transfer},
     },
 };
+use crate::ledger::utxo::ExecutionContext;
+use crate::ledger::utxo::{AssetJournal, AssetState};
 
 struct BoundAssetHost<'a> {
     state: &'a mut AssetState,
@@ -70,7 +71,7 @@ pub(crate) fn execute_asset(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{common::Owner, ledger::StateError, monetary::coin::CoinShare};
+    use crate::{common::Owner, error::StateError, monetary::coin::CoinShare};
     use crypto::ProgramId;
 
     #[derive(Clone, Copy)]

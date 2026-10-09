@@ -26,8 +26,8 @@ fn main() {
         for key in &keys {
             let owner = program_id_from_public_key(&key.public_key()).unwrap();
             let shares: Vec<_> = baseline
-                .state
-                .utxos
+                .state()
+                .utxos()
                 .coins_by_owner(Owner::Program(owner))
                 .take(if case == "mixed_near_limit_many_signatures" {
                     14
@@ -71,7 +71,7 @@ fn main() {
                     .unwrap()
             });
             assert_eq!(ledger.state_root().unwrap(), block.state_root());
-            ledger.state.audit_coin_supply().unwrap();
+            ledger.state().audit_coin_supply().unwrap();
             if sample != 0 {
                 values.push(ms);
             }

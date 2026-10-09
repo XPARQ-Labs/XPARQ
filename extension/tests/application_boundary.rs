@@ -38,14 +38,20 @@ fn funded() -> LedgerState {
             amount,
         },
     )]);
-    LedgerState {
-        utxos: canonical_decode(&canonical_bytes(&(coins, amount)).unwrap()).unwrap(),
-        coin: kernel::ledger::CoinRecord {
-            total_mined: amount,
-            total_burned: Zeno::ZERO,
-        },
-        ..LedgerState::default()
-    }
+    let state = LedgerState::default();
+    canonical_decode(
+        &canonical_bytes(&(
+            (coins, amount),
+            kernel::ledger::CoinRecord {
+                total_mined: amount,
+                total_burned: Zeno::ZERO,
+            },
+            state.programs(),
+            state.extensions(),
+        ))
+        .unwrap(),
+    )
+    .unwrap()
 }
 
 fn invocation(state: &LedgerState, call: ProgramCall) -> AuthorizedProgramInvocation {
@@ -53,7 +59,7 @@ fn invocation(state: &LedgerState, call: ProgramCall) -> AuthorizedProgramInvoca
     let signer = program_id_from_public_key(&seed.public_key()).unwrap();
     let chain = ChainContext::new([7; 32]);
     let (input, coin) = state
-        .utxos
+        .utxos()
         .coins()
         .find(|(_, coin)| coin.owner == kernel::common::Owner::Program(signer))
         .unwrap();
@@ -85,7 +91,7 @@ fn invocation(state: &LedgerState, call: ProgramCall) -> AuthorizedProgramInvoca
     let weight = program_created_state_weight_with_applications(
         &draft,
         chain,
-        &state.extensions,
+        state.extensions(),
         &extension::SystemApplications,
     )
     .unwrap();
@@ -346,7 +352,7 @@ fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
             &extension::SystemApplications,
         )
         .unwrap();
-    let asset = *state.extensions.assets.records().keys().next().unwrap();
+    let asset = *state.extensions().assets.records().keys().next().unwrap();
     let mint = ProgramCall {
         program: SystemProgramId::ASSET,
         opcode: AssetOpcode::Mint as u8,
@@ -369,7 +375,7 @@ fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
         )
         .unwrap();
     assert_eq!(
-        state.extensions.assets.records()[&asset].supply,
+        state.extensions().assets.records()[&asset].supply,
         Unit::from_units(15)
     );
     state.validate_supply_invariants().unwrap();
@@ -387,7 +393,7 @@ fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
         owner,
         vec![
             state
-                .utxos
+                .utxos()
                 .coins()
                 .find(|(_, c)| c.owner == kernel::common::Owner::Program(owner))
                 .unwrap()

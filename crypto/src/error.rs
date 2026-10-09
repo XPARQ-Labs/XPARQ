@@ -3,7 +3,6 @@ use std::{error::Error, fmt};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoError {
     InvalidProgramIdEncoding,
-    InvalidKeyDerivationParameters,
     InvalidPublicKey,
     InvalidPublicKeyLength,
     InvalidAccountScheme,
@@ -18,9 +17,6 @@ impl fmt::Display for CryptoError {
         match self {
             Self::InvalidProgramIdEncoding => {
                 f.write_str("program ID must contain 64 hexadecimal characters")
-            }
-            Self::InvalidKeyDerivationParameters => {
-                f.write_str("key derivation parameters are invalid")
             }
             Self::InvalidPublicKeyLength => {
                 f.write_str("public key length does not match account scheme")

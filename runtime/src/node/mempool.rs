@@ -712,7 +712,7 @@ mod serialization_benchmarks {
                 .as_ref()
                 .unwrap()
                 .state
-                .utxos
+                .utxos()
                 .coins_by_owner(kernel::common::Owner::Program(owner))
                 .next()
                 .unwrap();
@@ -757,8 +757,8 @@ mod serialization_benchmarks {
         let block = mine_cache_emission(&ledger, owner);
         kernel::consensus::apply_block(&mut ledger, block).unwrap();
         let (share, coin) = ledger
-            .state
-            .utxos
+            .state()
+            .utxos()
             .coins_by_owner(kernel::common::Owner::Program(owner))
             .next()
             .unwrap();
@@ -841,7 +841,7 @@ mod serialization_benchmarks {
         let before = initial.validated.as_ref().unwrap().state.clone();
         let owner = kernel::crypto::program_id_from_public_key(&key.public_key()).unwrap();
         let (child_input, child_coin) = before
-            .utxos
+            .utxos()
             .coins_by_owner(kernel::common::Owner::Program(owner))
             .next()
             .unwrap();
@@ -911,7 +911,7 @@ mod serialization_benchmarks {
                 .as_ref()
                 .unwrap()
                 .state
-                .utxos
+                .utxos()
                 .coin(&extra)
                 .is_some()
         );

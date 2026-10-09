@@ -14,9 +14,7 @@ mod blockchain_errors {
         BlockTooHeavy,
         InvalidOperation,
         DuplicateOperation,
-        InvalidEmission,
         InvalidMerkleRoot,
-        InvalidStateRoot,
         InvalidBlockWeight,
         Serialization(CodecError),
     }
@@ -29,11 +27,9 @@ mod blockchain_errors {
                 Self::BlockTooHeavy => f.write_str("block serialized weight exceeds limit"),
                 Self::InvalidOperation => f.write_str("block contains an invalid operation"),
                 Self::DuplicateOperation => f.write_str("block contains a duplicate operation"),
-                Self::InvalidEmission => f.write_str("block emission is invalid"),
                 Self::InvalidMerkleRoot => {
                     f.write_str("block merkle root does not match operations")
                 }
-                Self::InvalidStateRoot => f.write_str("block state root does not match ledger"),
                 Self::InvalidBlockWeight => {
                     f.write_str("block header weight does not cover canonical block size")
                 }
@@ -243,18 +239,6 @@ mod program_errors {
 
     impl StdError for IntentError {}
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum ProgramEncodingError {
-        Encoding,
-    }
-
-    impl fmt::Display for ProgramEncodingError {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self {
-                Self::Encoding => formatter.write_str("program envelope encoding failed"),
-            }
-        }
-    }
-
-    impl StdError for ProgramEncodingError {}
+    /// Compatibility name: program encoding uses the existing intent error.
+    pub use IntentError as ProgramEncodingError;
 }
