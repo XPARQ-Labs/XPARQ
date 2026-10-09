@@ -249,14 +249,16 @@ mining: enabled on the local canonical tip
 
 Mining rewards belong to the program supplied through `--miner`.
 
-Interactive terminals show mined blocks in a table with `height`, `weight`,
-`subsidy`, `state_burn`, `tx_count` and `difficulty`. Each mined block replaces
-the previous terminal frame rather than appending rows. Terminals with `TERM=dumb`
-or no `TERM` retain plain output. Weight is the consensus block weight; subsidy is gross emission in XPQ;
-state_burn is the block's total native protocol burn in zeno (archival plus state
-growth); tx_count counts all non-emission block operations; difficulty is the
-header's decimal compact target bits, not a relative difficulty multiplier.
-Redirected output retains the original single-line format and full hash for log processing.
+Interactive terminals show a mining dashboard with the latest persisted block,
+nonce, full block hash, session block count, gross session subsidy, and the five
+most recent locally mined blocks. The display refreshes after each mined block.
+Set `NO_COLOR=1` to disable colors. Terminals with `TERM=dumb` or no `TERM`, and
+redirected output, use the single-line mined-block log with the full hash.
+Weight is the consensus block weight; subsidy is gross emission in XPQ;
+state burn is the block's total native protocol burn in zeno (archival plus state
+growth); operations count all non-emission block operations. Compact target is
+the header's decimal target bits, not a relative difficulty multiplier. Session
+totals count locally mined blocks in the current process, not wallet balance.
 
 ## Public node
 

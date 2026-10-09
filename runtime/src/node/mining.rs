@@ -87,57 +87,126 @@ pub(super) fn mine_block_database(
     Ok(MiningAttempt::Mined)
 }
 
-// Refresh one terminal frame for each mined block; redirected logs remain append-only.
-// state_burn is the block's native protocol burn (archival plus state growth),
-// in zeno; subsidy is the gross emission in XPQ, before burns and miner fees.
+// Display accounting is separate from consensus and only records persisted blocks.
+#[derive(Default)]
+struct MiningDashboard {
+    blocks: u64,
+    subsidy: u128,
+    recent: std::collections::VecDeque<String>,
+}
+
+fn format_xpq(zeno: u128) -> String {
+    let scale = 10_u128.pow(kernel::monetary::coin::DECIMALS.into());
+    let amount = format!("{}.{:08}", zeno / scale, zeno % scale);
+    amount
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned()
+}
+
+// Refresh on each persisted block. Redirected logs remain append-only.
 fn print_mined_block(block: &Block, state_burn: u64) {
     let stdout = std::io::stdout();
     let terminal = stdout.is_terminal();
-    let mut output = stdout.lock();
     let height = block.height().0;
-    if !terminal {
-        if let Ok(hash) = block.hash() {
-            let _ = writeln!(
-                output,
-                "mined height={height} nonce={} hash={}",
-                block.header.nonce.0,
-                hex::encode(hash.0)
-            );
-        }
+    let hash = block
+        .hash()
+        .map(|hash| hex::encode(hash.0))
+        .unwrap_or_default();
+    let interactive = terminal && std::env::var("TERM").is_ok_and(|term| term != "dumb");
+    if !interactive {
+        let mut output = stdout.lock();
+        let _ = writeln!(
+            output,
+            "mined height={height} nonce={} hash={hash}",
+            block.header.nonce.0
+        );
         return;
     }
-    {
-        // Replace the current screen without accumulating mining rows in scrollback.
-        // Dumb terminals cannot interpret cursor/erase sequences.
-        if std::env::var("TERM").is_ok_and(|term| term != "dumb") {
-            let _ = write!(output, "\x1b[H\x1b[2J");
-        }
-        let _ = writeln!(
-            output,
-            "\n  XPARQ MINING  |  subsidy: XPQ  |  state_burn: zeno"
-        );
-        let _ = writeln!(
-            output,
-            "{:>9} | {:>10} | {:>12} | {:>12} | {:>8} | {:>10}",
-            "height", "weight", "subsidy", "state_burn", "tx_count", "difficulty"
-        );
-        let _ = writeln!(
-            output,
-            "----------+------------+--------------+--------------+----------+-----------"
-        );
-    }
+
+    static DASHBOARD: OnceLock<Mutex<MiningDashboard>> = OnceLock::new();
+    let Ok(mut dashboard) = DASHBOARD
+        .get_or_init(|| Mutex::new(MiningDashboard::default()))
+        .lock()
+    else {
+        return;
+    };
     let subsidy = block
         .emission()
         .map_or(0, |emission| emission.subsidy.as_zeno());
-    let scale = 10_u64.pow(kernel::monetary::coin::DECIMALS.into());
-    let subsidy = format!("{}.{:08}", subsidy / scale, subsidy % scale);
-    let subsidy = subsidy.trim_end_matches('0').trim_end_matches('.');
+    dashboard.blocks = dashboard.blocks.saturating_add(1);
+    dashboard.subsidy = dashboard.subsidy.saturating_add(u128::from(subsidy));
+    dashboard.recent.push_front(format!(
+        "{height:>10}  {:>10}  {:>14}  {state_burn:>12}  {:>7}",
+        block.block_weight(),
+        format_xpq(u128::from(subsidy)),
+        block.operations().len()
+    ));
+    dashboard.recent.truncate(5);
+
+    let color = std::env::var_os("NO_COLOR").is_none();
+    let cyan = if color { "\x1b[1;36m" } else { "" };
+    let green = if color { "\x1b[1;32m" } else { "" };
+    let reset = if color { "\x1b[0m" } else { "" };
+    let mut output = stdout.lock();
+    let _ = write!(output, "\x1b[H\x1b[2J");
+    let border = format!("+{}+", "-".repeat(72));
+    let _ = writeln!(output, "{cyan}{border}{reset}");
+    for text in [
+        "",
+        "X P A R Q   /   MINING CONSOLE",
+        "Proof of Work  |  Refreshes after each locally mined block",
+        "",
+    ] {
+        let _ = writeln!(output, "| {text:<70} |");
+    }
+    let _ = writeln!(output, "{cyan}{border}{reset}");
     let _ = writeln!(
         output,
-        "{height:>9} | {:>10} | {subsidy:>12} | {state_burn:>12} | {:>8} | {:>10}",
+        "{green}  BLOCK #{height} PERSISTED{reset}"
+    );
+    let _ = writeln!(output, "{border}");
+    let _ = writeln!(
+        output,
+        "  SESSION BLOCKS  {:<16} GROSS SUBSIDY  {} XPQ",
+        dashboard.blocks,
+        format_xpq(dashboard.subsidy)
+    );
+    let _ = writeln!(
+        output,
+        "  BLOCK WEIGHT    {:<16} OPERATIONS     {}",
         block.block_weight(),
-        block.operations().len(),
+        block.operations().len()
+    );
+    let _ = writeln!(
+        output,
+        "  BLOCK SUBSIDY   {:<16} STATE BURN     {} zeno",
+        format!("{} XPQ", format_xpq(u128::from(subsidy))),
+        state_burn
+    );
+    let _ = writeln!(
+        output,
+        "  NONCE          {:<16} COMPACT TARGET {}",
+        block.header.nonce.0,
         block.target_bits()
+    );
+    let _ = writeln!(output, "\n  BLOCK HASH\n  {hash}");
+    let _ = writeln!(
+        output,
+        "\n{cyan}  RECENT LOCAL BLOCKS  /  newest first{reset}"
+    );
+    let _ = writeln!(output, "{border}");
+    let _ = writeln!(
+        output,
+        "{:>12}  {:>10}  {:>14}  {:>12}  {:>7}",
+        "HEIGHT", "WEIGHT", "SUBSIDY XPQ", "BURN zeno", "OPS"
+    );
+    for recent in &dashboard.recent {
+        let _ = writeln!(output, "  {recent}");
+    }
+    let _ = writeln!(
+        output,
+        "{border}\n  Subsidy is gross emission before burns and miner fees.\n  Session totals count locally mined blocks in this process.\n  Ctrl+C to stop"
     );
     let _ = output.flush();
 }
