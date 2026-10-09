@@ -1,0 +1,40 @@
+Program decoding hardening verification, 2026-10-04
+
+/tmp/xparq-decoding-validation.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.89s
+     Running unittests src/lib.rs (target/debug/deps/extension-f80f6a0b38685613)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/application_boundary.rs (target/debug/deps/application_boundary-8030b9803980bb28)
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+     Running unittests src/lib.rs (target/debug/deps/kernel-e004ce544e2a4da2)
+test result: ok. 89 passed; 0 failed; 1 ignored; 0 measured; 2 filtered out; finished in 2.03s
+     Running unittests src/bin/print_genesis_hash.rs (target/debug/deps/print_genesis_hash-032a03dca079e3ae)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/consolidation_compatibility.rs (target/debug/deps/consolidation_compatibility-d407c9dfce7d9d34)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/decoding_bounds.rs (target/debug/deps/decoding_bounds-c41755bcb58a2468)
+test forged_maximum_registry_count_does_not_preallocate_entries ... ok
+test oversized_code_prefixes_stop_before_payload_reads ... ok
+test deterministic_mutation_corpus_covers_truncation_and_canonical_decoding ... ok
+test bounded_code_decoding_preserves_historical_field_encoding ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+     Running tests/supply_invariants.rs (target/debug/deps/supply_invariants-280e1db04c982dd9)
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests extension
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests kernel
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+/tmp/xparq-decoding-storage.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.63s
+     Running tests/snapshot_storage.rs (target/debug/deps/snapshot_storage-701200273e5e2dee)
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.94s
+
+/tmp/xparq-decoding-check.log
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.38s
+
+/tmp/xparq-decoding-clippy.log
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.52s
+
+Known chain identity fixture failures remain unresolved. Kernel/extension validation explicitly skips the three documented fixtures.
+Formatting and git diff --check passed.

@@ -1,0 +1,54 @@
+Shared ledger payload verification
+==================================
+
+All commands use the pinned Rust 1.99.0 toolchain and --locked. Native
+transport commands use the extracted protoc binary via PROTOC and its library
+path via LD_LIBRARY_PATH. Local socket tests run with sandbox approval.
+
+PASS cargo check --workspace --locked
+PASS cargo test -p kernel --locked --no-default-features --features devnet --lib
+     92 tests; consensus, authorization, state and rollback regressions.
+PASS cargo test -p kernel --locked --no-default-features --features devnet
+     --test shared_payloads --test decoding_bounds
+     2 shared payload compatibility/isolation tests and 4 bounded decoder tests.
+PASS cargo test -p wallet --locked --no-default-features --features devnet --lib
+     3 tests.
+PASS cargo test -p node --locked --no-default-features --features litep2p-devnet
+     --bin node --test snapshot_storage --test litep2p_limits
+     84 node, 9 snapshot/storage and 6 native transport/response-budget tests.
+PASS cargo test -p node --locked --no-default-features --features litep2p-devnet
+     --test litep2p_e2e -- --test-threads=1
+     All 7 integration scenarios; signed relay, reorganization, resume, reconnect,
+     discovery, peer rotation, inbound bounds and request fairness.
+PASS cargo test -p node --locked --no-default-features --features litep2p-devnet
+     --test network_e2e
+     All 7 legacy TCP integration scenarios, including program lifecycle,
+     stronger-fork rollback and restart replay.
+PASS cargo clippy -p node -p kernel -p wallet --locked --no-default-features
+     --features node/litep2p-devnet,kernel/devnet,wallet/devnet --all-targets
+     Existing dependency/repository warnings remain.
+
+Compatibility coverage compares canonical Block, DeployProgram, ProgramRecord
+and ProgramRegistry bytes against owned field encodings, decodes legacy bytes,
+checks the old owned-input program hash, and tests Arc copy-on-write isolation.
+Code size and bounded decoding rules are unchanged. Reorganization and snapshot
+regressions verify the existing commit-after-validation behavior.
+
+The known pre-existing frozen mainnet identity fixture discrepancies are not
+regenerated or represented as resolved by these devnet tests. The default
+workspace compilation passes; the full mainnet test suite is not claimed here.
+
+The measured release resource experiment is recorded separately in
+ledger-memory/README.md with machine-readable reports and 200 ms samples.
+Full historical ledger storage remains in RAM; sharing does not impose a
+constant RSS bound or remove independent decode/serialization allocations.
+
+PASS cargo test --release -p node --locked --no-default-features
+     --features litep2p-devnet --test litep2p_stress
+     large_valid_sync_under_multiple_request_flooders -- --ignored --nocapture
+     1 test; 380.73 seconds. Baseline and four-flooder targets match the source
+     and both survive peer-less restart. Canonical report fields exactly match
+     the original resource report; fixture identity was compared explicitly.
+     Sampled target peak RSS: baseline 423.16 -> 233.96 MiB; loaded
+     428.48 -> 236.40 MiB. Source: 499.96 -> 351.52 MiB and
+     502.47 -> 355.30 MiB. See recorded report for exact byte counts.

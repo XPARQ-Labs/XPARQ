@@ -1,0 +1,18 @@
+{
+  "os": "Linux 6.12.111+deb13-amd64 x86_64 GNU/Linux",
+  "cpu_model": "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz",
+  "rust_toolchain": "1.99.0",
+  "profile": "release",
+  "other_xparq_regression_suites_during_recorded_run": false,
+  "active_inbound_limit": 8,
+  "additional_inbound_waiters": 32,
+  "per_peer_inbound_slots_including_wait": 2,
+  "admission_wait_seconds": 5,
+  "frame_read_seconds": 5,
+  "node_binary_sha256": "0eb1e36665c3884c2f0ec6335dfc86f1b828362317e668a4e106de7b613e9add",
+  "allocation_strategy": "Arc block bodies and program code; copy-on-write mutations",
+  "body_cache_logical_bytes": 16777216,
+  "body_cache_recent_entries": 128,
+  "pinned_genesis_and_tip_exceptions": true,
+  "startup_body_reader": "pinned streaming redb transaction"
+}

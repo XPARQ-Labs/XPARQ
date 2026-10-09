@@ -1,0 +1,84 @@
+Monetary hardening verification — 2026-10-04
+Base revision: c9834d1f69b619590bc56b38807fd51344ec94c6 plus working-tree changes
+Toolchain: rustc/cargo 1.99.0
+Workspace results: 201 passed, 3 failed, 3 ignored.
+The additional mint amount/nonce overflow test also passed separately.
+All three workspace failures are the pre-existing chain identity fixtures.
+
+Workspace (outside sandbox)
+Finished `test` profile [unoptimized + debuginfo] target(s) in 10.46s
+Running unittests src/lib.rs (target/debug/deps/crypto-5119a6cd4760ef6d)
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+Running unittests src/lib.rs (target/debug/deps/extension-194a1e883d26ed63)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+Running tests/application_boundary.rs (target/debug/deps/application_boundary-39cd7b6d796443a1)
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+Running unittests src/lib.rs (target/debug/deps/kernel-d2cfbb5810b62295)
+test genesis::phase3_chain_spec_tests::bounded_work_rules_have_frozen_mainnet_chain_spec_identity ... FAILED
+test ledger::ledger::phase4_vectors::frozen_phase4_vectors_match_execution ... FAILED
+test result: FAILED. 85 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.64s
+error: test failed, to rerun pass `-p kernel --lib`
+Running unittests src/bin/print_genesis_hash.rs (target/debug/deps/print_genesis_hash-d351186c74cf8791)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+Running tests/consolidation_compatibility.rs (target/debug/deps/consolidation_compatibility-97ef294cd6e446fc)
+test mainnet_genesis_and_chain_spec_match_the_current_structure ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p kernel --test consolidation_compatibility`
+Running tests/supply_invariants.rs (target/debug/deps/supply_invariants-d007d79e4f8556d2)
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+Running unittests src/main.rs (target/debug/deps/node-f3ffad1ec2e391e8)
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.05s
+Running tests/network_e2e.rs (target/debug/deps/network_e2e-d571db04a3980ffc)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 568.54s
+Running tests/snapshot_storage.rs (target/debug/deps/snapshot_storage-d7cc659f69dc467f)
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.29s
+Running unittests src/lib.rs (target/debug/deps/wallet-12c5df649f886bb3)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+Running unittests src/main.rs (target/debug/deps/wallet-bcd19f945ffe0fe3)
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+Running tests/program_e2e.rs (target/debug/deps/program_e2e-a65d814a834b9707)
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: 2 targets failed:
+
+Final kernel unit tests, including the additional overflow regression
+Finished `test` profile [unoptimized + debuginfo] target(s) in 1.43s
+Running unittests src/lib.rs (target/debug/deps/kernel-e004ce544e2a4da2)
+test genesis::phase3_chain_spec_tests::bounded_work_rules_have_frozen_mainnet_chain_spec_identity ... FAILED
+test ledger::ledger::phase4_vectors::frozen_phase4_vectors_match_execution ... FAILED
+test result: FAILED. 86 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.26s
+error: test failed, to rerun pass `-p kernel --lib`
+
+Overflow and supply regressions
+Finished `test` profile [unoptimized + debuginfo] target(s) in 2.08s
+Running unittests src/lib.rs (target/debug/deps/kernel-e004ce544e2a4da2)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 88 filtered out; finished in 0.00s
+Running unittests src/bin/print_genesis_hash.rs (target/debug/deps/print_genesis_hash-032a03dca079e3ae)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+Running tests/consolidation_compatibility.rs (target/debug/deps/consolidation_compatibility-d407c9dfce7d9d34)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+Running tests/supply_invariants.rs (target/debug/deps/supply_invariants-280e1db04c982dd9)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+Running tests/supply_invariants.rs (target/debug/deps/supply_invariants-280e1db04c982dd9)
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Compile-fail API boundary tests
+Finished `test` profile [unoptimized + debuginfo] target(s) in 0.93s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+Explicit wallet lifecycle tests
+Finished `test` profile [unoptimized + debuginfo] target(s) in 2.83s
+Running tests/program_e2e.rs (target/debug/deps/program_e2e-b9ad66ca93e8af63)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 201.68s
+
+Clippy
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.47s
+
+Format check and workspace/all-targets compile check: exit 0.
+Clippy: exit 0 with existing warnings.
+Generated coverage: 4096 coin insertion/consumption steps; 1024 asset operations with exact rollback.
+Four compile-fail doctests passed; two explicit wallet lifecycle tests passed.

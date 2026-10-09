@@ -1,0 +1,37 @@
+Persistent counter verification, 2026-10-04
+
+/tmp/xparq-counter-unit.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.87s
+     Running unittests src/main.rs (target/debug/deps/node-1e53401a8cdcb008)
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.20s
+     Running unittests src/main.rs (target/debug/deps/wallet-1d88ee363a690315)
+test native::program::vm_call_tests::vm_call_uses_exact_program_id_and_rejects_invalid_ids ... ok
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+/tmp/xparq-counter-kernel.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.31s
+     Running unittests src/lib.rs (target/debug/deps/kernel-e004ce544e2a4da2)
+test program::vm::tests::program_state_proposal_is_metered_and_rollback_restores_value ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 91 filtered out; finished in 0.00s
+     Running unittests src/bin/print_genesis_hash.rs (target/debug/deps/print_genesis_hash-032a03dca079e3ae)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/consolidation_compatibility.rs (target/debug/deps/consolidation_compatibility-d407c9dfce7d9d34)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/decoding_bounds.rs (target/debug/deps/decoding_bounds-c41755bcb58a2468)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+     Running tests/supply_invariants.rs (target/debug/deps/supply_invariants-280e1db04c982dd9)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+/tmp/xparq-counter-e2e.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running tests/program_e2e.rs (target/debug/deps/program_e2e-b9ad66ca93e8af63)
+test counter_deploy_and_call_cli_survive_restart ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 57.65s
+
+/tmp/xparq-counter-build.log
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.23s
+
+/tmp/xparq-counter-clippy.log
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.87s
+
+Shell syntax/help checks passed. Mock wallet verified script arguments, bytecode, offline forwarding, and invalid-ID rejection. Bytecode is 27 bytes and matches the README hex. Formatting and git diff --check passed.

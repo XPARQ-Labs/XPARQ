@@ -1,0 +1,39 @@
+Historical initial hardening results. Limits and large-sync behavior are superseded
+by LITEP2P_HARDENING.md and litep2p-large-sync-verification.txt.
+
+Experimental litep2p devnet verification, 2026-10-04
+
+Rust: pinned 1.99.0
+Feature: --no-default-features --features litep2p-devnet
+Protoc: Debian protobuf-compiler 3.21.12 extracted into /tmp; no system installation performed
+
+/tmp/xparq-litep2p-unit.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.51s
+     Running unittests src/main.rs (target/debug/deps/node-ef92c7f00057a865)
+test node::litep2p_devnet::tests::session_deadline_is_absolute_and_releases_the_slot ... ok
+test node::litep2p_devnet::tests::oversized_header_sessions_and_out_of_order_blocks_are_rejected ... ok
+test node::litep2p_devnet::tests::failed_peer_cleanup_removes_only_its_requests_and_session ... ok
+test node::litep2p_devnet::tests::sync_body_budget_is_checked_before_decode_and_keeps_canonical_state ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.11s
+
+/tmp/xparq-litep2p-e2e.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running tests/litep2p_e2e.rs (target/debug/deps/litep2p_e2e-3697155a2f0c570b)
+test litep2p_reorgs_to_verified_stronger_fork ... ok
+test litep2p_three_node_transaction_sync_reconnect_and_restart ... litep2p: request failed: Rejected(ConnectionClosed)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 104.67s
+
+/tmp/xparq-litep2p-check.log
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.32s
+
+/tmp/xparq-litep2p-clippy.log
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.83s
+
+/tmp/xparq-litep2p-default-check.log
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.18s
+
+Formatting and git diff --check passed. Existing dependency/unrelated warnings remain; feature Clippy reports no warnings in the changed litep2p module or new integration test.
+
+Integration tests intentionally stop/restart peers. Connection-closed/refused messages are expected. Reannouncements of a mined transaction can be rejected because its input is already consumed; both lifecycle assertions passed.
+
+Limits apply only to experimental litep2p devnet. Oversized branch refusal is a transport limitation; no disk-backed or resumable download implemented. No mainnet-default switch, consensus parameter change, production load test, NAT test, or fuzzing campaign.

@@ -1,0 +1,87 @@
+Production journal pruning verification — 2026-10-05
+
+Runtime behavior
+- Default retention is 256 recent block journals, including the current tip.
+- Kernel exposes retention metadata/primitive but does not choose the window.
+- Journal deletion does not change execution state or consensus commitments.
+- Archive per-operation burn receipts in auxiliary storage keyed by block hash
+  before deleting undo data. Validate receipt size/count and canonical header.
+- Archive failure defers pruning and preserves all journals and valid state.
+- Apply retention during canonical publication, startup replay, sync and scratch
+  replay. Historical bodies are not deleted.
+- Snapshot restoration accepts only a complete contiguous retained suffix ending
+  at its tip, with the exact journal count for each retained block.
+- Stronger deep forks recover through scratch. Concurrent canonical appends may
+  continue: recheck latest work and active state root before publishing. A changed
+  common ancestor defers recovery and requires a new sync session.
+
+Long real-PoW retention/reorg fixture
+cargo test --release -p node --locked --no-default-features \
+  --features litep2p-devnet --bin node production_pruning -- --test-threads=1
+PASS: 1 test, 331.79 seconds.
+Build a canonical chain through height 260; keep journals 5..260. Assert state
+root unchanged after every prune, journal count <= 256, shallow rollback works,
+and a pruned snapshot restarts correctly. Fork at height 2, apply 259 blocks to
+height 261 via actual sync dispatch and scratch recovery. Restart matches the
+candidate root/tip, retains 256 journals, preserves all 262 bodies and cleans up
+scratch. Later refinements to failure deferral and concurrent-append admission
+were covered by the final short fixtures below; the healthy 256-block retention
+behavior in this long fixture is unchanged.
+
+Final node and snapshot/storage regression
+PROTOC=/tmp/xparq-protoc/root/usr/bin/protoc
+LD_LIBRARY_PATH=/tmp/xparq-protoc/root/usr/lib/x86_64-linux-gnu
+cargo test --release -p node --locked --no-default-features \
+  --features litep2p-devnet --bin node --test snapshot_storage \
+  -- --skip production_pruning_bounds_journals
+PASS: 90 node tests, 11 snapshot/storage tests.
+Includes deployment burn receipts after removing their journals; archive failure
+leaves root/journals intact; restart from a one-journal snapshot preserves the
+historical block response. Recovery accepts a still-stronger candidate after a
+concurrent append, ignores an equal-work/tip candidate, and defers when a
+concurrent canonical replacement changes the common ancestor.
+
+Kernel regression
+cargo test --release -p kernel --locked --no-default-features --features devnet \
+  --lib --test shared_payloads --test decoding_bounds --test body_cache
+PASS: 93 library + 1 body-cache + 4 decoding-bound + 2 shared-payload tests.
+The new snapshot fixture rejects journal holes, missing tip coverage, unrelated
+keys, wrong operation counts and empty coverage; valid suffix rollback succeeds,
+and exhausted rollback fails without mutating state.
+
+Transport regression
+cargo test --release -p node --locked --no-default-features \
+  --features litep2p-devnet --bin node --test snapshot_storage \
+  --test network_e2e --test litep2p_e2e --test litep2p_limits \
+  -- --skip production_pruning_bounds_journals
+Initial run: node fixtures passed; native suite passed 6 cases, but the handshake
+admission fixture hit its existing 15-second deadline during parallel execution.
+No transport code or timeout was changed.
+Isolated retry:
+cargo test --release -p node --locked --no-default-features \
+  --features litep2p-devnet --test litep2p_e2e \
+  litep2p_rejects_bad_handshakes_and_recovers_after_pending_socket_exhaustion \
+  -- --test-threads=1
+PASS: 1 handshake test, 17.66 seconds.
+Remaining targets were then run separately:
+cargo test --release -p node --locked --no-default-features \
+  --features litep2p-devnet --test network_e2e --test snapshot_storage \
+  --test litep2p_limits
+PASS: 7 TCP network, 11 snapshot/storage and 6 limit tests.
+The final concurrent-append refinement was verified by the node/snapshot fixtures
+above. Parallel native handshake flakiness remains a validation limitation.
+
+Default release build
+cargo build --release --locked -p node -p wallet
+PASS: 11.88 seconds; no warnings or errors.
+git diff --check
+PASS.
+
+Compatibility and limits
+- Storage schema 10, snapshot encoding/version 3, block encoding, chain spec and
+  wallet format unchanged. Older full-journal snapshots remain readable.
+- Retention bounds journal count, not bytes/RSS. Active state/headers remain RAM.
+- Loading an old full-journal snapshot can temporarily exceed the new window.
+- Disk-backed historical receipt rows for discarded branches are not deleted.
+  They are non-consensus caches; canonical membership is verified independently.
+- No full-workspace mainnet frozen-vector pass is claimed by these devnet tests.

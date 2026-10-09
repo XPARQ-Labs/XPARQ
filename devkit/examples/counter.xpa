@@ -1,0 +1,10 @@
+# Every successful call increments the program's scalar state.
+.version 4
+.stack 8
+.memory 1
+scalar.get
+u128.const 1
+add
+dup
+scalar.set
+return

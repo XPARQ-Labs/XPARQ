@@ -1,0 +1,59 @@
+litep2p outgoing response admission verification
+
+Scope: opt-in litep2p-devnet request-response serving. TCP remains the default.
+Consensus, addresses and wire protocol names are unchanged by this change.
+
+Production admission:
+- Block: per peer 16 MiB burst / 8 MiB per second; global 64 MiB burst /
+  32 MiB per second.
+- Tip/header: per peer 8 MiB burst / 4 MiB per second; global 16 MiB burst /
+  8 MiB per second, independent of block capacity.
+- Charge encoded payload plus unsigned-varint prefix after encoding, before send.
+- Atomic local/global debit; exhausted requests rejected without delayed buffers.
+- Failed writes are not refunded; reconnect retains history for five minutes.
+- At most 64 peer histories; new identities fail closed while the table is full.
+
+Direct transport regression:
+cargo test -p node --locked --no-default-features --features litep2p-devnet --test litep2p_limits
+Result: 5 passed, 0 failed (5.06 s): three production-budget unit tests and two
+real TCP/Noise/Yamux transport tests. The egress fixture uses a fixed budget clock
+and synthetic payloads, not canonical blocks or a measured bandwidth benchmark.
+Sixteen frames of 1 MiB minus three payload bytes each charge exactly 16 MiB
+including their prefixes. A seventeenth block reply is rejected; a separate peer
+receives 4,096 bytes and the exhausted peer retains control-response capacity.
+Unit tests verify shared exhaustion across identities, atomic debit when global
+capacity is absent, refill, independent control capacity, retained peer history,
+backwards time and oversized-response rejection. The existing substream lifecycle
+fixture also passes.
+
+Node regression:
+cargo test -p node --locked --no-default-features --features litep2p-devnet --bin node
+Result: 84 passed, 0 failed (105.66 s) with approved local socket access.
+The initial sandboxed run had 81 passes and three socket PermissionDenied failures;
+rerunning with socket access passed all tests. Includes staging above 64 MiB.
+
+Network regression:
+cargo test -p node --locked --no-default-features --features litep2p-devnet --test litep2p_e2e
+Result: 7 passed, 0 failed (199.77 s).
+Includes request-flood fairness, handshake recovery, relay/reconnect/restart,
+stronger-fork reorganization, durable prefix recovery, stalled-peer failover and
+hostname discovery persistence. Expected disconnect/timeout diagnostics occurred.
+
+cargo clippy -p node --locked --no-default-features --features litep2p-devnet --bin node --tests
+Result: passed; existing warnings remain.
+cargo check -p node --locked
+Result: passed for default mainnet/TCP configuration. An initial check with
+--no-default-features selected no chain and failed on absent genesis constants;
+checking the actual default configuration passed.
+rustfmt --edition 2024 --check runtime/src/node/response_budget.rs runtime/tests/litep2p_limits.rs runtime/src/node/litep2p_devnet.rs
+Result: passed.
+git diff --check: passed.
+
+Environment: extracted protoc via PROTOC and LD_LIBRARY_PATH for litep2p builds.
+Local socket fixtures ran with approved execution outside the sandbox.
+
+Limits: admission does not include Noise/Yamux/TCP overhead, announcement relay,
+or pre-admission storage access/serialization costs. Cooperating identities share
+aggregate capacity but can still deny service to others. Restart resets budgets.
+No total CPU/RSS cap, Sybil resistance, public-network throughput result, NAT
+certification or production-default qualification is claimed.

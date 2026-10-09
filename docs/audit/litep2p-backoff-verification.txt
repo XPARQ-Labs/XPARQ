@@ -1,0 +1,38 @@
+litep2p sync retry hardening — 2026-10-04
+
+Changes:
+- Preserve per-peer retry history through connection/substream closure.
+- Guard immediate tip requests, periodic requests and configured redials.
+- Repeated tracked failures double cooldown from 30 seconds to 30 minutes.
+- Clear history after a successfully completed verified sync session.
+- Keep at most 64 histories; expire one hour after the last cooldown ends.
+
+Limitations:
+- Local process history; node restart resets it.
+- Bounded eviction and changing peer identities can bypass old history.
+- Backoff covers local/network failures as well as invalid responses.
+- Announcement relay and inbound serving are not rate-limited by this change.
+
+Rust 1.99.0; locked/offline; --no-default-features --features litep2p-devnet.
+Protoc from temporary extracted Debian package; no system installation.
+
+cargo test -p node --locked --offline --no-default-features --features litep2p-devnet --bin node litep2p_devnet::tests
+test node::litep2p_devnet::tests::retry_history_is_bounded_expires_and_does_not_punish_other_peers ... ok
+test node::litep2p_devnet::tests::session_deadline_is_absolute_and_releases_the_slot ... ok
+test node::litep2p_devnet::tests::oversized_header_sessions_and_out_of_order_blocks_are_rejected ... ok
+test node::litep2p_devnet::tests::failed_peer_cleanup_removes_only_its_requests_and_session ... ok
+test node::litep2p_devnet::tests::retry_backoff_survives_disconnect_and_caps_repeated_failures ... ok
+test node::litep2p_devnet::tests::header_sync_finishes_at_the_advertised_tip_while_the_peer_keeps_mining ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 53 filtered out; finished in 9.53s
+
+cargo check --workspace --locked --offline: PASS
+cargo clippy -p node --locked --offline --no-default-features --features litep2p-devnet --all-targets: PASS (existing warnings)
+cargo fmt --all -- --check: PASS
+git diff --check: PASS
+
+cargo test -p node --locked --offline --no-default-features --features litep2p-devnet --test litep2p_e2e -- --test-threads=1
+test litep2p_reorgs_to_verified_stronger_fork ... ok
+test litep2p_resumes_durable_prefix_against_a_newer_verified_tip ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 151.60s
+Three-node transaction sync/reconnect/restart: PASS.
+Connection-close and stale-transaction rejection logs occur during lifecycle testing.

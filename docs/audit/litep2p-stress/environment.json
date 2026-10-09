@@ -1,0 +1,13 @@
+{
+  "os": "Linux 6.12.111+deb13-amd64 x86_64 GNU/Linux",
+  "cpu_model": "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz",
+  "rust_toolchain": "1.99.0",
+  "profile": "release",
+  "other_xparq_regression_suites_during_recorded_run": false,
+  "active_inbound_limit": 8,
+  "additional_inbound_waiters": 32,
+  "per_peer_inbound_slots_including_wait": 2,
+  "admission_wait_seconds": 5,
+  "frame_read_seconds": 5,
+  "node_binary_sha256": "839c641ce7507074ac1bf4f2ad0865aceef2fe4e596b09f0123c3324a0b26b6f"
+}

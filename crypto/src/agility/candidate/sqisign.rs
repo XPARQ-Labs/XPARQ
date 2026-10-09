@@ -1,0 +1,473 @@
+use borsh::{BorshDeserialize, BorshSerialize};
+use chacha20::ChaCha12Rng;
+
+use rand_10::{SeedableRng, rand_core::UnwrapErr, rngs::SysRng};
+
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{Error as DeError, Visitor},
+};
+
+use sqisign_rs::{
+    Level5, PublicKey as SqisignPublicKey, Signature as SqisignSignature,
+    SigningKey as SqisignSigningKey, Verifier, generate,
+};
+
+use static_assertions::const_assert_eq;
+
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt,
+    sync::{Arc, Mutex, OnceLock},
+};
+
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+use crate::error::CryptoError;
+
+type XparqSigningKey = SqisignSigningKey<Level5>;
+type XparqVerifyingKey = SqisignPublicKey<Level5>;
+type XparqSignature = SqisignSignature<Level5>;
+
+pub const PUBLIC_KEY_SIZE: usize = 129;
+pub const SECRET_KEY_SIZE: usize = 705;
+pub const SIGNATURE_SIZE: usize = 292;
+const_assert_eq!(PUBLIC_KEY_SIZE, 129);
+const_assert_eq!(SECRET_KEY_SIZE, 705);
+const_assert_eq!(SIGNATURE_SIZE, 292);
+const VERIFYING_KEY_CACHE_CAPACITY: usize = 4_096;
+
+/// Deterministic, non-consensus accounting for SQIsign verification jobs.
+/// Public-key decodes are charged at their worst-case count because cache
+/// state is process-local and must never influence admission decisions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SqisignVerificationWork {
+    pub signature_checks: u64,
+    pub public_key_decodes: u64,
+    pub message_bytes: u64,
+}
+
+impl SqisignVerificationWork {
+    pub fn for_jobs(jobs: &[(PublicKey, Vec<u8>, Signature)]) -> Self {
+        Self {
+            signature_checks: jobs.len() as u64,
+            public_key_decodes: jobs.len() as u64,
+            message_bytes: jobs.iter().fold(0_u64, |total, (_, message, _)| {
+                total.saturating_add(message.len() as u64)
+            }),
+        }
+    }
+}
+
+pub type PublicKeyBytes = [u8; PUBLIC_KEY_SIZE];
+pub type SecretKeyBytes = [u8; SECRET_KEY_SIZE];
+pub type SignatureBytes = [u8; SIGNATURE_SIZE];
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
+)]
+pub struct PublicKey(pub PublicKeyBytes);
+
+#[derive(
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Zeroize,
+    ZeroizeOnDrop,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub struct SecretKey(pub SecretKeyBytes);
+
+impl fmt::Debug for SecretKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SecretKey([REDACTED])")
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
+)]
+pub struct Signature(pub SignatureBytes);
+
+impl Serialize for PublicKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_bytes::<PUBLIC_KEY_SIZE, D>(deserializer).map(PublicKey)
+    }
+}
+
+impl Serialize for Signature {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Signature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_bytes::<SIGNATURE_SIZE, D>(deserializer).map(Signature)
+    }
+}
+
+fn deserialize_bytes<'de, const N: usize, D>(deserializer: D) -> Result<[u8; N], D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct BytesVisitor<const N: usize>;
+
+    impl<'de, const N: usize> Visitor<'de> for BytesVisitor<N> {
+        type Value = [u8; N];
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "{N} bytes")
+        }
+
+        fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+        where
+            E: DeError,
+        {
+            value
+                .try_into()
+                .map_err(|_| E::invalid_length(value.len(), &self))
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut bytes = [0_u8; N];
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                *byte = seq
+                    .next_element()?
+                    .ok_or_else(|| DeError::invalid_length(index, &self))?;
+            }
+            Ok(bytes)
+        }
+    }
+
+    deserializer.deserialize_bytes(BytesVisitor::<N>)
+}
+
+#[derive(Clone)]
+pub struct CachedVerifyingKey {
+    inner: Option<Arc<XparqVerifyingKey>>,
+}
+
+impl fmt::Debug for CachedVerifyingKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CachedVerifyingKey(SQIsign-Level5)")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyPair {
+    pub public_key: PublicKey,
+    pub secret_key: SecretKey,
+}
+
+pub fn generate_keypair() -> KeyPair {
+    let (public_key, signing_key) = generate::<Level5>(&mut UnwrapErr(SysRng));
+    keypair_from_parts(public_key, signing_key)
+}
+
+pub fn keypair_from_seed(seed: &[u8; 32]) -> KeyPair {
+    // ChaCha12Rng matches rand 0.10 StdRng's stream while additionally
+    // zeroizing its key, state, and buffered output when dropped.
+    let mut rng = ChaCha12Rng::from_seed(*seed);
+    let (public_key, signing_key) = generate::<Level5>(&mut rng);
+    keypair_from_parts(public_key, signing_key)
+}
+
+fn keypair_from_parts(public_key: XparqVerifyingKey, signing_key: XparqSigningKey) -> KeyPair {
+    let public_key = PublicKey(
+        public_key
+            .to_bytes()
+            .as_slice()
+            .try_into()
+            .expect("SQIsign Level 5 public-key length"),
+    );
+    let encoded_secret = signing_key
+        .to_bytes()
+        .expect("SQIsign Level 5 signing-key encoding");
+    let secret_key = SecretKey(
+        encoded_secret
+            .as_slice()
+            .try_into()
+            .expect("SQIsign Level 5 signing-key length"),
+    );
+    KeyPair {
+        public_key,
+        secret_key,
+    }
+}
+
+pub fn public_key_from_seed(seed: &[u8; 32]) -> PublicKey {
+    keypair_from_seed(seed).public_key
+}
+
+pub fn sign_from_seed(seed: &[u8; 32], message: &[u8]) -> Signature {
+    let keypair = keypair_from_seed(seed);
+    sign(&keypair.secret_key, message)
+}
+
+pub fn derive_public_key(secret_key: &SecretKey) -> PublicKey {
+    let signing_key = XparqSigningKey::from_bytes(&secret_key.0)
+        .expect("valid SQIsign Level 5 secret key required");
+    PublicKey(
+        signing_key
+            .public_key()
+            .to_bytes()
+            .as_slice()
+            .try_into()
+            .expect("SQIsign Level 5 public-key length"),
+    )
+}
+
+pub fn sign(secret_key: &SecretKey, message: &[u8]) -> Signature {
+    let signing_key = XparqSigningKey::from_bytes(&secret_key.0)
+        .expect("valid SQIsign Level 5 secret key required");
+    let signature = signing_key
+        .sign(message, &mut UnwrapErr(SysRng))
+        .expect("SQIsign Level 5 signing failed");
+    Signature(
+        signature
+            .to_bytes()
+            .as_slice()
+            .try_into()
+            .expect("SQIsign Level 5 signature length"),
+    )
+}
+
+pub fn verify(public_key: &PublicKey, message: &[u8], signature: &Signature) -> bool {
+    verify_result(public_key, message, signature).is_ok()
+}
+
+/// Verifies independent jobs in input order and returns their deterministic
+/// worst-case work. A node may schedule calls concurrently according to its
+/// own worker and backpressure policy.
+pub fn verify_batch_accounted(
+    jobs: &[(PublicKey, Vec<u8>, Signature)],
+) -> (Vec<bool>, SqisignVerificationWork) {
+    let work = SqisignVerificationWork::for_jobs(jobs);
+    (
+        jobs.iter()
+            .map(|(key, message, signature)| verify(key, message, signature))
+            .collect(),
+        work,
+    )
+}
+
+pub fn cached_verifying_key(public_key: &PublicKey) -> CachedVerifyingKey {
+    if let Some(inner) = verifying_key_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(public_key)
+    {
+        return CachedVerifyingKey { inner: Some(inner) };
+    }
+
+    let Ok(decoded) = XparqVerifyingKey::from_bytes(&public_key.0) else {
+        return CachedVerifyingKey { inner: None };
+    };
+    let decoded = Arc::new(decoded);
+    let inner = verifying_key_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(*public_key, decoded);
+    CachedVerifyingKey { inner: Some(inner) }
+}
+
+pub fn verify_result(
+    public_key: &PublicKey,
+    message: &[u8],
+    signature: &Signature,
+) -> Result<(), CryptoError> {
+    cached_verifying_key(public_key).verify(message, signature)
+}
+
+impl CachedVerifyingKey {
+    pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), CryptoError> {
+        let public_key = self.inner.as_ref().ok_or(CryptoError::InvalidPublicKey)?;
+        let signature = XparqSignature::from_bytes(&signature.0)
+            .map_err(|_| CryptoError::InvalidSignatureEncoding)?;
+        public_key
+            .verify(message, &signature)
+            .map_err(|_| CryptoError::VerificationFailed)
+    }
+}
+
+struct VerifyingKeyCache {
+    entries: HashMap<PublicKey, Arc<XparqVerifyingKey>>,
+    insertion_order: VecDeque<PublicKey>,
+}
+
+impl VerifyingKeyCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::with_capacity(VERIFYING_KEY_CACHE_CAPACITY),
+            insertion_order: VecDeque::with_capacity(VERIFYING_KEY_CACHE_CAPACITY),
+        }
+    }
+
+    fn get(&self, key: &PublicKey) -> Option<Arc<XparqVerifyingKey>> {
+        self.entries.get(key).cloned()
+    }
+
+    fn insert(
+        &mut self,
+        key: PublicKey,
+        decoded: Arc<XparqVerifyingKey>,
+    ) -> Arc<XparqVerifyingKey> {
+        if let Some(existing) = self.entries.get(&key) {
+            return Arc::clone(existing);
+        }
+        while self.entries.len() >= VERIFYING_KEY_CACHE_CAPACITY {
+            if let Some(oldest) = self.insertion_order.pop_front() {
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        self.insertion_order.push_back(key);
+        self.entries.insert(key, Arc::clone(&decoded));
+        decoded
+    }
+
+    #[cfg(any(test, feature = "sqisign-blockchain-test"))]
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.insertion_order.clear();
+    }
+}
+
+fn verifying_key_cache() -> &'static Mutex<VerifyingKeyCache> {
+    static CACHE: OnceLock<Mutex<VerifyingKeyCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(VerifyingKeyCache::new()))
+}
+
+/// Clears the experimental SQIsign verifier cache.
+///
+/// This is intended for controlled benchmarks; normal node operation should
+/// keep the bounded cache warm.
+#[doc(hidden)]
+pub fn clear_verifying_key_cache() {
+    verifying_key_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_seed_and_sign_verify_work() {
+        let key_a = keypair_from_seed(&[7; 32]);
+        let key_b = keypair_from_seed(&[7; 32]);
+        assert_eq!(key_a, key_b);
+        let signature = sign(&key_a.secret_key, b"SQIsign blockchain test");
+        assert!(verify(
+            &key_a.public_key,
+            b"SQIsign blockchain test",
+            &signature
+        ));
+        assert!(!verify(&key_a.public_key, b"modified", &signature));
+    }
+
+    #[test]
+    fn sqisign_level5_batch_verification_works() {
+        let owner = keypair_from_seed(&[3; 32]);
+        let authorization = keypair_from_seed(&[4; 32]);
+        let message = b"SQIsign Level 5 authorization";
+        let owner_signature = sign(&owner.secret_key, message);
+        let authorization_signature = sign(&authorization.secret_key, message);
+
+        let jobs = vec![
+            (owner.public_key, message.to_vec(), owner_signature),
+            (
+                authorization.public_key,
+                message.to_vec(),
+                authorization_signature,
+            ),
+            (owner.public_key, b"modified".to_vec(), owner_signature),
+        ];
+        assert_eq!(verify_batch_accounted(&jobs).0, vec![true, true, false]);
+    }
+
+    #[test]
+    fn batch_work_is_deterministic_and_cache_independent() {
+        let keypair = keypair_from_seed(&[29; 32]);
+        let messages = [b"one".as_slice(), b"longer-message".as_slice()];
+        let jobs = messages
+            .iter()
+            .map(|message| {
+                (
+                    keypair.public_key,
+                    message.to_vec(),
+                    sign(&keypair.secret_key, message),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        clear_verifying_key_cache();
+        let (cold_results, cold_work) = verify_batch_accounted(&jobs);
+        let (warm_results, warm_work) = verify_batch_accounted(&jobs);
+        assert_eq!(cold_results, vec![true, true]);
+        assert_eq!(warm_results, cold_results);
+        assert_eq!(warm_work, cold_work);
+        assert_eq!(cold_work.signature_checks, 2);
+        assert_eq!(cold_work.public_key_decodes, 2);
+        assert_eq!(cold_work.message_bytes, 3 + 14);
+    }
+
+    #[test]
+    fn invalid_signature_is_not_accepted_through_cache() {
+        clear_verifying_key_cache();
+        let invalid = PublicKey([0; PUBLIC_KEY_SIZE]);
+        let signature = Signature([0; SIGNATURE_SIZE]);
+        assert!(
+            cached_verifying_key(&invalid)
+                .verify(b"message", &signature)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn deterministic_rng_matches_previous_stream_and_zeroizes_on_drop() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<ChaCha12Rng>();
+
+        let seed = [0x5a; 32];
+        let mut previous = rand_10::rngs::StdRng::from_seed(seed);
+        let mut hardened = ChaCha12Rng::from_seed(seed);
+        let mut previous_bytes = [0_u8; 256];
+        let mut hardened_bytes = [0_u8; 256];
+        use rand_10::Rng;
+        previous.fill_bytes(&mut previous_bytes);
+        hardened.fill_bytes(&mut hardened_bytes);
+        assert_eq!(previous_bytes, hardened_bytes);
+        previous_bytes.zeroize();
+        hardened_bytes.zeroize();
+    }
+}

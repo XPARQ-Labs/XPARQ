@@ -1,0 +1,25 @@
+[package]
+name = "fn-dsa-comm"
+version = "0.4.0"
+authors.workspace = true
+categories.workspace = true
+description.workspace = true
+edition.workspace = true
+keywords.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rand_core.workspace = true
+
+[target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))'.dependencies]
+cpufeatures.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+
+[features]
+default = []
+no_avx2 = []

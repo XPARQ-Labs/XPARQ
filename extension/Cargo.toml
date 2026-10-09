@@ -1,0 +1,20 @@
+[package]
+name = "extension"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["mainnet"]
+mainnet = ["kernel/mainnet"]
+testnet = ["kernel/testnet"]
+devnet = ["kernel/devnet"]
+
+[dependencies]
+kernel.workspace = true
+
+[[bench]]
+name = "block_validation"
+harness = false

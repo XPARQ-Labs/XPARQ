@@ -1,0 +1,39 @@
+[package]
+name = "node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "node"
+path = "src/main.rs"
+
+[features]
+default = ["mainnet"]
+mainnet = ["kernel/mainnet", "wallet/mainnet"]
+testnet = ["kernel/testnet", "wallet/testnet"]
+devnet = ["kernel/devnet", "wallet/devnet"]
+sqisign-blockchain-test = ["kernel/sqisign-blockchain-test", "kernel/sqisign-blockchain-test"]
+litep2p-devnet = ["devnet", "dep:litep2p", "dep:tokio", "dep:futures"]
+
+[dependencies]
+extension = { version = "1.0.0", path = "../extension", default-features = false }
+borsh.workspace = true
+hex.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+igd-next.workspace = true
+getrandom.workspace = true
+redb.workspace = true
+kernel.workspace = true
+wallet = { version = "1.0.0", path = "../wallet", default-features = false }
+litep2p = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+
+[[bench]]
+name = "ledger_sync"
+harness = false

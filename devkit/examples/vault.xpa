@@ -1,0 +1,25 @@
+# Only the deployer's authenticated immediate caller can withdraw.
+# Calldata is exactly 16 bytes: a little-endian u128 amount in zeno.
+.version 4
+.stack 8
+.memory 1
+caller
+deployer
+equal
+assert
+data
+integer.decode
+dup
+u128.const 0
+equal
+jump.zero withdraw
+# Empty calldata permits a deposit-only call.
+drop
+u128.const 0
+return
+withdraw:
+deployer
+swap
+coin.transfer
+u128.const 1
+return

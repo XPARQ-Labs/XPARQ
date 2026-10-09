@@ -1,0 +1,54 @@
+litep2p discovery and hostname bootstrap verification — 2026-10-04
+
+Rust 1.99.0; locked/offline; --no-default-features --features litep2p-devnet.
+Protoc extracted from Debian packages under /tmp; no system installation.
+Cargo.lock unchanged. Tokio net/sync features are explicit.
+
+Coverage: canonical hostname endpoints with pinned peer IDs; public-only discovery;
+per-dial DNS filtering; bounded allocation-free length checks; capped/deduplicated
+peer table; expiry; configuration provenance; successful outbound persistence;
+async/native resolver concurrency; DNS-address fallback; stale dial failure guards.
+The native DNS worker owns its semaphore permit even after caller timeout.
+
+Full node regression suite (serial, before the final outbound-proof assertion)
+/tmp/xparq-discovery-node-final.log
+test result: ok. 73 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 157.73s
+
+Discovery/DNS/store regression suite with bounded native resolver
+/tmp/xparq-discovery-unit-final.log
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 0.01s
+
+Transport failure/rotation regression suite
+/tmp/xparq-discovery-transport-final.log
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 64 filtered out; finished in 10.89s
+
+Final outbound direction/socket-format regression
+/tmp/xparq-discovery-outbound-proof.log
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 73 filtered out; finished in 0.00s
+
+Five-scenario integration suite before final resolver/provenance tightening
+/tmp/xparq-discovery-e2e-final.log
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 394.67s
+
+Checks:
+cargo check --workspace --locked --offline: PASS
+cargo clippy -p node --locked --offline --no-default-features --features litep2p-devnet --all-targets: PASS (existing warnings)
+cargo fmt --all -- --check: PASS
+git diff --check: PASS
+
+An initial hostname test expected a numeric endpoint instead of the preserved DNS
+identity; its assertion was corrected. The stricter outbound proof then caught
+litep2p TCP reporting its endpoint without /p2p/PEER_ID; socket normalization was
+corrected with a focused regression. An old root-rejection fixture sometimes
+failed PoW first; mining the negative fixture makes its expected error deterministic.
+
+DNS answer-change tests inject resolver answer sets; no live external DDNS zone
+was changed. No production load, Internet/NAT or Sybil-resistance campaign was run.
+The transport remains opt-in devnet.
+
+Final hostname/discovery/persistence integration after native resolver and outbound socket proof fixes:
+cargo test -p node --locked --offline --no-default-features --features litep2p-devnet --test litep2p_e2e litep2p_hostname_bootstrap_discovers_peer_and_reconnects_without_bootstrap_after_restart
+test litep2p_hostname_bootstrap_discovers_peer_and_reconnects_without_bootstrap_after_restart has been running for over 60 seconds
+test litep2p_hostname_bootstrap_discovers_peer_and_reconnects_without_bootstrap_after_restart ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 150.33s
+Bootstrap offline + target restart with no --peer + newer source tip: PASS.

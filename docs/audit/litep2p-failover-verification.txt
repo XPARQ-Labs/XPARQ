@@ -1,0 +1,50 @@
+litep2p sync peer rotation and failover verification — 2026-10-04
+
+Rust 1.99.0; --locked --offline; --no-default-features --features litep2p-devnet.
+Protoc from temporary extracted Debian packages; no system installation.
+
+Behavior:
+- Accepted peers enter a bounded FIFO queue (at most 32).
+- Serial tip polling on the three-second tick rotates peers, skipping cooldowns.
+- A session without verified progress expires after 60 seconds.
+- Existing 15-second request and 24-hour absolute session deadlines remain.
+- Header validation, fresh prefix verification and durable body commits count
+  as progress. Invalid messages and queued requests do not.
+- Session failure releases requests/slot and preserves durable staging.
+
+cargo test -p node --locked --offline --no-default-features --features litep2p-devnet --bin node litep2p_devnet::tests
+test node::litep2p_devnet::tests::peer_rotation_is_fifo_skips_cooldown_and_removes_closed_peers ... ok
+test node::litep2p_devnet::tests::retry_history_is_bounded_expires_and_does_not_punish_other_peers ... ok
+test node::litep2p_devnet::tests::idle_timeout_uses_verified_progress_and_releases_the_slot ... ok
+test node::litep2p_devnet::tests::oversized_header_sessions_and_out_of_order_blocks_are_rejected ... ok
+test node::litep2p_devnet::tests::retry_backoff_survives_disconnect_and_caps_repeated_failures ... ok
+test node::litep2p_devnet::tests::failed_peer_cleanup_removes_only_its_requests_and_session ... ok
+test node::litep2p_devnet::tests::session_deadline_is_absolute_and_releases_the_slot ... ok
+test node::litep2p_devnet::tests::header_sync_finishes_at_the_advertised_tip_while_the_peer_keeps_mining ... ok
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 58 filtered out; finished in 11.66s
+
+Live Unix failover scenario:
+Mine a three-block source chain and copy it before transport identity generation.
+Target downloads its first body from source A. SIGSTOP freezes the child source
+process without deliberately closing its connection. A separate source B connects
+with a different identity. Target times out A, selects B, revalidates headers and
+resumes at least one (but fewer than all three) previously committed bodies.
+Canonical tip and miner balance match B; target retains the tip after restart.
+Test child cleanup kills and waits for the paused process.
+
+cargo check --workspace --locked --offline: PASS
+cargo clippy -p node --locked --offline --no-default-features --features litep2p-devnet --all-targets: PASS (existing warnings)
+cargo fmt --all -- --check: PASS
+git diff --check: PASS
+
+Limits: a source continuing valid progress can retain its active session; this
+is not session time-slicing. Serial polls delay tip discovery roughly three
+seconds per eligible peer. Timers cannot preempt synchronous validation or IO.
+No production load test, fuzzing campaign or real-world NAT test was run.
+
+cargo test -p node --locked --offline --no-default-features --features litep2p-devnet --test litep2p_e2e -- --test-threads=1
+test litep2p_fails_over_from_stalled_peer_and_reuses_its_committed_body ... litep2p: request failed: Rejected(SubstreamOpenError(NegotiationError(Timeout)))
+test litep2p_reorgs_to_verified_stronger_fork ... ok
+test litep2p_resumes_durable_prefix_against_a_newer_verified_tip ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 231.79s
+Three-node signed transaction relay/reconnect/restart: PASS.

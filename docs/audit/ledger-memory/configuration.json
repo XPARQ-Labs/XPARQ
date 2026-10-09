@@ -1,0 +1,11 @@
+{
+  "architecture": "x86_64",
+  "cpu_ticks_per_second": 100,
+  "debug_assertions": false,
+  "deployments": 65,
+  "flood_identities": 4,
+  "os": "linux",
+  "requests_in_flight_per_flood_identity": 8,
+  "sampling_interval_ms": 200,
+  "scenario_timeout_seconds": 900
+}

@@ -1,0 +1,64 @@
+Fair litep2p request service verification
+
+Application queue: 32 peers, two pending requests per peer, 64 total requests,
+131,264 total encoded bytes (64 * 2,051), two-second expiry. Maximum request
+size includes the full 64-hash locator framing, not just its hash payload.
+Service: one request each 31.25 ms, missed ticks skipped. Per-peer ingress and
+shared request service budgets are separate from announcement budgets.
+Wire protocols, consensus rules, transport's eight concurrent inbound requests,
+and the default transport selection remain unchanged.
+
+cargo test -p node --locked --no-default-features --features litep2p-devnet --bin node node::
+Result: 66 passed, 0 failed (120.94 s), 14 unrelated tests filtered out.
+Includes queue, per-peer/shared admission, discovery/DNS, sync/backoff, atomic
+canonical application and resumed staging above 64 MiB.
+
+cargo test -p node --locked --no-default-features --features litep2p-devnet --bin node request_
+Result: 7 passed, 0 failed; 74 unrelated tests filtered out.
+Additional final boundary coverage verifies that the largest valid 64-hash
+locator fits the request ceiling and a trailing byte is rejected.
+Queue tests exercise replenished flood-peer queues versus a healthy waiting peer,
+full peer/byte capacity, per-peer slots, expiry boundaries and disconnect cleanup.
+
+cargo test -p node --locked --no-default-features --features litep2p-devnet --bin node inbound_budget
+Result: 8 passed, 0 failed.
+Includes request service refill while new peer admission remains available,
+announcement-byte exhaustion that cannot consume request capacity, request
+exhaustion that cannot consume transaction capacity, and 10,000 paced sync requests.
+
+Focused live flood regression:
+litep2p_healthy_peer_syncs_while_another_peer_floods_requests
+Result: passed (26.75 s).
+A chain-authenticated peer continuously issues tip requests with up to eight
+outstanding requests, exceeding the 32-request per-peer burst by at least twice.
+A separate healthy node downloads and validates the source's two mined blocks
+while the flood remains active. The worker has a bounded 120-second lifetime.
+
+Build environment uses extracted protoc through PROTOC and LD_LIBRARY_PATH.
+Local-network tests run with approved socket access outside the sandbox.
+
+Scope: fairness among requests admitted to the application queue. No Sybil
+resistance, raw substream-slot reservation, response-byte quota, total CPU cap,
+sustained public-network flood benchmark or hard latency guarantee is claimed.
+Synchronous announcement validation/storage and transport response writes can
+still delay the service timer. The transport remains opt-in devnet.
+
+Network regression:
+cargo test -p node --locked --no-default-features --features litep2p-devnet --test litep2p_e2e -- --test-threads=1
+Result: 7 passed, 0 failed (456.55 s).
+Covers live request flood versus healthy sync, handshake exhaustion/recovery,
+three-node transaction relay/reconnect/restart, hostname discovery persistence,
+stronger-fork reorganization, stalled-peer failover and durable prefix reuse.
+The final 64-hash ceiling boundary was checked separately by the request unit
+regression; the live network fixtures use shorter locators.
+
+cargo clippy -p node --locked --no-default-features --features litep2p-devnet --bin node --tests
+Result: passed; existing dependency/node suggestions remain. An intermediate
+unreachable test match arm was removed before the passing Clippy run.
+
+cargo check -p node --locked
+Result: passed for the default transport configuration.
+
+rustfmt --edition 2024 --check runtime/src/node/request_queue.rs runtime/src/node/inbound_budget.rs runtime/src/node/litep2p_devnet.rs runtime/tests/litep2p_e2e.rs
+Result: passed.
+git diff --check: passed.

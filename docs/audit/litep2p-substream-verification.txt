@@ -1,0 +1,59 @@
+litep2p inbound substream lifecycle verification
+
+Production devnet configuration: 8 inbound request slots globally, 2 per peer;
+2,051-byte request frames; 5 s whole-frame read and rejection-close deadlines;
+15 s application wait and 15 s response-write deadlines. Owned permits retain
+per-peer occupancy throughout all phases and release the original semaphore.
+Wire protocol names and consensus rules are unchanged. Default transport is TCP.
+
+Direct transport regression:
+cargo test -p node --locked --no-default-features --features litep2p-devnet --test litep2p_limits -- --nocapture
+Result: 1 passed, 0 failed (4.67 s).
+Uses real localhost TCP/Noise/Yamux with shortened 500 ms phase deadlines to test
+state transitions. No mocked request IO is used. It verifies:
+- two unread/partial request frames reject a third stream from the same peer;
+- another peer receives a valid response while those slots remain occupied;
+- read timeout releases the silent/partial slots for a new valid request;
+- an excessive declared frame length is rejected without sending its payload;
+- the response limit restores correctly: a 4,096-byte reply exceeds the fixture's
+  33-byte request frame limit and is received intact;
+- a retained application response handle does not hold a slot indefinitely;
+- two unread 8 MiB replies hold both peer permits during blocked writes;
+- the third stream is rejected, a healthy peer works, and write timeout allows
+  the original peer to make another valid request;
+- disconnect/reconnect with the same transport identity uses fresh permits;
+  timing out an old application-wait future cannot release the new connection's
+  two occupied slots, and later read cleanup permits a new valid request.
+
+The fixture checks partial frames and declared-size admission, not a public-network
+slowloris/flood benchmark. Per-phase timers do not preempt synchronous work. Four
+cooperating peer identities can still occupy eight global slots until cleanup.
+No response-byte quota, Sybil resistance, total RSS/CPU cap, NAT certification or
+production-default qualification is claimed.
+
+Build environment: extracted protoc via PROTOC and LD_LIBRARY_PATH. Socket tests
+require approved execution outside the filesystem/network sandbox.
+
+Node regression:
+cargo test -p node --locked --no-default-features --features litep2p-devnet --bin node
+Result: 81 passed, 0 failed (103.70 s), with approved local networking.
+Includes request/announcement budgets, fair queue, maximum locator framing,
+discovery/DNS, canonical rollback/storage, and staging/resume above 64 MiB.
+
+Network regression:
+cargo test -p node --locked --no-default-features --features litep2p-devnet --test litep2p_e2e -- --test-threads=1
+Result: 7 passed, 0 failed (453.87 s).
+Covers healthy sync under request flood, transport/notification handshake failures,
+relay/reconnect/restart, hostname discovery persistence, verified stronger forks,
+stalled-source failover and durable body-prefix reuse. Expected restart/substream
+failures and rejection of a replayed consumed transaction appeared in passing tests.
+
+cargo clippy -p node --locked --no-default-features --features litep2p-devnet --bin node --tests
+Result: passed; existing dependency/node suggestions remain.
+
+cargo check -p node --locked
+Result: passed for default transport configuration.
+
+rustfmt --edition 2024 --check runtime/src/node/litep2p_devnet.rs runtime/tests/litep2p_limits.rs
+Result: passed.
+git diff --check: passed.

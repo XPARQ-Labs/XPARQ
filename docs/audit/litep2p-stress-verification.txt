@@ -1,0 +1,102 @@
+litep2p large valid-body resource and admission verification
+
+Scope: opt-in litep2p-devnet, real localhost TCP/Noise/Yamux, Linux /proc metrics.
+Default TCP and consensus/wire identities remain unchanged.
+
+Finding and fix:
+The immediate global-slot rejection policy let four peers retaining two inbound
+slots each deny a fifth peer admission before the application fair queue. The
+pre-fix loaded sync did not complete during 763.707 seconds of observation. Its
+baseline completed in 58.195 seconds. The loaded run was stopped before the
+900-second deadline to implement transport admission waiting; it was not a
+completed test or a statistically comparable performance benchmark.
+
+The production node now selects 8 active requests, 32 additional global-slot
+waiters and 2 peer slots across all phases. The active limit is enforced by owned
+global semaphore permits carried through read/application/write/cleanup. Waiters
+register FIFO, expire after 5 seconds, and do not read frames before admission.
+Admitted reads have a separate 5-second whole-frame deadline. Total tracked
+waiting/active streams are capped at 40; overflow is dropped without frame decode.
+Per-peer permits also cover waiting. Reconnect does not transfer old peer permits.
+The optional vendored builder defaults to zero waiters for other callers.
+
+Large valid-body fixture:
+Canonical genesis plus 66 mined blocks: one funding block and 65 signed 1 MiB
+XPVM deployments. The programs are valid nop/const/return code, deployed rather
+than invoked. Fees, burns and commitments use the actual ledger; ML-DSA-44 signs
+payments. Every block passes apply_block before production storage persists it.
+Canonical encoded bytes including genesis: 68,421,370 (65.25 MiB). Targets create
+genesis locally and download the subsequent bodies over the network.
+
+Recorded release experiment:
+cargo test --release -p node --locked --no-default-features --features litep2p-devnet --test litep2p_stress large_valid_sync_under_multiple_request_flooders -- --ignored --nocapture
+Result: 1 passed, 0 failed (383.42 s including fixture construction, source startup,
+both target syncs and peer-less replays; 2 unrelated storage tests filtered out).
+No other XPARQ regression suite ran concurrently with the recorded experiment.
+
+Scenario       Sync seconds  Source peak RSS MiB  Target peak RSS MiB  Source/target CPU seconds
+baseline       77.71         499.96               423.16               2.01 / 56.37
+four-flooders  87.55         502.47               428.48               18.58 / 57.33
+
+Four identities issued 54,162 requests; each exceeded 64 attempts and received
+full-size replies. All targets matched exact tip hash/height, cumulative work,
+weight, mined/burned amounts and supply, then restarted without peers to replay
+the downloaded canonical data. Request counts include failures/rejections.
+
+Data and environment:
+docs/audit/litep2p-stress/{report.json,configuration.json,environment.json}
+docs/audit/litep2p-stress/{baseline.csv,four-flooders.csv}
+docs/audit/litep2p-stress/before-slot-queue-four-flooders.csv
+The README in that directory summarizes results and links all raw evidence.
+CPU: Intel Core i7-8550U; Linux 6.12.111+deb13-amd64 x86_64; Rust 1.99.0.
+PROTOCOL_BUFFER compilation used extracted protoc via PROTOC/LD_LIBRARY_PATH.
+Local sockets required approved execution outside the sandbox.
+
+Measurements sample process RSS and user+system CPU every 200 ms, excluding
+fixture generation, generators, node startup/replay, kernel buffers and external
+page cache. Peak RSS is sampled, not an instantaneous guaranteed maximum.
+The source process/cache is reused in scenario order; the targets are fresh.
+This is one descriptive experiment without statistical throughput guarantees.
+The raw configuration and node binary SHA-256 are recorded in environment.json.
+
+Direct transport regressions:
+cargo test -p node --locked --no-default-features --features litep2p-devnet --test litep2p_limits
+Result: 6 passed, 0 failed (4.95 s): 3 budget unit tests and 3 real transport tests.
+The new fixture holds both global slots, queues two different peers, rejects
+queue overflow and excess peer occupancy, releases one active slot, observes
+FIFO admission, expires the remaining waiter without releasing either active
+application slot, then verifies successful service after a real slot release.
+Existing frame size, response size, slow read/write, reconnect and egress tests pass.
+
+Node regression:
+cargo test -p node --locked --no-default-features --features litep2p-devnet --bin node
+Result: 84 passed, 0 failed (121.86 s).
+
+Network regression:
+cargo test -p node --locked --no-default-features --features litep2p-devnet --test litep2p_e2e
+Result: 6 passed, 1 handshake-test timeout (189.57 s) while the first post-fix
+resource experiment and later node regression overlapped. The deadline failure
+was not suppressed or relaxed. The other six scenarios include signed relay,
+reconnect/restart, stronger forks, durable prefix reuse, stalled-peer failover,
+hostname discovery persistence and sync under request flooding.
+
+The failed scenario was rerun alone with the same production admission change:
+cargo test -p node --locked --no-default-features --features litep2p-devnet --test litep2p_e2e litep2p_rejects_bad_handshakes_and_recovers_after_pending_socket_exhaustion
+Result: 1 passed, 0 failed (17.95 s). All seven network scenarios have passing
+results, though the concurrently loaded full-suite invocation was not a clean pass.
+The final resource experiment was deliberately separated from those regressions.
+
+cargo clippy -p node --locked --no-default-features --features litep2p-devnet --bin node --tests
+Result: passed; existing dependency/node suggestions remain.
+cargo check -p node --locked
+Result: passed for default mainnet/TCP configuration.
+Selected runtime Rust formatting and git diff --check: passed.
+
+Limitations:
+A larger group can fill the 32 waiting slots, connection table or aggregate
+request/response budgets. No Sybil resistance or hard response-time guarantee
+is claimed. Existing transport buffering remains separate from frame decoding.
+Canonical history and deployed-program state still consume substantial RAM;
+this experiment establishes neither constant RSS nor a whole-process CPU cap.
+No multi-hour soak, thousands-of-block benchmark, WAN/NAT test or production-
+default qualification was performed. See docs/LITEP2P_STRESS.md for reproduction.

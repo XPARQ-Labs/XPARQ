@@ -1,0 +1,48 @@
+Large sync litep2p verification — 2026-10-04
+
+Rust 1.99.0; --locked --offline; litep2p-devnet without default features.
+Protoc: extracted Debian 3.21.12 packages under /tmp; no system installation.
+
+Changes: durable redb body staging, validated prefix resume, frozen advertised tip,
+streamed private-ledger application and atomic streamed canonical persistence.
+Bounds: 100,000 headers; 8 GiB logical encoded bodies by default; 16 MiB staging
+database cache; 24-hour session deadline. Ledger history still scales in RAM.
+Disk metadata/copy-on-write and retained file capacity add physical overhead.
+
+Node regression suite (before the additional frozen-tip test)
+Command output: /tmp/xparq-large-sync-verification.log
+test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 129.80s
+test litep2p_reorgs_to_verified_stronger_fork ... ok
+test litep2p_resumes_durable_prefix_against_a_newer_verified_tip ... ok
+test litep2p_three_node_transaction_sync_reconnect_and_restart ... litep2p: dial /ip4/127.0.0.1/tcp/45995/p2p/12D3KooWH5ABJt6TYzFFKo86u7gToCjTriaNxMk98SixAdRUyncc: Negotiation error: `I/O error: `connection refused``
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 167.39s
+test streaming_storage_failure_rolls_back_canonical_replacement ... ok
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.50s
+
+Additional frozen advertised tip regression
+Command output: /tmp/xparq-large-sync-frozen-tip.log
+test node::litep2p_devnet::tests::header_sync_finishes_at_the_advertised_tip_while_the_peer_keeps_mining ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 56 filtered out; finished in 14.03s
+
+Final storage suite including transaction rollback injection
+Command output: /tmp/xparq-large-sync-storage-final.log
+test streaming_storage_failure_rolls_back_canonical_replacement ... ok
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.61s
+
+Legacy TCP reorg regression
+Command output: /tmp/xparq-large-sync-tcp-regression.log
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 42.87s
+
+Stress coverage: 5,000 staged entries and more than 64 MiB staged/resumed bodies.
+These are codec/storage fixtures, not a large mined-chain network benchmark.
+Resume integration seeds two real mined bodies to simulate an interrupted download,
+then verifies prefix reuse against a newer third block and restart persistence.
+
+cargo check --workspace --locked --offline: PASS
+cargo clippy -p node --locked --offline --no-default-features --features litep2p-devnet --all-targets: PASS (existing warnings)
+cargo fmt --all -- --check: PASS
+git diff --check: PASS
+
+No production load test, fuzzing campaign or real-world NAT test performed.
+Existing mainnet chain-identity fixture failures were not changed by this task.
+The transport remains experimental opt-in devnet; default TCP is unchanged.

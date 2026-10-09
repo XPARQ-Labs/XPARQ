@@ -1,0 +1,33 @@
+[package]
+name = "wallet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "wallet"
+path = "src/main.rs"
+
+[lib]
+name = "wallet"
+path = "src/lib.rs"
+
+[features]
+default = ["mainnet"]
+mainnet = ["kernel/mainnet"]
+testnet = ["kernel/testnet"]
+devnet = ["kernel/devnet"]
+sqisign-blockchain-test = ["kernel/sqisign-blockchain-test"]
+
+[dependencies]
+borsh.workspace = true
+extension = { version = "1.0.0", path = "../extension", default-features = false }
+bip39.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+kernel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true

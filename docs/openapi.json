@@ -1,0 +1,339 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "XPARQ Node RPC",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/status": {
+      "get": {
+        "summary": "Get node and chain status",
+        "responses": {
+          "200": {
+            "description": "Node status, including minimum_chain_work (512-bit hex), minimum_chain_weight (decimal u64 string), and meets_chain_minimums (boolean) for the configured local sync policy"
+          }
+        }
+      }
+    },
+    "/fee-policy": {
+      "get": {
+        "summary": "Get relay fee and protocol burn policy",
+        "responses": {
+          "200": {
+            "description": "Fee policy"
+          }
+        }
+      }
+    },
+    "/transaction": {
+      "post": {
+        "summary": "Submit a signed canonical Borsh AuthorizedProgramEnvelope",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "contentEncoding": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted transaction ID"
+          },
+          "400": {
+            "description": "Invalid transaction"
+          }
+        }
+      }
+    },
+    "/program/deploy": {
+      "post": {
+        "summary": "Submit a canonical Borsh AuthorizedDeployProgram to the operation mempool",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted operation ID"
+          },
+          "400": {
+            "description": "Invalid deploy"
+          }
+        },
+        "description": "Request bytes are AuthorizedDeployProgram, without a BlockOperation wrapper. Returns operation_id."
+      }
+    },
+    "/program/deploy/quote": {
+      "post": {
+        "summary": "Quote the next-block deploy burn and authorization commitment before signing (chain-spec 9 salted authorization)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Program ID, exact protocol burn, authorization commitment, height and tip hash"
+          },
+          "400": {
+            "description": "Invalid deploy quote"
+          }
+        },
+        "description": "Request bytes are a draft AuthorizedDeployProgram before signing. Burn is in raw XPQ units; submission revalidates the quote."
+      }
+    },
+    "/program/balance/{program_id}": {
+      "get": {
+        "summary": "Get account balances",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProgramId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Balance"
+          }
+        }
+      }
+    },
+    "/program/account/{program_id}": {
+      "get": {
+        "summary": "Get paginated program-owned UTXOs, balances, and application state",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProgramId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "program_id, policy, nullable state_value, total/coin_balance in zeno, paginated utxos/coins, next_utxo_cursor, utxo_snapshot, program_assets and asset_shares"
+          }
+        }
+      }
+    },
+    "/coin-origin/{share}": {
+      "get": {
+        "summary": "Get canonical creation transaction and block height for a coin share",
+        "parameters": [
+          {
+            "name": "share",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Coin origin or null if absent"
+          }
+        }
+      }
+    },
+    "/program/state/{program_id}/{key}": {
+      "get": {
+        "summary": "Read one public key/value entry from a deployed program",
+        "parameters": [
+          {
+            "name": "program_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{64}$"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{2}){1,128}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "program_id, key, nullable hex value, canonical height and tip_hash"
+          },
+          "400": {
+            "description": "Invalid ID/key or unknown program"
+          }
+        }
+      }
+    },
+    "/program/quote": {
+      "post": {
+        "summary": "Quote state growth and bounded VM application execution for a signed Program transaction without submitting it",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "created_state_weight in bytes, vm_fuel, vm_created_coin_utxos, vm_consumed_coin_utxos, decimal-string vm_return_value (null for non-VM calls), and canonical tip_hash; exact payment burn is not checked during quote"
+          },
+          "400": {
+            "description": "Invalid Program quote request"
+          }
+        },
+        "description": "Verifies chain-spec 9 envelope authorization (32-byte salt, public key, signature) and previews asset/program storage growth, shared VM fuel, and contract-owned monetary effects. VM quotes check payment input ownership/conservation and contract balances; exact wallet payment burn is not checked."
+      }
+    },
+    "/program/asset/{asset}": {
+      "get": {
+        "summary": "Get Program asset metadata, supply and mint nonce",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AssetId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Canonical kernel-owned asset metadata"
+          }
+        }
+      }
+    },
+    "/program/asset/{asset}/balance/{program_id}": {
+      "get": {
+        "summary": "Get Program asset balance and shares",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AssetId"
+          },
+          {
+            "$ref": "#/components/parameters/ProgramId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw unit amount strings and owned shares"
+          }
+        }
+      }
+    },
+    "/blocks/latest": {
+      "get": {
+        "summary": "Get latest blocks",
+        "responses": {
+          "200": {
+            "description": "Blocks with hash (block hash), transaction_hashes (transaction ID array), and transaction_details"
+          }
+        }
+      }
+    },
+    "/block/{height}": {
+      "get": {
+        "summary": "Get block by height",
+        "parameters": [
+          {
+            "name": "height",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Block with hash (block hash), transaction_hashes (transaction ID array; empty for genesis), and transaction_details"
+          }
+        }
+      }
+    },
+    "/explorer/program/{program_id}": {
+      "get": {
+        "summary": "Get program activity",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProgramId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Program activity"
+          }
+        }
+      }
+    },
+    "/explorer/transaction/{transaction_id}": {
+      "get": {
+        "summary": "Get confirmed transaction",
+        "parameters": [
+          {
+            "name": "transaction_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transaction"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "AssetId": {
+        "name": "asset",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/AssetId"
+        }
+      },
+      "ProgramId": {
+        "name": "program_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        }
+      }
+    },
+    "schemas": {
+      "AssetId": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    }
+  }
+}

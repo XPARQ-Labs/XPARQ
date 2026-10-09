@@ -1,0 +1,37 @@
+Program registry hardening verification, 2026-10-04
+
+/tmp/xparq-registry-validation.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.40s
+     Running unittests src/lib.rs (target/debug/deps/extension-f80f6a0b38685613)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/application_boundary.rs (target/debug/deps/application_boundary-8030b9803980bb28)
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s
+     Running unittests src/lib.rs (target/debug/deps/kernel-e004ce544e2a4da2)
+test ledger::ledger::p3e_block_atomicity_tests::program_block_snapshot_replay_and_reorg_restore_exact_state ... ok
+test program::registry::tests::restored_registry_rejects_corrupted_records_and_duplicate_owner_nonce ... ok
+test consensus::deploy::tests::optimized_quote_matches_legacy_burn_and_does_not_mutate_state ... ok
+test program::registry::tests::record_growth_matches_legacy_serialization_and_index_survives_restore ... ok
+test result: ok. 89 passed; 0 failed; 1 ignored; 0 measured; 2 filtered out; finished in 1.82s
+     Running unittests src/bin/print_genesis_hash.rs (target/debug/deps/print_genesis_hash-032a03dca079e3ae)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/consolidation_compatibility.rs (target/debug/deps/consolidation_compatibility-d407c9dfce7d9d34)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/supply_invariants.rs (target/debug/deps/supply_invariants-280e1db04c982dd9)
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests extension
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests kernel
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+/tmp/xparq-registry-storage.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.45s
+     Running tests/snapshot_storage.rs (target/debug/deps/snapshot_storage-701200273e5e2dee)
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.96s
+
+/tmp/xparq-registry-workspace.log
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.01s
+
+/tmp/xparq-registry-clippy.log
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.16s
+
+Known chain identity fixture failures remain unresolved. The validation run explicitly skips the three documented fixtures.

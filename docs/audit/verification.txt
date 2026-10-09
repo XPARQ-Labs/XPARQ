@@ -1,0 +1,57 @@
+XPARQ-v2 audit verification — 2026-10-04
+Revision: c9834d1f69b619590bc56b38807fd51344ec94c6
+Toolchain: rustc/cargo 1.99.0
+
+workspace (outside sandbox)
+Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
+Running unittests src/lib.rs (target/debug/deps/crypto-5119a6cd4760ef6d)
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+Running unittests src/lib.rs (target/debug/deps/extension-194a1e883d26ed63)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+Running tests/application_boundary.rs (target/debug/deps/application_boundary-39cd7b6d796443a1)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.85s
+Running unittests src/lib.rs (target/debug/deps/kernel-d2cfbb5810b62295)
+test genesis::phase3_chain_spec_tests::bounded_work_rules_have_frozen_mainnet_chain_spec_identity ... FAILED
+test ledger::ledger::phase4_vectors::frozen_phase4_vectors_match_execution ... FAILED
+test result: FAILED. 80 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.32s
+error: test failed, to rerun pass `-p kernel --lib`
+Running unittests src/bin/print_genesis_hash.rs (target/debug/deps/print_genesis_hash-d351186c74cf8791)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+Running tests/consolidation_compatibility.rs (target/debug/deps/consolidation_compatibility-97ef294cd6e446fc)
+test mainnet_genesis_and_chain_spec_match_the_current_structure ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p kernel --test consolidation_compatibility`
+Running tests/supply_invariants.rs (target/debug/deps/supply_invariants-d007d79e4f8556d2)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+Running unittests src/main.rs (target/debug/deps/node-f3ffad1ec2e391e8)
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.06s
+Running tests/network_e2e.rs (target/debug/deps/network_e2e-d571db04a3980ffc)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 579.30s
+Running tests/snapshot_storage.rs (target/debug/deps/snapshot_storage-d7cc659f69dc467f)
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.19s
+Running unittests src/lib.rs (target/debug/deps/wallet-12c5df649f886bb3)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+Running unittests src/main.rs (target/debug/deps/wallet-bcd19f945ffe0fe3)
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+Running tests/program_e2e.rs (target/debug/deps/program_e2e-a65d814a834b9707)
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: 2 targets failed:
+
+explicit ignored wallet lifecycle
+Finished `test` profile [unoptimized + debuginfo] target(s) in 2.41s
+Running tests/program_e2e.rs (target/debug/deps/program_e2e-b9ad66ca93e8af63)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 205.62s
+
+Clippy
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 29.14s
+
+format
+Exit code: 0; warnings about nightly-only rustfmt options.
+
+Workspace totals: 187 passed, 3 failed, 3 ignored.
+Explicit wallet lifecycle: 2 passed (in addition to workspace totals).
+Reproducer: valid XPVM code 270023 bytes / 54002 fuel rejected by RPC length cap; repeated cursor accepted five times.

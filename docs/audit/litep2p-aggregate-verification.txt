@@ -1,0 +1,29 @@
+Aggregate inbound admission verification
+
+cargo test -p node --locked --no-default-features --features litep2p-devnet --bin node inbound_budget
+Result: 7 passed, 0 failed.
+Includes global count exhaustion across fresh peer IDs, 500 ms refill boundary,
+mixed-traffic byte exhaustion, rejection without debiting local/shared/combined
+budgets, per-peer isolation, retained reconnect history, backwards time handling,
+and 10,000 paced sync requests.
+
+cargo test -p node --locked --no-default-features --features litep2p-devnet --bin node node::litep2p_devnet::tests
+Result: 10 passed, 0 failed.
+
+cargo clippy -p node --locked --no-default-features --features litep2p-devnet --bin node
+Result: passed; existing dependency and node suggestions remain.
+
+Build environment: extracted protoc via PROTOC and LD_LIBRARY_PATH.
+Local socket integration testing requires execution outside the sandbox.
+No production flood benchmark, CPU quota, fairness guarantee or Sybil resistance
+is claimed. Transport remains opt-in devnet and wire formats are unchanged.
+
+cargo test -p node --locked --no-default-features --features litep2p-devnet --test litep2p_e2e litep2p_three_node_transaction_sync_reconnect_and_restart -- --nocapture
+Result: 1 passed, 0 failed; 4 unrelated integration tests filtered out (91.73 s).
+Verified three-node transaction relay, confirmation, reconnect, stable transport
+identity, and persisted transaction/address explorer results after restart.
+Initial sandbox run could not bind a local socket (PermissionDenied); rerun with
+approved local networking passed. Expected reconnect/replayed-operation rejection
+messages appeared during the passing lifecycle test.
+
+git diff --check: passed.

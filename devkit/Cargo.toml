@@ -1,0 +1,23 @@
+[package]
+name = "xparq-devkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "assembler/lib.rs"
+
+[[bin]]
+name = "xparq-devkit"
+path = "assembler/main.rs"
+
+[features]
+default = ["mainnet"]
+mainnet = ["kernel/mainnet"]
+testnet = ["kernel/testnet"]
+devnet = ["kernel/devnet"]
+
+[dependencies]
+kernel.workspace = true

@@ -1,0 +1,12 @@
+# Set ASSET (64-hex asset contract), RECIPIENT (64-hex ProgramId), AMOUNT (raw units).
+# Only the deployer can send the program's own asset shares.
+caller
+deployer
+equal
+assert
+bytes.const $ASSET
+owner.const $RECIPIENT
+u128.const $AMOUNT
+asset.transfer
+u128.const 1
+return

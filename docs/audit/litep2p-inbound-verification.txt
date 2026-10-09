@@ -1,0 +1,37 @@
+litep2p inbound admission verification — 2026-10-04
+
+Rust 1.99.0; --locked --offline; no default features; litep2p-devnet.
+Protoc from temporary extracted Debian packages; no system installation.
+
+Per-peer token buckets admit both message count and encoded bytes before
+announcement decoding/validation/logging or request storage work.
+Independent classes: requests, blocks, transactions, unknown announcements.
+Budget histories survive reconnect; at most 64 entries, five-minute idle expiry.
+A full table rejects new identities rather than evicting unexpired budgets.
+Header/body continuation requests use a nonblocking minimum 125 ms delay.
+
+cargo test -p node --locked --offline --no-default-features --features litep2p-devnet --bin node inbound_budget::tests
+test node::inbound_budget::tests::large_time_steps_cap_refill_and_backward_time_cannot_mint_tokens ... ok
+test node::inbound_budget::tests::byte_budget_is_atomic_and_traffic_classes_and_peers_are_independent ... ok
+test node::inbound_budget::tests::count_budget_refills_at_exact_boundaries_without_rejected_debits ... ok
+test node::inbound_budget::tests::reconnect_does_not_reset_budget_and_identity_churn_cannot_evict_it ... ok
+test node::inbound_budget::tests::paced_large_sync_requests_do_not_exhaust_the_server_budget ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 59 filtered out; finished in 0.02s
+
+cargo check --workspace --locked --offline: PASS
+cargo clippy -p node --locked --offline --no-default-features --features litep2p-devnet --all-targets: PASS (existing warnings)
+cargo fmt --all -- --check: PASS
+git diff --check: PASS
+
+Limitations: application-level budgets operate after transport frame buffering;
+no global process CPU/memory bound or Sybil resistance is established. Excess
+announcements are dropped; dropped transactions have no guaranteed later relay.
+Unexpired table saturation may temporarily exclude new healthy peer identities.
+No live flood/load benchmark or production/NAT campaign was run.
+
+cargo test -p node --locked --offline --no-default-features --features litep2p-devnet --test litep2p_e2e -- --test-threads=1
+test litep2p_reorgs_to_verified_stronger_fork ... ok
+test litep2p_resumes_durable_prefix_against_a_newer_verified_tip ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 170.37s
+Three-node transaction sync/reconnect/restart: PASS.
+Final integration suite ran with inbound admission and continuation pacing enabled.

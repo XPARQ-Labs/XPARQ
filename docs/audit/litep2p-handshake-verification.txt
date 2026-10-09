@@ -1,0 +1,61 @@
+litep2p transport/handshake verification
+
+Dependency: litep2p 0.15.2, local source at depend/network/litep2p.
+Cargo.lock changes only remove registry source/checksum for that local package.
+Package version and dependency graph remain unchanged.
+Build: PROTOC=/tmp/xparq-protoc/root/usr/bin/protoc and the extracted protobuf
+library directory supplied through LD_LIBRARY_PATH.
+
+New integration regression:
+litep2p_rejects_bad_handshakes_and_recovers_after_pending_socket_exhaustion
+- 16 silent TCP clients: at least eight rejected before negotiation timeout.
+- Admitted silent clients remain open beyond the five-second timeout.
+- Incorrect chain identity is rejected.
+- A 65-byte handshake is rejected by the server's 64-byte frame cap.
+- Unknown notification protocol version is rejected.
+- A peer withholding validation is rejected before the 15-second test deadline.
+- A valid peer still opens its notification stream after these failures.
+Focused result: 1 passed, 0 failed (17.95 s).
+
+The varint receive decoder's size check precedes payload buffer allocation.
+Both handshake-ready paths share codec restoration through pop_event, preserving
+normal notification frame size. The socket rejection path continues polling
+pending negotiation completions/deadlines under a ready listener.
+
+cargo check -p node --locked
+Result: passed for the default transport configuration.
+
+cargo clippy -p node --locked --no-default-features --features litep2p-devnet --bin node --tests
+Result: passed; existing dependency/node warnings remain. New test warnings fixed.
+
+rustfmt --edition 2024 --check runtime/src/node/litep2p_devnet.rs runtime/tests/litep2p_e2e.rs
+Result: passed.
+git diff --check: passed.
+
+An intermediate patch restored the notification limit on only one of two
+handshake-ready paths. This caused discovery and transaction-relay regressions;
+both paths were consolidated before final network verification. No unsuccessful
+intermediate run is counted as passing validation. Initial node tests were run
+inside the sandbox: 73 passed and three local networking tests were denied.
+Those networking tests passed when rerun outside the sandbox.
+
+Scope: local transport/resource policy, not consensus changes or mainnet approval.
+No public-internet NAT test, sustained flood benchmark, fairness guarantee, or
+hard process CPU/RAM cap is claimed. Established transports may outlive rejected
+notification streams until normal upstream connection cleanup.
+
+Final network suite:
+cargo test -p node --locked --no-default-features --features litep2p-devnet --test litep2p_e2e -- --test-threads=1
+Result: 6 passed, 0 failed (408.21 s).
+Includes final handshake regression plus hostname bootstrap/discovery persistence,
+restart without bootstrap, stalled-peer failover, durable-prefix reuse,
+stronger-fork reorganization, signed transaction relay and explorer persistence.
+Expected connection failures during restart/failover and rejection of a relayed
+already-consumed transaction appeared in the passing suite.
+
+Final node regression:
+cargo test -p node --locked --no-default-features --features litep2p-devnet --bin node
+Result: 76 passed, 0 failed, with approved local networking.
+Includes aggregate/per-peer admission, discovery/DNS, sync backoff, header/body
+session limits, canonical rollback/storage behavior and resumed staging above
+64 MiB. This final run supersedes the earlier sandbox networking failures.

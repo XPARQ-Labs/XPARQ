@@ -1,0 +1,8 @@
+**/target/
+/runtime/test explorer address/
+/.agents/
+/.codex/
+/.aws/
+.env
+.env.*
+!.env.example

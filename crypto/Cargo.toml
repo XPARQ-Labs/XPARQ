@@ -1,0 +1,49 @@
+[package]
+name = "crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Opt-in backend comparison; this does not register a SHA2 account scheme.
+slh-sha2-benchmark = ["slh-dsa/sha2"]
+default = ["mainnet"]
+mainnet = []
+testnet = []
+devnet = ["sqisign-blockchain-test"]
+sqisign-blockchain-test = ["dep:rand_10", "dep:sqisign_rs", "dep:chacha20"]
+falcon-candidate = ["dep:fn-dsa"]
+
+[dependencies]
+sha3.workspace = true
+ml_dsa.workspace = true
+sqisign_rs = { workspace = true, optional = true }
+rand_10 = { workspace = true, optional = true }
+chacha20 = { workspace = true, optional = true }
+borsh.workspace = true
+serde.workspace = true
+hex.workspace = true
+zeroize.workspace = true
+argon2.workspace = true
+static_assertions.workspace = true
+fn-dsa = { workspace = true, optional = true }
+rand_core_06.workspace = true
+
+slh-dsa.workspace = true
+shake.workspace = true
+
+[[example]]
+name = "slh_compare"
+required-features = ["slh-sha2-benchmark"]
+
+[[bench]]
+name = "slh_compare"
+path = "benches/slh_compare.rs"
+harness = false
+required-features = ["slh-sha2-benchmark"]
+
+[[bench]]
+name = "signatures"
+harness = false

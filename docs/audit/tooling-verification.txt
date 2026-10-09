@@ -1,0 +1,32 @@
+Build and dependency tooling verification, 2026-10-04
+
+Pinned compiler: rustc 1.99.0 (b940084d7 2026-09-28)
+Components: rustfmt, clippy
+cargo-deny: 0.20.2
+
+mainnet:
+advisories ok, bans ok, licenses ok, sources ok
+Duplicate dependency warnings: 9
+
+testnet:
+advisories ok, bans ok, licenses ok, sources ok
+Duplicate dependency warnings: 9
+
+devnet:
+advisories ok, bans ok, licenses ok, sources ok
+Duplicate dependency warnings: 10
+
+litep2p:
+advisories ok, bans ok, licenses ok, sources ok
+Duplicate dependency warnings: 32
+
+cargo check-all --offline: passed
+cargo fmt-check: passed; vendored rustfmt configurations emit existing stable/nightly option warnings
+cargo lint --offline: passed with existing warnings
+TOML parsing: all four new configuration files passed
+build.sh syntax/help: passed
+build.sh mock invocation: release, --locked, package selection, and additional argument forwarding passed
+git diff --check: passed
+Cargo.lock: unchanged
+
+Dependency checks are not a proof of security or validation of local vendored cryptographic forks. Existing chain-spec fixture failures remain unresolved; no consensus parameters or fixtures changed.

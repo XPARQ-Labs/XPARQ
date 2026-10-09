@@ -1,0 +1,63 @@
+Historical body cache verification
+==================================
+
+Pinned Rust 1.99.0; all repository Cargo commands use --locked.
+Native builds use PROTOC=/tmp/xparq-protoc/root/usr/bin/protoc and
+LD_LIBRARY_PATH=/tmp/xparq-protoc/root/usr/lib/x86_64-linux-gnu.
+Socket integration tests run with sandbox approval.
+
+PASS cargo test -p kernel --locked --no-default-features --features devnet
+     --lib --test shared_payloads --test decoding_bounds --test body_cache
+     92 kernel tests, 2 shared payload compatibility/isolation tests,
+     4 bounded decoder tests, 1 header-preserving eviction/rehydration test.
+
+The node eviction regression mines a real canonical branch, evicts intermediate
+bodies, verifies historical RPC and receipts, complete latest-block results,
+header locator and work/difficulty behavior, startup replay and a stronger reorg
+that must rehydrate old bodies. It also checks Merkle tampering, wrong height and
+trailing bytes, and that a pinned read transaction retains its old canonical tip
+while a new branch commits atomically. The storage regression rejects missing
+heights and oversized entries without accepting a partial log.
+
+Implementation retains all journals and all canonical bodies on disk. Journal
+pruning, scratch-database recovery and a disk-backed active-state store are not
+implemented in this stage. The cache budget is for logical block encodings, with
+pinned genesis/tip exceptions; it does not establish a whole-process RSS bound.
+
+The final node/network command and resource results are recorded below.
+Known pre-existing frozen mainnet identity fixture discrepancies are
+not regenerated; devnet regression passes do not resolve those discrepancies.
+
+PASS cargo test --release -p node --locked --no-default-features
+     --features litep2p-devnet --bin node --test litep2p_e2e
+     --test network_e2e --test snapshot_storage --test litep2p_limits
+     86 node tests (5.31s), all 7 native network scenarios (113.62s),
+     all 7 legacy TCP scenarios (104.15s), 6 native limits/budget tests (4.98s),
+     and 10 snapshot/storage tests (0.71s).
+     These are the final regression results after the live handle registry and
+     local commitment-verification read path changes.
+
+The initial disk-read experiment passed but exposed repeated VM/operation
+validation on already validated local bodies: source CPU was 91.56 seconds in
+the loaded scenario versus 20.13 seconds in the preceding shared-payload run.
+The final read path authenticates bounded local bytes against the pinned header
+and its Merkle root. Full consensus validation is unchanged for admission,
+peer blocks and replay. The preliminary report/samples are retained separately
+as diagnostic evidence; final measurements are not mixed with that run.
+
+PASS cargo test --release -p node --locked --no-default-features
+     --features litep2p-devnet --test litep2p_stress
+     large_valid_sync_under_multiple_request_flooders -- --ignored --nocapture
+     1 test; 393.78s. Canonical status and peer-less restart pass in baseline and
+     loaded scenarios. Fixture/status fields exactly match the preceding report.
+     Source peak sampled RSS: 351.52 -> 220.12 MiB, 355.30 -> 224.21 MiB.
+     Target peaks: 233.96 -> 234.82 MiB, 236.40 -> 233.50 MiB.
+     CPU costs and single-run sampling limits are documented in
+     disk-body-cache/README.md, with reports and CSV evidence.
+
+PASS cargo build --release --locked -p node -p wallet
+     Default mainnet feature compilation; zero compiler warnings/errors.
+PASS cargo clippy -p node -p kernel --locked --no-default-features
+     --features node/litep2p-devnet,kernel/devnet --all-targets
+     Existing dependency/repository Clippy warnings remain.
+PASS git diff --check

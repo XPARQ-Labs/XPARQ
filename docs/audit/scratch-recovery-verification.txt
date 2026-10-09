@@ -1,0 +1,59 @@
+Scratch recovery verification — 2026-10-05
+
+Behavior
+- Missing local rollback journals route sync to isolated recovery rather than
+  rejecting the candidate as consensus-invalid.
+- Candidate header PoW, difficulty, work and weight are independently verified.
+- Restore a validated local snapshot no higher than the common ancestor, or
+  replay genesis; pin prefix bodies to captured canonical headers.
+- Fully execute candidate blocks before publication; stream bodies into scratch
+  and retain the existing bounded body cache.
+- Persist the final validated state snapshot in scratch. Publish canonical log,
+  derived indexes, mempool and recovered snapshot in one redb transaction.
+- Recheck active tip and fork preference under the mutation lock before commit.
+- Single-flight recovery; bounded 64-entry invalid block commitment history.
+  Local read failures and uncommitted/corrupt bodies do not poison that history.
+- Owned scratch directories are cleaned up on normal success/error paths.
+- The canonical replacement now writes the program address index version marker.
+
+Final targeted regression
+PROTOC=/tmp/xparq-protoc/root/usr/bin/protoc
+LD_LIBRARY_PATH=/tmp/xparq-protoc/root/usr/lib/x86_64-linux-gnu
+cargo test --release -p node --locked --no-default-features \
+  --features litep2p-devnet --bin node --test snapshot_storage
+PASS: 89 node tests and 11 snapshot/storage tests.
+Includes journal expiry, ancestor snapshot selection, forged work rejection,
+partial stream failure, Merkle corruption, mined invalid state root, repeated
+invalid candidate suppression, concurrent canonical tip movement, single-flight
+admission, cleanup, index publication, restart and transaction rollback when
+snapshot publication fails after canonical tables have been modified.
+Unit recovery fixtures retain their captured ledger explicitly: the shared
+single-entry node cache may be replaced by unrelated parallel test fixtures.
+
+Transport regression (before the final atomic recovery snapshot extension)
+cargo test --release -p node --locked --no-default-features \
+  --features litep2p-devnet --bin node --test litep2p_e2e \
+  --test network_e2e --test snapshot_storage --test litep2p_limits
+PASS: 89 node, 7 native litep2p, 7 TCP network, 6 request-limit,
+10 snapshot/storage tests. The final snapshot extension was covered by the
+89 + 11 targeted regression above; ordinary journal reorg storage behavior is
+unchanged except for the corrected index version metadata.
+
+Default distribution build
+cargo build --release --locked -p node -p wallet
+PASS: 20.84 seconds; no warnings or errors.
+git diff --check
+PASS.
+
+Limits
+- Production journal pruning remains disabled. Snapshot journal coverage and
+  historical explorer receipt lookup must be adapted before enabling it.
+- Execution state and journals remain in memory; this is not a disk-backed UTXO
+  implementation. Snapshot encoding can temporarily increase memory usage.
+- The scratch prefix duplicates canonical bodies on disk during recovery.
+- A process crash can leave an isolated scratch directory. Startup never loads
+  these directories as canonical state; automatic stale-directory cleanup is
+  not implemented.
+- Schema version 10, snapshot version 3, consensus/block encoding, chain
+  specification and wallet format are unchanged.
+- No new full-workspace mainnet frozen-vector result is claimed.

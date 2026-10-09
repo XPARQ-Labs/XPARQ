@@ -1,0 +1,196 @@
+[package]
+edition = "2021"
+rust-version = "1.80"
+name = "xparq-sqisign"
+version = "0.1.0"
+authors = ["XPARQ Labs <https://github.com/XPARQ-Labs>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Experimental internal SQIsign candidate implementation for XPARQ test networks"
+readme = "README.md"
+keywords = [
+    "sqisign",
+    "post-quantum",
+    "isogeny",
+    "signature",
+    "cryptography",
+]
+categories = [
+    "cryptography",
+    "no-std",
+]
+license = "Apache-2.0 OR MIT"
+homepage = "https://github.com/XPARQ-Labs/XPARQ"
+repository = "https://github.com/XPARQ-Labs/XPARQ"
+include = [
+    "Cargo.toml",
+    "README.md",
+    "src/**",
+    "tests/**",
+    "examples/**",
+    "benches/**",
+]
+
+[package.metadata.xparq]
+status = "experimental-internal"
+production_ready = false
+standardized = false
+intended_networks = ["devnet", "testnet"]
+
+# Keep the vendored candidate reproducibly testable as a standalone crate even
+# though it lives below the repository's dependency workspace boundary.
+[workspace]
+resolver = "3"
+
+[features]
+default = []
+dangerous-secret-display = []
+kat-compat = []
+parallel = ["std"]
+sqisign-rk = []
+std = []
+vartime = []
+
+[lib]
+name = "sqisign_rs"
+path = "src/lib.rs"
+
+[[example]]
+name = "c_interop_vectors"
+path = "examples/c_interop_vectors.rs"
+
+[[test]]
+name = "canonical_matrix"
+path = "tests/canonical_matrix.rs"
+
+[[test]]
+name = "compact_api"
+path = "tests/compact_api.rs"
+
+[[test]]
+name = "dependency_upgrade_levels"
+path = "tests/dependency_upgrade_levels.rs"
+
+[[test]]
+name = "serialization_roundtrip"
+path = "tests/serialization_roundtrip.rs"
+
+[[test]]
+name = "sign_roundtrip"
+path = "tests/sign_roundtrip.rs"
+
+[[test]]
+name = "signing_constants"
+path = "tests/signing_constants.rs"
+
+[[test]]
+name = "unified_autodetect"
+path = "tests/unified_autodetect.rs"
+
+[[test]]
+name = "zeroize"
+path = "tests/zeroize.rs"
+
+[[bench]]
+name = "sign_bench"
+path = "benches/sign_bench.rs"
+harness = false
+
+[[bench]]
+name = "sqisign_rk"
+path = "benches/sqisign_rk.rs"
+harness = false
+required-features = ["sqisign-rk"]
+
+[dependencies.crypto-bigint]
+version = "0.7"
+default-features = false
+path = "../crypto-bigint-0.7"
+
+[dependencies.hybrid-array]
+version = "0.4"
+path = "../../utils/hybrid-array"
+
+[dependencies.num-bigint]
+version = "0.5"
+features = ["rand_0_10"]
+default-features = false
+path = "../num-bigint-0.5"
+
+[dependencies.num-integer]
+version = "0.1"
+default-features = false
+path = "../num-integer"
+
+[dependencies.num-traits]
+version = "0.2"
+features = ["libm"]
+default-features = false
+path = "../../traits/num-traits"
+
+[dependencies.paste]
+version = "1"
+path = "../paste"
+
+[dependencies.rand]
+version = "0.10"
+features = ["std_rng"]
+default-features = false
+path = "../rand-0.10"
+
+[dependencies.rand_core]
+version = "0.10"
+default-features = false
+path = "../../traits/rand_core"
+
+[dependencies.shake]
+version = "0.1.0"
+default-features = false
+path = "../../mldsa/shake"
+
+[dependencies.signature]
+version = "3"
+default-features = false
+path = "../../traits/signature"
+
+[dependencies.subtle]
+version = "2"
+default-features = false
+path = "../../utils/subtle"
+
+[dependencies.typenum]
+version = "1.17"
+path = "../../utils/typenum"
+
+[dependencies.zeroize]
+version = "1"
+features = ["alloc", "derive"]
+default-features = false
+path = "../../traits/zeroize"
+
+[dev-dependencies.criterion]
+version = "0.8.2"
+features = ["html_reports"]
+
+[dev-dependencies.hex]
+version = "0.4"
+
+[dev-dependencies.hex-literal]
+version = "1.1"
+
+[dev-dependencies.rand]
+version = "0.10"
+path = "../rand-0.10"
+
+[dev-dependencies.serde_json]
+version = "1"
+
+[dev-dependencies.sha3_legacy]
+package = "sha3"
+version = "0.10"
+default-features = false
+path = "../sha3"

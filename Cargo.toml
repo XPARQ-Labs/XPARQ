@@ -1,0 +1,88 @@
+[workspace]
+resolver = "3"
+members = ["kernel", "crypto", "runtime", "wallet", "extension", "devkit"]
+exclude = [
+    "depend",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/XPARQ-Labs/XPARQ"
+
+[profile.bench]
+debug = true
+
+[workspace.dependencies]
+slh-dsa = { version = "=0.2.0-rc.5", path = "depend/slhdsa/slh-dsa", features = ["zeroize"] }
+shake = { version = "0.1.0", path = "depend/mldsa/shake", features = ["zeroize"] }
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc"], path = "depend/argon2/argon2" }
+bip39 = "2.2"
+borsh = { version = "1.5", features = ["derive", "rc"], path = "depend/traits/borsh" }
+chacha20 = { version = "0.10.1", default-features = false, features = ["rng", "zeroize"], path = "depend/sqisign/chacha20-0.10.1" }
+getrandom = { version = "0.4.3", default-features = false }
+fn-dsa = { version = "0.4.0", default-features = false, path = "depend/fn-dsa/fn-dsa" }
+rand_core_06 = { package = "rand_core", version = "0.6.4", features = ["getrandom"] }
+hex = "0.4"
+futures = "0.3"
+igd-next = "0.16"
+litep2p = { version = "0.15.2", path = "depend/network/litep2p" }
+redb = "4.2.0"
+ml_dsa = { package = "ml-dsa", version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "zeroize"], path = "depend/mldsa/ml-dsa" }
+serde = { version = "1", features = ["derive"], path = "depend/traits/serde" }
+serde_json = "1"
+sha3 = { version = "0.12.0", default-features = false, path = "depend/sha3/sha3" }
+sqisign_rs = { package = "xparq-sqisign", version = "0.1.0", path = "depend/sqisign/sqisign-rs" }
+static_assertions = { version = "1.1.0", path = "depend/utils/static_assertions" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync"] }
+zeroize = { version = "1.9.0", features = ["alloc", "derive"], path = "depend/traits/zeroize" }
+rand_10 = { package = "rand", version = "0.10.2", features = ["sys_rng"], path = "depend/sqisign/rand-0.10" }
+
+crypto = { version = "1.0.0", path = "crypto", default-features = false }
+kernel = { version = "1.0.0", path = "kernel", default-features = false }
+
+[patch.crates-io]
+serde = { path = "depend/traits/serde" }
+serde_core = { path = "depend/traits/serde_core" }
+serde_derive = { path = "depend/traits/serde_derive" }
+autocfg = { path = "depend/utils/autocfg" }
+block-buffer = { path = "depend/utils/block-buffer" }
+crypto-bigint = { path = "depend/sqisign/crypto-bigint-0.7" }
+crypto-common = { path = "depend/utils/crypto-common-0.1.7" }
+digest = { path = "depend/traits/digest-0.10.7" }
+generic-array = { path = "depend/utils/generic-array" }
+hybrid-array = { path = "depend/utils/hybrid-array" }
+libm = { path = "depend/sqisign/libm" }
+num-bigint = { path = "depend/sqisign/num-bigint-0.5" }
+num-integer = { path = "depend/sqisign/num-integer" }
+num-traits = { path = "depend/traits/num-traits" }
+paste = { path = "depend/sqisign/paste" }
+proc-macro2 = { path = "depend/proc-macro/proc-macro2" }
+quote = { path = "depend/proc-macro/quote" }
+rand = { path = "depend/sqisign/rand-0.10" }
+rand_core = { path = "depend/traits/rand_core" }
+signature = { path = "depend/traits/signature" }
+chacha20 = { path = "depend/sqisign/chacha20-0.10.1" }
+cpubits = { path = "depend/utils/cpubits" }
+ctutils = { path = "depend/utils/ctutils" }
+subtle = { path = "depend/utils/subtle" }
+syn = { path = "depend/proc-macro/syn-2.0.119" }
+typenum = { path = "depend/utils/typenum" }
+unicode-ident = { path = "depend/proc-macro/unicode-ident" }
+version_check = { path = "depend/utils/version_check" }
+zeroize_derive = { path = "depend/traits/zeroize_derive" }
+
+# Hash-based signing is expensive without optimization, including generic code
+# instantiated in crypto. Keep debug wallet/node builds usable for SLH-DSA.
+[profile.dev.package.crypto]
+opt-level = 3
+[profile.dev.package.slh-dsa]
+opt-level = 3
+[profile.dev.package.sha3]
+opt-level = 3
+[profile.dev.package.shake]
+opt-level = 3
+[profile.dev.package.keccak]
+opt-level = 3

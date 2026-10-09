@@ -1,0 +1,91 @@
+{
+  "blocks_after_genesis": 66,
+  "canonical_encoded_bytes": 68421370,
+  "cpu_ticks_per_second": 100,
+  "deployments": 65,
+  "network": "localhost TCP/Noise/Yamux devnet",
+  "sampling_interval_ms": 200,
+  "scenarios": [
+    {
+      "resources": {
+        "samples": 388,
+        "source_average_cpu_percent": 2.5865707767729798,
+        "source_cpu_seconds": 2.01,
+        "source_peak_sampled_rss_bytes": 524242944,
+        "target_average_cpu_percent": 72.53979835158849,
+        "target_cpu_seconds": 56.37,
+        "target_peak_sampled_rss_bytes": 443719680
+      },
+      "scenario": "baseline",
+      "status": {
+        "cumulative_weight": "68421245",
+        "cumulative_work": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000084",
+        "next_difficulty": 545259519,
+        "next_height": 67,
+        "supply": 9219747352,
+        "tip_hash": "af010db8f08517d36e0fe63a52421a9792b6dbd19ac1dac80b93c47c5610ab17",
+        "tip_height": 66,
+        "total_burned": 1092752648,
+        "total_mined": 10312500000
+      },
+      "sync_seconds": 77.709066307
+    },
+    {
+      "flood": {
+        "identities": 4,
+        "per_peer": [
+          {
+            "attempts": 13516,
+            "failures": 12831,
+            "identity_index": 0,
+            "response_payload_bytes": 717895706,
+            "responses": 682
+          },
+          {
+            "attempts": 13936,
+            "failures": 13246,
+            "identity_index": 1,
+            "response_payload_bytes": 717895706,
+            "responses": 682
+          },
+          {
+            "attempts": 13849,
+            "failures": 13155,
+            "identity_index": 2,
+            "response_payload_bytes": 722106238,
+            "responses": 686
+          },
+          {
+            "attempts": 12861,
+            "failures": 12171,
+            "identity_index": 3,
+            "response_payload_bytes": 717895706,
+            "responses": 682
+          }
+        ]
+      },
+      "resources": {
+        "samples": 437,
+        "source_average_cpu_percent": 21.2224349690776,
+        "source_cpu_seconds": 18.58,
+        "source_peak_sampled_rss_bytes": 526880768,
+        "target_average_cpu_percent": 65.4834336263304,
+        "target_cpu_seconds": 57.33,
+        "target_peak_sampled_rss_bytes": 449290240
+      },
+      "scenario": "four-flooders",
+      "status": {
+        "cumulative_weight": "68421245",
+        "cumulative_work": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000084",
+        "next_difficulty": 545259519,
+        "next_height": 67,
+        "supply": 9219747352,
+        "tip_hash": "af010db8f08517d36e0fe63a52421a9792b6dbd19ac1dac80b93c47c5610ab17",
+        "tip_height": 66,
+        "total_burned": 1092752648,
+        "total_mined": 10312500000
+      },
+      "sync_seconds": 87.548860567
+    }
+  ]
+}
