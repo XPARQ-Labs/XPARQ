@@ -1,0 +1,51 @@
+# cpu=Intel Core i7-8550U, rustc=1.99.0, llvm=23.1.1, profile=bench, features=mainnet, cpu_target=default
+# samples=3, warmup=1, verify_rounds=100, arch=x86_64, os=linux, threads=8
+case,operation,median_ms,min_ms,max_ms
+# fixture: creating >= 50000 live UTXOs then 128 additional valid blocks
+# fixture: height=2, UTXOs=3802
+# fixture: height=3, UTXOs=7603
+# fixture: height=4, UTXOs=11404
+# fixture: height=5, UTXOs=15205
+# fixture: height=6, UTXOs=19006
+# fixture: height=7, UTXOs=22807
+# fixture: height=8, UTXOs=26608
+# fixture: height=9, UTXOs=30409
+# fixture: height=10, UTXOs=34210
+# fixture: height=11, UTXOs=38011
+# fixture: height=12, UTXOs=41812
+# fixture: height=13, UTXOs=45613
+# fixture: height=14, UTXOs=49414
+# fixture: height=15, UTXOs=50002
+# fixture: additional block 0/128
+# fixture: additional block 16/128
+# fixture: additional block 32/128
+# fixture: additional block 48/128
+# fixture: additional block 64/128
+# fixture: additional block 80/128
+# fixture: additional block 96/128
+# fixture: additional block 112/128
+# fixture complete (includes mining setup): VmHWM:	  300340 kB
+# fixture complete (includes mining setup): VmRSS:	  169724 kB
+history,storage_append_per_block,0.257265,0.224064,43.649147
+# fixture: tip=143, live_utxos=50130, state_bytes=3659530
+# replay: sample 0/3 complete
+# replay sample complete: VmHWM:	  462760 kB
+# replay sample complete: VmRSS:	  332152 kB
+# replay: sample 1/3 complete
+# replay sample complete: VmHWM:	  463720 kB
+# replay sample complete: VmRSS:	  333032 kB
+# replay: sample 2/3 complete
+# replay sample complete: VmHWM:	  466800 kB
+# replay sample complete: VmRSS:	  336244 kB
+# replay: sample 3/3 complete
+# replay sample complete: VmHWM:	  467308 kB
+# replay sample complete: VmRSS:	  336732 kB
+history,serialize_state,4.157467,4.017933,15.044841
+history,hash_preencoded_state,16.695213,16.176751,48.150659
+history,cold_state_root,20.769371,19.749597,51.877998
+history,serialize_snapshot,5.171152,4.773628,8.137154
+history,read_and_decode_history,47.402628,47.079116,103.239036
+history,admission_pow_history,12247.240935,12218.337495,15727.919624
+history,execute_commit_history,2980.822395,2974.205188,4477.194065
+history,replay_total,15268.952109,15246.341240,20308.470415
+history,snapshot_restore,12503.104853,12421.087242,13478.692143

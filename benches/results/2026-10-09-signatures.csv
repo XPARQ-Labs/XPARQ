@@ -1,0 +1,69 @@
+# date=2026-10-09, cpu=Intel Core i7-8550U, rustc=1.99.0, llvm=23.1.1, profile=bench, features=mainnet, cpu_target=default
+# samples=3, warmup=1, verify_rounds=100, arch=x86_64, os=linux, threads=8
+case,operation,median_ms,min_ms,max_ms
+# MlDsa44: public_key_bytes=1312, signature_bytes=2420
+# MlDsa44: sample 0/3 complete
+# MlDsa44: sample 1/3 complete
+# MlDsa44: sample 2/3 complete
+# MlDsa44: sample 3/3 complete
+MlDsa44,prepare_public_key,0.276162,0.275622,0.408122
+MlDsa44,sign_cold_with_keygen_and_drop,0.710286,0.533898,0.967985
+MlDsa44,sign_prepared,0.415425,0.176718,0.786978
+MlDsa44,verify_valid,0.178229,0.166915,0.178369
+MlDsa44,verify_invalid_first_byte,0.174018,0.164692,0.176084
+MlDsa44,verify_invalid_last_byte,0.097800,0.096376,0.106598
+# MlDsa65: public_key_bytes=1952, signature_bytes=3309
+# MlDsa65: sample 0/3 complete
+# MlDsa65: sample 1/3 complete
+# MlDsa65: sample 2/3 complete
+# MlDsa65: sample 3/3 complete
+MlDsa65,prepare_public_key,0.432452,0.414679,0.434614
+MlDsa65,sign_cold_with_keygen_and_drop,1.038085,0.668803,2.037230
+MlDsa65,sign_prepared,0.583613,0.230762,1.582435
+MlDsa65,verify_valid,0.267768,0.264348,0.278739
+MlDsa65,verify_invalid_first_byte,0.269462,0.259671,0.293852
+MlDsa65,verify_invalid_last_byte,0.172284,0.164869,0.182560
+# MlDsa87: public_key_bytes=2592, signature_bytes=4627
+# MlDsa87: sample 0/3 complete
+# MlDsa87: sample 1/3 complete
+# MlDsa87: sample 2/3 complete
+# MlDsa87: sample 3/3 complete
+MlDsa87,prepare_public_key,0.710993,0.703961,0.776890
+MlDsa87,sign_cold_with_keygen_and_drop,1.275354,1.040382,1.996810
+MlDsa87,sign_prepared,0.556081,0.321716,1.211580
+MlDsa87,verify_valid,0.424496,0.424062,0.426196
+MlDsa87,verify_invalid_first_byte,0.427907,0.424556,0.436190
+MlDsa87,verify_invalid_last_byte,0.291466,0.289554,0.294559
+# SlhDsaShake128s: public_key_bytes=32, signature_bytes=7856
+# SlhDsaShake128s: sample 0/3 complete
+# SlhDsaShake128s: sample 1/3 complete
+# SlhDsaShake128s: sample 2/3 complete
+# SlhDsaShake128s: sample 3/3 complete
+SlhDsaShake128s,prepare_public_key,201.402777,195.598195,209.713321
+SlhDsaShake128s,sign_cold_with_keygen_and_drop,1744.162800,1739.112408,1805.322223
+SlhDsaShake128s,sign_prepared,1520.824362,1498.325563,1716.473912
+SlhDsaShake128s,verify_valid,1.495719,1.418077,1.526394
+SlhDsaShake128s,verify_invalid_first_byte,1.466829,1.441628,1.553001
+SlhDsaShake128s,verify_invalid_last_byte,1.508578,1.471488,1.799918
+# SlhDsaShake192s: public_key_bytes=48, signature_bytes=16224
+# SlhDsaShake192s: sample 0/3 complete
+# SlhDsaShake192s: sample 1/3 complete
+# SlhDsaShake192s: sample 2/3 complete
+# SlhDsaShake192s: sample 3/3 complete
+SlhDsaShake192s,prepare_public_key,286.931061,278.453103,288.181882
+SlhDsaShake192s,sign_cold_with_keygen_and_drop,2805.010680,2761.589675,2826.997325
+SlhDsaShake192s,sign_prepared,2600.386487,2528.558730,3113.941440
+SlhDsaShake192s,verify_valid,2.176234,2.166398,2.616178
+SlhDsaShake192s,verify_invalid_first_byte,2.197004,2.122387,2.472555
+SlhDsaShake192s,verify_invalid_last_byte,2.241762,2.161797,2.758841
+# SlhDsaShake256s: public_key_bytes=64, signature_bytes=29792
+# SlhDsaShake256s: sample 0/3 complete
+# SlhDsaShake256s: sample 1/3 complete
+# SlhDsaShake256s: sample 2/3 complete
+# SlhDsaShake256s: sample 3/3 complete
+SlhDsaShake256s,prepare_public_key,194.298134,186.578833,203.243559
+SlhDsaShake256s,sign_cold_with_keygen_and_drop,2428.730603,2423.274671,2549.748480
+SlhDsaShake256s,sign_prepared,2233.776523,2185.897193,2249.113391
+SlhDsaShake256s,verify_valid,3.147788,3.095047,3.191855
+SlhDsaShake256s,verify_invalid_first_byte,3.162389,2.831533,3.214581
+SlhDsaShake256s,verify_invalid_last_byte,3.173158,3.157682,3.192672

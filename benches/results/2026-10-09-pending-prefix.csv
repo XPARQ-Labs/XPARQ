@@ -1,0 +1,6 @@
+# cpu=Intel Core i7-8550U, profile=release, 1 warmup + 5 measured samples, no disk or networking
+prefix,full_replay_ms,cached_advance_ms
+0,0.243643,0.254457
+16,3.578555,0.210519
+64,14.277452,0.223394
+128,31.036168,0.217346

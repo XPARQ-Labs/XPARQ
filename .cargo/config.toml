@@ -1,0 +1,6 @@
+# Keep compiler CPU defaults for distributable binaries.
+# Use explicit --target flags when cross-compiling.
+[alias]
+check-all = "check --workspace --all-targets --locked"
+fmt-check = "fmt --all -- --check"
+lint = "clippy --workspace --all-targets --locked"

@@ -1,0 +1,58 @@
+# cpu=Intel Core i7-8550U, rustc=1.99.0, llvm=23.1.1, profile=bench, features=mainnet, cpu_target=default
+# samples=3, warmup=1, verify_rounds=100, arch=x86_64, os=linux, threads=8
+case,operation,median_ms,min_ms,max_ms
+# setup: mining and signing fixtures outside timed region
+# mixed_small: fixture signed 1 operations
+# mixed_small: fixture signed 2 operations
+# mixed_small: fixture signed 3 operations
+# mixed_small: fixture signed 4 operations
+# mixed_small: fixture signed 5 operations
+# mixed_small: fixture signed 6 operations
+# mixed_small: fixture signed 7 operations
+# mixed_small: fixture signed 8 operations
+# mixed_small: fixture signed 9 operations
+# mixed_small: fixture signed 10 operations
+# mixed_small: fixture signed 11 operations
+# mixed_small: fixture signed 12 operations
+# mixed_small: operations=12, outputs_per_tx=1, bytes=143093, weight=143093, limit=2097152
+# mixed_small: sample 0/3 complete
+# mixed_small: sample 1/3 complete
+# mixed_small: sample 2/3 complete
+# mixed_small: sample 3/3 complete
+mixed_small,apply_block_including_pow,114.143847,112.973415,132.493317
+# mixed_near_limit_many_outputs: fixture signed 1 operations
+# mixed_near_limit_many_outputs: fixture signed 2 operations
+# mixed_near_limit_many_outputs: fixture signed 3 operations
+# mixed_near_limit_many_outputs: fixture signed 4 operations
+# mixed_near_limit_many_outputs: fixture signed 5 operations
+# mixed_near_limit_many_outputs: fixture signed 6 operations
+# mixed_near_limit_many_outputs: fixture signed 7 operations
+# mixed_near_limit_many_outputs: fixture signed 8 operations
+# mixed_near_limit_many_outputs: fixture signed 9 operations
+# mixed_near_limit_many_outputs: fixture signed 10 operations
+# mixed_near_limit_many_outputs: fixture signed 11 operations
+# mixed_near_limit_many_outputs: fixture signed 12 operations
+# mixed_near_limit_many_outputs: operations=12, outputs_per_tx=3800, bytes=2012201, weight=2012201, limit=2097152
+# mixed_near_limit_many_outputs: sample 0/3 complete
+# mixed_near_limit_many_outputs: sample 1/3 complete
+# mixed_near_limit_many_outputs: sample 2/3 complete
+# mixed_near_limit_many_outputs: sample 3/3 complete
+mixed_near_limit_many_outputs,apply_block_including_pow,315.016576,310.516361,327.167300
+# mixed_near_limit_many_signatures: fixture signed 14 operations
+# mixed_near_limit_many_signatures: fixture signed 28 operations
+# mixed_near_limit_many_signatures: fixture signed 42 operations
+# mixed_near_limit_many_signatures: fixture signed 56 operations
+# mixed_near_limit_many_signatures: fixture signed 70 operations
+# mixed_near_limit_many_signatures: fixture signed 84 operations
+# mixed_near_limit_many_signatures: fixture signed 98 operations
+# mixed_near_limit_many_signatures: fixture signed 112 operations
+# mixed_near_limit_many_signatures: fixture signed 126 operations
+# mixed_near_limit_many_signatures: fixture signed 140 operations
+# mixed_near_limit_many_signatures: fixture signed 154 operations
+# mixed_near_limit_many_signatures: fixture signed 168 operations
+# mixed_near_limit_many_signatures: operations=168, outputs_per_tx=1, bytes=2001157, weight=2001157, limit=2097152
+# mixed_near_limit_many_signatures: sample 0/3 complete
+# mixed_near_limit_many_signatures: sample 1/3 complete
+# mixed_near_limit_many_signatures: sample 2/3 complete
+# mixed_near_limit_many_signatures: sample 3/3 complete
+mixed_near_limit_many_signatures,apply_block_including_pow,322.582071,321.563651,323.408846

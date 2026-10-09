@@ -1,0 +1,13 @@
+# Intel i7-8550U; Rust 1.99.0; Linux x86_64; default CPU target; mainnet
+# 143 post-genesis blocks; 50130 live UTXOs; 3659530 state bytes; excluded warmup + 3 samples
+workload,phase,median_ms,min_ms,max_ms
+history,storage_append_per_block,0.324703,0.282999,31.418701
+history,serialize_state,5.079032,4.954574,5.437533
+history,hash_preencoded_state,24.244169,23.271009,24.513077
+history,cold_state_root,26.731535,26.388322,27.342355
+history,serialize_snapshot,5.124021,5.106886,6.743768
+history,read_and_decode_history,62.556902,62.152908,69.365543
+history,admission_pow_history,16416.224845,16372.464571,16491.430333
+history,execute_commit_history,4085.139801,4030.662658,4087.991445
+history,replay_total,20570.870594,20465.423960,20642.148830
+history,snapshot_restore,16687.004712,16282.546864,16864.786998
