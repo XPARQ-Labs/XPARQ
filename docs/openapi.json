@@ -129,6 +129,33 @@
         }
       }
     },
+    "/program/coins/{program_id}": {
+      "get": {
+        "summary": "Get paginated coin UTXOs without enumerating asset holdings",
+        "description": "Used by wallet coin input selection, deployment funding, and UTXO tracking. Returns at most 1000 coin UTXOs per page. Asset shares and program_assets are omitted. Use either utxo_after or utxo_offset, not both.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ProgramId" },
+          {
+            "name": "utxo_after",
+            "in": "query",
+            "schema": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+            "description": "Exclusive coin share cursor from next_utxo_cursor."
+          },
+          {
+            "name": "utxo_offset",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 0 },
+            "description": "Legacy offset pagination; prefer utxo_after."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "program_id, policy, nullable state_value, tip_height, next_height, total/coin_balance in zeno, paginated utxos/coins with reservation flags, next_utxo_offset, next_utxo_cursor and utxo_snapshot"
+          },
+          "400": { "description": "Invalid program ID or pagination query" }
+        }
+      }
+    },
     "/coin-origin/{share}": {
       "get": {
         "summary": "Get canonical creation transaction and block height for a coin share",

@@ -32,7 +32,7 @@ RPC is still needed when selecting inputs or calculating fees from node state.
 ./target/release/wallet consolidate --wallet wallet.json --rpc 127.0.0.1:6666
 ```
 
-Without explicit inputs, the wallet selects available `/program/account/{program_id}`
+Without explicit inputs, the wallet selects available `/program/coins/{program_id}`
 UTXOs and creates change. Consolidation merges the selected XPQ UTXOs into one
 self-owned output. Consensus validates it as an ordinary transaction, so its
 canonical bytes still incur archival burn and a miner fee.
@@ -151,6 +151,13 @@ Wallet balances belong to a stateless system signature-policy instance derived
 from the signature policy, signature scheme, public key and 32-byte public salt. `wallet program-id` prints its 64-character
 hex representation (32 decoded bytes). Public keys are included in spending
 proofs, not ledger ownership. Coin and asset operations use monetary route 0.
+
+`GET /program/coins/PROGRAM_ID` provides paginated coin UTXOs and reservation
+flags without enumerating asset holdings. Wallet input selection, deployment
+funding, and UTXO tracking use this endpoint, so a large asset inventory does
+not enlarge their responses. It accepts `utxo_after` or `utxo_offset` and returns
+at most 1,000 coin UTXOs per page. This wallet requires a node that supports
+`/program/coins`; upgrade the node before the wallet.
 
 `GET /program/account/PROGRAM_ID` returns both wallet and deployed-program
 balances, paginated coin UTXOs, asset shares, and nullable scalar state. `GET

@@ -291,8 +291,14 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                 &canonical_block(database, &ledger, Height(height))?,
             )?
         }
-        route if route.starts_with("/program/account/") => {
-            let account_route = route.trim_start_matches("/program/account/");
+        route if route.starts_with("/program/account/") || route.starts_with("/program/coins/") => {
+            let coins_only = route.starts_with("/program/coins/");
+            let prefix = if coins_only {
+                "/program/coins/"
+            } else {
+                "/program/account/"
+            };
+            let account_route = route.strip_prefix(prefix).ok_or("invalid account route")?;
             let (program_id, query) = account_route.split_once('?').unwrap_or((account_route, ""));
             if program_id.is_empty() || program_id.contains(['/', '#']) {
                 return Err("invalid account route".into());
@@ -320,13 +326,20 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                     _ => return Err("invalid account query".into()),
                 }
             }
-            account_response(
-                &ledger,
-                &read_pending_operations(database)?,
-                parse_program_id(program_id)?,
-                utxo_offset,
-                utxo_after,
-            )?
+            let pending = read_pending_operations(database)?;
+            let program_id = parse_program_id(program_id)?;
+            if coins_only {
+                coin_account_response(
+                    ledger.state(),
+                    ledger.tip_height(),
+                    &pending,
+                    program_id,
+                    utxo_offset,
+                    utxo_after,
+                )?
+            } else {
+                account_response(&ledger, &pending, program_id, utxo_offset, utxo_after)?
+            }
         }
         route if route.starts_with("/explorer/program/") => {
             let value = route.trim_start_matches("/explorer/program/");

@@ -33,6 +33,7 @@ fn embedded_api_documentation_is_valid_and_references_every_rpc_route() {
         "/block/{height}",
         "/program/balance/{program_id}",
         "/program/account/{program_id}",
+        "/program/coins/{program_id}",
         "/coin-origin/{share}",
         "/program/quote",
         "/program/state/{program_id}/{key}",

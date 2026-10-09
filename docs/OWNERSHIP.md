@@ -43,6 +43,7 @@ Program IDs are exactly 64 hexadecimal characters, with lowercase canonical
 output. `wallet program-id` replaces the old identity command. Transfers accept
 Program IDs (optionally prefixed with `program:`); miners use `--miner PROGRAM_ID`.
 
+- `/program/coins/{program_id}`: paginated coin UTXOs without asset inventory; used for wallet input selection and deployment funding.
 - `/program/account/{program_id}`: paginated UTXOs, balances and program state.
 - `/program/balance/{program_id}`: available/reserved coin balance.
 - `/explorer/program/{program_id}`: paginated program activity.

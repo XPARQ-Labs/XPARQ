@@ -6,6 +6,10 @@ use kernel::common::Owner;
 
 use kernel::operation::BlockOperation;
 
+#[cfg(test)]
+#[path = "explorer/coin_tests.rs"]
+mod coin_tests;
+
 pub(super) const DEFAULT_PROGRAM_ACTIVITY_LIMIT: usize = 50;
 
 pub(super) const MAX_PROGRAM_ACTIVITY_LIMIT: usize = 250;
@@ -44,16 +48,45 @@ pub(super) fn account_response(
 
     utxo_after: Option<kernel::monetary::coin::CoinShare>,
 ) -> Result<serde_json::Value, String> {
-    let next_height = ledger
-        .tip_height()
-        .map_or(0, |height| height.0.saturating_add(1));
+    let mut response = coin_account_response(
+        ledger.state(),
+        ledger.tip_height(),
+        mempool,
+        program_id,
+        utxo_offset,
+        utxo_after,
+    )?;
+    let mut owned_asset_shares: Vec<_> = ledger
+        .state()
+        .extensions()
+        .assets
+        .shares_by_owner(Owner::Program(program_id))
+        .collect();
+    owned_asset_shares.sort_by_key(|(share, _)| *share);
+    let asset_shares: Vec<_> = owned_asset_shares.into_iter()
+        .map(|(share, value)| serde_json::json!({"id":share.to_string(),"asset":value.asset.to_string(),"amount":value.amount.to_string()}))
+        .collect();
+    response["asset_shares"] = serde_json::json!(asset_shares);
+    response["program_assets"] = serde_json::json!(program_account_assets(ledger, program_id)?);
+    Ok(response)
+}
+
+/// Coin reads must not enumerate or serialize the account's asset inventory.
+pub(super) fn coin_account_response(
+    state: &kernel::ledger::LedgerState,
+    tip_height: Option<Height>,
+    mempool: &[BlockOperation],
+    program_id: ProgramId,
+    utxo_offset: usize,
+    utxo_after: Option<kernel::monetary::coin::CoinShare>,
+) -> Result<serde_json::Value, String> {
+    let next_height = tip_height.map_or(0, |height| height.0.saturating_add(1));
 
     let reserved = reserved_coin_inputs(mempool);
 
     let mut total = Zeno::from_zeno(0);
 
-    let account_utxos = ledger
-        .state()
+    let account_utxos = state
         .utxos()
         .coins_by_owner(Owner::Program(program_id))
         .collect::<Vec<_>>();
@@ -108,17 +141,7 @@ pub(super) fn account_response(
         &utxo_snapshot_bytes,
     );
 
-    let record = ledger.state().programs().program(&program_id);
-    let mut owned_asset_shares: Vec<_> = ledger
-        .state()
-        .extensions()
-        .assets
-        .shares_by_owner(Owner::Program(program_id))
-        .collect();
-    owned_asset_shares.sort_by_key(|(share, _)| *share);
-    let asset_shares: Vec<_> = owned_asset_shares.into_iter()
-        .map(|(share, value)| serde_json::json!({"id":share.to_string(),"asset":value.asset.to_string(),"amount":value.amount.to_string()}))
-        .collect();
+    let record = state.programs().program(&program_id);
     Ok(serde_json::json!({
 
         "program_id": program_id.to_string(),
@@ -126,17 +149,14 @@ pub(super) fn account_response(
         "state_value": record.map(|r| r.state_value),
         "coin_balance": total.as_zeno(),
         "coins": utxos,
-        "asset_shares": asset_shares,
 
         "utxo_snapshot": hex::encode(utxo_snapshot.0),
 
-        "tip_height": ledger.tip_height().map_or(0, |height| height.0),
+        "tip_height": tip_height.map_or(0, |height| height.0),
 
         "next_height": next_height,
 
         "total": total.as_zeno(),
-
-        "program_assets": program_account_assets(ledger, program_id)?,
 
         "utxos": utxos,
 
