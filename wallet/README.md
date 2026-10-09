@@ -175,6 +175,12 @@ original signature scheme and, for a nondefault account, its salt.
 
 ## Multiple accounts in one wallet
 
+`wallet balance --wallet wallet.json --rpc 127.0.0.1:6666` displays balances
+for every account recorded in `account_salts`, including zero balances, reserved
+coins, UTXO counts and asset holdings. It labels the active account and shows
+network totals once. A failed account query is reported without skipping later
+accounts. This also applies to the interactive balance menu.
+
 One key can control multiple signature-policy ProgramIds. Each distinct public
 salt derives a different account. Account creation happens locally and requires
 no deployment transaction or fee. Coin and asset balances belong to the selected
