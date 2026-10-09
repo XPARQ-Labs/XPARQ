@@ -72,6 +72,27 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
         Ok(AuthorizedProgramEnvelope::Program(Box::new(signed)))
     })?;
     drop(wallet);
+    if has_flag(args, "--offline") {
+        let AuthorizedProgramEnvelope::Program(tx) = &transaction;
+        let fee = tx.payment.charges.miner_fee.as_zeno();
+        let state_burn = StateTransitionWeight {
+            created_coin_utxos: tx.payment.outputs.len() as u64 + u64::from(fee > 0),
+            consumed_coin_utxos: tx.payment.inputs.len() as u64,
+            ..StateTransitionWeight::default()
+        }
+        .state_growth_burn()
+        .map_err(|e| e.to_string())?
+        .as_zeno();
+        let archival_burn = kernel::crypto::canonical_length(&transaction)
+            .map_err(|e| e.to_string())?
+            .checked_mul(kernel::consensus::STATE_BURN_RATE_ZENO_PER_BYTE)
+            .ok_or("transaction burn overflow")?;
+        let burn = archival_burn
+            .checked_add(state_burn)
+            .ok_or("transaction burn overflow")?;
+        println!("Miner Fee: {}", format_amount(fee));
+        println!("Protocol Burn: {}", format_amount(burn));
+    }
     submit_or_print_transaction(args, &transaction)
 }
 

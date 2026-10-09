@@ -13,9 +13,6 @@ The project is organized around a small set of components:
 - `docs` — protocol and RPC documentation
 - `depend` — vendored or project-pinned dependencies
 
-> [!WARNING]
-> XPARQ is under active development. Protocol rules, database formats, networking, wallet formats, and APIs may change. Do not use funds or keys that you cannot afford to lose.
-
 Build and dependency-check configuration is documented in
 [Tooling](docs/TOOLING.md). `Cargo.lock` is committed, and `build.sh` uses
 `--locked` to prevent dependency resolution changes during builds.
@@ -140,6 +137,19 @@ Stop the node with:
 
 ```text
 Ctrl+C
+```
+
+### Desktop GUI (GPUI)
+
+The optional [desktop console](gui/README.md) provides node/miner settings,
+Start/Stop controls, live node logs, RPC status and a Wallet tab for wallet
+creation, balances, history, UTXOs and reviewed XPQ transfers. It can also monitor an
+existing node without opening its database. Desktop dependencies are built
+separately from the node workspace.
+
+```bash
+cargo build --manifest-path gui/Cargo.toml
+./gui/target/debug/xparq-gui
 ```
 
 ### Run with an explicit peer

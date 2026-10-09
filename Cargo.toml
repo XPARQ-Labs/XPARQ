@@ -3,6 +3,7 @@ resolver = "3"
 members = ["kernel", "crypto", "runtime", "wallet", "extension", "devkit"]
 exclude = [
     "depend",
+    "gui",
 ]
 
 [workspace.package]
