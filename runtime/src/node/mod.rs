@@ -223,6 +223,12 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         None => run_automatic(&[]),
         Some("run") => run_automatic(&args[1..]),
         Some("info") => config::print_network_info(),
+        Some("peers") => {
+            if args.len() > 2 {
+                return Err("usage: node peers [data-dir]".into());
+            }
+            print_stored_peers(args.get(1).map(String::as_str))
+        }
         Some("check") => {
             let mut path = None;
             let mut full = false;
@@ -294,6 +300,50 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         }
         Some(command) => Err(format!("unknown command `{command}`")),
     }
+}
+
+fn print_stored_peers(path: Option<&str>) -> Result<(), String> {
+    let database = config::database_path(path);
+    let mut found = false;
+
+    if let Some(bytes) = crate::storage::auxiliary_get(&database, "peers")? {
+        let decoded: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("decode peer store: {error}"))?;
+        let peers = decoded
+            .get("peers")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("invalid peer store: expected peers array")?;
+        println!("P2P peers ({}):", peers.len());
+        for peer in peers {
+            let address = peer.get("address").and_then(serde_json::Value::as_str).unwrap_or("?");
+            let successes = peer.get("successes").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let failures = peer.get("failures").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            println!("  {address} successes={successes} failures={failures}");
+        }
+        found = true;
+    }
+
+    #[cfg(feature = "litep2p-devnet")]
+    if let Some(bytes) = crate::storage::auxiliary_get(&database, "litep2p-peers-v1")? {
+        #[derive(serde::Deserialize)]
+        struct StoredPeer {
+            endpoint: String,
+            trusted: bool,
+            success: u64,
+        }
+        let peers: Vec<StoredPeer> = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("decode litep2p peer store: {error}"))?;
+        println!("litep2p peers ({}):", peers.len());
+        for peer in peers {
+            println!("  {} trusted={} last_success_unix={}", peer.endpoint, peer.trusted, peer.success);
+        }
+        found = true;
+    }
+
+    if !found {
+        println!("no stored peers in {}", database.display());
+    }
+    Ok(())
 }
 
 fn run_automatic(args: &[String]) -> Result<(), String> {
