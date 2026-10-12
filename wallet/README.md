@@ -32,10 +32,16 @@ RPC is still needed when selecting inputs or calculating fees from node state.
 ./target/release/wallet consolidate --wallet wallet.json --rpc 127.0.0.1:6666
 ```
 
-Without explicit inputs, the wallet selects available `/program/coins/{program_id}`
-UTXOs and creates change. Consolidation merges the selected XPQ UTXOs into one
-self-owned output. Consensus validates it as an ordinary transaction, so its
-canonical bytes still incur archival burn and a miner fee.
+Without explicit inputs, a send checks available UTXOs for every account recorded
+in the wallet and chooses one ProgramId that can cover the amount, miner fee and
+protocol burn. It prefers the account that leaves the least change, then the one
+with fewer inputs, with the active account breaking ties. Change returns to the
+selected source account; the command prints the ProgramId it used. Each send still
+spends from one ProgramId. If no single account can cover it, the wallet reports
+available balances by account. Supplying `--input` keeps input selection manual
+and uses the active account. Consolidation merges the active account's selected
+XPQ UTXOs into one self-owned output. Consensus validates it as an ordinary
+transaction, so its canonical bytes still incur archival burn and a miner fee.
 
 The miner fee is node policy. The protocol burn separately covers canonical
 transaction history and positive net state growth. Consumed Coin UTXOs offset
@@ -183,8 +189,10 @@ accounts. This also applies to the interactive balance menu.
 
 One key can control multiple signature-policy ProgramIds. Each distinct public
 salt derives a different account. Account creation happens locally and requires
-no deployment transaction or fee. Coin and asset balances belong to the selected
-ProgramId; adding an account does not move existing funds.
+no deployment transaction or fee. Coin and asset balances belong to their
+respective ProgramIds; adding an account does not move existing funds. Automatic
+XPQ sends search all recorded accounts, while other operations that require one
+signer use the active ProgramId.
 
 ```sh
 wallet accounts --wallet wallet.json

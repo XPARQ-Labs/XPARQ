@@ -14,7 +14,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
         .map(kernel::monetary::coin::CoinShare::from_str)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "invalid --input coin id".to_string())?;
-    let wallet = load_wallet(path)?;
+    let mut wallet = load_wallet(path)?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let explicit_change = option(args, "--change").map(parse_amount).transpose()?;
     let change_target = option(args, "--change-to")
@@ -23,15 +23,32 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
     if inputs.is_empty() && (explicit_change.is_some() || change_target.is_some()) {
         return Err("automatic input selection also calculates change automatically".into());
     }
+    let account_candidates = if inputs.is_empty() {
+        Some(wallet_account_input_candidates(rpc, &wallet)?)
+    } else {
+        None
+    };
+    let initially_active_salt = wallet.0.account_salt;
     let transaction = automatic_fee_transaction(|fee, archival_burn| {
         let required = amount
             .as_zeno()
             .checked_add(fee)
             .ok_or("transaction amount plus fee overflow")?;
         let (selected, change, _state_burn, change_program_id) = if inputs.is_empty() {
-            let (selected, _total, state_burn, change) =
-                select_account_inputs_with_state_burn(rpc, &wallet, required, 2, 0, archival_burn)?;
-            (selected, change, state_burn, wallet.program_id())
+            let account_candidates = account_candidates
+                .as_ref()
+                .ok_or("wallet account candidates are unavailable")?;
+            let (salt, program_id, selected, _total, state_burn, change) =
+                select_wallet_account_inputs_with_state_burn(
+                    account_candidates,
+                    required,
+                    2,
+                    0,
+                    archival_burn,
+                    initially_active_salt,
+                )?;
+            wallet.0.select_account(salt)?;
+            (selected, change, state_burn, program_id)
         } else {
             let gross_change = explicit_change.map_or(0, Zeno::as_zeno);
             let created = 2_u64 + u64::from(gross_change > fee);
@@ -71,6 +88,8 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
         let signed = wallet.sign_onchain_spend(intent)?;
         Ok(AuthorizedProgramEnvelope::Program(Box::new(signed)))
     })?;
+    let AuthorizedProgramEnvelope::Program(invocation) = &transaction;
+    println!("Using wallet Program ID: {}", invocation.signer);
     drop(wallet);
     if has_flag(args, "--offline") {
         let AuthorizedProgramEnvelope::Program(tx) = &transaction;
@@ -162,7 +181,14 @@ pub(super) fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
 }
 
 fn account_input_candidates(rpc: &str, wallet: &LoadedWallet) -> Result<Vec<AccountUtxo>, String> {
-    let program_id = kernel::crypto::program_id_to_string(&wallet.program_id());
+    account_input_candidates_for_program(rpc, wallet.program_id())
+}
+
+fn account_input_candidates_for_program(
+    rpc: &str,
+    program_id: ProgramId,
+) -> Result<Vec<AccountUtxo>, String> {
+    let program_id = kernel::crypto::program_id_to_string(&program_id);
     let response = fetch_account(rpc, &program_id)?;
     let mut candidates = response
         .utxos
@@ -176,6 +202,107 @@ fn account_input_candidates(rpc: &str, wallet: &LoadedWallet) -> Result<Vec<Acco
             .then_with(|| left.id.cmp(&right.id))
     });
     Ok(candidates)
+}
+
+fn wallet_account_input_candidates(
+    rpc: &str,
+    wallet: &LoadedWallet,
+) -> Result<Vec<WalletAccountInputCandidates>, String> {
+    wallet
+        .0
+        .account_salts
+        .iter()
+        .map(|salt| {
+            let program_id =
+                kernel::crypto::program_id_from_public_key_with_salt(&wallet.0.public_key, salt)
+                    .map_err(|error| error.to_string())?;
+            let utxos = account_input_candidates_for_program(rpc, program_id)?;
+            Ok(WalletAccountInputCandidates {
+                salt: *salt,
+                program_id,
+                utxos,
+            })
+        })
+        .collect()
+}
+
+fn select_wallet_account_inputs_with_state_burn(
+    accounts: &[WalletAccountInputCandidates],
+    base_required: u64,
+    created_coin_without_change: u64,
+    created_state_weight: u64,
+    archival_burn: u64,
+    active_salt: kernel::crypto::AccountSalt,
+) -> Result<
+    (
+        kernel::crypto::AccountSalt,
+        ProgramId,
+        Vec<kernel::monetary::coin::CoinShare>,
+        u64,
+        u64,
+        u64,
+    ),
+    String,
+> {
+    let mut best: Option<(usize, Vec<kernel::monetary::coin::CoinShare>, u64, u64, u64)> = None;
+    let mut balances = Vec::with_capacity(accounts.len());
+
+    for (index, account) in accounts.iter().enumerate() {
+        let available = account.utxos.iter().try_fold(0_u64, |total, utxo| {
+            total
+                .checked_add(utxo.amount)
+                .ok_or_else(|| "available account balance overflow".to_string())
+        })?;
+        balances.push((account.program_id, available));
+
+        let Some((selected, total, burn, change)) = select_inputs_from_candidates(
+            &account.utxos,
+            base_required,
+            created_coin_without_change,
+            created_state_weight,
+            archival_burn,
+            0,
+        )?
+        else {
+            continue;
+        };
+
+        let preference = (change, selected.len(), account.salt != active_salt);
+        let is_better =
+            best.as_ref()
+                .is_none_or(|(best_index, best_selected, _, _, best_change)| {
+                    preference
+                        < (
+                            *best_change,
+                            best_selected.len(),
+                            accounts[*best_index].salt != active_salt,
+                        )
+                });
+        if is_better {
+            best = Some((index, selected, total, burn, change));
+        }
+    }
+
+    if let Some((index, selected, total, burn, change)) = best {
+        let account = &accounts[index];
+        return Ok((
+            account.salt,
+            account.program_id,
+            selected,
+            total,
+            burn,
+            change,
+        ));
+    }
+
+    let accounts = balances
+        .iter()
+        .map(|(program_id, balance)| format!("{program_id}: {balance} units"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "no single wallet account has enough available balance for amount, fee, and state burn; available by account: {accounts}"
+    ))
 }
 
 pub(super) fn select_account_inputs_with_state_burn(
@@ -207,6 +334,34 @@ pub(super) fn select_account_inputs_with_vm_state_burn(
     vm_consumed_coin_utxos: u64,
 ) -> Result<(Vec<kernel::monetary::coin::CoinShare>, u64, u64, u64), String> {
     let candidates = account_input_candidates(rpc, wallet)?;
+    let available = candidates.iter().try_fold(0_u64, |total, utxo| {
+        total
+            .checked_add(utxo.amount)
+            .ok_or_else(|| "available account balance overflow".to_string())
+    })?;
+    select_inputs_from_candidates(
+        &candidates,
+        base_required,
+        created_coin_without_change,
+        created_state_weight,
+        archival_burn,
+        vm_consumed_coin_utxos,
+    )?
+    .ok_or_else(|| {
+        format!(
+            "insufficient available balance for amount, fee, and state burn: available {available} units"
+        )
+    })
+}
+
+fn select_inputs_from_candidates(
+    candidates: &[AccountUtxo],
+    base_required: u64,
+    created_coin_without_change: u64,
+    created_state_weight: u64,
+    archival_burn: u64,
+    vm_consumed_coin_utxos: u64,
+) -> Result<Option<(Vec<kernel::monetary::coin::CoinShare>, u64, u64, u64)>, String> {
     let mut selected = Vec::new();
     let mut total = 0_u64;
     for utxo in candidates {
@@ -245,13 +400,11 @@ pub(super) fn select_account_inputs_with_vm_state_burn(
                 total == required
             };
             if valid {
-                return Ok((selected, total, burn, total - required));
+                return Ok(Some((selected, total, burn, total - required)));
             }
         }
     }
-    Err(format!(
-        "insufficient available balance for amount, fee, and state burn: available {total} units"
-    ))
+    Ok(None)
 }
 
 pub(super) fn reject_manual_fee(args: &[String]) -> Result<(), String> {

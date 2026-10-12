@@ -1,5 +1,6 @@
 use super::*;
 use super::{mempool::*, p2p::*, protocol::*, state::*};
+use std::time::Instant;
 
 pub(super) fn gossip_inventory(database: &Path) -> Result<GossipInventory, String> {
     let (ledger, _header_checkpoints, cumulative_work, cumulative_weight) =
@@ -73,23 +74,36 @@ pub(super) fn request_discovered_peers(stream: &mut TcpStream) -> Result<Vec<Pee
     if response.first() != Some(&PEERS_MESSAGE) {
         return Err("peer returned an unexpected discovery response".into());
     }
-    let declared_peers = response
-        .get(1..5)
-        .and_then(|bytes| bytes.try_into().ok())
+    decode_peer_addresses(&response[1..], MAX_DISCOVERED_PEERS)
+        .map_err(|error| format!("decode discovered peers: {error}"))
+}
+
+pub(super) fn decode_peer_addresses(
+    bytes: &[u8],
+    maximum_count: usize,
+) -> Result<Vec<PeerAddress>, String> {
+    if bytes.len() > MAX_PEERS_RESPONSE_SIZE {
+        return Err("peer address list exceeds size limit".into());
+    }
+    let declared = bytes
+        .get(..4)
+        .and_then(|count| count.try_into().ok())
         .map(u32::from_le_bytes)
-        .ok_or("peer discovery response is truncated")? as usize;
-    if declared_peers > MAX_DISCOVERED_PEERS {
-        return Err("peer discovery response exceeds peer limit".into());
+        .ok_or("peer address list is truncated")? as usize;
+    if declared > maximum_count {
+        return Err("peer address list exceeds peer limit".into());
     }
-    let peers: Vec<String> = canonical_decode(&response[1..])
-        .map_err(|error| format!("decode discovered peers: {error}"))?;
-    if peers.len() > MAX_DISCOVERED_PEERS {
-        return Err("peer discovery response exceeds peer limit".into());
+    let peers: Vec<String> =
+        canonical_decode(bytes).map_err(|error| format!("decode peer address list: {error}"))?;
+    if peers.len() > maximum_count {
+        return Err("peer address list exceeds peer limit".into());
     }
+    let mut unique = BTreeSet::new();
     Ok(peers
         .into_iter()
-        .filter_map(|peer| peer.parse().ok())
+        .filter_map(|peer| peer.parse::<PeerAddress>().ok())
         .filter(PeerAddress::is_admissible)
+        .filter(|peer| unique.insert(peer.clone()))
         .collect())
 }
 
@@ -113,14 +127,27 @@ pub(super) fn gossip_outbound_session(
     stream: &mut TcpStream,
     peer: &Handshake,
 ) -> Result<(), String> {
-    if peer.capabilities & CAPABILITY_RELAY == 0 {
+    let supports_data_relay = peer.capabilities & CAPABILITY_RELAY != 0;
+    let supports_peer_relay = peer.capabilities & CAPABILITY_PEER_RELAY != 0;
+    if !supports_data_relay && !supports_peer_relay {
         write_frame(stream, &[SYNC_COMPLETE_MESSAGE])?;
         return Ok(());
     }
 
     let mut generation = gossip_generation()?;
+    let mut last_peer_refresh = Instant::now();
 
     loop {
+        if supports_peer_relay && last_peer_refresh.elapsed() >= PEER_RELAY_REFRESH_INTERVAL {
+            refresh_peer_addresses(database, stream, peer)?;
+            last_peer_refresh = Instant::now();
+        }
+
+        if !supports_data_relay {
+            generation = wait_for_gossip(generation)?;
+            continue;
+        }
+
         let local_before = gossip_inventory(database)?;
         let encoded = canonical_bytes(&local_before).map_err(|error| error.to_string())?;
 

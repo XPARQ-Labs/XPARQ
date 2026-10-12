@@ -63,7 +63,9 @@ const P2P_MAGIC: [u8; 8] = *b"XPQP2P01";
 const P2P_PROTOCOL_VERSION: u32 = 1;
 const CAPABILITY_PEER_DISCOVERY: u64 = 1 << 0;
 const CAPABILITY_RELAY: u64 = 1 << 1;
-const LOCAL_CAPABILITIES: u64 = CAPABILITY_PEER_DISCOVERY | CAPABILITY_RELAY;
+const CAPABILITY_PEER_RELAY: u64 = 1 << 2;
+const LOCAL_CAPABILITIES: u64 =
+    CAPABILITY_PEER_DISCOVERY | CAPABILITY_RELAY | CAPABILITY_PEER_RELAY;
 const MAX_HANDSHAKE_SIZE: usize = 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_LOCATOR_HASHES: usize = 64;
@@ -83,7 +85,11 @@ const REJECTED_MESSAGE: u8 = 12;
 const INVENTORY_MESSAGE: u8 = 13;
 const GET_TRANSACTION_MESSAGE: u8 = 14;
 const TRANSACTION_MESSAGE: u8 = 15;
+const ANNOUNCE_PEER_MESSAGE: u8 = 16;
+const ANNOUNCE_PEERS_MESSAGE: u8 = 17;
 const MAX_PEERS_RESPONSE_SIZE: usize = 16 * 1024;
+const MAX_PEER_ANNOUNCEMENT_ENDPOINTS: usize = 32;
+const PEER_RELAY_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_RELAY_ITEMS_PER_SESSION: usize = 256;
 const MAX_RELAYED_BLOCKS_PER_SESSION: usize = 4;
 const MAX_HEADER_REQUESTS_PER_SESSION: usize =
@@ -318,6 +324,30 @@ fn print_stored_peers(path: Option<&str>) -> Result<(), String> {
             let address = peer.get("address").and_then(serde_json::Value::as_str).unwrap_or("?");
             let successes = peer.get("successes").and_then(serde_json::Value::as_u64).unwrap_or(0);
             let failures = peer.get("failures").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            println!("  {address} successes={successes} failures={failures}");
+        }
+        found = true;
+    } else if let Ok(bytes) = std::fs::read(database.join("peers.json")) {
+        let decoded: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("decode peer JSON export: {error}"))?;
+        let peers = decoded
+            .get("peers")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("invalid peer JSON export: expected peers array")?;
+        println!("P2P peers ({}):", peers.len());
+        for peer in peers {
+            let address = peer
+                .get("address")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            let successes = peer
+                .get("successes")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let failures = peer
+                .get("failures")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             println!("  {address} successes={successes} failures={failures}");
         }
         found = true;

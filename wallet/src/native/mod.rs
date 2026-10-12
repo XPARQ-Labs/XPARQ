@@ -93,6 +93,12 @@ struct AccountUtxo {
     reserved: bool,
 }
 
+struct WalletAccountInputCandidates {
+    salt: kernel::crypto::AccountSalt,
+    program_id: ProgramId,
+    utxos: Vec<AccountUtxo>,
+}
+
 #[derive(Deserialize)]
 struct ProgramHistoryResponse {
     program_id: String,

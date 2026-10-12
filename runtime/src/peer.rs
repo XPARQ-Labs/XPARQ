@@ -1,8 +1,8 @@
 use std::{
-    collections::BTreeMap,
-    fmt,
+    collections::{BTreeMap, BTreeSet},
+    fmt, fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    path::Path,
+    path::{Path, PathBuf},
     str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 const PEERS_KEY: &str = "peers";
 pub const MAX_DISCOVERED_PEERS: usize = 128;
+const RELAY_ADDRESS_TTL_SECS: u64 = 24 * 60 * 60;
 
 /// A stable peer endpoint. DNS is resolved only when dialing, never on decode.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -91,6 +92,10 @@ pub struct PeerRecord {
     pub failures: u32,
     pub last_success_unix: Option<u64>,
     pub cooldown_until_unix: Option<u64>,
+    #[serde(default)]
+    pub relay_only: bool,
+    #[serde(default)]
+    pub relay_until_unix: Option<u64>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -104,6 +109,10 @@ pub struct PeerStore {
 }
 
 impl PeerStore {
+    fn json_path(database: &Path) -> PathBuf {
+        database.join("peers.json")
+    }
+
     pub fn load(database: &Path) -> Result<Self, String> {
         let contents = match crate::storage::auxiliary_get(database, PEERS_KEY)? {
             Some(contents) => contents,
@@ -112,12 +121,18 @@ impl PeerStore {
         let decoded: PeerFile = serde_json::from_slice(&contents)
             .map_err(|error| format!("decode peer store: {error}"))?;
         let mut peers = BTreeMap::new();
-        for record in decoded.peers.into_iter().take(MAX_DISCOVERED_PEERS) {
+        let now = unix_time();
+        for record in decoded.peers {
             let Ok(address) = record.address.parse::<PeerAddress>() else {
                 continue;
             };
-            if address.is_admissible() {
+            if address.is_admissible()
+                && !(record.relay_only && record.relay_until_unix.is_none_or(|until| until <= now))
+            {
                 peers.insert(address, record);
+                if peers.len() == MAX_DISCOVERED_PEERS {
+                    break;
+                }
             }
         }
         Ok(Self { peers })
@@ -128,7 +143,9 @@ impl PeerStore {
         let mut addresses: Vec<_> = self
             .peers
             .iter()
-            .filter(|(_, peer)| peer.cooldown_until_unix.is_none_or(|until| until <= now))
+            .filter(|(_, peer)| {
+                !peer.relay_only && peer.cooldown_until_unix.is_none_or(|until| until <= now)
+            })
             .map(|(address, _)| address.clone())
             .collect();
         // Prefer stable DNS identities over potentially stale IP fallback records.
@@ -140,6 +157,26 @@ impl PeerStore {
         self.peers
             .iter()
             .filter(|(_, peer)| peer.last_success_unix.is_some())
+            .take(MAX_DISCOVERED_PEERS)
+            .map(|(address, _)| address.to_string())
+            .collect()
+    }
+
+    pub fn relay_candidates(&self) -> Vec<String> {
+        let now = unix_time();
+        let successful: BTreeSet<_> = self.relay_addresses().into_iter().collect();
+        let mut peers: Vec<_> = self
+            .peers
+            .iter()
+            .filter(|(_, peer)| {
+                peer.cooldown_until_unix.is_none_or(|until| until <= now)
+                    && (peer.last_success_unix.is_some()
+                        || peer.relay_until_unix.is_some_and(|until| until > now))
+            })
+            .collect();
+        peers.sort_by_key(|(address, _)| !successful.contains(&address.to_string()));
+        peers
+            .into_iter()
             .take(MAX_DISCOVERED_PEERS)
             .map(|(address, _)| address.to_string())
             .collect()
@@ -157,6 +194,8 @@ impl PeerStore {
         record.failures = 0;
         record.last_success_unix = Some(unix_time());
         record.cooldown_until_unix = None;
+        record.relay_only = false;
+        record.relay_until_unix = None;
     }
 
     pub fn record_failure(&mut self, address: PeerAddress, malicious: bool) {
@@ -168,6 +207,9 @@ impl PeerStore {
         }
         let record = self.record(address);
         record.failures = record.failures.saturating_add(1);
+        if record.last_success_unix.is_none() {
+            record.relay_until_unix = None;
+        }
         let exponent = record.failures.min(8);
         let ordinary = 10_u64.saturating_mul(1_u64 << exponent);
         let delay = if malicious {
@@ -179,10 +221,22 @@ impl PeerStore {
     }
 
     pub fn insert_discovered(&mut self, address: PeerAddress) -> bool {
-        if !address.is_admissible()
-            || self.peers.contains_key(&address)
-            || self.peers.len() >= MAX_DISCOVERED_PEERS
-        {
+        if !address.is_admissible() {
+            return false;
+        }
+        let now = unix_time();
+        if let Some(record) = self.peers.get_mut(&address) {
+            if record.relay_only || record.last_success_unix.is_some() {
+                return false;
+            }
+            let next_expiration = Some(now.saturating_add(RELAY_ADDRESS_TTL_SECS));
+            if record.relay_until_unix == next_expiration {
+                return false;
+            }
+            record.relay_until_unix = next_expiration;
+            return true;
+        }
+        if self.peers.len() >= MAX_DISCOVERED_PEERS {
             return false;
         }
         self.peers.insert(
@@ -193,6 +247,44 @@ impl PeerStore {
                 failures: 0,
                 last_success_unix: None,
                 cooldown_until_unix: None,
+                relay_only: false,
+                relay_until_unix: Some(now.saturating_add(RELAY_ADDRESS_TTL_SECS)),
+            },
+        );
+        true
+    }
+
+    pub fn insert_announced(&mut self, address: PeerAddress) -> bool {
+        if !address.is_admissible() {
+            return false;
+        }
+        let now = unix_time();
+        if let Some(record) = self.peers.get_mut(&address) {
+            if record.last_success_unix.is_some() {
+                return false;
+            }
+            let next_expiration = Some(now.saturating_add(RELAY_ADDRESS_TTL_SECS));
+            let changed = !record.relay_only || record.relay_until_unix != next_expiration;
+            if !changed {
+                return false;
+            }
+            record.relay_only = true;
+            record.relay_until_unix = next_expiration;
+            return true;
+        }
+        if self.peers.len() >= MAX_DISCOVERED_PEERS {
+            return false;
+        }
+        self.peers.insert(
+            address.clone(),
+            PeerRecord {
+                address: address.to_string(),
+                successes: 0,
+                failures: 0,
+                last_success_unix: None,
+                cooldown_until_unix: None,
+                relay_only: true,
+                relay_until_unix: Some(now.saturating_add(RELAY_ADDRESS_TTL_SECS)),
             },
         );
         true
@@ -203,7 +295,14 @@ impl PeerStore {
             peers: self.peers.values().cloned().collect(),
         })
         .map_err(|error| format!("encode peer store: {error}"))?;
-        crate::storage::auxiliary_put(database, PEERS_KEY, &encoded)
+        crate::storage::auxiliary_put(database, PEERS_KEY, &encoded)?;
+        fs::create_dir_all(database)
+            .map_err(|error| format!("create peer export directory: {error}"))?;
+        let path = Self::json_path(database);
+        let temporary = path.with_extension("json.tmp");
+        fs::write(&temporary, &encoded)
+            .map_err(|error| format!("write peer JSON export: {error}"))?;
+        fs::rename(&temporary, &path).map_err(|error| format!("replace peer JSON export: {error}"))
     }
 
     fn record(&mut self, address: PeerAddress) -> &mut PeerRecord {
@@ -215,6 +314,8 @@ impl PeerStore {
                 failures: 0,
                 last_success_unix: None,
                 cooldown_until_unix: None,
+                relay_only: false,
+                relay_until_unix: None,
             })
     }
 }

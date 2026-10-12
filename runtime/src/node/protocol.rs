@@ -47,6 +47,8 @@ pub(super) fn read_block_session_frame(stream: &mut TcpStream) -> Result<Vec<u8>
 pub(super) fn validate_session_frame_length(length: usize, tag: u8) -> Result<(), String> {
     if tag == SUBMIT_TRANSACTION_MESSAGE {
         validate_frame_length(length, 1 + MAX_STORED_TRANSACTION_SIZE)?;
+    } else if matches!(tag, ANNOUNCE_PEER_MESSAGE | ANNOUNCE_PEERS_MESSAGE) {
+        validate_frame_length(length, 1 + MAX_PEERS_RESPONSE_SIZE)?;
     }
     Ok(())
 }

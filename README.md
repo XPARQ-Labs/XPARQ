@@ -341,6 +341,12 @@ XPARQ can attempt to map its P2P listener through a compatible NAT gateway:
 
 `--public-addr` and `--nat-traversal` are mutually exclusive.
 
+Nodes exchange reachable peer addresses automatically during synchronization
+and refresh them over active P2P sessions every 60 seconds. A node that should
+be relayed to others must advertise a reachable endpoint with `--public-addr`
+or `--nat-traversal`; the temporary source port of an outbound TCP connection
+is not advertised.
+
 ## RPC
 
 The default mainnet RPC endpoint is:
@@ -354,6 +360,10 @@ Check node status:
 ```bash
 curl -s http://127.0.0.1:6666/status
 ```
+
+The node also writes its regular P2P peer store to `peers.json` in the data
+directory whenever it changes. The file is updated atomically and can be read
+while the node is running.
 
 Pretty-print with `jq`:
 
@@ -914,10 +924,12 @@ wallet account-add --wallet wallet.json
 wallet account-use --salt HEX64 --wallet wallet.json
 ```
 
-Use `account-add --salt HEX64` for a chosen 32-byte public salt. Transfer, balance,
-history, asset and deploy commands use the selected account. To recover a
-nondefault account, use `wallet restore ... --salt HEX64`. Preserve the salt list
-with the wallet backup; mnemonic recovery alone cannot reconstruct random salts.
+Use `account-add --salt HEX64` for a chosen 32-byte public salt. XPQ sends search
+all recorded accounts and choose one with enough available coin for the amount,
+fee and burn. Other commands that require one signer use the selected account.
+To recover a nondefault account, use `wallet restore ... --salt HEX64`. Preserve
+the salt list with the wallet backup; mnemonic recovery alone cannot reconstruct
+random salts.
 Custom program IDs continue to bind deployer ProgramId, deploy nonce and code hash.
 See [salted ownership and CLI](docs/OWNERSHIP.md).
 

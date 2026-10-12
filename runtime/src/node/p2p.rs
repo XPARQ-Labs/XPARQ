@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, net::ToSocketAddrs, sync::mpsc, time::Instant};
+use std::{
+    collections::BTreeMap,
+    net::{IpAddr, ToSocketAddrs},
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
 use super::*;
 use super::{chain_sync::*, config::*, gossip::*, mempool::*, protocol::*, state::*, util::*};
@@ -14,6 +19,7 @@ pub(super) fn serve_p2p_database(database: PathBuf, listen: &str) -> Result<(), 
     println!("p2p: {listen}");
     let active = Arc::new(AtomicUsize::new(0));
     let active_by_ip = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    let rejected_until = Arc::new(Mutex::new(BTreeMap::<IpAddr, (u32, Instant)>::new()));
     for connection in listener.incoming() {
         match connection {
             Ok(stream) => {
@@ -23,6 +29,17 @@ pub(super) fn serve_p2p_database(database: PathBuf, listen: &str) -> Result<(), 
                     continue;
                 }
                 let peer_ip = stream.peer_addr().ok().map(|address| address.ip());
+                if let Some(ip) = peer_ip {
+                    let now = Instant::now();
+                    if let Ok(mut rejected) = rejected_until.lock() {
+                        rejected.retain(|_, (_, until)| *until > now);
+                        if rejected.get(&ip).is_some_and(|(_, until)| *until > now) {
+                            active.fetch_sub(1, Ordering::AcqRel);
+                            eprintln!("node: inbound peer temporarily suppressed address={ip}");
+                            continue;
+                        }
+                    }
+                }
                 if let Some(ip) = peer_ip {
                     let mut by_ip = active_by_ip
                         .lock()
@@ -38,8 +55,20 @@ pub(super) fn serve_p2p_database(database: PathBuf, listen: &str) -> Result<(), 
                 let database = database.clone();
                 let active = Arc::clone(&active);
                 let active_by_ip = Arc::clone(&active_by_ip);
+                let rejected_until = Arc::clone(&rejected_until);
                 thread::spawn(move || {
-                    handle_inbound_peer(&database, stream);
+                    let should_cooldown = handle_inbound_peer(&database, stream);
+                    if should_cooldown
+                        && let Some(ip) = peer_ip
+                        && let Ok(mut cooldowns) = rejected_until.lock()
+                    {
+                        let failures = cooldowns
+                            .get(&ip)
+                            .map_or(1, |(failures, _)| failures.saturating_add(1));
+                        let exponent = failures.min(8);
+                        let delay = Duration::from_secs((10_u64 << exponent).min(1_800));
+                        cooldowns.insert(ip, (failures, Instant::now() + delay));
+                    }
                     active.fetch_sub(1, Ordering::AcqRel);
                     if let Some(ip) = peer_ip
                         && let Ok(mut by_ip) = active_by_ip.lock()
@@ -58,7 +87,7 @@ pub(super) fn serve_p2p_database(database: PathBuf, listen: &str) -> Result<(), 
     Ok(())
 }
 
-pub(super) fn handle_inbound_peer(database: &Path, mut stream: TcpStream) {
+pub(super) fn handle_inbound_peer(database: &Path, mut stream: TcpStream) -> bool {
     let address = stream
         .peer_addr()
         .map_or_else(|_| "unknown".into(), |value| value.to_string());
@@ -74,14 +103,67 @@ pub(super) fn handle_inbound_peer(database: &Path, mut stream: TcpStream) {
         }
         Ok(exchange.peer)
     }) {
-        Ok(peer) => println!(
-            "peer served address={address} height={} tip={} work={}",
-            peer.tip_height.0,
-            hex::encode(peer.tip_hash),
-            format_work(peer.cumulative_work),
-        ),
-        Err(error) => eprintln!("node: peer rejected address={address} reason={error}"),
+        Ok(peer) => {
+            println!(
+                "peer served address={address} height={} tip={} work={}",
+                peer.tip_height.0,
+                hex::encode(peer.tip_hash),
+                format_work(peer.cumulative_work),
+            );
+            false
+        }
+        Err(error) => {
+            let rejected = inbound_error_is_protocol_violation(&error);
+            if rejected {
+                eprintln!("node: peer rejected address={address} reason={error}");
+            } else {
+                eprintln!("node: peer disconnected address={address} reason={error}");
+            }
+            rejected
+        }
     }
+}
+
+fn inbound_error_is_protocol_violation(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    if [
+        "failed to fill whole buffer",
+        "unexpected eof",
+        "connection reset",
+        "connection aborted",
+        "connection was aborted",
+        "broken pipe",
+        "forcibly closed",
+        "timed out",
+        "operation timed out",
+        "resource temporarily unavailable",
+        "would block",
+        "network is unreachable",
+        "host is unreachable",
+        "no route to host",
+    ]
+    .iter()
+    .any(|marker| error.contains(marker))
+    {
+        return false;
+    }
+
+    [
+        "invalid",
+        "unsupported ",
+        "does not match",
+        "mismatch",
+        "exceeded",
+        "outside allowed range",
+        "exceeds ",
+        "unexpected ",
+        "decode ",
+        "expected get-headers message",
+        "missing locator count",
+        "peer locator has no canonical common ancestor",
+    ]
+    .iter()
+    .any(|marker| error.contains(marker))
 }
 
 pub(super) fn run_network(
@@ -347,8 +429,9 @@ fn synchronize_peer_database(
     } else if let Some(address) = connected_address {
         record_peer_success(database, address.into())?;
     }
-    for address in discovered {
-        record_discovered_peer(database, address)?;
+    record_discovered_peers(database, discovered)?;
+    if handshake.capabilities & CAPABILITY_PEER_RELAY != 0 {
+        announce_peer_addresses(database, &mut stream)?;
     }
     println!(
         "peer accepted address={peer} height={} tip={} work={} verified_headers={verified} preferred={preferred} applied_blocks={applied}",
@@ -467,7 +550,9 @@ pub(super) fn serve_block_requests(
     stream: &mut TcpStream,
 ) -> Result<PeerSessionOutcome, String> {
     let mut block_requests = 0_usize;
-    let mut discovery_requests = 0_usize;
+    let mut last_discovery_request = None;
+    let mut last_peer_announcement = None;
+    let mut last_peers_announcement = None;
     let mut relayed_transactions = 0_usize;
     let mut relayed_blocks = 0_usize;
     let mut transaction_requests = 0_usize;
@@ -477,21 +562,65 @@ pub(super) fn serve_block_requests(
         match message {
             SYNC_COMPLETE_MESSAGE if body.is_empty() => return Ok(PeerSessionOutcome::Complete),
             GET_PEERS_MESSAGE if body.is_empty() => {
-                discovery_requests += 1;
-                if discovery_requests > 1 {
-                    return Err("peer exceeded the discovery request limit".into());
+                let now = Instant::now();
+                if last_discovery_request.is_some_and(|last: Instant| {
+                    now.duration_since(last) < PEER_RELAY_REFRESH_INTERVAL
+                }) {
+                    return Err("peer exceeded the discovery request rate limit".into());
                 }
-                let mut peers = advertised_peer_addresses()?;
-                for peer in PeerStore::load(database)?.relay_addresses() {
-                    if !peers.contains(&peer) {
-                        peers.push(peer);
-                    }
-                }
+                last_discovery_request = Some(now);
+                let peers = relay_address_list(database)?;
                 let encoded = encode_discovery_addresses(peers)?;
                 let mut response = Vec::with_capacity(1 + encoded.len());
                 response.push(PEERS_MESSAGE);
                 response.extend_from_slice(&encoded);
                 write_frame(stream, &response)?;
+                continue;
+            }
+            ANNOUNCE_PEER_MESSAGE => {
+                if let Err(error) = check_peer_announcement_rate_limit(
+                    &mut last_peer_announcement,
+                    "peer endpoint announcement",
+                ) {
+                    write_relay_result(stream, Err(error.clone()))?;
+                    return Err(error);
+                }
+                let addresses = match decode_peer_addresses(body, MAX_PEER_ANNOUNCEMENT_ENDPOINTS) {
+                    Ok(addresses) => addresses,
+                    Err(error) => {
+                        write_relay_result(stream, Err(error.clone()))?;
+                        return Err(format!("invalid peer endpoint announcement: {error}"));
+                    }
+                };
+                let result = record_announced_peers(database, addresses);
+                let rejection = result.as_ref().err().cloned();
+                write_relay_result(stream, result)?;
+                if let Some(error) = rejection {
+                    return Err(error);
+                }
+                continue;
+            }
+            ANNOUNCE_PEERS_MESSAGE => {
+                if let Err(error) = check_peer_announcement_rate_limit(
+                    &mut last_peers_announcement,
+                    "peer list announcement",
+                ) {
+                    write_relay_result(stream, Err(error.clone()))?;
+                    return Err(error);
+                }
+                let addresses = match decode_peer_addresses(body, MAX_PEER_ANNOUNCEMENT_ENDPOINTS) {
+                    Ok(addresses) => addresses,
+                    Err(error) => {
+                        write_relay_result(stream, Err(error.clone()))?;
+                        return Err(format!("invalid peer list announcement: {error}"));
+                    }
+                };
+                let result = record_discovered_peers(database, addresses);
+                let rejection = result.as_ref().err().cloned();
+                write_relay_result(stream, result)?;
+                if let Some(error) = rejection {
+                    return Err(error);
+                }
                 continue;
             }
             INVENTORY_MESSAGE => {
@@ -602,14 +731,132 @@ fn encode_discovery_addresses(mut peers: Vec<String>) -> Result<Vec<u8>, String>
     canonical_bytes(&peers).map_err(|error| error.to_string())
 }
 
-pub(super) fn record_discovered_peer(database: &Path, address: PeerAddress) -> Result<(), String> {
+pub(super) fn record_discovered_peers(
+    database: &Path,
+    addresses: impl IntoIterator<Item = PeerAddress>,
+) -> Result<(), String> {
     let _guard = peer_store_lock()?
         .lock()
         .map_err(|_| "peer store lock is poisoned")?;
     let mut store = PeerStore::load(database)?;
-    if store.insert_discovered(address) {
+    let local = advertised_peer_addresses()?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut changed = false;
+    for address in addresses {
+        if local.contains(&address.to_string()) {
+            continue;
+        }
+        changed |= store.insert_discovered(address);
+    }
+    if changed {
         store.save(database)?;
     }
+    Ok(())
+}
+
+fn record_announced_peers(
+    database: &Path,
+    addresses: impl IntoIterator<Item = PeerAddress>,
+) -> Result<(), String> {
+    let _guard = peer_store_lock()?
+        .lock()
+        .map_err(|_| "peer store lock is poisoned")?;
+    let mut store = PeerStore::load(database)?;
+    let local = advertised_peer_addresses()?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut changed = false;
+    for address in addresses {
+        if local.contains(&address.to_string()) {
+            continue;
+        }
+        changed |= store.insert_announced(address);
+    }
+    if changed {
+        store.save(database)?;
+    }
+    Ok(())
+}
+
+fn relay_address_list(database: &Path) -> Result<Vec<String>, String> {
+    Ok(PeerStore::load(database)?.relay_candidates())
+}
+
+pub(super) fn announce_peer_addresses(
+    database: &Path,
+    stream: &mut TcpStream,
+) -> Result<(), String> {
+    let local = advertised_peer_addresses()?
+        .into_iter()
+        .filter_map(|address| address.parse::<PeerAddress>().ok())
+        .filter(PeerAddress::is_admissible)
+        .map(|address| address.to_string())
+        .collect::<BTreeSet<_>>();
+    if !local.is_empty() {
+        let encoded = encode_peer_announcement_addresses(local.iter().cloned().collect())?;
+        let mut message = Vec::with_capacity(1 + encoded.len());
+        message.push(ANNOUNCE_PEER_MESSAGE);
+        message.extend_from_slice(&encoded);
+        write_frame(stream, &message)?;
+        read_relay_result(stream)?;
+    }
+
+    let mut peers = PeerStore::load(database)?
+        .relay_candidates()
+        .into_iter()
+        .filter_map(|address| address.parse::<PeerAddress>().ok())
+        .filter(PeerAddress::is_admissible)
+        .map(|address| address.to_string())
+        .filter(|address| !local.contains(address))
+        .collect::<Vec<_>>();
+    peers.truncate(MAX_PEER_ANNOUNCEMENT_ENDPOINTS);
+    if !peers.is_empty() {
+        let encoded = encode_peer_announcement_addresses(peers)?;
+        let mut message = Vec::with_capacity(1 + encoded.len());
+        message.push(ANNOUNCE_PEERS_MESSAGE);
+        message.extend_from_slice(&encoded);
+        write_frame(stream, &message)?;
+        read_relay_result(stream)?;
+    }
+    Ok(())
+}
+
+pub(super) fn refresh_peer_addresses(
+    database: &Path,
+    stream: &mut TcpStream,
+    peer: &Handshake,
+) -> Result<(), String> {
+    if peer.capabilities & CAPABILITY_PEER_DISCOVERY != 0 {
+        let discovered = request_discovered_peers(stream)?;
+        record_discovered_peers(database, discovered)?;
+    }
+    announce_peer_addresses(database, stream)
+}
+
+fn encode_peer_announcement_addresses(mut peers: Vec<String>) -> Result<Vec<u8>, String> {
+    peers.truncate(MAX_PEER_ANNOUNCEMENT_ENDPOINTS);
+    let mut size = 4;
+    let count = peers
+        .iter()
+        .take_while(|peer| {
+            size += 4 + peer.len();
+            size <= MAX_PEERS_RESPONSE_SIZE
+        })
+        .count();
+    peers.truncate(count);
+    canonical_bytes(&peers).map_err(|error| error.to_string())
+}
+
+fn check_peer_announcement_rate_limit(
+    last: &mut Option<Instant>,
+    label: &str,
+) -> Result<(), String> {
+    let now = Instant::now();
+    if last.is_some_and(|previous| now.duration_since(previous) < PEER_RELAY_REFRESH_INTERVAL) {
+        return Err(format!("peer exceeded the {label} rate limit"));
+    }
+    *last = Some(now);
     Ok(())
 }
 
