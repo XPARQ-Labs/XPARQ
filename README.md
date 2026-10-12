@@ -1,5 +1,21 @@
 # XPARQ
 
+## TL;DR
+
+XPARQ is an independent, nonprofit project built from scratch and funded
+without venture capital (VC). **There is no promise, commitment, or guarantee
+that XPQ or any other XPARQ-related asset will ever be listed on a decentralized
+or centralized exchange (DEX or CEX). No return on investment (ROI), profit, or
+recovery of money or time spent is promised or guaranteed to node operators,
+users, or any other participant.** Participation is voluntary and at your own
+risk; do not spend money or time you cannot afford to lose. **Do your own
+research (DYOR) before contributing to or participating in the network.**
+
+As a developer, I do not guarantee that node databases will be preserved. Some
+XPARQ changes may require a database reset, which can result in the loss of
+locally stored chain data. Node operators are responsible for maintaining their
+own backups and deciding whether to upgrade or reset.
+
 **XPARQ** is a post-quantum Layer 1 blockchain written in Rust.
 
 The project is organized around a small set of components:
