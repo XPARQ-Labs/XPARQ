@@ -81,7 +81,9 @@ const INTENT_KIND_PROGRAM_CALL: u8 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AccountAuthorization {
-    pub salt: crypto::AccountSalt,
+    /// Fixed 32-byte wire field. Wallet account salts use the first 16 bytes
+    /// and zero-pad the rest; the wallet's legacy full-width input is transfer-only.
+    pub salt: crypto::AuthorizationSalt,
     pub public_key: PublicKey,
     pub signature: AccountSignature,
 }

@@ -45,8 +45,8 @@ from normal node/wallet builds and node storage.
 
 Coins and assets use a single ownership type: `Owner::Program(ProgramId)`.
 A Program ID is 32 bytes, displayed as 64 hexadecimal characters. Wallets derive
-their ID from the signature policy, signature scheme, public key and 32-byte public salt; public keys
-appear in spending proofs. Wallet accounts require no deployment or stored
+their ID from the signature policy, signature scheme, public key and 16-byte
+account salt; public keys appear in spending proofs. Wallet accounts require no deployment or stored
 public-key record. Deployed contracts have their own Program IDs and can hold
 and transfer coins and assets through the VM.
 
@@ -937,14 +937,17 @@ ProgramId from the same public/private key and selects that account:
 ```bash
 wallet accounts --wallet wallet.json
 wallet account-add --wallet wallet.json
-wallet account-use --salt HEX64 --wallet wallet.json
+wallet account-use --salt HEX32 --wallet wallet.json
 ```
 
-Use `account-add --salt HEX64` for a chosen 32-byte public salt. XPQ sends search
-all recorded accounts and choose one with enough available coin for the amount,
-fee and burn. Other commands that require one signer use the selected account.
-To recover a nondefault account, use `wallet restore ... --salt HEX64`. Preserve
-the salt list with the wallet backup; mnemonic recovery alone cannot reconstruct
+Account salts are 16 bytes (32 hexadecimal characters). Use
+`account-add --salt HEX32` for a chosen salt. XPQ sends search all recorded accounts and choose one
+with enough available coin for the amount, fee and burn. To spend from an older
+32-byte-salt account, use `wallet sign-spend --legacy-salt HEX64`; that salt is
+used only for that transfer and is not added to the wallet. Other commands that
+require one signer use a wallet account with a 16-byte salt. To recover a
+nondefault wallet account, use `wallet restore ... --salt HEX32`. Preserve the
+salt list with the wallet backup; mnemonic recovery alone cannot reconstruct
 random salts.
 Custom program IDs continue to bind deployer ProgramId, deploy nonce and code hash.
 See [salted ownership and CLI](docs/OWNERSHIP.md).

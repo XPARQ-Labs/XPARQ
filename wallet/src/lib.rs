@@ -172,6 +172,95 @@ pub fn account_wallet_from_file_bytes(bytes: &[u8]) -> Result<AccountWallet, Str
     Ok(wallet)
 }
 
+/// Load only key material from an older wallet with a full-width salt. The
+/// selected legacy salt remains a one-off transfer input and is not installed
+/// as an account in the returned wallet.
+pub fn account_wallet_for_legacy_transfer_from_file_bytes(
+    bytes: &[u8],
+    transfer_salt: &kernel::crypto::AuthorizationSalt,
+) -> Result<AccountWallet, String> {
+    let wallet_file: WalletFile = serde_json::from_slice(bytes)
+        .map_err(|error| format!("failed to parse wallet: {error}"))?;
+    if wallet_file.version != WALLET_FILE_VERSION {
+        return Err("unsupported wallet file version".into());
+    }
+
+    let active_salt = wallet_salt_bytes_from_string(&wallet_file.account_salt)?;
+    let listed_salts = wallet_file
+        .account_salts
+        .iter()
+        .map(|salt| wallet_salt_bytes_from_string(salt))
+        .collect::<Result<Vec<_>, _>>()?;
+    let unique_salts = listed_salts.iter().collect::<std::collections::BTreeSet<_>>();
+    if listed_salts.is_empty()
+        || listed_salts.len() > MAX_WALLET_ACCOUNTS
+        || unique_salts.len() != listed_salts.len()
+        || !listed_salts.contains(&active_salt)
+        || !listed_salts
+            .iter()
+            .any(|salt| salt.as_slice() == &transfer_salt[..])
+    {
+        return Err("legacy transfer salt is not recorded in the wallet".into());
+    }
+
+    let account = wallet_file
+        .signature_account
+        .as_deref()
+        .ok_or("wallet file does not contain a signature account")?
+        .parse::<Signature>()
+        .map_err(str::to_string)?;
+    let mut wallet = account_wallet_from_bip39_mnemonic(&wallet_file.mnemonic, account)?;
+    let expected_active_id = match active_salt.len() {
+        kernel::crypto::ACCOUNT_SALT_SIZE => {
+            let salt: kernel::crypto::AccountSalt = active_salt
+                .as_slice()
+                .try_into()
+                .map_err(|_| "invalid active account salt")?;
+            kernel::crypto::program_id_from_public_key_with_salt(&wallet.public_key, &salt)
+        }
+        kernel::crypto::AUTHORIZATION_SALT_SIZE => {
+            let salt: kernel::crypto::AuthorizationSalt = active_salt
+                .as_slice()
+                .try_into()
+                .map_err(|_| "invalid active account salt")?;
+            kernel::crypto::program_id_from_public_key_with_authorization_salt(
+                &wallet.public_key,
+                &salt,
+            )
+        }
+        _ => return Err("invalid active account salt length".into()),
+    }
+    .map_err(|error| error.to_string())?;
+    let stored_program_id = program_id_from_string(&wallet_file.program_id)
+        .map_err(|error| format!("invalid wallet program_id: {error}"))?;
+    if expected_active_id != stored_program_id {
+        return Err("wallet program-id does not match its mnemonic and active salt".into());
+    }
+    if let Some(public_key) = wallet_file.public_key.as_deref()
+        && public_key != hex::encode(&wallet.public_key.bytes)
+    {
+        return Err("wallet public key does not match its mnemonic and signature account".into());
+    }
+    if let Some(private_key) = wallet_file.private_key.as_deref() {
+        let seed = wallet.signing_seed.dangerous_export_seed();
+        let expected_private_key = Zeroizing::new(hex::encode(&seed[..]));
+        if private_key != expected_private_key.as_str() {
+            return Err(
+                "wallet private key does not match its mnemonic and signature account".into(),
+            );
+        }
+    }
+    wallet.mnemonic = Some(wallet_file.mnemonic.clone());
+    Ok(wallet)
+}
+
+fn wallet_salt_bytes_from_string(value: &str) -> Result<Vec<u8>, String> {
+    if !matches!(value.len(), 32 | 64) {
+        return Err("wallet account salts must contain 32 or 64 hexadecimal characters".into());
+    }
+    hex::decode(value).map_err(|_| "invalid hexadecimal account salt".to_string())
+}
+
 pub fn wallet_file_signature_account(bytes: &[u8]) -> Result<Option<Signature>, String> {
     let wallet_file: WalletFile = serde_json::from_slice(bytes)
         .map_err(|error| format!("failed to parse wallet: {error}"))?;
@@ -270,12 +359,24 @@ fn tagged_wallet_hash(tag: &[u8], bytes: &[u8]) -> Zeroizing<[u8; 32]> {
 }
 
 pub fn account_salt_from_string(value: &str) -> Result<kernel::crypto::AccountSalt, String> {
-    if value.len() != 64 {
-        return Err("account salt must be 64 hexadecimal characters".into());
+    if value.len() != 32 {
+        return Err("account salt must be 32 hexadecimal characters".into());
     }
-    let mut salt = [0; 32];
+    let mut salt = [0; 16];
     hex::decode_to_slice(value, &mut salt)
         .map_err(|_| "invalid hexadecimal account salt".to_string())?;
+    Ok(salt)
+}
+
+pub fn transfer_salt32_from_string(
+    value: &str,
+) -> Result<kernel::crypto::AuthorizationSalt, String> {
+    if value.len() != 64 {
+        return Err("transfer salt must be 64 hexadecimal characters".into());
+    }
+    let mut salt = [0; kernel::crypto::AUTHORIZATION_SALT_SIZE];
+    hex::decode_to_slice(value, &mut salt)
+        .map_err(|_| "invalid hexadecimal transfer salt".to_string())?;
     Ok(salt)
 }
 
@@ -336,16 +437,55 @@ impl AccountWallet {
         payment: kernel::program::CoinTransition,
     ) -> Result<kernel::program::AuthorizedProgramInvocation, String> {
         self.validate_account_metadata()?;
+        self.sign_program_call_as(
+            call,
+            payment,
+            self.program_id,
+            kernel::crypto::authorization_salt_from_account_salt(&self.account_salt),
+        )
+    }
+
+    /// Sign an XPQ transfer from a legacy 32-byte-salt account without adding
+    /// that account to the wallet or making it selectable for other commands.
+    pub fn sign_xpq_transfer_with_legacy_salt(
+        &self,
+        salt: kernel::crypto::AuthorizationSalt,
+        payment: kernel::program::CoinTransition,
+    ) -> Result<kernel::program::AuthorizedProgramInvocation, String> {
+        self.validate_account_metadata()?;
+        let signer = kernel::crypto::program_id_from_public_key_with_authorization_salt(
+            &self.public_key,
+            &salt,
+        )
+        .map_err(|error| error.to_string())?;
+        if payment.signer != signer {
+            return Err("transfer signer does not match the legacy salt account".into());
+        }
+        self.sign_program_call_as(
+            extension::coin_program::transfer_call(),
+            payment,
+            signer,
+            salt,
+        )
+    }
+
+    fn sign_program_call_as(
+        &self,
+        call: extension::script::call::ProgramCall,
+        payment: kernel::program::CoinTransition,
+        signer: ProgramId,
+        authorization_salt: kernel::crypto::AuthorizationSalt,
+    ) -> Result<kernel::program::AuthorizedProgramInvocation, String> {
         let chain = kernel::genesis::chain_context().map_err(|e| e.to_string())?;
         let commitment =
-            kernel::program::program_invocation_commitment(self.program_id, &call, &payment, chain)
+            kernel::program::program_invocation_commitment(signer, &call, &payment, chain)
                 .map_err(|e| e.to_string())?;
         Ok(kernel::program::AuthorizedProgramInvocation {
-            signer: self.program_id,
+            signer,
             call,
             payment,
             authorization: kernel::program::AccountAuthorization {
-                salt: self.account_salt,
+                salt: authorization_salt,
                 public_key: self.public_key.clone(),
                 signature: self.signing_seed.sign(commitment.as_bytes()),
             },
@@ -366,7 +506,7 @@ impl AccountWallet {
             deploy,
             payment,
             authorization: kernel::program::AccountAuthorization {
-                salt: self.account_salt,
+                salt: kernel::crypto::authorization_salt_from_account_salt(&self.account_salt),
                 public_key: self.public_key.clone(),
                 signature: kernel::crypto::AccountSignature {
                     account: self.account(),
@@ -492,8 +632,8 @@ mod tests {
             wallet.mnemonic = Some(phrase.clone());
             let key = wallet.public_key.clone();
             let first = wallet.program_id;
-            let second = wallet.select_account([1; 32]).unwrap();
-            let third = wallet.select_account([2; 32]).unwrap();
+            let second = wallet.select_account([1; 16]).unwrap();
+            let third = wallet.select_account([2; 16]).unwrap();
             assert_eq!(wallet.public_key, key);
             assert_eq!(
                 [first, second, third]
@@ -505,18 +645,18 @@ mod tests {
             let bytes = account_wallet_file_bytes(&wallet).unwrap();
             let mut restored = account_wallet_from_file_bytes(&bytes).unwrap();
             assert_eq!(restored.program_id, third);
-            assert_eq!(restored.account_salts, vec![[0; 32], [1; 32], [2; 32]]);
-            assert_eq!(restored.select_account([1; 32]).unwrap(), second);
-            assert_eq!(restored.select_account([0; 32]).unwrap(), first);
+            assert_eq!(restored.account_salts, vec![[0; 16], [1; 16], [2; 16]]);
+            assert_eq!(restored.select_account([1; 16]).unwrap(), second);
+            assert_eq!(restored.select_account([0; 16]).unwrap(), first);
             assert_eq!(restored.public_key, key);
             for case in 0..4 {
                 let mut json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
                 match case {
-                    0 => json["account_salt"] = hex::encode([3; 32]).into(),
-                    1 => json["account_salts"] = serde_json::json!([hex::encode([0; 32])]),
+                    0 => json["account_salt"] = hex::encode([3; 16]).into(),
+                    1 => json["account_salts"] = serde_json::json!([hex::encode([0; 16])]),
                     2 => {
                         json["account_salts"] =
-                            serde_json::json!([hex::encode([2; 32]), hex::encode([2; 32])])
+                            serde_json::json!([hex::encode([2; 16]), hex::encode([2; 16])])
                     }
                     _ => json["version"] = 1.into(),
                 }
@@ -538,9 +678,9 @@ mod tests {
         };
         let phrase = encode_bip39_mnemonic(&[20; 16]).unwrap();
         let mut alice = account_wallet_from_bip39_mnemonic(&phrase, Signature::MlDsa44).unwrap();
-        alice.select_account([1; 32]).unwrap();
+        alice.select_account([1; 16]).unwrap();
         let mut bob = account_wallet_from_bip39_mnemonic(&phrase, Signature::MlDsa44).unwrap();
-        bob.select_account([2; 32]).unwrap();
+        bob.select_account([2; 16]).unwrap();
         assert_eq!(alice.public_key, bob.public_key);
         let input_a = CoinShare::from_bytes([1; 32]);
         let input_b = CoinShare::from_bytes([2; 32]);
@@ -593,7 +733,10 @@ mod tests {
         let signed = alice
             .sign_xpq_transfer(payment(alice.program_id, 1_000_000 - burn))
             .unwrap();
-        assert_eq!(signed.authorization.salt, [1; 32]);
+        assert_eq!(
+            signed.authorization.salt,
+            kernel::crypto::authorization_salt_from_account_salt(&[1; 16])
+        );
         assert!(signed.verify_authorizations(chain, 1).unwrap());
         let mut forged = signed.clone();
         forged.authorization.salt = [2; 32];
@@ -673,7 +816,10 @@ mod tests {
         let signed = alice
             .sign_deploy_program(program, deploy_payment(1_000_000 - cost.as_zeno()))
             .unwrap();
-        assert_eq!(signed.authorization.salt, [1; 32]);
+        assert_eq!(
+            signed.authorization.salt,
+            kernel::crypto::authorization_salt_from_account_salt(&[1; 16])
+        );
         let mut deployed = original;
         deployed
             .apply_deploy_with_applications(
@@ -841,7 +987,7 @@ mod slh_wallet_tests {
         let mut wallet =
             account_wallet_from_bip39_mnemonic(&mnemonic, Signature::SlhDsaShake128s).unwrap();
         wallet.mnemonic = Some(mnemonic);
-        wallet.select_account([17; 32]).unwrap();
+        wallet.select_account([17; 16]).unwrap();
         let bytes = account_wallet_file_bytes(&wallet).unwrap();
         let restored = account_wallet_from_file_bytes(&bytes).unwrap();
         assert_eq!(restored.public_key, wallet.public_key);

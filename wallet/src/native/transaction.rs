@@ -3,6 +3,11 @@ use super::*;
 
 pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
     reject_manual_fee(args)?;
+    if option(args, "--salt").is_some() {
+        return Err(
+            "sign-spend does not accept --salt; use --legacy-salt for one legacy transfer".into(),
+        );
+    }
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
     let recipient = option(args, "--to")
         .map(super::util::parse_owner)
@@ -14,7 +19,24 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
         .map(kernel::monetary::coin::CoinShare::from_str)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "invalid --input coin id".to_string())?;
-    let mut wallet = load_wallet(path)?;
+    let legacy_salt = option(args, "--legacy-salt")
+        .map(wallet::transfer_salt32_from_string)
+        .transpose()?;
+    let mut wallet = if let Some(salt) = legacy_salt.as_ref() {
+        load_wallet_for_legacy_transfer(path, salt)?
+    } else {
+        load_wallet(path)?
+    };
+    let legacy_program_id = legacy_salt
+        .as_ref()
+        .map(|salt| {
+            kernel::crypto::program_id_from_public_key_with_authorization_salt(
+                &wallet.0.public_key,
+                salt,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .transpose()?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let explicit_change = option(args, "--change").map(parse_amount).transpose()?;
     let change_target = option(args, "--change-to")
@@ -23,8 +45,15 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
     if inputs.is_empty() && (explicit_change.is_some() || change_target.is_some()) {
         return Err("automatic input selection also calculates change automatically".into());
     }
-    let account_candidates = if inputs.is_empty() {
+    let account_candidates = if inputs.is_empty() && legacy_salt.is_none() {
         Some(wallet_account_input_candidates(rpc, &wallet)?)
+    } else {
+        None
+    };
+    let legacy_candidates = if inputs.is_empty() {
+        legacy_program_id
+            .map(|program_id| account_input_candidates_for_program(rpc, program_id))
+            .transpose()?
     } else {
         None
     };
@@ -34,21 +63,52 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
             .as_zeno()
             .checked_add(fee)
             .ok_or("transaction amount plus fee overflow")?;
-        let (selected, change, _state_burn, change_program_id) = if inputs.is_empty() {
-            let account_candidates = account_candidates
-                .as_ref()
-                .ok_or("wallet account candidates are unavailable")?;
-            let (salt, program_id, selected, _total, state_burn, change) =
-                select_wallet_account_inputs_with_state_burn(
-                    account_candidates,
+        let (selected, change, _state_burn, change_program_id, signer) = if inputs.is_empty() {
+            if let Some(legacy_program_id) = legacy_program_id {
+                let candidates = legacy_candidates
+                    .as_ref()
+                    .ok_or("legacy transfer account candidates are unavailable")?;
+                let available = candidates.iter().try_fold(0_u64, |total, utxo| {
+                    total
+                        .checked_add(utxo.amount)
+                        .ok_or_else(|| "available account balance overflow".to_string())
+                })?;
+                let (selected, _total, state_burn, change) = select_inputs_from_candidates(
+                    candidates,
                     required,
                     2,
                     0,
                     archival_burn,
-                    initially_active_salt,
-                )?;
-            wallet.0.select_account(salt)?;
-            (selected, change, state_burn, program_id)
+                    0,
+                )?
+                .ok_or_else(|| {
+                    format!(
+                        "insufficient available balance in legacy transfer account: available {available} units"
+                    )
+                })?;
+                (
+                    selected,
+                    change,
+                    state_burn,
+                    legacy_program_id,
+                    legacy_program_id,
+                )
+            } else {
+                let account_candidates = account_candidates
+                    .as_ref()
+                    .ok_or("wallet account candidates are unavailable")?;
+                let (salt, program_id, selected, _total, state_burn, change) =
+                    select_wallet_account_inputs_with_state_burn(
+                        account_candidates,
+                        required,
+                        2,
+                        0,
+                        archival_burn,
+                        initially_active_salt,
+                    )?;
+                wallet.0.select_account(salt)?;
+                (selected, change, state_burn, program_id, program_id)
+            }
         } else {
             let gross_change = explicit_change.map_or(0, Zeno::as_zeno);
             let created = 2_u64 + u64::from(gross_change > fee);
@@ -67,11 +127,13 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
                 .checked_sub(fee)
                 .and_then(|change| change.checked_sub(state_burn))
                 .ok_or("explicit change is smaller than the automatic fee and state burn")?;
+            let signer = legacy_program_id.unwrap_or(wallet.program_id());
             (
                 inputs.clone(),
                 change,
                 state_burn,
-                change_target.unwrap_or(wallet.program_id()),
+                change_target.unwrap_or(signer),
+                signer,
             )
         };
         let mut outputs = vec![CoinOutput::to_owner(recipient, amount)];
@@ -79,17 +141,25 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
             outputs.push(CoinOutput::new(change_program_id, Zeno::from_zeno(change)));
         }
         let intent = CoinTransition::coin_with_charges(
-            wallet.program_id(),
+            signer,
             selected,
             outputs,
             CoinCharges::new(Zeno::from_zeno(fee)),
         )
         .map_err(|error| error.to_string())?;
-        let signed = wallet.sign_onchain_spend(intent)?;
+        let signed = if let Some(salt) = legacy_salt {
+            wallet.sign_legacy_onchain_spend(salt, intent)?
+        } else {
+            wallet.sign_onchain_spend(intent)?
+        };
         Ok(AuthorizedProgramEnvelope::Program(Box::new(signed)))
     })?;
     let AuthorizedProgramEnvelope::Program(invocation) = &transaction;
-    println!("Using wallet Program ID: {}", invocation.signer);
+    if legacy_salt.is_some() {
+        println!("Using legacy 32-byte salt for this XPQ transfer");
+    } else {
+        println!("Using wallet Program ID: {}", invocation.signer);
+    }
     drop(wallet);
     if has_flag(args, "--offline") {
         let AuthorizedProgramEnvelope::Program(tx) = &transaction;
@@ -178,6 +248,101 @@ pub(super) fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
     })?;
     drop(wallet);
     submit_or_print_transaction(args, &transaction)
+}
+
+pub(super) struct LegacyMigrationPreview {
+    pub(super) transaction: AuthorizedProgramEnvelope,
+    pub(super) source_program_id: ProgramId,
+    pub(super) destination_program_id: ProgramId,
+    pub(super) available: u64,
+    pub(super) destination_amount: u64,
+    pub(super) miner_fee: u64,
+    pub(super) protocol_burn: u64,
+}
+
+pub(super) fn prepare_legacy_migration(args: &[String]) -> Result<LegacyMigrationPreview, String> {
+    reject_manual_fee(args)?;
+    let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
+    let salt = wallet::transfer_salt32_from_string(
+        option(args, "--legacy-salt").ok_or("missing --legacy-salt HEX64")?,
+    )?;
+    let destination = option(args, "--to")
+        .map(|value| program_id_from_string(value).map_err(|error| error.to_string()))
+        .transpose()?
+        .ok_or("missing destination --to PROGRAM_ID")?;
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let wallet = load_wallet_for_legacy_transfer(path, &salt)?;
+    let signer = kernel::crypto::program_id_from_public_key_with_authorization_salt(
+        &wallet.0.public_key,
+        &salt,
+    )
+    .map_err(|error| error.to_string())?;
+    let candidates = account_input_candidates_for_program(rpc, signer)?;
+    if candidates.is_empty() {
+        return Err("legacy account has no available XPQ coins to migrate".into());
+    }
+    let total = candidates.iter().try_fold(0_u64, |total, utxo| {
+        total
+            .checked_add(utxo.amount)
+            .ok_or_else(|| "legacy account balance overflow".to_string())
+    })?;
+    let inputs = candidates
+        .iter()
+        .map(|utxo| {
+            kernel::monetary::coin::CoinShare::from_str(&utxo.id)
+                .map_err(|_| "node returned an invalid coin id".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let consumed_coin_utxos =
+        u64::try_from(inputs.len()).map_err(|_| "coin input count overflow")?;
+
+    let mut destination_amount = 0_u64;
+    let transaction = automatic_fee_transaction(|fee, archival_burn| {
+        let state_burn = StateTransitionWeight {
+            created_coin_utxos: 2,
+            consumed_coin_utxos,
+            ..StateTransitionWeight::default()
+        }
+        .state_growth_burn()
+        .map_err(|error| error.to_string())?
+        .as_zeno();
+        let amount = total
+            .checked_sub(fee)
+            .and_then(|amount| amount.checked_sub(state_burn))
+            .and_then(|amount| amount.checked_sub(archival_burn))
+            .filter(|amount| *amount > 0)
+            .ok_or("legacy account balance cannot cover the automatic fee and protocol burn")?;
+        destination_amount = amount;
+        let intent = CoinTransition::coin_with_charges(
+            signer,
+            inputs.clone(),
+            vec![CoinOutput::new(destination, Zeno::from_zeno(amount))],
+            CoinCharges::new(Zeno::from_zeno(fee)),
+        )
+        .map_err(|error| error.to_string())?;
+        wallet
+            .sign_legacy_onchain_spend(salt, intent)
+            .map(|invocation| AuthorizedProgramEnvelope::Program(Box::new(invocation)))
+    })?;
+    let miner_fee = match &transaction {
+        AuthorizedProgramEnvelope::Program(invocation) => {
+            invocation.payment.charges.miner_fee.as_zeno()
+        }
+    };
+    let protocol_burn = total
+        .checked_sub(destination_amount)
+        .and_then(|remaining| remaining.checked_sub(miner_fee))
+        .ok_or("migration cost calculation underflow")?;
+    drop(wallet);
+    Ok(LegacyMigrationPreview {
+        transaction,
+        source_program_id: signer,
+        destination_program_id: destination,
+        available: total,
+        destination_amount,
+        miner_fee,
+        protocol_burn,
+    })
 }
 
 fn account_input_candidates(rpc: &str, wallet: &LoadedWallet) -> Result<Vec<AccountUtxo>, String> {

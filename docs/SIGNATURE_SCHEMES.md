@@ -21,12 +21,14 @@ these implementations; their presence does not enable them in consensus.
 explicitly committed to the chain-spec, separate from candidate upgrade plans.
 The default remains ML-DSA44. Custom VM program IDs use the existing derivation.
 
-Program identity remains
-`H(policy || scheme || canonical_public_key || salt32)`, using the existing
-SHA3-256 domain and length framing. ML-DSA IDs and wallet derivation are unchanged.
-An SLH proof must match its scheme, exact lengths, public key, salt, signer
-ProgramId and transaction commitment. Changing the owner or scheme cannot give
-access to another program's UTXO. Signing still uses the normal root policy;
+Program identity is
+`H(policy || scheme || canonical_public_key || salt)`, using the existing
+SHA3-256 domain and length framing. Wallet account IDs use a 16-byte salt, while
+the fixed 32-byte authorization field carries that salt followed by 16 zero
+bytes. The wallet accepts a full-width legacy salt only for a single native XPQ
+transfer. An SLH proof must match its scheme, exact lengths, public key, salt, signer ProgramId
+and transaction commitment. Changing the owner or scheme cannot give access to
+another program's UTXO. Signing still uses the normal root policy;
 this does not add a VM opcode to verify arbitrary signature algorithms.
 
 SLH authorization uses FIPS 205 **Pure** signing with empty context. The message

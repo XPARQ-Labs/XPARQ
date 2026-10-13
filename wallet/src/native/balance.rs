@@ -104,9 +104,9 @@ mod tests {
         let mnemonic = generate_bip39_mnemonic(12).unwrap();
         let mut wallet = account_wallet_from_bip39_mnemonic(&mnemonic, Signature::MlDsa44).unwrap();
         let first = wallet.program_id.to_string();
-        let second = wallet.select_account([1; 32]).unwrap().to_string();
-        let third = wallet.select_account([2; 32]).unwrap().to_string();
-        wallet.select_account([1; 32]).unwrap();
+        let second = wallet.select_account([1; 16]).unwrap().to_string();
+        let third = wallet.select_account([2; 16]).unwrap().to_string();
+        wallet.select_account([1; 16]).unwrap();
         let expected = vec![first, second, third];
         let server_ids = expected.clone();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

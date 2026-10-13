@@ -5,6 +5,7 @@ pub enum CryptoError {
     InvalidProgramIdEncoding,
     InvalidPublicKey,
     InvalidPublicKeyLength,
+    InvalidAccountSaltLength,
     InvalidAccountScheme,
     InvalidSignatureEncoding,
     InvalidPoWParameters,
@@ -20,6 +21,9 @@ impl fmt::Display for CryptoError {
             }
             Self::InvalidPublicKeyLength => {
                 f.write_str("public key length does not match account scheme")
+            }
+            Self::InvalidAccountSaltLength => {
+                f.write_str("account salt must contain 16 or 32 bytes")
             }
             Self::InvalidAccountScheme => f.write_str("account scheme identifier is invalid"),
             Self::InvalidPublicKey => f.write_str("public key bytes are invalid"),

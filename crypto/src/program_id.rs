@@ -8,8 +8,12 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
-pub const ACCOUNT_SALT_SIZE: usize = 32;
+pub const ACCOUNT_SALT_SIZE: usize = 16;
 pub type AccountSalt = [u8; ACCOUNT_SALT_SIZE];
+/// Fixed-size salt field carried by account authorization proofs. Wallet salts
+/// are 16 bytes and occupy the prefix; the remaining bytes are zero-padded.
+pub const AUTHORIZATION_SALT_SIZE: usize = 32;
+pub type AuthorizationSalt = [u8; AUTHORIZATION_SALT_SIZE];
 pub const DEFAULT_ACCOUNT_SALT: AccountSalt = [0; ACCOUNT_SALT_SIZE];
 
 pub const PROGRAM_ID_SIZE: usize = HASH_SIZE;
@@ -55,14 +59,35 @@ impl ProgramId {
         public_key: &[u8],
         salt: &AccountSalt,
     ) -> Result<Self, CryptoError> {
+        Self::signature_account_with_salt_bytes(scheme, public_key, salt)
+    }
+
+    pub fn signature_account_with_authorization_salt(
+        scheme: AccountSignatureScheme,
+        public_key: &[u8],
+        salt: &AuthorizationSalt,
+    ) -> Result<Self, CryptoError> {
+        Self::signature_account_with_salt_bytes(scheme, public_key, salt)
+    }
+
+    fn signature_account_with_salt_bytes(
+        scheme: AccountSignatureScheme,
+        public_key: &[u8],
+        salt: &[u8],
+    ) -> Result<Self, CryptoError> {
         if public_key.len() != scheme.public_key_size() {
             return Err(CryptoError::InvalidPublicKeyLength);
         }
-        let mut material = Vec::with_capacity(26 + public_key.len() + ACCOUNT_SALT_SIZE);
+        if !matches!(salt.len(), ACCOUNT_SALT_SIZE | AUTHORIZATION_SALT_SIZE) {
+            return Err(CryptoError::InvalidAccountSaltLength);
+        }
+        let mut normalized_salt = [0; AUTHORIZATION_SALT_SIZE];
+        normalized_salt[..salt.len()].copy_from_slice(salt);
+        let mut material = Vec::with_capacity(26 + public_key.len() + AUTHORIZATION_SALT_SIZE);
         material.extend_from_slice(b"xparq:signature-policy:v2");
         material.push(scheme.id());
         material.extend_from_slice(public_key);
-        material.extend_from_slice(salt);
+        material.extend_from_slice(&normalized_salt);
         Ok(Self(
             domain(HashDomain::ProgramAccount, &material).into_bytes(),
         ))
@@ -112,6 +137,21 @@ pub fn program_id_from_public_key_with_salt(
 ) -> Result<ProgramId, CryptoError> {
     ProgramId::signature_account_with_salt(public_key.scheme(), &public_key.bytes, salt)
 }
+pub fn program_id_from_public_key_with_authorization_salt(
+    public_key: &PublicKey,
+    salt: &AuthorizationSalt,
+) -> Result<ProgramId, CryptoError> {
+    ProgramId::signature_account_with_authorization_salt(
+        public_key.scheme(),
+        &public_key.bytes,
+        salt,
+    )
+}
+pub fn authorization_salt_from_account_salt(salt: &AccountSalt) -> AuthorizationSalt {
+    let mut authorization_salt = [0; AUTHORIZATION_SALT_SIZE];
+    authorization_salt[..ACCOUNT_SALT_SIZE].copy_from_slice(salt);
+    authorization_salt
+}
 pub fn program_id_from_string(value: &str) -> Result<ProgramId, CryptoError> {
     value.parse()
 }
@@ -130,8 +170,8 @@ mod tests {
                 bytes: vec![0xa5; scheme.public_key_size()],
             };
             let zero = program_id_from_public_key(&key).unwrap();
-            let a = program_id_from_public_key_with_salt(&key, &[1; 32]).unwrap();
-            let b = program_id_from_public_key_with_salt(&key, &[2; 32]).unwrap();
+            let a = program_id_from_public_key_with_authorization_salt(&key, &[1; 32]).unwrap();
+            let b = program_id_from_public_key_with_authorization_salt(&key, &[2; 32]).unwrap();
             // Independent Python hashlib fixture for a nonzero account salt.
             let expected = match scheme.id() {
                 1 => "44af36b8b03e8101b2b9f91a20461d7addb05f40401209ee2ebd50c29812bada",
@@ -148,7 +188,11 @@ mod tests {
             assert_ne!(zero, b);
             assert_eq!(
                 a,
-                ProgramId::signature_account_with_salt(scheme, &key.bytes, &[1; 32]).unwrap()
+                ProgramId::signature_account_with_authorization_salt(
+                    scheme,
+                    &key.bytes,
+                    &[1; 32],
+                )
             );
         }
     }

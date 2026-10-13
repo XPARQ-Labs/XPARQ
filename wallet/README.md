@@ -154,8 +154,9 @@ deployed without rebuilding the node. See [the v4 instruction contract](../docs/
 ## Program-owned accounts and unified monetary calls
 
 Wallet balances belong to a stateless system signature-policy instance derived
-from the signature policy, signature scheme, public key and 32-byte public salt. `wallet program-id` prints its 64-character
-hex representation (32 decoded bytes). Public keys are included in spending
+from the signature policy, signature scheme, public key and 16-byte account salt.
+`wallet program-id` prints its 64-character hex representation (32 decoded
+bytes). Public keys are included in spending
 proofs, not ledger ownership. Coin and asset operations use monetary route 0.
 
 `GET /program/coins/PROGRAM_ID` provides paginated coin UTXOs and reservation
@@ -197,8 +198,12 @@ signer use the active ProgramId.
 ```sh
 wallet accounts --wallet wallet.json
 wallet account-add --wallet wallet.json
-wallet account-use --salt HEX64 --wallet wallet.json
+wallet account-use --salt HEX32 --wallet wallet.json
 ```
+
+Wallet account salts are 16 bytes (32 hexadecimal characters). A legacy
+32-byte salt can be passed as `--legacy-salt HEX64` to `wallet sign-spend` for
+one XPQ transfer; it is not saved or added as a wallet account.
 
 In interactive mode, **13. Manage Accounts** lists the recorded accounts. Choose
 `add` to generate a random salt, append it to `account_salts`, and update

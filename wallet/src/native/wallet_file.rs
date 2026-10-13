@@ -6,6 +6,22 @@ pub(super) fn load_wallet(path: &str) -> Result<LoadedWallet, String> {
     account_wallet_from_file_bytes(&bytes).map(LoadedWallet)
 }
 
+pub(super) fn load_wallet_for_legacy_transfer(
+    path: &str,
+    salt: &kernel::crypto::AuthorizationSalt,
+) -> Result<LoadedWallet, String> {
+    let bytes =
+        Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
+    match account_wallet_from_file_bytes(&bytes) {
+        Ok(wallet) => Ok(LoadedWallet(wallet)),
+        Err(current_error) => account_wallet_for_legacy_transfer_from_file_bytes(&bytes, salt)
+            .map(LoadedWallet)
+            .map_err(|legacy_error| {
+                format!("{current_error}; legacy transfer wallet load failed: {legacy_error}")
+            }),
+    }
+}
+
 pub(super) fn write_account_wallet(path: &str, wallet: &AccountWallet) -> Result<(), String> {
     let bytes = account_wallet_file_bytes(wallet)?;
     write_private_file_atomically(Path::new(path), &bytes)

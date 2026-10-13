@@ -9,13 +9,19 @@ in `crypto::ProgramId` and is re-exported by `kernel::program`.
 
 ProgramId is SHA3-256 with the framed domain `XPARQ_HASH_PROGRAM_ACCOUNT`, over:
 `xparq:signature-policy:v2 || scheme_id_u8 || canonical_public_key_bytes || salt_32_bytes`.
+Wallet account IDs use a 16-byte salt, zero-padded to the fixed 32-byte protocol
+salt before hashing. The wallet accepts an unpadded legacy 32-byte salt only
+through its one-off native XPQ transfer option.
 Public-key length is validated against the chosen scheme before hashing. Policy,
 scheme, full key and salt are bound to the instance identity. Supported schemes remain
 ML-DSA44/65/87 and Pure SLH-DSA SHAKE128s/192s/256s. Public keys appear in spending proofs, not in UTXO owners.
 
-A witness reveals its 32-byte public salt, public key and signature. The system policy derives its
-ProgramId, checks it against the transaction principal, and verifies the signature
-against the chain-bound call/payment commitment. No account deployment or
+A witness reveals a fixed 32-byte salt field, public key and signature. Wallet
+account salts occupy the first 16 bytes and are padded with 16 zero bytes. The
+wallet's `--legacy-salt` option is limited to one native XPQ transfer and is not
+stored as an account. The system policy derives its ProgramId, checks it against
+the transaction principal, and verifies the signature against the chain-bound
+call/payment commitment. No account deployment or
 persistent public-key record is needed. Deployed IDs bind the deploying ProgramId,
 nonce and code hash under `xparq:program-id:v2` in the artifact hash domain.
 
@@ -63,7 +69,7 @@ reset is performed automatically.
 
 ## Several accounts from one key
 
-Default account salt is 32 zero bytes. Each distinct salt creates an independent
+Default account salt is 16 zero bytes. Each distinct salt creates an independent
 ProgramId from the same key, without deploying an account or registering it in
 state. UTXOs and asset shares belong to their particular ProgramId; possession of
 the same key does not let a transaction relabel that owner. The proof must derive
@@ -72,13 +78,15 @@ the exact principal, and its signature binds the chain, signer, call and payment
 ```bash
 wallet accounts --wallet wallet.json
 wallet account-add --wallet wallet.json
-wallet account-add --salt HEX64 --wallet wallet.json
-wallet account-use --salt HEX64 --wallet wallet.json
-wallet restore --mnemonic "..." --account mldsa44 --salt HEX64 --wallet restored.json
+wallet account-add --salt HEX32 --wallet wallet.json
+wallet account-use --salt HEX32 --wallet wallet.json
+wallet restore --mnemonic "..." --account mldsa44 --salt HEX32 --wallet restored.json
 ```
 
-`account-add` records and selects its salt; without `--salt` it generates 32 random
-public bytes. `account-use` selects a salt already recorded in the file. All balance,
+`account-add` records and selects its salt; without `--salt` it generates 16 random
+public bytes. `account-use` selects a salt already recorded in the file. `sign-spend`
+also accepts `--legacy-salt HEX64` for one XPQ transfer; it does not add that
+32-byte salt as a wallet account. All balance,
 history, transfer, asset and deploy commands then use the active account. The
 interactive menu provides **13. Manage Accounts**: `add` generates and selects
 a new account; `use` selects a recorded salt. Both update the same wallet JSON.

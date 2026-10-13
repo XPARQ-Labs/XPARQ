@@ -14,8 +14,9 @@ use kernel::{
 };
 use serde::Deserialize;
 use wallet::{
-    AccountWallet, account_wallet_file_bytes, account_wallet_from_bip39_mnemonic,
-    account_wallet_from_file_bytes, generate_bip39_mnemonic, wallet_program_id_from_file_bytes,
+    AccountWallet, account_wallet_file_bytes, account_wallet_for_legacy_transfer_from_file_bytes,
+    account_wallet_from_bip39_mnemonic, account_wallet_from_file_bytes, generate_bip39_mnemonic,
+    wallet_program_id_from_file_bytes,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -38,6 +39,14 @@ impl LoadedWallet {
         intent: CoinTransition,
     ) -> Result<kernel::program::AuthorizedProgramInvocation, String> {
         self.0.sign_xpq_transfer(intent)
+    }
+
+    fn sign_legacy_onchain_spend(
+        &self,
+        salt: kernel::crypto::AuthorizationSalt,
+        intent: CoinTransition,
+    ) -> Result<kernel::program::AuthorizedProgramInvocation, String> {
+        self.0.sign_xpq_transfer_with_legacy_salt(salt, intent)
     }
 }
 #[cfg(feature = "mainnet")]
@@ -171,7 +180,7 @@ mod util;
 mod utxo;
 mod wallet_file;
 
-use wallet_file::{load_wallet, write_account_wallet};
+use wallet_file::{load_wallet, load_wallet_for_legacy_transfer, write_account_wallet};
 
 use cli::{create_wallet, interactive_menu, manage_accounts, print_program_id, restore_wallet};
 use util::{format_amount, has_flag, option, parse_amount, print_help, repeated_options};
@@ -179,7 +188,9 @@ use util::{format_amount, has_flag, option, parse_amount, print_help, repeated_o
 use balance::print_balance;
 use history::print_history;
 use rpc::{http_get_json, http_post_bytes};
-use transaction::{consolidate_coin_utxos, sign_spend};
+use transaction::{
+    consolidate_coin_utxos, prepare_legacy_migration, sign_spend, submit_or_print_transaction,
+};
 use utxo::print_utxo_tracker;
 
 #[cfg(test)]

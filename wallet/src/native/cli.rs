@@ -18,6 +18,7 @@ pub(super) fn interactive_menu() -> Result<(), String> {
         println!("11. Deploy Program");
         println!("12. Exit");
         println!("13. Manage Accounts");
+        println!("14. Migrate Legacy 32-byte Account");
 
         match prompt("Select")?.as_str() {
             "1" => {
@@ -80,6 +81,7 @@ pub(super) fn interactive_menu() -> Result<(), String> {
                     choice => return Err(format!("unknown account action `{choice}`")),
                 }
             }
+            "14" | "migrate" => interactive_legacy_migration()?,
             "12" | "exit" | "quit" => return Ok(()),
             choice => println!("Unknown selection `{choice}`"),
         }
@@ -218,6 +220,51 @@ fn interactive_spend() -> Result<(), String> {
     sign_spend(&args)
 }
 
+fn interactive_legacy_migration() -> Result<(), String> {
+    println!("Migrate all available XPQ from a legacy 32-byte-salt account.");
+    println!("Miner fee and protocol burn are deducted automatically.");
+    println!("Reserved coins cannot be migrated until they are available.");
+
+    let path = prompt_default("Wallet file", DEFAULT_WALLET_PATH)?;
+    let salt = prompt("Legacy account salt (64 hexadecimal characters)")?;
+    wallet::transfer_salt32_from_string(&salt)?;
+    let destination = prompt("Destination Program ID (new 16-byte-salt wallet)")?;
+    program_id_from_string(&destination).map_err(|error| error.to_string())?;
+    let rpc = prompt_default("RPC", DEFAULT_RPC_ADDR)?;
+
+    let args = vec![
+        "--wallet".into(),
+        path,
+        "--rpc".into(),
+        rpc,
+        "--legacy-salt".into(),
+        salt,
+        "--to".into(),
+        destination,
+    ];
+    let preview = prepare_legacy_migration(&args)?;
+
+    println!();
+    println!(
+        "Legacy Program ID: {}",
+        kernel::crypto::program_id_to_string(&preview.source_program_id)
+    );
+    println!("Available XPQ: {}", format_amount(preview.available));
+    println!("Destination Program ID: {}", preview.destination_program_id);
+    println!(
+        "Destination amount: {}",
+        format_amount(preview.destination_amount)
+    );
+    println!("Miner fee: {}", format_amount(preview.miner_fee));
+    println!("Protocol burn: {}", format_amount(preview.protocol_burn));
+    if prompt("Type MIGRATE to broadcast this transaction")? != "MIGRATE" {
+        println!("Migration cancelled.");
+        return Ok(());
+    }
+
+    submit_or_print_transaction(&args, &preview.transaction)
+}
+
 fn interactive_block_explorer() -> Result<(), String> {
     let rpc = prompt_default("RPC", DEFAULT_RPC_ADDR)?;
     println!("1. Program activity");
@@ -349,11 +396,11 @@ pub(super) fn manage_accounts(command: &str, args: &[String]) -> Result<(), Stri
     let salt = if let Some(value) = option(args, "--salt") {
         wallet::account_salt_from_string(value)?
     } else if command == "account-add" {
-        let mut salt = [0; 32];
+        let mut salt = [0; 16];
         getrandom::fill(&mut salt).map_err(|error| format!("generate account salt: {error}"))?;
         salt
     } else {
-        return Err("account-use requires --salt HEX64".into());
+        return Err("account-use requires --salt HEX32".into());
     };
     if command == "account-use" && !loaded.0.account_salts.contains(&salt) {
         return Err("account salt is not in this wallet; use account-add first".into());
@@ -535,7 +582,7 @@ mod account_cli_tests {
         drop(wallet);
         let base = vec!["--wallet".into(), path.to_str().unwrap().into()];
         let mut selected = base.clone();
-        selected.extend(["--salt".into(), hex::encode([7; 32])]);
+        selected.extend(["--salt".into(), hex::encode([7; 16])]);
         manage_accounts("account-add", &selected).unwrap();
         let active = load_wallet(path.to_str().unwrap()).unwrap().0.program_id;
         assert_ne!(active, zero);
@@ -545,7 +592,7 @@ mod account_cli_tests {
         );
         manage_accounts("accounts", &base).unwrap();
         let mut reset = base.clone();
-        reset.extend(["--salt".into(), hex::encode([0; 32])]);
+        reset.extend(["--salt".into(), hex::encode([0; 16])]);
         manage_accounts("account-use", &reset).unwrap();
         assert_eq!(
             load_wallet(path.to_str().unwrap()).unwrap().0.program_id,
@@ -558,7 +605,7 @@ mod account_cli_tests {
             "--mnemonic".into(),
             phrase.into(),
             "--salt".into(),
-            hex::encode([7; 32]),
+            hex::encode([7; 16]),
         ])
         .unwrap();
         assert_eq!(
@@ -569,7 +616,7 @@ mod account_cli_tests {
             active
         );
         let mut unknown = base.clone();
-        unknown.extend(["--salt".into(), hex::encode([8; 32])]);
+        unknown.extend(["--salt".into(), hex::encode([8; 16])]);
         assert!(manage_accounts("account-use", &unknown).is_err());
         assert_eq!(
             load_wallet(path.to_str().unwrap()).unwrap().0.program_id,
@@ -577,7 +624,7 @@ mod account_cli_tests {
         );
         let before = Zeroizing::new(fs::read(&path).unwrap());
         let mut candidate = account_wallet_from_file_bytes(&before).unwrap();
-        candidate.select_account([9; 32]).unwrap();
+        candidate.select_account([9; 16]).unwrap();
         manage_accounts("account-use", &selected).unwrap();
         assert!(
             super::super::wallet_file::update_account_wallet(

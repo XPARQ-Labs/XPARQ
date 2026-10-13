@@ -8,7 +8,11 @@ requires a valid signature against the chain-bound transaction commitment.
 
 The SHA3-256 preimage is the framed domain `XPARQ_HASH_PROGRAM_ACCOUNT`, the
 little-endian u64 material length, then `xparq:signature-policy:v2`, scheme ID,
-full canonical public-key bytes, and 32 public salt bytes. Scheme IDs remain 1/2/3 for ML-DSA44/65/87; Pure SLH-DSA SHAKE128s/192s/256s use 5/6/7. See [signature schemes](SIGNATURE_SCHEMES.md).
+full canonical public-key bytes, and 32 salt bytes. Wallet account IDs use a
+16-byte salt padded with 16 zero bytes; the wallet accepts a full-width legacy
+salt only for one XPQ transfer.
+Scheme IDs remain 1/2/3 for ML-DSA44/65/87; Pure SLH-DSA SHAKE128s/192s/256s
+use 5/6/7. See [signature schemes](SIGNATURE_SCHEMES.md).
 The immutable policy domain distinguishes these instances from deployed code.
 
 Program IDs use exactly 64 hexadecimal characters. Parsing checks length before
