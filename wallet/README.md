@@ -204,6 +204,10 @@ wallet account-use --salt HEX32 --wallet wallet.json
 Wallet account salts are 16 bytes (32 hexadecimal characters). A legacy
 32-byte salt can be passed as `--legacy-salt HEX64` to `wallet sign-spend` for
 one XPQ transfer; it is not saved or added as a wallet account.
+The interactive **14. Migrate Legacy 32-byte Account** option sends all
+currently available XPQ from that legacy account to a destination Program ID.
+See [legacy wallet salt migration](../wallet_migration.md) for requirements and
+the confirmation flow.
 
 In interactive mode, **13. Manage Accounts** lists the recorded accounts. Choose
 `add` to generate a random salt, append it to `account_salts`, and update

@@ -948,9 +948,12 @@ used only for that transfer and is not added to the wallet. Other commands that
 require one signer use a wallet account with a 16-byte salt. To recover a
 nondefault wallet account, use `wallet restore ... --salt HEX32`. Preserve the
 salt list with the wallet backup; mnemonic recovery alone cannot reconstruct
-random salts.
+random salts. See [legacy wallet salt migration](wallet_migration.md) for the
+interactive transfer workflow.
 Custom program IDs continue to bind deployer ProgramId, deploy nonce and code hash.
 See [salted ownership and CLI](docs/OWNERSHIP.md).
+See [consensus overview](consensus.md) for active block validation, WBDA,
+emission, and fork-choice rules.
 
 ### Protocol and storage compatibility
 
