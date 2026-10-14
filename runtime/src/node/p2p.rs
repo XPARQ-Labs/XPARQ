@@ -1,9 +1,12 @@
 use std::{
-    collections::BTreeMap,
-    net::{IpAddr, ToSocketAddrs},
+    collections::{BTreeMap, VecDeque},
+    io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, ToSocketAddrs},
     sync::mpsc,
     time::{Duration, Instant},
 };
+
+use socket2::{Domain, Protocol, Socket, Type};
 
 use super::*;
 use super::{chain_sync::*, config::*, gossip::*, mempool::*, protocol::*, state::*, util::*};
@@ -15,27 +18,50 @@ pub(super) fn serve_p2p(path: Option<&str>, listen: &str) -> Result<(), String> 
 }
 
 pub(super) fn serve_p2p_database(database: PathBuf, listen: &str) -> Result<(), String> {
-    let listener = TcpListener::bind(listen).map_err(|error| format!("bind P2P: {error}"))?;
+    let listeners = bind_p2p_listeners(listen).map_err(|error| format!("bind P2P: {error}"))?;
     println!("p2p: {listen}");
     let active = Arc::new(AtomicUsize::new(0));
     let active_by_ip = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
     let rejected_until = Arc::new(Mutex::new(BTreeMap::<IpAddr, (u32, Instant)>::new()));
-    for connection in listener.incoming() {
+    let (sender, receiver) = mpsc::channel();
+    for listener in listeners {
+        let sender = sender.clone();
+        thread::spawn(move || {
+            for connection in listener.incoming() {
+                if sender.send(connection).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    drop(sender);
+    for connection in receiver {
         match connection {
             Ok(stream) => {
-                if active.fetch_add(1, Ordering::AcqRel) >= MAX_INBOUND_CONNECTIONS {
-                    active.fetch_sub(1, Ordering::AcqRel);
-                    eprintln!("node: inbound peer limit reached");
+                if let Err(error) = configure_p2p_stream(&stream) {
+                    super::mining::log_node(format!(
+                        "node: configure inbound peer stream: {error}"
+                    ));
                     continue;
                 }
-                let peer_ip = stream.peer_addr().ok().map(|address| address.ip());
+                if active.fetch_add(1, Ordering::AcqRel) >= MAX_INBOUND_CONNECTIONS {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                    super::mining::log_node("node: inbound peer limit reached");
+                    continue;
+                }
+                let peer_ip = stream
+                    .peer_addr()
+                    .ok()
+                    .map(|address| rate_limit_key(address.ip()));
                 if let Some(ip) = peer_ip {
                     let now = Instant::now();
                     if let Ok(mut rejected) = rejected_until.lock() {
                         rejected.retain(|_, (_, until)| *until > now);
                         if rejected.get(&ip).is_some_and(|(_, until)| *until > now) {
                             active.fetch_sub(1, Ordering::AcqRel);
-                            eprintln!("node: inbound peer temporarily suppressed address={ip}");
+                            super::mining::log_node(format!(
+                                "node: inbound peer temporarily suppressed address={ip}"
+                            ));
                             continue;
                         }
                     }
@@ -47,7 +73,9 @@ pub(super) fn serve_p2p_database(database: PathBuf, listen: &str) -> Result<(), 
                     let count = by_ip.entry(ip).or_insert(0_usize);
                     if *count >= MAX_INBOUND_CONNECTIONS_PER_IP {
                         active.fetch_sub(1, Ordering::AcqRel);
-                        eprintln!("node: inbound per-IP limit reached address={ip}");
+                        super::mining::log_node(format!(
+                            "node: inbound per-IP limit reached address={ip}"
+                        ));
                         continue;
                     }
                     *count += 1;
@@ -81,10 +109,63 @@ pub(super) fn serve_p2p_database(database: PathBuf, listen: &str) -> Result<(), 
                     }
                 });
             }
-            Err(error) => eprintln!("node: accept P2P connection: {error}"),
+            Err(error) => super::mining::log_node(format!("node: accept P2P connection: {error}")),
         }
     }
     Ok(())
+}
+
+fn bind_p2p_listeners(listen: &str) -> io::Result<Vec<TcpListener>> {
+    let requested: SocketAddr = listen.parse().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "P2P listen address must be an IP socket address",
+        )
+    })?;
+    if requested.ip() == IpAddr::V4(Ipv4Addr::UNSPECIFIED) {
+        match bind_dual_stack(requested.port()) {
+            Ok(listener) => return Ok(vec![listener]),
+            Err(error) if can_fall_back_to_separate_families(&error) => {
+                match bind_v6_only(requested.port()) {
+                    Ok(v6_listener) => {
+                        let v4_listener = TcpListener::bind(requested)?;
+                        return Ok(vec![v4_listener, v6_listener]);
+                    }
+                    Err(error) if can_fall_back_to_separate_families(&error) => {
+                        return Ok(vec![TcpListener::bind(requested)?]);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(vec![TcpListener::bind(requested)?])
+}
+
+fn bind_dual_stack(port: u16) -> io::Result<TcpListener> {
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_only_v6(false)?;
+    socket.set_reuse_address(true)?;
+    socket.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+    socket.listen(1024)?;
+    Ok(socket.into())
+}
+
+fn bind_v6_only(port: u16) -> io::Result<TcpListener> {
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_only_v6(true)?;
+    socket.set_reuse_address(true)?;
+    socket.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+    socket.listen(1024)?;
+    Ok(socket.into())
+}
+
+fn can_fall_back_to_separate_families(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::AddrNotAvailable | io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput
+    )
 }
 
 pub(super) fn handle_inbound_peer(database: &Path, mut stream: TcpStream) -> bool {
@@ -104,20 +185,24 @@ pub(super) fn handle_inbound_peer(database: &Path, mut stream: TcpStream) -> boo
         Ok(exchange.peer)
     }) {
         Ok(peer) => {
-            println!(
+            super::mining::log_node(format!(
                 "peer served address={address} height={} tip={} work={}",
                 peer.tip_height.0,
                 hex::encode(peer.tip_hash),
                 format_work(peer.cumulative_work),
-            );
+            ));
             false
         }
         Err(error) => {
             let rejected = inbound_error_is_protocol_violation(&error);
             if rejected {
-                eprintln!("node: peer rejected address={address} reason={error}");
+                super::mining::log_node(format!(
+                    "node: peer rejected address={address} reason={error}"
+                ));
             } else {
-                eprintln!("node: peer disconnected address={address} reason={error}");
+                super::mining::log_node(format!(
+                    "node: peer disconnected address={address} reason={error}"
+                ));
             }
             rejected
         }
@@ -197,9 +282,13 @@ pub(super) fn start_peer_supervisor(
         let mut active = BTreeSet::new();
         let mut retry = BTreeMap::new();
         let (events, completed) = mpsc::channel();
+        let mut pending_events = VecDeque::new();
         let mut dialing = 0_usize;
         loop {
-            while let Ok((peer, outcome)) = completed.try_recv() {
+            while let Some((peer, outcome)) = pending_events
+                .pop_front()
+                .or_else(|| completed.try_recv().ok())
+            {
                 match outcome {
                     None => dialing -= 1,
                     Some((failures, delay)) => {
@@ -213,7 +302,7 @@ pub(super) fn start_peer_supervisor(
                 Ok(store) => {
                     candidates.extend(store.addresses().into_iter().map(|peer| peer.to_string()))
                 }
-                Err(error) => eprintln!("node: load peer store: {error}"),
+                Err(error) => super::mining::log_node(format!("node: load peer store: {error}")),
             }
             retry.retain(|peer, (_, until)| {
                 active.contains(peer) || candidates.contains(peer) || *until > Instant::now()
@@ -246,8 +335,10 @@ pub(super) fn start_peer_supervisor(
                             match gossip {
                                 Ok(()) => RECONNECT_INTERVAL,
                                 Err(error) if error.starts_with(GOSSIP_RESYNC_PREFIX) => {
-                                    eprintln!("node: peer={peer} requires header resync");
-                                    Duration::from_secs(1)
+                                    super::mining::log_node(format!(
+                                        "node: peer={peer} requires header resync"
+                                    ));
+                                    Duration::ZERO
                                 }
                                 Err(error) => {
                                     consecutive_failures = consecutive_failures.saturating_add(1);
@@ -264,10 +355,10 @@ pub(super) fn start_peer_supervisor(
                                             &peer,
                                         )
                                     };
-                                    eprintln!(
+                                    super::mining::log_node(format!(
                                         "node: peer={peer} gossip session failed: {error} reconnect_after_secs={}",
                                         cooldown.as_secs()
-                                    );
+                                    ));
                                     cooldown
                                 }
                             }
@@ -280,17 +371,19 @@ pub(super) fn start_peer_supervisor(
                             }
                             let cooldown =
                                 reconnect_delay_for_error(&error, consecutive_failures, &peer);
-                            eprintln!(
+                            super::mining::log_node(format!(
                                 "node: outbound peer={peer} sync failed: {error} reconnect_after_secs={}",
                                 cooldown.as_secs()
-                            );
+                            ));
                             cooldown
                         }
                     };
                     let _ = events.send((peer, Some((consecutive_failures, reconnect_after))));
                 });
             }
-            thread::sleep(Duration::from_secs(1));
+            if let Ok(event) = completed.recv_timeout(Duration::from_secs(1)) {
+                pending_events.push_back(event);
+            }
         }
     });
 }
@@ -346,7 +439,7 @@ fn connect_with_policy(
         .map_err(|error| format!("resolve peer: {error}"))?;
     let deadline = Instant::now() + timeout;
     let mut last_error = "peer resolved to no admissible addresses".to_string();
-    for address in addresses {
+    for address in interleave(addresses.collect()) {
         if public_only && !is_admissible_discovered_peer(&address) {
             continue;
         }
@@ -354,12 +447,39 @@ fn connect_with_policy(
         if remaining.is_zero() {
             return Err("connect peer: dial timeout".into());
         }
-        match TcpStream::connect_timeout(&address, remaining) {
-            Ok(stream) => return Ok(stream),
+        match TcpStream::connect_timeout(&address, remaining.min(PER_ADDRESS_TIMEOUT)) {
+            Ok(stream) => {
+                configure_p2p_stream(&stream)
+                    .map_err(|error| format!("configure peer stream: {error}"))?;
+                return Ok(stream);
+            }
             Err(error) => last_error = error.to_string(),
         }
     }
     Err(format!("connect peer: {last_error}"))
+}
+
+const PER_ADDRESS_TIMEOUT: Duration = Duration::from_secs(3);
+const P2P_SESSION_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn configure_p2p_stream(stream: &TcpStream) -> io::Result<()> {
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(P2P_SESSION_TIMEOUT))?;
+    stream.set_write_timeout(Some(P2P_SESSION_TIMEOUT))
+}
+
+fn interleave(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let (v6, v4): (Vec<_>, Vec<_>) = addresses.into_iter().partition(SocketAddr::is_ipv6);
+    let (mut v6, mut v4) = (v6.into_iter(), v4.into_iter());
+    let mut output = Vec::new();
+    loop {
+        let (next_v6, next_v4) = (v6.next(), v4.next());
+        if next_v6.is_none() && next_v4.is_none() {
+            return output;
+        }
+        output.extend(next_v6);
+        output.extend(next_v4);
+    }
 }
 
 fn dial_peer_database(database: &Path, peer: &str) -> Result<ConnectedPeer, String> {
@@ -418,6 +538,7 @@ fn synchronize_peer_database(
             &mut stream,
             handshake.tip_height,
             handshake.tip_hash,
+            handshake.capabilities & CAPABILITY_COMPACT_BLOCK_RELAY_V2 != 0,
         )?;
         if same_tip || extended_peer {
             relay_mempool(database, &mut stream)?;
@@ -433,12 +554,12 @@ fn synchronize_peer_database(
     if handshake.capabilities & CAPABILITY_PEER_RELAY != 0 {
         announce_peer_addresses(database, &mut stream)?;
     }
-    println!(
+    super::mining::log_node(format!(
         "peer accepted address={peer} height={} tip={} work={} verified_headers={verified} preferred={preferred} applied_blocks={applied}",
         handshake.tip_height.0,
         hex::encode(handshake.tip_hash),
         format_work(handshake.cumulative_work),
-    );
+    ));
     Ok(ConnectedPeer { handshake, stream })
 }
 
@@ -556,6 +677,7 @@ pub(super) fn serve_block_requests(
     let mut relayed_transactions = 0_usize;
     let mut relayed_blocks = 0_usize;
     let mut transaction_requests = 0_usize;
+    let mut last_tip_announcement = None;
     loop {
         let request = read_block_session_frame(stream)?;
         let (&message, body) = request.split_first().ok_or("empty block request")?;
@@ -621,6 +743,24 @@ pub(super) fn serve_block_requests(
                 if let Some(error) = rejection {
                     return Err(error);
                 }
+                continue;
+            }
+            ANNOUNCE_TIP_MESSAGE => {
+                let now = Instant::now();
+                if last_tip_announcement
+                    .is_some_and(|last: Instant| now.duration_since(last) < GOSSIP_HEARTBEAT / 4)
+                {
+                    return Err("peer exceeded the tip announcement rate limit".into());
+                }
+                last_tip_announcement = Some(now);
+                let _: TipAnnouncement = canonical_decode(body)
+                    .map_err(|error| format!("invalid tip announcement: {error}"))?;
+                let local_tip = gossip_tip(database)?;
+                let encoded = canonical_bytes(&local_tip).map_err(|error| error.to_string())?;
+                let mut response = Vec::with_capacity(1 + encoded.len());
+                response.push(ANNOUNCE_TIP_MESSAGE);
+                response.extend_from_slice(&encoded);
+                write_frame(stream, &response)?;
                 continue;
             }
             INVENTORY_MESSAGE => {
@@ -695,11 +835,43 @@ pub(super) fn serve_block_requests(
                 }
                 continue;
             }
+            COMPACT_BLOCK_MESSAGE => {
+                relayed_blocks += 1;
+                if relayed_blocks > MAX_RELAYED_BLOCKS_PER_SESSION {
+                    return Err("peer exceeded the block relay limit".into());
+                }
+                let result = accept_compact_block(database, stream, body);
+                let rejection = result.as_ref().err().cloned();
+                write_relay_result(stream, result)?;
+                if let Some(error) = rejection {
+                    return if error.starts_with(GOSSIP_RESYNC_PREFIX) {
+                        Err(error)
+                    } else {
+                        Err(format!("invalid compact relayed block: {error}"))
+                    };
+                }
+                continue;
+            }
             GET_BLOCK_MESSAGE if body.len() == 32 => {
                 block_requests += 1;
                 if block_requests > MAX_SYNC_HEADERS {
                     return Err("peer exceeded the block request limit".into());
                 }
+            }
+            GET_COMPACT_BLOCK_MESSAGE if body.len() == 32 => {
+                block_requests += 1;
+                if block_requests > MAX_SYNC_HEADERS {
+                    return Err("peer exceeded the block request limit".into());
+                }
+                let requested: [u8; 32] = body
+                    .try_into()
+                    .map_err(|_| "invalid requested block hash")?;
+                let encoded = cached_canonical_block_bytes(database, requested)?
+                    .ok_or("requested compact block is not canonical")?;
+                let block = decode_block(&encoded)
+                    .map_err(|error| format!("decode requested compact block: {error}"))?;
+                relay_compact_block(stream, &block)?;
+                continue;
             }
             _ => return Err("invalid block-session message".into()),
         }
@@ -780,7 +952,16 @@ fn record_announced_peers(
 }
 
 fn relay_address_list(database: &Path) -> Result<Vec<String>, String> {
-    Ok(PeerStore::load(database)?.relay_candidates())
+    let mut addresses = PeerStore::load(database)?.relay_candidates();
+    addresses.extend(advertised_peer_addresses()?);
+    let mut unique = BTreeSet::new();
+    Ok(addresses
+        .into_iter()
+        .filter_map(|address| address.parse::<PeerAddress>().ok())
+        .filter(PeerAddress::is_admissible)
+        .filter(|address| unique.insert(address.clone()))
+        .map(|address| address.to_string())
+        .collect())
 }
 
 pub(super) fn announce_peer_addresses(
@@ -977,5 +1158,43 @@ mod connection_tests {
         )
         .unwrap();
         assert_eq!(stream.peer_addr().unwrap(), address);
+    }
+
+    #[test]
+    fn interleave_alternates_address_families_and_keeps_order() {
+        let addresses = [
+            "192.0.2.1:1",
+            "[2001:db8::1]:2",
+            "192.0.2.2:3",
+            "[2001:db8::2]:4",
+            "192.0.2.3:5",
+        ]
+        .map(|address| address.parse().unwrap());
+        let ordered = interleave(addresses.to_vec());
+        assert_eq!(
+            ordered,
+            [
+                addresses[1],
+                addresses[0],
+                addresses[3],
+                addresses[2],
+                addresses[4]
+            ]
+        );
+        assert!(
+            ordered[..4]
+                .windows(2)
+                .all(|pair| pair[0].is_ipv6() != pair[1].is_ipv6())
+        );
+    }
+
+    #[test]
+    fn p2p_stream_enables_nodelay_and_bounded_session_timeouts() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        configure_p2p_stream(&stream).unwrap();
+        assert!(stream.nodelay().unwrap());
+        assert_eq!(stream.read_timeout().unwrap(), Some(P2P_SESSION_TIMEOUT));
+        assert_eq!(stream.write_timeout().unwrap(), Some(P2P_SESSION_TIMEOUT));
     }
 }

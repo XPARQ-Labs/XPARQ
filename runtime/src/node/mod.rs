@@ -12,7 +12,9 @@ use std::{
     time::Duration,
 };
 
-use crate::peer::{MAX_DISCOVERED_PEERS, PeerAddress, PeerStore, is_admissible_discovered_peer};
+use crate::peer::{
+    MAX_DISCOVERED_PEERS, PeerAddress, PeerStore, is_admissible_discovered_peer, rate_limit_key,
+};
 use crate::sync::{
     HeaderChainChunk, MAX_HEADER_CHAIN_CHUNK_HEADERS, MAX_HEADER_CHAIN_CHUNK_SIZE,
     decode_header_chain_chunk,
@@ -32,6 +34,7 @@ use kernel::{
     genesis::{EXPECTED_GENESIS_HASH, chain_spec_hash, genesis_block},
     ledger::Ledger,
     monetary::coin::{CoinOutput, Zeno},
+    operation::BlockOperation,
     program::{AuthorizedProgramEnvelope, ProgramEnvelope as Transaction},
 };
 
@@ -64,8 +67,11 @@ const P2P_PROTOCOL_VERSION: u32 = 1;
 const CAPABILITY_PEER_DISCOVERY: u64 = 1 << 0;
 const CAPABILITY_RELAY: u64 = 1 << 1;
 const CAPABILITY_PEER_RELAY: u64 = 1 << 2;
-const LOCAL_CAPABILITIES: u64 =
-    CAPABILITY_PEER_DISCOVERY | CAPABILITY_RELAY | CAPABILITY_PEER_RELAY;
+const CAPABILITY_COMPACT_BLOCK_RELAY_V2: u64 = 1 << 4;
+const LOCAL_CAPABILITIES: u64 = CAPABILITY_PEER_DISCOVERY
+    | CAPABILITY_RELAY
+    | CAPABILITY_PEER_RELAY
+    | CAPABILITY_COMPACT_BLOCK_RELAY_V2;
 const MAX_HANDSHAKE_SIZE: usize = 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_LOCATOR_HASHES: usize = 64;
@@ -87,6 +93,11 @@ const GET_TRANSACTION_MESSAGE: u8 = 14;
 const TRANSACTION_MESSAGE: u8 = 15;
 const ANNOUNCE_PEER_MESSAGE: u8 = 16;
 const ANNOUNCE_PEERS_MESSAGE: u8 = 17;
+const COMPACT_BLOCK_MESSAGE: u8 = 18;
+const GET_BLOCK_OPERATIONS_MESSAGE: u8 = 19;
+const BLOCK_OPERATIONS_MESSAGE: u8 = 20;
+const GET_COMPACT_BLOCK_MESSAGE: u8 = 21;
+const ANNOUNCE_TIP_MESSAGE: u8 = 22;
 const MAX_PEERS_RESPONSE_SIZE: usize = 16 * 1024;
 const MAX_PEER_ANNOUNCEMENT_ENDPOINTS: usize = 32;
 const PEER_RELAY_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
@@ -98,7 +109,8 @@ const MAX_GOSSIP_INVENTORY_ITEMS: usize = 1_024;
 const MAX_MEMPOOL_TRANSACTIONS: usize = MAX_GOSSIP_INVENTORY_ITEMS;
 const MIN_RELAY_FEE_ZENO_PER_BYTE: u64 = 8;
 const MAX_GOSSIP_INVENTORY_SIZE: usize = 64 * 1024;
-const GOSSIP_HEARTBEAT: Duration = Duration::from_secs(2);
+const GOSSIP_HEARTBEAT: Duration = Duration::from_millis(200);
+const GOSSIP_FULL_INVENTORY_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_OUTBOUND_CONNECTIONS: usize = 8;
 const MAX_CONCURRENT_DIALS: usize = 2;
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -144,12 +156,6 @@ struct RunConfig {
     public_addr: Option<PeerAddress>,
     nat_traversal: bool,
     chain_minimums: chain_minimums::ChainMinimums,
-    #[cfg(feature = "litep2p-devnet")]
-    litep2p: bool,
-    #[cfg(feature = "litep2p-devnet")]
-    staging_bytes: u64,
-    #[cfg(feature = "litep2p-devnet")]
-    private_discovery: bool,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
@@ -177,12 +183,42 @@ struct HandshakeExchange {
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+struct CompactBlock {
+    block_hash: [u8; 32],
+    header: kernel::block::Header,
+    height: Height,
+    emission: Option<Emission>,
+    salt: u64,
+    short_ids: Vec<[u8; 6]>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+struct MissingBlockOperations {
+    block_hash: [u8; 32],
+    indices: Vec<u32>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+struct RequestedBlockOperations {
+    block_hash: [u8; 32],
+    operations: Vec<(u32, BlockOperation)>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 struct GossipInventory {
     tip_height: Height,
     tip_hash: [u8; 32],
     cumulative_work: [u64; 8],
     cumulative_weight: u64,
     hash: Vec<[u8; 32]>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+struct TipAnnouncement {
+    tip_height: Height,
+    tip_hash: [u8; 32],
+    cumulative_work: [u64; 8],
+    cumulative_weight: u64,
 }
 
 enum PeerSessionOutcome {
@@ -201,27 +237,15 @@ mod chain_sync;
 mod config;
 mod explorer;
 mod gossip;
-#[cfg(feature = "litep2p-devnet")]
-mod inbound_budget;
 mod index;
 mod journal;
-#[cfg(feature = "litep2p-devnet")]
-mod litep2p_devnet;
-#[cfg(feature = "litep2p-devnet")]
-mod litep2p_peers;
 mod mempool;
 mod mining;
 mod p2p;
 mod protocol;
 mod recovery;
-#[cfg(feature = "litep2p-devnet")]
-mod request_queue;
-#[cfg(feature = "litep2p-devnet")]
-mod response_budget;
 mod rpc;
 mod state;
-#[cfg(feature = "litep2p-devnet")]
-mod sync_stage;
 mod util;
 
 pub fn run(args: Vec<String>) -> Result<(), String> {
@@ -285,13 +309,6 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                 .map_or(config::default_p2p_listen(), String::as_str),
             args.get(3..).unwrap_or(&[]),
         ),
-        #[cfg(feature = "litep2p-devnet")]
-        Some("litep2p") => litep2p_devnet::run(
-            args.get(1).map(String::as_str),
-            args.get(2)
-                .map_or(config::default_p2p_listen(), String::as_str),
-            args.get(3..).unwrap_or(&[]),
-        ),
         Some("peer") => p2p::connect_peer(
             args.get(1).map(String::as_str),
             args.get(2).ok_or("missing peer address")?,
@@ -321,9 +338,18 @@ fn print_stored_peers(path: Option<&str>) -> Result<(), String> {
             .ok_or("invalid peer store: expected peers array")?;
         println!("P2P peers ({}):", peers.len());
         for peer in peers {
-            let address = peer.get("address").and_then(serde_json::Value::as_str).unwrap_or("?");
-            let successes = peer.get("successes").and_then(serde_json::Value::as_u64).unwrap_or(0);
-            let failures = peer.get("failures").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let address = peer
+                .get("address")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            let successes = peer
+                .get("successes")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let failures = peer
+                .get("failures")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             println!("  {address} successes={successes} failures={failures}");
         }
         found = true;
@@ -349,23 +375,6 @@ fn print_stored_peers(path: Option<&str>) -> Result<(), String> {
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
             println!("  {address} successes={successes} failures={failures}");
-        }
-        found = true;
-    }
-
-    #[cfg(feature = "litep2p-devnet")]
-    if let Some(bytes) = crate::storage::auxiliary_get(&database, "litep2p-peers-v1")? {
-        #[derive(serde::Deserialize)]
-        struct StoredPeer {
-            endpoint: String,
-            trusted: bool,
-            success: u64,
-        }
-        let peers: Vec<StoredPeer> = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("decode litep2p peer store: {error}"))?;
-        println!("litep2p peers ({}):", peers.len());
-        for peer in peers {
-            println!("  {} trusted={} last_success_unix={}", peer.endpoint, peer.trusted, peer.success);
         }
         found = true;
     }
@@ -396,15 +405,6 @@ fn run_automatic(args: &[String]) -> Result<(), String> {
         }
     });
 
-    #[cfg(feature = "litep2p-devnet")]
-    if !config.litep2p {
-        p2p::start_peer_supervisor(
-            config.database.clone(),
-            config.peers.clone(),
-            Arc::clone(&sync_lock),
-        );
-    }
-    #[cfg(not(feature = "litep2p-devnet"))]
     p2p::start_peer_supervisor(
         config.database.clone(),
         config.peers.clone(),
@@ -423,17 +423,6 @@ fn run_automatic(args: &[String]) -> Result<(), String> {
         println!("mining: enabled on the local canonical tip");
     } else {
         println!("mining: disabled");
-    }
-    #[cfg(feature = "litep2p-devnet")]
-    if config.litep2p {
-        return litep2p_devnet::run_database(
-            config.database,
-            &config.p2p_listen,
-            &config.peers,
-            config.staging_bytes,
-            config.public_addr,
-            config.private_discovery,
-        );
     }
     p2p::serve_p2p_database(config.database, &config.p2p_listen)
 }

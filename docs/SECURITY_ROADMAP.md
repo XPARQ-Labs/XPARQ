@@ -77,7 +77,7 @@ suite. Complete fresh-storage replay, snapshot/restart and reorganization checks
 including the three-node Program lifecycle and explicitly enabled wallet CLI
 integration tests. The three-node lifecycle and both wallet CLI lifecycle tests passed on
 3 October 2026. On 8 October 2026, the full default workspace suite and
-`litep2p-devnet` all-target check passed after the salted-account/share32 reset;
+devnet all-target check passed after the salted-account/share32 reset;
 chain-spec fixtures also passed. The ignored wallet CLI lifecycle tests were not
 rerun in that default suite. Commands and current limitations are listed in
 [ProgramCall verification](PROGRAM_CALL.md#verification-status-and-remaining-gates).

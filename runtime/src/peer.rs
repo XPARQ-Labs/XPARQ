@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 const PEERS_KEY: &str = "peers";
 pub const MAX_DISCOVERED_PEERS: usize = 128;
+const MAX_PEERS_PER_DIVERSITY_GROUP: usize = 8;
 const RELAY_ADDRESS_TTL_SECS: u64 = 24 * 60 * 60;
 
 /// A stable peer endpoint. DNS is resolved only when dialing, never on decode.
@@ -22,7 +23,7 @@ pub enum PeerAddress {
 
 impl From<SocketAddr> for PeerAddress {
     fn from(address: SocketAddr) -> Self {
-        Self::Ip(address)
+        Self::Ip(canonical_socket_addr(address))
     }
 }
 
@@ -30,7 +31,10 @@ impl FromStr for PeerAddress {
     type Err = String;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         if let Ok(address) = value.parse::<SocketAddr>() {
-            return Ok(Self::Ip(address));
+            if matches!(&address, SocketAddr::V6(v6) if v6.scope_id() != 0) {
+                return Err("scoped peer addresses are not supported".into());
+            }
+            return Ok(Self::Ip(canonical_socket_addr(address)));
         }
         let (hostname, port) = value.rsplit_once(':').ok_or("peer requires host:port")?;
         let hostname = hostname
@@ -239,6 +243,9 @@ impl PeerStore {
         if self.peers.len() >= MAX_DISCOVERED_PEERS {
             return false;
         }
+        if !self.has_diversity_capacity(&address) {
+            return false;
+        }
         self.peers.insert(
             address.clone(),
             PeerRecord {
@@ -273,6 +280,9 @@ impl PeerStore {
             return true;
         }
         if self.peers.len() >= MAX_DISCOVERED_PEERS {
+            return false;
+        }
+        if !self.has_diversity_capacity(&address) {
             return false;
         }
         self.peers.insert(
@@ -318,14 +328,68 @@ impl PeerStore {
                 relay_until_unix: None,
             })
     }
+
+    fn has_diversity_capacity(&self, address: &PeerAddress) -> bool {
+        let PeerAddress::Ip(address) = address else {
+            return true;
+        };
+        let group = diversity_group(address.ip());
+        self.peers
+            .keys()
+            .filter_map(|peer| match peer {
+                PeerAddress::Ip(address) => Some(diversity_group(address.ip())),
+                PeerAddress::Dns { .. } => None,
+            })
+            .filter(|candidate| *candidate == group)
+            .count()
+            < MAX_PEERS_PER_DIVERSITY_GROUP
+    }
 }
 
 pub fn is_admissible_discovered_peer(address: &SocketAddr) -> bool {
-    address.port() != 0
-        && match address.ip() {
-            IpAddr::V4(ip) => admissible_ipv4(ip),
-            IpAddr::V6(ip) => admissible_ipv6(ip),
+    if address.port() == 0 || matches!(address, SocketAddr::V6(v6) if v6.scope_id() != 0) {
+        return false;
+    }
+    is_public_ip(address.ip())
+}
+
+pub fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(ip) => ip.to_ipv4_mapped().map_or(IpAddr::V6(ip), IpAddr::V4),
+        ip => ip,
+    }
+}
+
+fn canonical_socket_addr(address: SocketAddr) -> SocketAddr {
+    match canonical_ip(address.ip()) {
+        IpAddr::V4(ip) => SocketAddr::new(IpAddr::V4(ip), address.port()),
+        IpAddr::V6(ip) => SocketAddr::new(IpAddr::V6(ip), address.port()),
+    }
+}
+
+pub fn rate_limit_key(ip: IpAddr) -> IpAddr {
+    match canonical_ip(ip) {
+        IpAddr::V4(ip) => IpAddr::V4(ip),
+        IpAddr::V6(ip) => {
+            let mut octets = ip.octets();
+            octets[8..].fill(0);
+            IpAddr::V6(Ipv6Addr::from(octets))
         }
+    }
+}
+
+fn diversity_group(ip: IpAddr) -> Vec<u8> {
+    match canonical_ip(ip) {
+        IpAddr::V4(ip) => [&[4][..], &ip.octets()[..2]].concat(),
+        IpAddr::V6(ip) => [&[6][..], &ip.octets()[..4]].concat(),
+    }
+}
+
+pub fn is_public_ip(ip: IpAddr) -> bool {
+    match canonical_ip(ip) {
+        IpAddr::V4(ip) => admissible_ipv4(ip),
+        IpAddr::V6(ip) => admissible_ipv6(ip),
+    }
 }
 
 fn admissible_ipv4(ip: Ipv4Addr) -> bool {
@@ -346,16 +410,11 @@ fn admissible_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 fn admissible_ipv6(ip: Ipv6Addr) -> bool {
-    if let Some(ipv4) = ip.to_ipv4_mapped() {
-        return admissible_ipv4(ipv4);
-    }
     let segments = ip.segments();
-    !(ip.is_unspecified()
-        || ip.is_loopback()
-        || ip.is_multicast()
-        || (segments[0] & 0xfe00) == 0xfc00
-        || (segments[0] & 0xffc0) == 0xfe80
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8))
+    (segments[0] & 0xe000) == 0x2000
+        && !(segments[0] == 0x2001 && (segments[1] == 0x0db8 || segments[1] == 0))
+        && segments[0] != 0x2002
+        && !(segments[0] == 0x3fff && segments[1] & 0xf000 == 0)
 }
 
 fn unix_time() -> u64 {
@@ -386,6 +445,34 @@ mod tests {
         assert!(is_admissible_discovered_peer(
             &"8.8.8.8:6677".parse().unwrap()
         ));
+    }
+
+    #[test]
+    fn ipv6_discovery_allow_list_and_rate_limit_use_public_prefixes() {
+        for address in [
+            "[2001:db8::1]:6677",
+            "[2001:0:1::1]:6677",
+            "[3fff:0000::1]:6677",
+            "[fc00::1]:6677",
+            "[fe80::1]:6677",
+            "[::1]:6677",
+        ] {
+            let parsed: SocketAddr = address.parse().unwrap();
+            assert!(!is_admissible_discovered_peer(&parsed), "{address}");
+        }
+        assert!(is_admissible_discovered_peer(
+            &"[2606:4700:4700::1111]:6677".parse().unwrap()
+        ));
+
+        let first: IpAddr = "2606:4700:4700:1234:1111::1".parse().unwrap();
+        let same_64: IpAddr = "2606:4700:4700:1234:ffff::2".parse().unwrap();
+        let other_64: IpAddr = "2606:4700:4700:1235::1".parse().unwrap();
+        assert_eq!(rate_limit_key(first), rate_limit_key(same_64));
+        assert_ne!(rate_limit_key(first), rate_limit_key(other_64));
+        assert_eq!(
+            rate_limit_key("::ffff:8.8.8.8".parse().unwrap()),
+            "8.8.8.8".parse::<IpAddr>().unwrap()
+        );
     }
 
     #[test]

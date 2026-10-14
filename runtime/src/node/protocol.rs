@@ -49,6 +49,12 @@ pub(super) fn validate_session_frame_length(length: usize, tag: u8) -> Result<()
         validate_frame_length(length, 1 + MAX_STORED_TRANSACTION_SIZE)?;
     } else if matches!(tag, ANNOUNCE_PEER_MESSAGE | ANNOUNCE_PEERS_MESSAGE) {
         validate_frame_length(length, 1 + MAX_PEERS_RESPONSE_SIZE)?;
+    } else if tag == ANNOUNCE_TIP_MESSAGE {
+        validate_frame_length(length, 1 + 128)?;
+    } else if matches!(tag, GET_BLOCK_MESSAGE | GET_COMPACT_BLOCK_MESSAGE) {
+        if length != 1 + 32 {
+            return Err("invalid P2P block request size".into());
+        }
     }
     Ok(())
 }

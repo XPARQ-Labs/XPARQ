@@ -636,49 +636,6 @@ Run:
 ./target/release/node
 ```
 
-#### litep2p devnet transport
-
-Install `protoc` (the Protocol Buffers compiler) before building `litep2p`.
-This transport uses its own protocol and port; legacy TCP peers cannot connect to it.
-
-```bash
-cargo build -p node --no-default-features --features litep2p-devnet
-./target/debug/node litep2p ./data/devnet-litep2p 127.0.0.1:27677
-```
-
-For the normal node with RPC and optional mining, use `node run --litep2p`
-with `--data`, `--p2p`, `--rpc`, and `--peer ADDRESS@PEER_ID` as needed.
-
-The node prints its persistent litep2p peer ID. To connect another devnet node,
-pass `ADDRESS@PEER_ID`, for example:
-
-```bash
-./target/debug/node litep2p ./data/devnet-litep2p-2 127.0.0.1:27678 \
-  127.0.0.1:27677@<first-node-peer-id>
-```
-
-The litep2p transport validates the genesis and chain-spec hashes during
-notification handshake. It verifies a peer's header branch and cumulative
-work, downloads matching blocks, and applies the same fork-choice and reorg
-logic as the legacy transport. It also relays new blocks and mempool transactions.
-Its devnet protocol names are `/xparq/devnet/blocks/2` and
-`/xparq/devnet/announce/2`.
-
-The litep2p transport stages block bodies in a resumable redb download cache,
-with up to 100,000 verified headers and an 8 GiB logical body budget by default.
-Use `node run --litep2p --sync-staging-mib 16384` to select a 16 GiB budget.
-Canonical branch application and persistence consume bodies as a stream. Request
-timeouts and connection limits remain enforced; ledger history still consumes RAM.
-Per-peer inbound count/byte budgets guard request serving and announcement validation;
-header/body continuation requests are paced to preserve healthy downloads.
-Sync polls rotate among eligible peers; stalled sessions release their slot and a
-replacement peer can reuse matching staged bodies.
-Bootstrap endpoints accept `HOST:PORT@PEER_ID`; bounded discovery defaults to public
-addresses and persists successfully dialed endpoints for reconnect after restart.
-See [litep2p discovery and DNS policy](docs/LITEP2P_DISCOVERY.md).
-See [litep2p hardening and verification](docs/LITEP2P_HARDENING.md).
-
-
 ## Node commands
 
 Show available commands:
@@ -811,8 +768,8 @@ digits (up to 512 bits), with an optional `0x` prefix. Weight is an unsigned
 `cumulative_weight` fields of a trusted node's `GET /status` response. Both default
 to zero; configure the same options again after restarting.
 
-TCP header sync, gossip/reverse sync and litep2p tip discovery skip below-floor
-claims before requesting headers or bodies. Passing that cheap filter is not proof:
+TCP header sync and gossip/reverse sync skip below-floor claims before requesting
+headers or bodies. Passing that cheap filter is not proof:
 header PoW and advertised totals still have to match, and validated candidates are
 checked before branch commit or recovery. Unannounced relay blocks are subject to
 the same floors. Peers below the floor can still request our chain for bootstrap.

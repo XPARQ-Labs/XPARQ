@@ -13,12 +13,6 @@ impl RunConfig {
         let mut public_addr = None;
         let mut nat_traversal = false;
         let mut chain_minimums = super::chain_minimums::ChainMinimums::default();
-        #[cfg(feature = "litep2p-devnet")]
-        let mut litep2p = false;
-        #[cfg(feature = "litep2p-devnet")]
-        let mut staging_bytes = super::sync_stage::DEFAULT_STAGING_BYTES;
-        #[cfg(feature = "litep2p-devnet")]
-        let mut private_discovery = false;
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
@@ -73,30 +67,9 @@ impl RunConfig {
                         .map_err(|_| "--minimum-chain-weight exceeds u64")?;
                 }
                 "--nat-traversal" => nat_traversal = true,
-                #[cfg(feature = "litep2p-devnet")]
-                "--litep2p" => litep2p = true,
-                #[cfg(feature = "litep2p-devnet")]
-                "--litep2p-private-discovery" => private_discovery = true,
-                #[cfg(feature = "litep2p-devnet")]
-                "--sync-staging-mib" => {
-                    index += 1;
-                    let mib = args
-                        .get(index)
-                        .ok_or("missing value for --sync-staging-mib")?
-                        .parse::<u64>()
-                        .map_err(|_| "invalid --sync-staging-mib")?;
-                    if !(2..=1_048_576).contains(&mib) {
-                        return Err("--sync-staging-mib must be between 2 and 1048576".into());
-                    }
-                    staging_bytes = mib * 1024 * 1024;
-                }
                 option => return Err(format!("unknown node run option `{option}`")),
             }
             index += 1;
-        }
-        #[cfg(feature = "litep2p-devnet")]
-        if !litep2p && (private_discovery || args.iter().any(|arg| arg == "--sync-staging-mib")) {
-            return Err("litep2p options require --litep2p".into());
         }
         Ok(Self {
             database,
@@ -107,12 +80,6 @@ impl RunConfig {
             public_addr,
             nat_traversal,
             chain_minimums,
-            #[cfg(feature = "litep2p-devnet")]
-            litep2p,
-            #[cfg(feature = "litep2p-devnet")]
-            staging_bytes,
-            #[cfg(feature = "litep2p-devnet")]
-            private_discovery,
         })
     }
 }
@@ -263,12 +230,8 @@ pub(super) fn print_network_info() -> Result<(), String> {
 }
 
 pub(super) fn print_help() {
-    #[cfg(feature = "litep2p-devnet")]
     println!(
-        "node run --litep2p [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS@PEER_ID]... [--miner PROGRAM_ID] [--minimum-chain-work HEX] [--minimum-chain-weight DECIMAL] [--sync-staging-mib 2..1048576] [--public-addr HOST:PORT] [--litep2p-private-discovery]"
-    );
-    println!(
-        "node run [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS]... [--miner PROGRAM_ID] [--minimum-chain-work HEX] [--minimum-chain-weight DECIMAL] [--public-addr ADDRESS | --nat-traversal]\nnode network [data-dir] [listen-address] [peer-address...]\nnode litep2p [data-dir] [listen-address] [peer-address...] (requires litep2p-devnet feature)\nnode rpc [data-dir] [listen-address]\nnode p2p-listen [data-dir] [listen-address]\nnode peer [data-dir] <peer-address>\nnode info\nnode peers [data-dir]\nnode check [data-dir]\nnode program-account [data-dir] <program-id>\nnode mempool [data-dir]\nnode mine-block [data-dir] <miner-program-id>\nnode submit-transaction [data-dir] <transaction-hex>\nnode submit-deploy [data-dir] <authorized-deploy-hex>\nnode submit-block [data-dir] <block-hex>\nnode version"
+        "node run [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS]... [--miner PROGRAM_ID] [--minimum-chain-work HEX] [--minimum-chain-weight DECIMAL] [--public-addr ADDRESS | --nat-traversal]\nnode network [data-dir] [listen-address] [peer-address...]\nnode rpc [data-dir] [listen-address]\nnode p2p-listen [data-dir] [listen-address]\nnode peer [data-dir] <peer-address>\nnode info\nnode peers [data-dir]\nnode check [data-dir]\nnode program-account [data-dir] <program-id>\nnode mempool [data-dir]\nnode mine-block [data-dir] <miner-program-id>\nnode submit-transaction [data-dir] <transaction-hex>\nnode submit-deploy [data-dir] <authorized-deploy-hex>\nnode submit-block [data-dir] <block-hex>\nnode version"
     );
 }
 
@@ -347,46 +310,6 @@ mod ddns_tests {
         );
         advertisement.replace_resolved(&[]);
         assert_eq!(advertisement.addresses(), ["xparqnode.duckdns.org:6677"]);
-    }
-}
-
-#[cfg(all(test, feature = "litep2p-devnet"))]
-mod staging_budget_tests {
-    use super::*;
-    #[test]
-    fn staging_budget_accepts_only_bounded_explicit_litep2p_values() {
-        let config = RunConfig::parse(&["--litep2p".into()]).unwrap();
-        assert_eq!(
-            config.staging_bytes,
-            super::super::sync_stage::DEFAULT_STAGING_BYTES
-        );
-        let config =
-            RunConfig::parse(&["--litep2p".into(), "--sync-staging-mib".into(), "64".into()])
-                .unwrap();
-        assert_eq!(config.staging_bytes, 64 * 1024 * 1024);
-        for value in ["0", "1", "1048577", "18446744073709551615", "bad", "-1"] {
-            assert!(
-                RunConfig::parse(&[
-                    "--litep2p".into(),
-                    "--sync-staging-mib".into(),
-                    value.into()
-                ])
-                .is_err()
-            );
-        }
-        assert!(RunConfig::parse(&["--sync-staging-mib".into(), "64".into()]).is_err());
-        assert!(RunConfig::parse(&["--litep2p".into(), "--sync-staging-mib".into()]).is_err());
-        assert!(
-            !RunConfig::parse(&["--litep2p".into()])
-                .unwrap()
-                .private_discovery
-        );
-        assert!(
-            RunConfig::parse(&["--litep2p".into(), "--litep2p-private-discovery".into()])
-                .unwrap()
-                .private_discovery
-        );
-        assert!(RunConfig::parse(&["--litep2p-private-discovery".into()]).is_err());
     }
 }
 

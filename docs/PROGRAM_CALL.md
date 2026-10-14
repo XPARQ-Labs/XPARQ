@@ -117,7 +117,7 @@ On 8 October 2026, after the salted-account and 32-byte share changes, the full
 workspace test suite passed. Coverage includes authorization, monetary effects,
 VM, supply and state roots, snapshot/restart, mempool persistence, and network
 sync/reorg. The three-node program lifecycle passed as part of the network suite
-(8 tests, 121.53 s). The `litep2p-devnet` all-target build check also passed.
+(8 tests, 121.53 s). The devnet all-target build check also passed.
 Rust formatting, Markdown local links and OpenAPI JSON are checked separately.
 Existing vendor warnings remain; these checks do not replace a security audit.
 

@@ -142,6 +142,6 @@ proposal; mixing one global v2 setting with old-chain history is invalid.
 - Verify chain-spec/genesis identity, header PoW, Merkle proofs, ownership,
   monetary conservation, deterministic VM output, replay and atomic rollback.
 - Verify snapshot restore/recovery, persistent mempool IDs, RPC fingerprints,
-  node restart and legacy/litep2p handshakes for each network feature separately.
+  node restart and TCP handshakes for each network feature separately.
 
 No production v2 implementation or activation has been performed in this audit.

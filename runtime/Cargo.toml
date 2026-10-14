@@ -1,6 +1,6 @@
 [package]
 name = "node"
-version.workspace = true
+version = "1.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -17,7 +17,6 @@ mainnet = ["kernel/mainnet", "wallet/mainnet"]
 testnet = ["kernel/testnet", "wallet/testnet"]
 devnet = ["kernel/devnet", "wallet/devnet"]
 sqisign-blockchain-test = ["kernel/sqisign-blockchain-test", "kernel/sqisign-blockchain-test"]
-litep2p-devnet = ["devnet", "dep:litep2p", "dep:tokio", "dep:futures"]
 
 [dependencies]
 extension = { version = "1.0.0", path = "../extension", default-features = false }
@@ -29,10 +28,8 @@ igd-next.workspace = true
 getrandom.workspace = true
 redb.workspace = true
 kernel.workspace = true
-wallet = { version = "1.0.0", path = "../wallet", default-features = false }
-litep2p = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
-futures = { workspace = true, optional = true }
+wallet = { version = "1.1.0", path = "../wallet", default-features = false }
+socket2 = "0.5.10"
 
 [[bench]]
 name = "ledger_sync"

@@ -188,11 +188,8 @@ mod tests {
             assert_ne!(zero, b);
             assert_eq!(
                 a,
-                ProgramId::signature_account_with_authorization_salt(
-                    scheme,
-                    &key.bytes,
-                    &[1; 32],
-                )
+                ProgramId::signature_account_with_authorization_salt(scheme, &key.bytes, &[1; 32],)
+                    .unwrap()
             );
         }
     }

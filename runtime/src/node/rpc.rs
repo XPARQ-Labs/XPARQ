@@ -27,7 +27,10 @@ pub(super) fn serve_rpc_database(database: PathBuf, listen: &str) -> Result<(), 
                     continue;
                 }
 
-                let peer_ip = stream.peer_addr().ok().map(|address| address.ip());
+                let peer_ip = stream
+                    .peer_addr()
+                    .ok()
+                    .map(|address| rate_limit_key(address.ip()));
                 if let Some(ip) = peer_ip {
                     let mut by_ip = match active_by_ip.lock() {
                         Ok(by_ip) => by_ip,

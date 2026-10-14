@@ -35,8 +35,7 @@ Failed sessions release their worker slot during reconnect backoff so other
 candidate peers can be tried.
 
 The endpoint is for the standard mainnet TCP transport. Testnet/devnet use
-different networks and ports. The experimental litep2p transport additionally
-requires a peer identity; this endpoint alone is not a litep2p bootstrap entry.
+different networks and ports.
 
 ## Accept incoming IPv6 connections
 
@@ -108,8 +107,7 @@ Automatically discovered endpoints are restricted to public resolved addresses
 on every dial, including after a DNS change. Explicit `--peer` endpoints can
 still connect to private or loopback addresses for local networks.
 
-These features apply to the standard TCP transport. The experimental litep2p
-transport retains its separate peer address and identity format.
+These features apply to the standard TCP transport.
 
 ## Check DNS and connectivity
 

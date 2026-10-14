@@ -35,19 +35,17 @@ cargo install cargo-deny --version 0.20.2 --locked
 cargo deny --locked check
 cargo deny --locked --no-default-features --features testnet check
 cargo deny --locked --no-default-features --features devnet check
-cargo deny --locked --no-default-features --features node/litep2p-devnet check
 ```
 
 These checks need registry metadata and an up-to-date RustSec advisory database.
 Network features are checked individually rather than enabling mainnet,
-testnet, and devnet together. The default graph is mainnet. The optional litep2p devnet graph is checked
-separately.
+testnet, and devnet together. The default graph is mainnet.
 
 `deny.toml` reports duplicate versions as warnings, rejects wildcard dependency
 requirements and unapproved registries/Git sources, and lists accepted license
 identifiers. Local inter-crate path dependencies declare version `0.1.0`; update these
 requirements alongside the workspace version when releasing. The license
-allowlist includes ISC, used by the optional litep2p dependency graph.
+allowlist includes ISC for dependencies that require it.
 It does not suppress security advisories. An accepted license ID
 is an input to dependency policy, not a substitute for preserving required
 license notices in distributed artifacts.
@@ -69,7 +67,7 @@ when those workflows are implemented and verified.
 ## Verification
 
 On 2026-10-04, cargo-deny 0.20.2 passed advisories, bans, licenses, and sources
-for mainnet, testnet, devnet, and optional litep2p-devnet. Duplicate dependency
+for mainnet, testnet, and devnet. Duplicate dependency
 versions remain visible as warnings. Workspace compilation, formatting, and
 Clippy passed with existing warnings. `Cargo.lock` remained unchanged.
 See [verification results](audit/tooling-verification.txt).

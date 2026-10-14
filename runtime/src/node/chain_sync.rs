@@ -14,7 +14,9 @@ pub(super) fn synchronize_headers(
         Work::from_be_limbs(peer.cumulative_work),
         peer.cumulative_weight,
     ) {
-        println!("sync: ignoring advertised chain below configured work/weight minimums");
+        super::mining::log_node(
+            "sync: ignoring advertised chain below configured work/weight minimums",
+        );
         return Ok(HeaderSyncResult {
             ancestor_height: ledger.tip_height().ok_or("local chain has no tip")?,
             ancestor_hash: ledger.tip_hash().ok_or("local chain has no tip")?,
@@ -148,10 +150,10 @@ pub(super) fn synchronize_headers(
         }
 
         if verified_headers.is_multiple_of(256) {
-            println!(
+            super::mining::log_node(format!(
                 "sync_progress: verified_headers={verified_headers} peer_height={}",
                 peer.tip_height.0
-            );
+            ));
         }
 
         let tip_hash = advanced.header.hash().map_err(|error| error.to_string())?.0;
@@ -214,6 +216,10 @@ pub(super) fn synchronize_blocks(
         {
             return Err("peer block body does not match the verified header".into());
         }
+        // Its header and PoW were verified before block download. Let connected
+        // peers validate and process this body while this node fetches the rest.
+        queue_early_relay_block(block.clone())?;
+        notify_gossip();
         blocks.push(block);
     }
     apply_verified_branch(database, sync, blocks)
@@ -238,7 +244,9 @@ where
     I: Iterator<Item = Result<Block, String>>,
 {
     if !super::chain_minimums::allows(database, sync.peer_work, sync.peer_weight)? {
-        println!("sync: ignoring verified branch below configured work/weight minimums");
+        super::mining::log_node(
+            "sync: ignoring verified branch below configured work/weight minimums",
+        );
         return Ok(0);
     }
     let count = sync.headers.len();
@@ -266,7 +274,9 @@ where
     )
     .is_gt()
     {
-        println!("sync: downloaded peer branch is no longer preferred after local tip advanced");
+        super::mining::log_node(
+            "sync: downloaded peer branch is no longer preferred after local tip advanced",
+        );
         return Ok(0);
     }
     let ancestor = cached_ledger
@@ -383,14 +393,14 @@ where
     persist_chain_and_pending(database, &staged, &mempool)?;
     let staged = update_ledger_cache(database, staged)?;
     if let Err(error) = crate::snapshot::write_after_large_sync(database, &staged, count) {
-        eprintln!("node: post-sync snapshot write failed: {error}");
+        super::mining::log_node(format!("node: post-sync snapshot write failed: {error}"));
     }
     notify_gossip();
     if disconnected_blocks > 0 {
-        println!(
+        super::mining::log_node(format!(
             "reorg: disconnected_blocks={disconnected_blocks} disconnected_operations={} requeued_operations={requeued_operations}",
             disconnected_hash.len(),
-        );
+        ));
     }
     Ok(count)
 }

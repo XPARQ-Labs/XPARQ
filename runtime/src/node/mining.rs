@@ -1,9 +1,14 @@
-use std::io::IsTerminal;
+use std::{
+    collections::VecDeque,
+    io::IsTerminal,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use super::*;
 use super::{config::*, gossip::*, mempool::*, state::*, util::*};
 
 pub(super) fn mining_loop(database: PathBuf, miner: ProgramId) {
+    INTERACTIVE_MINING.store(mining_dashboard_is_interactive(), Ordering::Relaxed);
     let mut next_nonce = 0_u64;
     let mut memory = new_pow_memory();
     println!("mining_state: ready");
@@ -13,7 +18,7 @@ pub(super) fn mining_loop(database: PathBuf, miner: ProgramId) {
             Ok(MiningAttempt::Exhausted { next }) => next_nonce = next,
             Err(error) => {
                 next_nonce = 0;
-                eprintln!("node: mining attempt failed: {error}");
+                log_node(format!("node: mining attempt failed: {error}"));
             }
         }
     }
@@ -95,6 +100,29 @@ struct MiningDashboard {
     recent: std::collections::VecDeque<String>,
 }
 
+static RECENT_NODE_LOGS: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+static INTERACTIVE_MINING: AtomicBool = AtomicBool::new(false);
+
+fn mining_dashboard_is_interactive() -> bool {
+    std::io::stdout().is_terminal() && std::env::var("TERM").is_ok_and(|term| term != "dumb")
+}
+
+pub(super) fn log_node(message: impl AsRef<str>) {
+    let message = message.as_ref();
+    if let Ok(mut logs) = RECENT_NODE_LOGS
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+    {
+        logs.push_back(message.to_owned());
+        while logs.len() > 5 {
+            logs.pop_front();
+        }
+    }
+    if !INTERACTIVE_MINING.load(Ordering::Relaxed) {
+        eprintln!("{message}");
+    }
+}
+
 fn format_xpq(zeno: u128) -> String {
     let scale = 10_u128.pow(kernel::monetary::coin::DECIMALS.into());
     let amount = format!("{}.{:08}", zeno / scale, zeno % scale);
@@ -113,7 +141,7 @@ fn print_mined_block(block: &Block, state_burn: u64) {
         .hash()
         .map(|hash| hex::encode(hash.0))
         .unwrap_or_default();
-    let interactive = terminal && std::env::var("TERM").is_ok_and(|term| term != "dumb");
+    let interactive = terminal && mining_dashboard_is_interactive();
     if !interactive {
         let mut output = stdout.lock();
         let _ = writeln!(
@@ -161,10 +189,7 @@ fn print_mined_block(block: &Block, state_burn: u64) {
         let _ = writeln!(output, "| {text:<70} |");
     }
     let _ = writeln!(output, "{cyan}{border}{reset}");
-    let _ = writeln!(
-        output,
-        "{green}  BLOCK #{height} PERSISTED{reset}"
-    );
+    let _ = writeln!(output, "{green}  BLOCK #{height} PERSISTED{reset}");
     let _ = writeln!(output, "{border}");
     let _ = writeln!(
         output,
@@ -203,6 +228,29 @@ fn print_mined_block(block: &Block, state_burn: u64) {
     );
     for recent in &dashboard.recent {
         let _ = writeln!(output, "  {recent}");
+    }
+    let recent_logs = RECENT_NODE_LOGS
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .map(|logs| {
+            logs.iter()
+                .rev()
+                .take(3)
+                .map(|message| {
+                    let mut line: String = message.chars().take(70).collect();
+                    if message.chars().count() > 70 {
+                        line.push_str("...");
+                    }
+                    line
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !recent_logs.is_empty() {
+        let _ = writeln!(output, "\n{cyan}  RECENT NODE LOGS  /  newest first{reset}");
+        for line in recent_logs {
+            let _ = writeln!(output, "  {line}");
+        }
     }
     let _ = writeln!(
         output,

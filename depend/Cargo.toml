@@ -5,7 +5,6 @@ members = []
 # Cargo needs concrete package paths here; wildcard exclusions do not isolate
 # these vendored packages when tools inspect their manifests directly.
 exclude = [
-    "network/litep2p",
     "slhdsa/slh-dsa",
     "slhdsa/hmac",
     "slhdsa/sha2",
