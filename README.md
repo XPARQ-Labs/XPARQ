@@ -140,6 +140,13 @@ Default mainnet settings:
 | RPC listen | `127.0.0.1:6666` |
 | Mining | Disabled |
 
+Override the default RPC listener with `XPARQ_RPC_LISTEN`. A command-line
+`--rpc` address takes precedence over the environment setting.
+
+```bash
+XPARQ_RPC_LISTEN=127.0.0.1:7777 ./target/release/node run
+```
+
 A normal startup will print information similar to:
 
 ```text
@@ -267,6 +274,17 @@ You can combine mining with peers:
   --miner <PROGRAM_ID>
 ```
 
+Mining uses a bounded set of CPU workers. By default, it reserves at least one
+logical CPU for node services when available and uses at most four workers.
+Override the count with `XPARQ_MINING_THREADS` (1–8); each worker uses 128 MiB
+for PoW.
+
+```bash
+XPARQ_MINING_THREADS=4 ./target/release/node run \
+  --peer xparqnode.duckdns.org:6677 \
+  --miner <PROGRAM_ID>
+```
+
 When mining is active, the node prints:
 
 ```text
@@ -275,16 +293,23 @@ mining: enabled on the local canonical tip
 
 Mining rewards belong to the program supplied through `--miner`.
 
-Interactive terminals show a mining dashboard with the latest persisted block,
-nonce, full block hash, session block count, gross session subsidy, and the five
-most recent locally mined blocks. The display refreshes after each mined block.
-Set `NO_COLOR=1` to disable colors. Terminals with `TERM=dumb` or no `TERM`, and
-redirected output, use the single-line mined-block log with the full hash.
+Interactive terminals show a live mining dashboard refreshed about once per
+second. It includes hash rate, template details, and the latest persisted block
+with its nonce and full hash, plus session totals and the five most recent local
+blocks. Set `NO_COLOR=1` to disable colors. Terminals with `TERM=dumb` or no
+`TERM` use regular logs. Redirected output gets periodic `mining_progress`
+records (about every ten seconds) and an append-only `mined` record with the
+full hash for each block.
 Weight is the consensus block weight; subsidy is gross emission in XPQ;
 state burn is the block's total native protocol burn in zeno (archival plus state
 growth); operations count all non-emission block operations. Compact target is
 the header's decimal target bits, not a relative difficulty multiplier. Session
 totals count locally mined blocks in the current process, not wallet balance.
+Mining progress logs report hash rate, template preparation time, worker count,
+and template refreshes. P2P logs report handshake and sync stage durations,
+downloaded block bytes, and applied blocks. The outbound supervisor allows two
+initial sync sessions at once; downloaded branches are applied to the canonical
+ledger under the node's state mutation lock.
 
 ## Public node
 
@@ -310,7 +335,8 @@ To listen for RPC connections on IPv6, explicitly pass:
 --rpc '[::]:6666'
 ```
 
-Without this option, the default RPC listener remains `127.0.0.1:6666`.
+Without this option or `XPARQ_RPC_LISTEN`, the default mainnet listener remains
+`127.0.0.1:6666`.
 
 ### Advertise a public address
 
@@ -417,13 +443,16 @@ Query account UTXOs and asset holdings:
 curl -s "http://127.0.0.1:6666/program/account/<PROGRAM_ID>" | jq
 ```
 
-The account response is paginated; use the returned pagination fields to fetch
-additional UTXOs. Other program queries include:
+The account response pages coin UTXOs and asset shares separately. Use
+`next_utxo_cursor` to fetch more UTXOs and `next_asset_cursor` with
+`asset_after` to fetch more asset shares. Balance and explorer responses include
+asset totals and share counts without embedding every share. Other program
+queries include:
 
 | Endpoint | Data |
 | --- | --- |
 | `/explorer/program/{program_id}` | Paginated transaction activity |
-| `/program/asset/{asset}/balance/{program_id}` | Asset balance and shares |
+| `/program/asset/{asset}/balance/{program_id}?limit=100&after=...` | Asset balance, share count, and a bounded share page (maximum 256) |
 | `/program/state/{program_id}/{key}` | Deployed program storage; key encoded as hex |
 
 The former `/account/`, `/balance/` and `/explorer/address/` routes have been
@@ -466,8 +495,14 @@ XPARQ Wallet
 9. Explorer
 10. Program Assets
 11. Deploy Program
-12. Exit
-13. Manage Accounts
+12. Manage Accounts
+13. Migrate Legacy 32-byte Account
+14. Mempool
+15. Fee Policy
+16. Program State
+17. Coin Origin
+18. Program Account by ID
+19. Exit
 ```
 
 ### Create a wallet

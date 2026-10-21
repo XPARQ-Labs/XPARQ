@@ -7,6 +7,86 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Encode numeric peer endpoints as a compact PEX list (count, family, IP, port).
+pub fn encode_peer_endpoints(addresses: &[SocketAddr], maximum: usize) -> Vec<u8> {
+    let addresses: Vec<_> = addresses
+        .iter()
+        .copied()
+        .map(canonical_socket_addr)
+        .take(maximum.min(u16::MAX as usize))
+        .collect();
+    let mut bytes = Vec::with_capacity(2 + addresses.len() * 19);
+    bytes.extend_from_slice(&(addresses.len() as u16).to_be_bytes());
+    for address in addresses {
+        match address.ip() {
+            IpAddr::V4(ip) => {
+                bytes.push(4);
+                bytes.extend_from_slice(&ip.octets());
+            }
+            IpAddr::V6(ip) => {
+                bytes.push(6);
+                bytes.extend_from_slice(&ip.octets());
+            }
+        }
+        bytes.extend_from_slice(&address.port().to_be_bytes());
+    }
+    bytes
+}
+
+/// Decode a PEX list and reject malformed entries or trailing bytes.
+pub fn decode_peer_endpoints(bytes: &[u8], maximum: usize) -> Result<Vec<SocketAddr>, String> {
+    let count = u16::from_be_bytes(
+        bytes
+            .get(..2)
+            .ok_or("peer list is truncated")?
+            .try_into()
+            .map_err(|_| "peer list is truncated")?,
+    ) as usize;
+    if count > maximum {
+        return Err("peer address list exceeds peer limit".into());
+    }
+    let mut offset = 2;
+    let mut addresses = Vec::with_capacity(count);
+    for _ in 0..count {
+        let family = *bytes.get(offset).ok_or("peer list is truncated")?;
+        offset += 1;
+        let ip = match family {
+            4 => {
+                let octets: [u8; 4] = bytes
+                    .get(offset..offset + 4)
+                    .ok_or("peer list is truncated")?
+                    .try_into()
+                    .map_err(|_| "peer list is truncated")?;
+                offset += 4;
+                IpAddr::V4(Ipv4Addr::from(octets))
+            }
+            6 => {
+                let octets: [u8; 16] = bytes
+                    .get(offset..offset + 16)
+                    .ok_or("peer list is truncated")?
+                    .try_into()
+                    .map_err(|_| "peer list is truncated")?;
+                offset += 16;
+                IpAddr::V6(Ipv6Addr::from(octets))
+            }
+            _ => return Err("peer list has unknown address family".into()),
+        };
+        let port = u16::from_be_bytes(
+            bytes
+                .get(offset..offset + 2)
+                .ok_or("peer list is truncated")?
+                .try_into()
+                .map_err(|_| "peer list is truncated")?,
+        );
+        offset += 2;
+        addresses.push(canonical_socket_addr(SocketAddr::new(ip, port)));
+    }
+    if offset != bytes.len() {
+        return Err("peer list has trailing bytes".into());
+    }
+    Ok(addresses)
+}
+
 use serde::{Deserialize, Serialize};
 
 const PEERS_KEY: &str = "peers";
@@ -381,7 +461,8 @@ pub fn rate_limit_key(ip: IpAddr) -> IpAddr {
 fn diversity_group(ip: IpAddr) -> Vec<u8> {
     match canonical_ip(ip) {
         IpAddr::V4(ip) => [&[4][..], &ip.octets()[..2]].concat(),
-        IpAddr::V6(ip) => [&[6][..], &ip.octets()[..4]].concat(),
+        // A /48 is a practical diversity boundary for IPv6 peers.
+        IpAddr::V6(ip) => [&[6][..], &ip.octets()[..6]].concat(),
     }
 }
 

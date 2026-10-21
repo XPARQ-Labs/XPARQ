@@ -4,7 +4,7 @@ use extension::asset_program::asset::ASSET_DECIMALS;
 
 pub(super) fn print_balance(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
-    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let rpc = option(args, "--rpc").unwrap_or(default_rpc_addr());
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
     let wallet = account_wallet_from_file_bytes(&bytes)?;
@@ -77,18 +77,28 @@ fn print_account_balance(balance: &BalanceResponse) -> Result<(), String> {
     println!("UTXOs: {}", balance.utxo_count);
     println!("Program assets: {}", balance.program_assets.len());
     for asset in &balance.program_assets {
-        let owned = asset.shares.iter().try_fold(0_u128, |sum, s| {
-            let amount = s
-                .amount
-                .parse::<u128>()
-                .map_err(|_| "invalid program amount")?;
-            sum.checked_add(amount).ok_or("program balance overflow")
-        })?;
+        let owned = if let Some(balance) = &asset.balance {
+            balance.clone()
+        } else {
+            asset
+                .shares
+                .iter()
+                .try_fold(0_u128, |sum, share| {
+                    let amount = share
+                        .amount
+                        .parse::<u128>()
+                        .map_err(|_| "invalid program amount")?;
+                    sum.checked_add(amount).ok_or("program balance overflow")
+                })?
+                .to_string()
+        };
+        let share_count = asset.share_count.unwrap_or(asset.shares.len());
         println!(
-            "  {} ({}) — {}",
+            "  {} ({}) — {} ({} shares)",
             asset.name,
             asset.asset,
-            format_asset_amount(&owned.to_string(), ASSET_DECIMALS)?
+            format_asset_amount(&owned, ASSET_DECIMALS)?,
+            share_count,
         );
     }
     Ok(())

@@ -13,7 +13,8 @@ use std::{
 };
 
 use crate::peer::{
-    MAX_DISCOVERED_PEERS, PeerAddress, PeerStore, is_admissible_discovered_peer, rate_limit_key,
+    MAX_DISCOVERED_PEERS, PeerAddress, PeerStore, decode_peer_endpoints, encode_peer_endpoints,
+    is_admissible_discovered_peer, rate_limit_key,
 };
 use crate::sync::{
     HeaderChainChunk, MAX_HEADER_CHAIN_CHUNK_HEADERS, MAX_HEADER_CHAIN_CHUNK_SIZE,
@@ -28,15 +29,16 @@ use kernel::{
         Work, apply_block, compare_chain_tips, expected_emission_for_height,
         expected_next_difficulty, new_pow_memory,
     },
-    crypto::{
-        BlockHash, PoWMemory, ProgramId, canonical_bytes, canonical_decode, program_id_from_string,
-    },
+    crypto::{BlockHash, ProgramId, canonical_bytes, canonical_decode, program_id_from_string},
     genesis::{EXPECTED_GENESIS_HASH, chain_spec_hash, genesis_block},
     ledger::Ledger,
     monetary::coin::{CoinOutput, Zeno},
     operation::BlockOperation,
     program::{AuthorizedProgramEnvelope, ProgramEnvelope as Transaction},
 };
+
+#[cfg(test)]
+use kernel::crypto::PoWMemory;
 
 mod admission;
 const NODE_ID_FILE: &str = "node-id";
@@ -63,7 +65,7 @@ const API_DOCS_HTML: &[u8] = br#"<!doctype html>
 </html>
 "#;
 const P2P_MAGIC: [u8; 8] = *b"XPQP2P01";
-const P2P_PROTOCOL_VERSION: u32 = 1;
+const P2P_PROTOCOL_VERSION: u32 = 2;
 const CAPABILITY_PEER_DISCOVERY: u64 = 1 << 0;
 const CAPABILITY_RELAY: u64 = 1 << 1;
 const CAPABILITY_PEER_RELAY: u64 = 1 << 2;
@@ -297,7 +299,8 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         ),
         Some("rpc") => rpc::serve_rpc(
             args.get(1).map(String::as_str),
-            args.get(2).map_or("127.0.0.1:6666", String::as_str),
+            args.get(2)
+                .map_or(config::default_rpc_listen(), String::as_str),
         ),
         Some("p2p-listen") => p2p::serve_p2p(
             args.get(1).map(String::as_str),
@@ -395,7 +398,7 @@ fn run_automatic(args: &[String]) -> Result<(), String> {
         config.chain_minimums.weight
     );
     config::configure_public_address(&config)?;
-    let sync_lock = Arc::new(Mutex::new(()));
+    let sync_gate = Arc::new(p2p::SyncGate::new(p2p::MAX_CONCURRENT_SYNC_SESSIONS));
 
     let rpc_database = config.database.clone();
     let rpc_listen = config.rpc_listen.clone();
@@ -408,7 +411,7 @@ fn run_automatic(args: &[String]) -> Result<(), String> {
     p2p::start_peer_supervisor(
         config.database.clone(),
         config.peers.clone(),
-        Arc::clone(&sync_lock),
+        Arc::clone(&sync_gate),
     );
 
     if let Some(miner) = config.miner {

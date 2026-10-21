@@ -3,6 +3,7 @@ use std::{
     net::TcpStream,
 };
 
+use bytes::BytesMut;
 use serde::Deserialize;
 
 use super::AccountResponse;
@@ -39,7 +40,7 @@ pub(super) fn http_get_json<T: for<'de> Deserialize<'de>>(
 }
 
 fn read_json_response<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) -> Result<T, String> {
-    let mut response = Vec::new();
+    let mut response = BytesMut::with_capacity(8192);
     let mut buffer = [0_u8; 8192];
     loop {
         match stream.read(&mut buffer) {
@@ -58,6 +59,7 @@ fn read_json_response<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) -> R
             Err(error) => return Err(format!("read RPC response: {error}")),
         }
     }
+    let response = response.freeze();
     let separator = b"\r\n\r\n";
     let body_offset = response
         .windows(separator.len())

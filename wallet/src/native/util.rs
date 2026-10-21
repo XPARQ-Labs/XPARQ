@@ -57,6 +57,7 @@ pub(super) fn print_help() {
     println!(
         "\nBytecode deployment and execution:\nwallet program-deploy --code PROGRAM.xpvm --nonce NONCE [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-call --program-id HEX_ID [--data HEX_DATA] [--deposit XPQ_AMOUNT] [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-account --program-id HEX_ID [--rpc ADDRESS]"
     );
+    println!("\nRPC default: --rpc overrides XPARQ_RPC, then RPC_ADDR, then the network default.");
 }
 
 pub(super) fn parse_owner(value: &str) -> Result<kernel::common::Owner, String> {

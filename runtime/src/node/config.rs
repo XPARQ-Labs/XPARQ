@@ -231,7 +231,7 @@ pub(super) fn print_network_info() -> Result<(), String> {
 
 pub(super) fn print_help() {
     println!(
-        "node run [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS]... [--miner PROGRAM_ID] [--minimum-chain-work HEX] [--minimum-chain-weight DECIMAL] [--public-addr ADDRESS | --nat-traversal]\nnode network [data-dir] [listen-address] [peer-address...]\nnode rpc [data-dir] [listen-address]\nnode p2p-listen [data-dir] [listen-address]\nnode peer [data-dir] <peer-address>\nnode info\nnode peers [data-dir]\nnode check [data-dir]\nnode program-account [data-dir] <program-id>\nnode mempool [data-dir]\nnode mine-block [data-dir] <miner-program-id>\nnode submit-transaction [data-dir] <transaction-hex>\nnode submit-deploy [data-dir] <authorized-deploy-hex>\nnode submit-block [data-dir] <block-hex>\nnode version"
+        "node run [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS]... [--miner PROGRAM_ID] [--minimum-chain-work HEX] [--minimum-chain-weight DECIMAL] [--public-addr ADDRESS | --nat-traversal]\nnode network [data-dir] [listen-address] [peer-address...]\nnode rpc [data-dir] [listen-address]\nnode p2p-listen [data-dir] [listen-address]\nnode peer [data-dir] <peer-address>\nnode info\nnode peers [data-dir]\nnode check [data-dir]\nnode program-account [data-dir] <program-id>\nnode mempool [data-dir]\nnode mine-block [data-dir] <miner-program-id>\nnode submit-transaction [data-dir] <transaction-hex>\nnode submit-deploy [data-dir] <authorized-deploy-hex>\nnode submit-block [data-dir] <block-hex>\nnode version\n\nSet XPARQ_RPC_LISTEN to override the default RPC listener; --rpc takes precedence. Set XPARQ_MINING_THREADS to choose 1-8 CPU mining workers; each worker uses 128 MiB of PoW memory."
     );
 }
 
@@ -244,17 +244,25 @@ pub(super) fn default_p2p_listen() -> &'static str {
     "0.0.0.0:6677"
 }
 
-#[cfg(feature = "mainnet")]
 pub(super) fn default_rpc_listen() -> &'static str {
-    "127.0.0.1:6666"
-}
-#[cfg(feature = "testnet")]
-pub(super) fn default_rpc_listen() -> &'static str {
-    "127.0.0.1:16666"
-}
-#[cfg(feature = "devnet")]
-pub(super) fn default_rpc_listen() -> &'static str {
-    "127.0.0.1:26666"
+    static RPC_LISTEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    RPC_LISTEN
+        .get_or_init(|| {
+            std::env::var("XPARQ_RPC_LISTEN")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| {
+                    if cfg!(feature = "devnet") {
+                        "127.0.0.1:26666".into()
+                    } else if cfg!(feature = "testnet") {
+                        "127.0.0.1:16666".into()
+                    } else {
+                        "127.0.0.1:6666".into()
+                    }
+                })
+        })
+        .as_str()
 }
 #[cfg(feature = "testnet")]
 pub(super) fn default_p2p_listen() -> &'static str {

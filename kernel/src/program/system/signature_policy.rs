@@ -12,7 +12,8 @@ pub fn authorize(
     if !proof.active_at_height(height) {
         return false;
     }
-    let identity = program_id_from_public_key_with_authorization_salt(&proof.public_key, &proof.salt)
-        .is_ok_and(|identity| identity == instance);
+    let identity =
+        program_id_from_public_key_with_authorization_salt(&proof.public_key, &proof.salt)
+            .is_ok_and(|identity| identity == instance);
     identity && verify(&proof.public_key, commitment.as_bytes(), &proof.signature)
 }

@@ -145,11 +145,18 @@ impl AssetState {
                 .collect(),
         };
         for (key, previous) in journal.records {
-            if self.records.get(&key) == previous.as_ref() {
+            let current = self.records.get(&key).cloned();
+            if current.as_ref() == previous.as_ref() {
                 continue;
+            }
+            if let Some(record) = current {
+                self.unindex_asset_role(key, record.metadata.creator);
+                self.unindex_asset_role(key, record.metadata.mint_authority);
             }
             match previous {
                 Some(record) => {
+                    self.index_asset_role(key, record.metadata.creator);
+                    self.index_asset_role(key, record.metadata.mint_authority);
                     self.records.insert(key, record);
                 }
 

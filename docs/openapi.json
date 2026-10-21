@@ -15,6 +15,16 @@
         }
       }
     },
+    "/mempool": {
+      "get": {
+        "summary": "List pending operations",
+        "responses": {
+          "200": {
+            "description": "Pending operation IDs and types (program_deploy or program_call)"
+          }
+        }
+      }
+    },
     "/fee-policy": {
       "get": {
         "summary": "Get relay fee and protocol burn policy",
@@ -109,7 +119,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Balance"
+            "description": "Coin balance and Program asset summaries with aggregate balance and share count; asset shares are not embedded"
           }
         }
       }
@@ -120,11 +130,23 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/ProgramId"
+          },
+          {
+            "name": "asset_limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 256, "default": 100 },
+            "description": "Maximum number of account asset shares in this page."
+          },
+          {
+            "name": "asset_after",
+            "in": "query",
+            "schema": { "type": "string", "pattern": "^[0-9a-fA-F]{128}$" },
+            "description": "Exclusive asset-and-share cursor from next_asset_cursor."
           }
         ],
         "responses": {
           "200": {
-            "description": "program_id, policy, nullable state_value, total/coin_balance in zeno, paginated utxos/coins, next_utxo_cursor, utxo_snapshot, program_assets and asset_shares"
+            "description": "program_id, policy, nullable state_value, total/coin_balance in zeno, paginated utxos/coins and asset_shares, next_utxo_cursor, next_asset_cursor, utxo_snapshot and program_assets summaries"
           }
         }
       }
@@ -252,18 +274,30 @@
     },
     "/program/asset/{asset}/balance/{program_id}": {
       "get": {
-        "summary": "Get Program asset balance and shares",
+        "summary": "Get Program asset balance and a page of owned shares",
         "parameters": [
           {
             "$ref": "#/components/parameters/AssetId"
           },
           {
             "$ref": "#/components/parameters/ProgramId"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 256, "default": 100 },
+            "description": "Maximum number of shares in this page."
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "schema": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+            "description": "Exclusive share cursor from next_cursor."
           }
         ],
         "responses": {
           "200": {
-            "description": "Raw unit amount strings and owned shares"
+            "description": "Raw unit balance, total share_count, a bounded shares page, and nullable next_cursor"
           }
         }
       }

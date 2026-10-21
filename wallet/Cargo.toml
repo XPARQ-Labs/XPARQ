@@ -22,6 +22,7 @@ devnet = ["kernel/devnet"]
 sqisign-blockchain-test = ["kernel/sqisign-blockchain-test"]
 
 [dependencies]
+bytes = "1"
 borsh.workspace = true
 extension = { version = "1.0.0", path = "../extension", default-features = false }
 bip39.workspace = true

@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn print_history(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
-    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let rpc = option(args, "--rpc").unwrap_or(default_rpc_addr());
     let limit = option(args, "--limit")
         .map(parse_history_limit)
         .transpose()?

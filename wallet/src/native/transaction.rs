@@ -37,7 +37,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
             .map_err(|error| error.to_string())
         })
         .transpose()?;
-    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let rpc = option(args, "--rpc").unwrap_or(default_rpc_addr());
     let explicit_change = option(args, "--change").map(parse_amount).transpose()?;
     let change_target = option(args, "--change-to")
         .map(|program_id| program_id_from_string(program_id).map_err(|error| error.to_string()))
@@ -188,7 +188,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
 pub(super) fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
     reject_manual_fee(args)?;
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
-    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let rpc = option(args, "--rpc").unwrap_or(default_rpc_addr());
     let wallet = load_wallet(path)?;
     let mut candidates = account_input_candidates(rpc, &wallet)?;
     if candidates.len() < 2 {
@@ -270,7 +270,7 @@ pub(super) fn prepare_legacy_migration(args: &[String]) -> Result<LegacyMigratio
         .map(|value| program_id_from_string(value).map_err(|error| error.to_string()))
         .transpose()?
         .ok_or("missing destination --to PROGRAM_ID")?;
-    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let rpc = option(args, "--rpc").unwrap_or(default_rpc_addr());
     let wallet = load_wallet_for_legacy_transfer(path, &salt)?;
     let signer = kernel::crypto::program_id_from_public_key_with_authorization_salt(
         &wallet.0.public_key,
@@ -641,7 +641,7 @@ pub(super) fn submit_or_print_transaction(
         return Ok(());
     }
 
-    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let rpc = option(args, "--rpc").unwrap_or(default_rpc_addr());
     let response: SubmitTransactionResponse =
         http_post_bytes(rpc, "/transaction", &transaction_bytes)?;
 

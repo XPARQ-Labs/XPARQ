@@ -16,9 +16,14 @@ pub(super) fn interactive_menu() -> Result<(), String> {
         println!("9. Explorer");
         println!("10. Program Assets");
         println!("11. Deploy Program");
-        println!("12. Exit");
-        println!("13. Manage Accounts");
-        println!("14. Migrate Legacy 32-byte Account");
+        println!("12. Manage Accounts");
+        println!("13. Migrate Legacy 32-byte Account");
+        println!("14. Mempool");
+        println!("15. Fee Policy");
+        println!("16. Program State");
+        println!("17. Coin Origin");
+        println!("18. Program Account by ID");
+        println!("19. Exit");
 
         match prompt("Select")?.as_str() {
             "1" => {
@@ -44,7 +49,7 @@ pub(super) fn interactive_menu() -> Result<(), String> {
             }
             "4" => {
                 let path = prompt_default("Wallet file", DEFAULT_WALLET_PATH)?;
-                let rpc = prompt_default("RPC", DEFAULT_RPC_ADDR)?;
+                let rpc = prompt_default("RPC", default_rpc_addr())?;
                 print_balance(&["--wallet".into(), path, "--rpc".into(), rpc])?;
             }
             "5" => interactive_history()?,
@@ -54,12 +59,12 @@ pub(super) fn interactive_menu() -> Result<(), String> {
             "9" => interactive_block_explorer()?,
             "10" => interactive_program_assets()?,
             "11" => {
-                let mut args = interactive_asset_wallet_rpc()?;
+                let (mut args, _, _) = interactive_asset_wallet_rpc()?;
                 args.extend(["--code".into(), prompt("XPVM bytecode file")?]);
                 args.extend(["--nonce".into(), prompt("Deploy nonce")?]);
                 super::deploy::deploy_program(&args)?;
             }
-            "13" => {
+            "12" => {
                 let path = prompt_default("Wallet file", DEFAULT_WALLET_PATH)?;
                 manage_accounts("accounts", &["--wallet".into(), path.clone()])?;
                 match prompt("Account action (add/use/back)")?.as_str() {
@@ -81,17 +86,29 @@ pub(super) fn interactive_menu() -> Result<(), String> {
                     choice => return Err(format!("unknown account action `{choice}`")),
                 }
             }
-            "14" | "migrate" => interactive_legacy_migration()?,
-            "12" | "exit" | "quit" => return Ok(()),
+            "13" | "migrate" => interactive_legacy_migration()?,
+            "14" | "mempool" => interactive_mempool()?,
+            "15" | "fee-policy" => interactive_fee_policy()?,
+            "16" | "program-state" => interactive_program_state()?,
+            "17" | "coin-origin" => interactive_coin_origin()?,
+            "18" | "program-account" => interactive_program_account()?,
+            "19" | "exit" | "quit" => return Ok(()),
             choice => println!("Unknown selection `{choice}`"),
         }
     }
 }
 
 fn interactive_program_assets() -> Result<(), String> {
-    println!(
-        "Program Assets: 1 Create, 2 Mint, 3 Transfer, 4 Burn, 5 Info, 6 Balance, 7 Consolidate, 8 Back"
-    );
+    println!("Program Assets");
+    println!("1. Create asset");
+    println!("2. Mint");
+    println!("3. Transfer");
+    println!("4. Burn");
+    println!("5. Asset info");
+    println!("6. Balance");
+    println!("7. Consolidate shares");
+    println!("8. List my assets");
+    println!("9. Back");
     let choice = prompt("Select")?;
     let command = match choice.as_str() {
         "1" => "program-register",
@@ -101,10 +118,23 @@ fn interactive_program_assets() -> Result<(), String> {
         "5" => "program-info",
         "6" => "program-balance",
         "7" => "program-consolidate",
-        "8" | "back" => return Ok(()),
+        "8" => "list",
+        "9" | "back" => return Ok(()),
         _ => return Err("unknown Program selection".into()),
     };
-    let mut args = interactive_asset_wallet_rpc()?;
+
+    let (mut args, rpc, program_id) = interactive_asset_wallet_rpc()?;
+    let assets = if choice == "1" {
+        Vec::new()
+    } else {
+        http_get_json::<BalanceResponse>(&rpc, &format!("/program/balance/{program_id}"))?
+            .program_assets
+    };
+    if command == "list" {
+        print_program_asset_list(&assets)?;
+        return Ok(());
+    }
+
     if choice == "1" {
         args.extend([
             "--name".into(),
@@ -114,8 +144,16 @@ fn interactive_program_assets() -> Result<(), String> {
             "--initial-mint".into(),
             prompt("Initial Mint")?,
         ]);
+        let fixed_supply = prompt_default("Disable future minting? (yes/no)", "no")?;
+        match fixed_supply.to_ascii_lowercase().as_str() {
+            "yes" | "y" => args.push("--fixed-supply".into()),
+            "no" | "n" => {}
+            _ => return Err("answer yes or no".into()),
+        }
     } else {
-        args.extend(["--asset".into(), prompt("Program Asset Contract")?]);
+        print_program_asset_list(&assets)?;
+        let asset = prompt_program_asset(&assets)?;
+        args.extend(["--asset".into(), asset]);
     }
     if choice == "2" || choice == "3" {
         args.extend(interactive_asset_recipient()?);
@@ -132,13 +170,69 @@ fn interactive_asset_recipient() -> Result<[String; 2], String> {
     Ok(["--to".into(), recipient])
 }
 
-fn interactive_asset_wallet_rpc() -> Result<Vec<String>, String> {
-    Ok(vec![
-        "--wallet".into(),
-        prompt_default("Wallet file", DEFAULT_WALLET_PATH)?,
-        "--rpc".into(),
-        prompt_default("RPC", DEFAULT_RPC_ADDR)?,
-    ])
+fn interactive_asset_wallet_rpc() -> Result<(Vec<String>, String, String), String> {
+    let wallet_path = prompt_default("Wallet file", DEFAULT_WALLET_PATH)?;
+    let rpc = prompt_default("RPC", default_rpc_addr())?;
+    let bytes = Zeroizing::new(
+        fs::read(&wallet_path).map_err(|error| format!("failed to read {wallet_path}: {error}"))?,
+    );
+    let program_id = wallet_program_id_from_file_bytes(&bytes)?.to_string();
+    let args = vec!["--wallet".into(), wallet_path, "--rpc".into(), rpc.clone()];
+    Ok((args, rpc, program_id))
+}
+
+fn print_program_asset_list(assets: &[AccountAssetBalance]) -> Result<(), String> {
+    if assets.is_empty() {
+        println!("No assets are held, issued, or controlled by this Program ID.");
+        return Ok(());
+    }
+    println!("\nAssets held or controlled by this Program ID:");
+    for (index, asset) in assets.iter().enumerate() {
+        let balance = asset_balance_units(asset)?;
+        let amount =
+            format_asset_amount(&balance, extension::asset_program::asset::ASSET_DECIMALS)?;
+        println!(
+            "{:>3}. {} — {} ({}) [{} shares]",
+            index + 1,
+            asset.name,
+            amount,
+            asset.asset,
+            asset.share_count.unwrap_or(asset.shares.len()),
+        );
+    }
+    Ok(())
+}
+
+fn asset_balance_units(asset: &AccountAssetBalance) -> Result<String, String> {
+    if let Some(balance) = &asset.balance {
+        return Ok(balance.clone());
+    }
+    asset
+        .shares
+        .iter()
+        .try_fold(0_u128, |sum, share| {
+            let amount = share
+                .amount
+                .parse::<u128>()
+                .map_err(|_| "invalid asset balance".to_string())?;
+            sum.checked_add(amount)
+                .ok_or_else(|| "asset balance overflow".to_string())
+        })
+        .map(|amount| amount.to_string())
+}
+
+fn prompt_program_asset(assets: &[AccountAssetBalance]) -> Result<String, String> {
+    let value = prompt("Asset number or 64-character asset ID")?;
+    if let Ok(index) = value.parse::<usize>() {
+        if let Some(asset) = index.checked_sub(1).and_then(|index| assets.get(index)) {
+            return Ok(asset.asset.clone());
+        }
+        return Err("asset number is out of range".into());
+    }
+    value
+        .parse::<extension::asset_program::asset::AssetContract>()
+        .map(|asset| asset.to_string())
+        .map_err(|_| "invalid asset contract ID".into())
 }
 
 fn prompt_signature_account() -> Result<String, String> {
@@ -156,7 +250,7 @@ fn prompt_signature_account() -> Result<String, String> {
 
 fn interactive_history() -> Result<(), String> {
     let path = prompt_default("Wallet file", DEFAULT_WALLET_PATH)?;
-    let rpc = prompt_default("RPC", DEFAULT_RPC_ADDR)?;
+    let rpc = prompt_default("RPC", default_rpc_addr())?;
     let limit_text = prompt_default("Entries per page", &DEFAULT_HISTORY_LIMIT.to_string())?;
     let limit = parse_history_limit(&limit_text)?;
     let bytes =
@@ -197,12 +291,86 @@ fn interactive_history() -> Result<(), String> {
 
 fn interactive_wallet_query(query: fn(&[String]) -> Result<(), String>) -> Result<(), String> {
     let path = prompt_default("Wallet file", DEFAULT_WALLET_PATH)?;
-    let rpc = prompt_default("RPC", DEFAULT_RPC_ADDR)?;
+    let rpc = prompt_default("RPC", default_rpc_addr())?;
     query(&["--wallet".into(), path, "--rpc".into(), rpc])
 }
 
+fn interactive_mempool() -> Result<(), String> {
+    let rpc = prompt_default("RPC", default_rpc_addr())?;
+    let response: serde_json::Value = http_get_json(&rpc, "/mempool")?;
+    let operations = response
+        .get("operations")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("invalid mempool response: missing operations")?;
+
+    println!("Pending operations: {}", operations.len());
+    if operations.is_empty() {
+        println!("Mempool is empty.");
+        return Ok(());
+    }
+
+    for (index, operation) in operations.iter().enumerate() {
+        let id = operation
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("invalid mempool response: operation ID is missing")?;
+        let kind = operation
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("operation");
+        println!("{:>4}. {kind}: {id}", index + 1);
+    }
+    Ok(())
+}
+
+fn interactive_fee_policy() -> Result<(), String> {
+    let rpc = prompt_default("RPC", default_rpc_addr())?;
+    let response: serde_json::Value = http_get_json(&rpc, "/fee-policy")?;
+    println!("Monetary values are in zeno (100,000,000 zeno = 1 XPQ).");
+    print_human_json(&response);
+    Ok(())
+}
+
+fn interactive_program_state() -> Result<(), String> {
+    let rpc = prompt_default("RPC", default_rpc_addr())?;
+    let program = prompt("Program ID")?;
+    let program = program_id_from_string(&program).map_err(|_| "invalid Program ID")?;
+    let key = prompt("Storage key (hex, 1 to 128 bytes)")?;
+    let key = hex::decode(&key).map_err(|_| "storage key must be hexadecimal")?;
+    if key.is_empty() || key.len() > 128 {
+        return Err("storage key must contain between 1 and 128 bytes".into());
+    }
+
+    let program = kernel::crypto::program_id_to_string(&program);
+    let key = hex::encode(key);
+    let response: serde_json::Value =
+        http_get_json(&rpc, &format!("/program/state/{program}/{key}"))?;
+    print_human_json(&response);
+    Ok(())
+}
+
+fn interactive_coin_origin() -> Result<(), String> {
+    let rpc = prompt_default("RPC", default_rpc_addr())?;
+    let share = prompt("CoinShare ID")?
+        .parse::<CoinShare>()
+        .map_err(|_| "invalid CoinShare ID")?;
+    let response: serde_json::Value = http_get_json(&rpc, &format!("/coin-origin/{share}"))?;
+    print_human_json(&response);
+    Ok(())
+}
+
+fn interactive_program_account() -> Result<(), String> {
+    let rpc = prompt_default("RPC", default_rpc_addr())?;
+    let program = prompt("Program ID")?;
+    let program = program_id_from_string(&program).map_err(|_| "invalid Program ID")?;
+    let program = kernel::crypto::program_id_to_string(&program);
+    let response: serde_json::Value = http_get_json(&rpc, &format!("/program/account/{program}"))?;
+    print_human_json(&response);
+    Ok(())
+}
+
 fn interactive_spend() -> Result<(), String> {
-    let rpc = prompt_default("RPC", DEFAULT_RPC_ADDR)?;
+    let rpc = prompt_default("RPC", default_rpc_addr())?;
     let recipient = prompt("Recipient Program ID")?;
     program_id_from_string(&recipient).map_err(|error| error.to_string())?;
     let mut args = vec![
@@ -230,7 +398,7 @@ fn interactive_legacy_migration() -> Result<(), String> {
     wallet::transfer_salt32_from_string(&salt)?;
     let destination = prompt("Destination Program ID (new 16-byte-salt wallet)")?;
     program_id_from_string(&destination).map_err(|error| error.to_string())?;
-    let rpc = prompt_default("RPC", DEFAULT_RPC_ADDR)?;
+    let rpc = prompt_default("RPC", default_rpc_addr())?;
 
     let args = vec![
         "--wallet".into(),
@@ -266,7 +434,7 @@ fn interactive_legacy_migration() -> Result<(), String> {
 }
 
 fn interactive_block_explorer() -> Result<(), String> {
-    let rpc = prompt_default("RPC", DEFAULT_RPC_ADDR)?;
+    let rpc = prompt_default("RPC", default_rpc_addr())?;
     println!("1. Program activity");
     println!("2. Transaction by Hash");
     println!("3. Latest blocks");
@@ -437,10 +605,11 @@ pub(super) fn format_asset_amount(value: &str, decimals: u8) -> Result<String, S
     let whole = units / scale;
     let fractional = units % scale;
 
-    Ok(format!(
-        "{whole}.{fractional:0width$}",
-        width = decimals as usize
-    ))
+    let formatted = format!("{whole}.{fractional:0width$}", width = decimals as usize);
+    Ok(formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned())
 }
 
 fn human_label(key: &str) -> String {

@@ -630,6 +630,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "mio"
+version = "1.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
+dependencies = [
+ "libc 0.2.189 (registry+https://github.com/rust-lang/crates.io-index)",
+ "wasi",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ml-dsa"
 version = "0.1.1"
 dependencies = [
@@ -657,6 +668,7 @@ name = "node"
 version = "1.1.0"
 dependencies = [
  "borsh",
+ "bytes 1.12.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "extension",
  "getrandom 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "hex",
@@ -665,7 +677,8 @@ dependencies = [
  "redb",
  "serde",
  "serde_json",
- "socket2",
+ "socket2 0.5.10",
+ "tokio",
  "wallet",
 ]
 
@@ -715,6 +728,12 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "pin-project-lite"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pkcs8"
@@ -944,7 +963,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
 dependencies = [
  "libc 0.2.189 (registry+https://github.com/rust-lang/crates.io-index)",
- "windows-sys",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "socket2"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
+dependencies = [
+ "libc 0.2.189 (registry+https://github.com/rust-lang/crates.io-index)",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1044,6 +1073,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
+name = "tokio"
+version = "1.53.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
+dependencies = [
+ "libc 0.2.189 (registry+https://github.com/rust-lang/crates.io-index)",
+ "mio",
+ "pin-project-lite",
+ "socket2 0.6.5",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "toml_datetime"
 version = "1.1.1+spec-1.1.0"
 
@@ -1109,6 +1151,7 @@ version = "1.1.0"
 dependencies = [
  "bip39",
  "borsh",
+ "bytes 1.12.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "extension",
  "getrandom 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "hex",
@@ -1134,12 +1177,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-link"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
 name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
 dependencies = [
  "windows-targets",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+dependencies = [
+ "windows-link",
 ]
 
 [[package]]

@@ -65,6 +65,25 @@ impl<K, V> StateMap<K, V> {
         iter.push_left(self.root.as_deref());
         iter
     }
+    /// Iterate in key order starting at the first key greater than or equal to `bound`.
+    pub fn iter_from(&self, bound: &K) -> IterFrom<'_, K, V>
+    where
+        K: Ord,
+    {
+        let mut iter = IterFrom {
+            stack: Vec::with_capacity(usize::from(height(&self.root))),
+        };
+        let mut node = self.root.as_deref();
+        while let Some(current) = node {
+            if current.key < *bound {
+                node = current.right.as_deref();
+            } else {
+                iter.stack.push(current);
+                node = current.left.as_deref();
+            }
+        }
+        iter
+    }
     pub fn keys(&self) -> impl ExactSizeIterator<Item = &K> {
         self.iter().map(|(k, _)| k)
     }
@@ -281,6 +300,24 @@ impl<'a, K, V> Iterator for Iter<'a, K, V> {
 }
 impl<K, V> ExactSizeIterator for Iter<'_, K, V> {}
 impl<K, V> std::iter::FusedIterator for Iter<'_, K, V> {}
+
+pub struct IterFrom<'a, K, V> {
+    stack: Vec<&'a Node<K, V>>,
+}
+impl<'a, K, V> Iterator for IterFrom<'a, K, V> {
+    type Item = (&'a K, &'a V);
+    fn next(&mut self) -> Option<Self::Item> {
+        let node = self.stack.pop()?;
+        let mut right = node.right.as_deref();
+        while let Some(current) = right {
+            self.stack.push(current);
+            right = current.left.as_deref();
+        }
+        Some((&node.key, &node.value))
+    }
+}
+impl<K, V> std::iter::FusedIterator for IterFrom<'_, K, V> {}
+
 impl<'a, K, V> IntoIterator for &'a StateMap<K, V> {
     type Item = (&'a K, &'a V);
     type IntoIter = Iter<'a, K, V>;

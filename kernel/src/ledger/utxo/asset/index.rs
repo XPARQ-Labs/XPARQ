@@ -10,15 +10,48 @@ use crypto::HASH_SIZE;
 
 impl AssetState {
     pub(super) fn rebuild_owner_index(&mut self) {
-        let by_owner = &mut self.by_owner;
-        by_owner.clear();
+        self.by_owner.clear();
+        self.owner_asset_balances.clear();
+        self.asset_roles.clear();
         for (&id, share) in self.shares.iter() {
-            by_owner
+            self.by_owner
                 .entry(share.owner)
                 .or_default()
                 .entry(share.asset)
                 .or_default()
                 .insert(id, ());
+            let key = (share.owner, share.asset);
+            let balance = self
+                .owner_asset_balances
+                .get(&key)
+                .copied()
+                .unwrap_or(Unit::ZERO)
+                .saturating_add(share.amount);
+            self.owner_asset_balances.insert(key, balance);
+        }
+        let asset_roles = &mut self.asset_roles;
+        for (&asset, record) in self.records.iter() {
+            asset_roles
+                .entry(record.metadata.creator)
+                .or_default()
+                .insert(asset, ());
+            asset_roles
+                .entry(record.metadata.mint_authority)
+                .or_default()
+                .insert(asset, ());
+        }
+    }
+
+    pub(super) fn index_asset_role(&mut self, asset: AssetContract, owner: Owner) {
+        self.asset_roles.entry(owner).or_default().insert(asset, ());
+    }
+
+    pub(super) fn unindex_asset_role(&mut self, asset: AssetContract, owner: Owner) {
+        if let Some(assets) = self.asset_roles.get_mut(&owner) {
+            assets.remove(&asset);
+            if assets.is_empty() {
+                self.asset_roles.remove(&owner);
+            }
         }
     }
     /// Read-only asset accounting records. Mutation is restricted to the kernel.
@@ -77,6 +110,118 @@ impl AssetState {
             })
     }
 
+    /// Return a bounded page ordered by asset ID and then share ID.
+    pub fn asset_share_page_by_owner(
+        &self,
+        owner: Owner,
+        after: Option<(AssetContract, Share)>,
+        limit: usize,
+    ) -> (
+        Vec<(AssetContract, Share, AssetShare)>,
+        Option<(AssetContract, Share)>,
+    ) {
+        let Some(assets) = self.by_owner.get(&owner) else {
+            return (Vec::new(), None);
+        };
+        let first_asset =
+            after.map_or(AssetContract::from_bytes([0; HASH_SIZE]), |cursor| cursor.0);
+        let mut page = Vec::with_capacity(limit.saturating_add(1));
+        for (asset, ids) in assets.iter_from(&first_asset) {
+            for (id, _) in ids.iter_from(
+                &after
+                    .filter(|cursor| cursor.0 == *asset)
+                    .map_or(Share::from_bytes([0; HASH_SIZE]), |cursor| cursor.1),
+            ) {
+                if after.is_some_and(|cursor| *asset == cursor.0 && *id <= cursor.1) {
+                    continue;
+                }
+                if let Some(share) = self.shares.get(id).copied() {
+                    page.push((*asset, *id, share));
+                    if page.len() > limit {
+                        break;
+                    }
+                }
+            }
+            if page.len() > limit {
+                break;
+            }
+        }
+        let has_more = page.len() > limit;
+        page.truncate(limit);
+        let next = has_more
+            .then(|| page.last().map(|(asset, share, _)| (*asset, *share)))
+            .flatten();
+        (page, next)
+    }
+
+    /// Return a bounded page for one asset, seeking directly to the share cursor.
+    pub fn asset_share_page_by_owner_asset(
+        &self,
+        owner: Owner,
+        asset: AssetContract,
+        after: Option<Share>,
+        limit: usize,
+    ) -> (Vec<(Share, AssetShare)>, Option<Share>) {
+        let Some(ids) = self
+            .by_owner
+            .get(&owner)
+            .and_then(|assets| assets.get(&asset))
+        else {
+            return (Vec::new(), None);
+        };
+        let first_share = after.unwrap_or_else(|| Share::from_bytes([0; HASH_SIZE]));
+        let mut page = Vec::with_capacity(limit.saturating_add(1));
+        for (id, _) in ids.iter_from(&first_share) {
+            if after.is_some_and(|cursor| *id <= cursor) {
+                continue;
+            }
+            if let Some(share) = self.shares.get(id).copied() {
+                page.push((*id, share));
+                if page.len() > limit {
+                    break;
+                }
+            }
+        }
+        let has_more = page.len() > limit;
+        page.truncate(limit);
+        let next = has_more
+            .then(|| page.last().map(|(share, _)| *share))
+            .flatten();
+        (page, next)
+    }
+
+    /// Aggregate balance from a derived owner-and-asset index.
+    pub fn balance_by_owner_asset(&self, owner: Owner, asset: AssetContract) -> Unit {
+        self.owner_asset_balances
+            .get(&(owner, asset))
+            .copied()
+            .unwrap_or(Unit::ZERO)
+    }
+
+    /// Live share count without scanning share values.
+    pub fn share_count_by_owner_asset(&self, owner: Owner, asset: AssetContract) -> usize {
+        self.by_owner
+            .get(&owner)
+            .and_then(|assets| assets.get(&asset))
+            .map_or(0, StateMap::len)
+    }
+
+    /// Assets created by or assigned to this owner's mint authority.
+    pub fn assets_by_owner_role(&self, owner: Owner) -> impl Iterator<Item = AssetContract> + '_ {
+        self.asset_roles
+            .get(&owner)
+            .into_iter()
+            .flat_map(|assets| assets.keys().copied())
+    }
+
+    /// Assets for which this owner has at least one live share.
+    pub fn assets_by_owner_shares(&self, owner: Owner) -> impl Iterator<Item = AssetContract> + '_ {
+        self.by_owner
+            .get(&owner)
+            .into_iter()
+            .flat_map(|assets| assets.keys().copied())
+    }
+
     pub(super) fn remove_share(&mut self, id: &Share) -> Option<AssetShare> {
         let share = *self.shares.get(id)?;
         self.shares.remove(id);
@@ -92,6 +237,18 @@ impl AssetState {
                 by_owner.remove(&share.owner);
             }
         }
+        let key = (share.owner, share.asset);
+        let balance = self
+            .owner_asset_balances
+            .get(&key)
+            .copied()
+            .and_then(|balance| balance.checked_sub(share.amount))
+            .unwrap_or(Unit::ZERO);
+        if balance.is_zero() {
+            self.owner_asset_balances.remove(&key);
+        } else {
+            self.owner_asset_balances.insert(key, balance);
+        }
         Some(share)
     }
 
@@ -106,6 +263,14 @@ impl AssetState {
             .entry(share.asset)
             .or_default()
             .insert(id, ());
+        let balance_key = (share.owner, share.asset);
+        let balance = self
+            .owner_asset_balances
+            .get(&balance_key)
+            .copied()
+            .unwrap_or(Unit::ZERO)
+            .saturating_add(share.amount);
+        self.owner_asset_balances.insert(balance_key, balance);
         self.shares.insert(id, share);
     }
 

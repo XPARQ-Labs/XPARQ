@@ -3,7 +3,7 @@ use super::*;
 
 pub(super) fn print_utxo_tracker(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
-    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let rpc = option(args, "--rpc").unwrap_or(default_rpc_addr());
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
     let program_id =

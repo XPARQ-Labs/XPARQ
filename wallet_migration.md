@@ -38,7 +38,7 @@ you control it. Verify the destination carefully before broadcasting.
 
 ## Interactive migration
 
-Start the wallet without a subcommand and choose **14. Migrate Legacy 32-byte
+Start the wallet without a subcommand and choose **13. Migrate Legacy 32-byte
 Account**. Enter the wallet file, legacy salt, destination Program ID, and RPC
 address when prompted.
 

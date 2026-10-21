@@ -30,6 +30,8 @@ redb.workspace = true
 kernel.workspace = true
 wallet = { version = "1.1.0", path = "../wallet", default-features = false }
 socket2 = "0.5.10"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+bytes = "1"
 
 [[bench]]
 name = "ledger_sync"

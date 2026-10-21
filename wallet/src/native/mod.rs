@@ -3,6 +3,7 @@ use std::{
     io::{self, Write},
     path::Path,
     str::FromStr,
+    sync::OnceLock,
 };
 
 use kernel::monetary::coin::{CoinOutput, CoinShare, Zeno};
@@ -49,12 +50,32 @@ impl LoadedWallet {
         self.0.sign_xpq_transfer_with_legacy_salt(salt, intent)
     }
 }
-#[cfg(feature = "mainnet")]
-const DEFAULT_RPC_ADDR: &str = "127.0.0.1:6666";
-#[cfg(feature = "testnet")]
-const DEFAULT_RPC_ADDR: &str = "127.0.0.1:16666";
-#[cfg(feature = "devnet")]
-const DEFAULT_RPC_ADDR: &str = "127.0.0.1:26666";
+fn default_rpc_addr() -> &'static str {
+    static RPC_ADDR: OnceLock<String> = OnceLock::new();
+    RPC_ADDR
+        .get_or_init(|| {
+            std::env::var("XPARQ_RPC")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    std::env::var("RPC_ADDR")
+                        .ok()
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                })
+                .unwrap_or_else(|| {
+                    if cfg!(feature = "devnet") {
+                        "127.0.0.1:26666".into()
+                    } else if cfg!(feature = "testnet") {
+                        "127.0.0.1:16666".into()
+                    } else {
+                        "127.0.0.1:6666".into()
+                    }
+                })
+        })
+        .as_str()
+}
 
 #[derive(Deserialize)]
 struct AccountResponse {
@@ -86,6 +107,10 @@ struct NodeBurnResponse {
 struct AccountAssetBalance {
     asset: String,
     name: String,
+    #[serde(default)]
+    balance: Option<String>,
+    #[serde(default)]
+    share_count: Option<usize>,
     #[serde(default)]
     shares: Vec<AccountAssetShare>,
 }

@@ -9,9 +9,24 @@ cargo build --release --locked -p wallet
 ./target/release/wallet --help
 ```
 
+Set `XPARQ_RPC` to configure the default node endpoint without passing `--rpc`
+to every command. `RPC_ADDR` is also accepted for existing scripts. An explicit
+`--rpc` argument takes precedence over both environment variables.
+
+```bash
+export XPARQ_RPC=127.0.0.1:26666
+./target/release/wallet balance
+```
+
 The interactive menu supports wallet creation and restoration, balances,
 canonical history, UTXO tracking and consolidation, XPQ sends, Program assets,
-block exploration, bytecode deployment, and salted account management.
+block exploration, mempool inspection, bytecode deployment, and salted account
+management. Choose **14. Mempool** to list pending operations, **15. Fee Policy**
+to inspect relay and burn rules, **16. Program State** to read a public XPVM
+storage value, **17. Coin Origin** to look up a CoinShare's creation record, or
+**18. Program Account by ID** to inspect an account through the selected node's
+RPC endpoint. **19. Exit** closes the wallet. Program storage keys are entered
+as hex bytes.
 
 ## Security
 
@@ -74,8 +89,12 @@ wallet program-info --asset CONTRACT
 wallet program-balance --asset CONTRACT --program-id PROGRAM_ID
 ```
 
-`--fixed-supply` disables further minting at registration. `--offline` prints
-canonical signed transaction hex without submitting it; RPC is still needed to
+`--fixed-supply` disables further minting at registration. The interactive
+Program Assets menu can list assets held or controlled by the active account,
+pick one by number, and choose fixed supply when creating an asset.
+`program-balance` prints the formatted total and share count without downloading
+the share inventory. `--offline` prints canonical signed transaction hex without
+submitting it; RPC is still needed to
 select XPQ/share inputs and quote state growth. Transfer/burn consume at most
 256 shares per call. Consolidation merges up to 256 shares per invocation and
 requires at least two shares. Wait for pending asset operations to confirm
@@ -86,9 +105,14 @@ extension holdings and operations; asset-only recipients also receive history
 entries even when they receive no XPQ.
 
 RPC reads: `/program/asset/{asset}` and
-`/program/asset/{asset}/balance/{program_id}`. `/program/account` and `/program/balance` expose a
-separate `program_assets` array; `/explorer/program` contains aggregate balances
-without share lists. `/explorer/transaction` decodes Program asset instructions.
+`/program/asset/{asset}/balance/{program_id}`. Asset balance responses include
+the aggregate balance and share count plus a page of at most 256 shares. Use
+`?limit=100&after=<next_cursor>` to continue. `/program/account` returns a page
+of asset shares (`asset_limit`, `asset_after`) and balance summaries;
+`/program/balance` and `/explorer/program` return aggregate summaries without
+share lists. The wallet needs a node that supports these paginated asset reads;
+upgrade the node before the wallet. `/explorer/transaction` decodes Program
+asset instructions.
 `POST /program/quote` reads a signed canonical Program transaction and returns
 extension state growth in bytes without admitting or applying the transaction.
 Its quote reflects canonical state; final submission revalidates against mempool
@@ -136,8 +160,8 @@ mint, transfer, burn, consolidation, balances, recipient history and restart.
 recipient as `--to program:PROGRAM_ID`. All recipients use 64-character hex Program IDs.
 `program-account --program-id PROGRAM_ID` displays the contract's coin balance
 and live coin/asset shares. `program-call` executes its code and pays costs from
-the calling wallet. See [the fixed payout contract](../examples/vault/README.md)
-for an example that receives and sends both values.
+the calling wallet. See [the owner-controlled vault](../examples/vault/README.md)
+for a v4 example that receives and sends both values.
 
 
 XPVM v3 programs can also register and mint native assets with the deployed program
@@ -167,8 +191,10 @@ at most 1,000 coin UTXOs per page. This wallet requires a node that supports
 `/program/coins`; upgrade the node before the wallet.
 
 `GET /program/account/PROGRAM_ID` returns both wallet and deployed-program
-balances, paginated coin UTXOs, asset shares, and nullable scalar state. `GET
-/program/balance/PROGRAM_ID` returns available/reserved coin balance. History is
+balances, paginated coin UTXOs and asset shares, and nullable scalar state.
+Continue asset pages with `asset_after` and `next_asset_cursor`. `GET
+/program/balance/PROGRAM_ID` returns coin totals and asset balance summaries.
+History is
 `GET /explorer/program/PROGRAM_ID`. Asset balances accept a Program ID as their
 last path parameter. The old identity routes and `wallet address` command do not
 exist; Program IDs do not accept the old Base56 encoding.
@@ -204,12 +230,12 @@ wallet account-use --salt HEX32 --wallet wallet.json
 Wallet account salts are 16 bytes (32 hexadecimal characters). A legacy
 32-byte salt can be passed as `--legacy-salt HEX64` to `wallet sign-spend` for
 one XPQ transfer; it is not saved or added as a wallet account.
-The interactive **14. Migrate Legacy 32-byte Account** option sends all
+The interactive **13. Migrate Legacy 32-byte Account** option sends all
 currently available XPQ from that legacy account to a destination Program ID.
 See [legacy wallet salt migration](../wallet_migration.md) for requirements and
 the confirmation flow.
 
-In interactive mode, **13. Manage Accounts** lists the recorded accounts. Choose
+In interactive mode, **12. Manage Accounts** lists the recorded accounts. Choose
 `add` to generate a random salt, append it to `account_salts`, and update
 `account_salt` and `program_id` to make the new account active. Choose `use` and
 enter a recorded salt to select an existing account. **3. Show Program ID** prints

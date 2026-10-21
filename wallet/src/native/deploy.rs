@@ -18,7 +18,7 @@ pub(super) fn deploy_program(args: &[String]) -> Result<(), String> {
         .map_err(|_| "invalid --nonce")?;
     let code = fs::read(code_path).map_err(|e| format!("read {code_path}: {e}"))?;
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
-    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let rpc = option(args, "--rpc").unwrap_or(default_rpc_addr());
     let deploy = DeployProgram {
         owner: wallet.program_id(),
         nonce,

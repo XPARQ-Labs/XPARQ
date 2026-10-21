@@ -18,6 +18,8 @@ impl BorshDeserialize for AssetState {
             records: records.into(),
             shares: shares.into(),
             by_owner: StateMap::default(),
+            owner_asset_balances: StateMap::default(),
+            asset_roles: StateMap::default(),
             supply_cache: SupplyAuditCache::default(),
         };
         state.rebuild_owner_index();
@@ -31,6 +33,8 @@ impl AssetState {
             records,
             shares,
             by_owner: _,
+            owner_asset_balances: _,
+            asset_roles: _,
             supply_cache: _,
         } = self;
         let width = crypto::canonical_length(&(
@@ -51,6 +55,8 @@ impl AssetState {
             records,
             shares,
             by_owner: _,
+            owner_asset_balances: _,
+            asset_roles: _,
             supply_cache: _,
         } = self;
         records.shares_root(&other.records) && shares.shares_root(&other.shares)

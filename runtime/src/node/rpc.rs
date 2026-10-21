@@ -236,6 +236,28 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                 serde_json::json!(minimums.allows(cumulative_work, cumulative_weight));
             response
         }
+        "/mempool" => {
+            let pending = read_pending_operations(database)?;
+            let operations = pending
+                .iter()
+                .map(|operation| {
+                    let kind = match operation {
+                        BlockOperation::DeployProgram(_) => "program_deploy",
+                        BlockOperation::ProgramCall(_) => "program_call",
+                    };
+                    Ok(serde_json::json!({
+                        "id": hex::encode(
+                            operation
+                                .id()
+                                .map_err(|error| error.to_string())?
+                                .into_bytes()
+                        ),
+                        "type": kind,
+                    }))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            serde_json::json!({"operations": operations})
+        }
         "/fee-policy" => {
             let emission = expected_next_emission(&ledger)?;
             serde_json::json!({
@@ -308,26 +330,52 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
             }
             let mut utxo_offset = 0;
             let mut utxo_after = None;
+            let mut asset_share_limit = DEFAULT_ASSET_SHARE_LIMIT;
+            let mut asset_share_after = None;
+            let mut seen_utxo_offset = false;
+            let mut seen_utxo_after = false;
+            let mut seen_asset_limit = false;
+            let mut seen_asset_after = false;
             if !query.is_empty() {
-                let (name, value) = query.split_once('=').ok_or("invalid account query")?;
-                if value.is_empty() || value.contains('&') {
-                    return Err("invalid account query".into());
-                }
-                match name {
-                    "utxo_offset" => {
-                        utxo_offset = value
-                            .parse::<usize>()
-                            .map_err(|_| "invalid account UTXO offset")?;
+                for pair in query.split('&') {
+                    let (name, value) = pair.split_once('=').ok_or("invalid account query")?;
+                    if value.is_empty() {
+                        return Err("invalid account query".into());
                     }
-                    "utxo_after" => {
-                        utxo_after = Some(
-                            value
-                                .parse::<kernel::monetary::coin::CoinShare>()
-                                .map_err(|_| "invalid account UTXO cursor")?,
-                        );
+                    match name {
+                        "utxo_offset" if !seen_utxo_offset => {
+                            seen_utxo_offset = true;
+                            utxo_offset = value
+                                .parse::<usize>()
+                                .map_err(|_| "invalid account UTXO offset")?;
+                        }
+                        "utxo_after" if !seen_utxo_after => {
+                            seen_utxo_after = true;
+                            utxo_after = Some(
+                                value
+                                    .parse::<kernel::monetary::coin::CoinShare>()
+                                    .map_err(|_| "invalid account UTXO cursor")?,
+                            );
+                        }
+                        "asset_limit" if !seen_asset_limit => {
+                            seen_asset_limit = true;
+                            asset_share_limit = value
+                                .parse::<usize>()
+                                .map_err(|_| "invalid asset share limit")?;
+                            if asset_share_limit == 0 || asset_share_limit > MAX_ASSET_SHARE_LIMIT {
+                                return Err("asset share limit is out of range".into());
+                            }
+                        }
+                        "asset_after" if !seen_asset_after => {
+                            seen_asset_after = true;
+                            asset_share_after = Some(parse_asset_account_cursor(value)?);
+                        }
+                        _ => return Err("invalid account query".into()),
                     }
-                    _ => return Err("invalid account query".into()),
                 }
+            }
+            if coins_only && (seen_asset_limit || seen_asset_after) {
+                return Err("asset pagination is unavailable on /program/coins".into());
             }
             let pending = read_pending_operations(database)?;
             let program_id = parse_program_id(program_id)?;
@@ -341,7 +389,15 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                     utxo_after,
                 )?
             } else {
-                account_response(&ledger, &pending, program_id, utxo_offset, utxo_after)?
+                account_response(
+                    &ledger,
+                    &pending,
+                    program_id,
+                    utxo_offset,
+                    utxo_after,
+                    asset_share_limit,
+                    asset_share_after,
+                )?
             }
         }
         route if route.starts_with("/explorer/program/") => {

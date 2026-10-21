@@ -267,23 +267,12 @@ pub(super) fn decode_peer_addresses(
     if bytes.len() > MAX_PEERS_RESPONSE_SIZE {
         return Err("peer address list exceeds size limit".into());
     }
-    let declared = bytes
-        .get(..4)
-        .and_then(|count| count.try_into().ok())
-        .map(u32::from_le_bytes)
-        .ok_or("peer address list is truncated")? as usize;
-    if declared > maximum_count {
-        return Err("peer address list exceeds peer limit".into());
-    }
-    let peers: Vec<String> =
-        canonical_decode(bytes).map_err(|error| format!("decode peer address list: {error}"))?;
-    if peers.len() > maximum_count {
-        return Err("peer address list exceeds peer limit".into());
-    }
+    let peers = decode_peer_endpoints(bytes, maximum_count)
+        .map_err(|error| format!("decode peer address list: {error}"))?;
     let mut unique = BTreeSet::new();
     Ok(peers
         .into_iter()
-        .filter_map(|peer| peer.parse::<PeerAddress>().ok())
+        .map(PeerAddress::from)
         .filter(PeerAddress::is_admissible)
         .filter(|peer| unique.insert(peer.clone()))
         .collect())

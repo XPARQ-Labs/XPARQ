@@ -39,6 +39,10 @@ pub struct AssetState {
     #[borsh(skip)]
     by_owner: StateMap<Owner, StateMap<AssetContract, StateMap<Share, ()>>>,
     #[borsh(skip)]
+    owner_asset_balances: StateMap<(Owner, AssetContract), Unit>,
+    #[borsh(skip)]
+    asset_roles: StateMap<Owner, StateMap<AssetContract, ()>>,
+    #[borsh(skip)]
     supply_cache: SupplyAuditCache,
 }
 

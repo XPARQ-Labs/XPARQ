@@ -1,3 +1,5 @@
+use bytes::{Bytes, BytesMut};
+
 use super::state::*;
 use super::*;
 
@@ -9,20 +11,21 @@ pub(super) fn write_frame(stream: &mut TcpStream, bytes: &[u8]) -> Result<(), St
         .map_err(|error| format!("write P2P frame: {error}"))
 }
 
-pub(super) fn read_frame(stream: &mut TcpStream, maximum: usize) -> Result<Vec<u8>, String> {
+pub(super) fn read_frame(stream: &mut TcpStream, maximum: usize) -> Result<Bytes, String> {
     let mut length = [0_u8; 4];
     stream
         .read_exact(&mut length)
         .map_err(|error| format!("read P2P frame length: {error}"))?;
     let length = validate_frame_length(u32::from_le_bytes(length) as usize, maximum)?;
-    let mut bytes = vec![0_u8; length];
+    let mut bytes = BytesMut::with_capacity(length);
+    bytes.resize(length, 0);
     stream
-        .read_exact(&mut bytes)
+        .read_exact(&mut bytes[..])
         .map_err(|error| format!("read P2P frame: {error}"))?;
-    Ok(bytes)
+    Ok(bytes.freeze())
 }
 
-pub(super) fn read_block_session_frame(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+pub(super) fn read_block_session_frame(stream: &mut TcpStream) -> Result<Bytes, String> {
     let mut length = [0_u8; 4];
     stream
         .read_exact(&mut length)
@@ -36,12 +39,13 @@ pub(super) fn read_block_session_frame(stream: &mut TcpStream) -> Result<Vec<u8>
         .read_exact(&mut tag)
         .map_err(|error| format!("read P2P frame tag: {error}"))?;
     validate_session_frame_length(length, tag[0])?;
-    let mut bytes = vec![0_u8; length];
+    let mut bytes = BytesMut::with_capacity(length);
+    bytes.resize(length, 0);
     bytes[0] = tag[0];
     stream
         .read_exact(&mut bytes[1..])
         .map_err(|error| format!("read P2P frame: {error}"))?;
-    Ok(bytes)
+    Ok(bytes.freeze())
 }
 
 pub(super) fn validate_session_frame_length(length: usize, tag: u8) -> Result<(), String> {

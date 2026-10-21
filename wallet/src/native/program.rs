@@ -41,8 +41,10 @@ fn shares(
     required: Option<Unit>,
 ) -> Result<(Vec<Share>, Unit), String> {
     let program_id = kernel::crypto::program_id_to_string(&owner);
-    let response: serde_json::Value =
-        http_get_json(rpc, &format!("/program/asset/{asset}/balance/{program_id}"))?;
+    let response: serde_json::Value = http_get_json(
+        rpc,
+        &format!("/program/asset/{asset}/balance/{program_id}?limit=256"),
+    )?;
     let mut inputs = Vec::new();
     let mut total = Unit::ZERO;
     for share in response["shares"]
@@ -81,7 +83,7 @@ fn submit(args: &[String], wallet: LoadedWallet, call: ProgramCall) -> Result<()
     reject_manual_fee(args)?;
     extension::script::execute::decode_program(&call)
         .map_err(|e| format!("invalid ProgramCall: {e:?}"))?;
-    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let rpc = option(args, "--rpc").unwrap_or(default_rpc_addr());
     let deposit = option(args, "--deposit")
         .map(parse_amount)
         .transpose()?
@@ -184,7 +186,7 @@ fn submit(args: &[String], wallet: LoadedWallet, call: ProgramCall) -> Result<()
 pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
     if command == "program-account" {
         let id = option(args, "--program-id").ok_or("missing --program-id")?;
-        let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+        let rpc = option(args, "--rpc").unwrap_or(default_rpc_addr());
         let value: serde_json::Value = http_get_json(rpc, &format!("/program/account/{id}"))?;
         super::cli::print_human_json(&value);
         return Ok(());
@@ -192,10 +194,17 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
     if command == "program-deploy" {
         return super::deploy::deploy_program(args);
     }
-    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let rpc = option(args, "--rpc").unwrap_or(default_rpc_addr());
     if command == "program-info" {
-        let value: serde_json::Value =
-            http_get_json(rpc, &format!("/program/asset/{}", asset(args)?))?;
+        let id = asset(args)?;
+        let mut value: serde_json::Value = http_get_json(rpc, &format!("/program/asset/{id}"))?;
+        for field in ["max_supply", "supply", "total_minted", "total_burned"] {
+            let units = value[field]
+                .as_str()
+                .ok_or("invalid asset metadata amount")?;
+            value[field] =
+                serde_json::Value::String(super::cli::format_asset_amount(units, ASSET_DECIMALS)?);
+        }
         super::cli::print_human_json(&value);
         return Ok(());
     }
@@ -206,15 +215,7 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
                 load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?.program_id()
             }
         };
-        let value: serde_json::Value = http_get_json(
-            rpc,
-            &format!(
-                "/program/asset/{}/balance/{}",
-                asset(args)?,
-                kernel::crypto::program_id_to_string(&owner)
-            ),
-        )?;
-        super::cli::print_human_json(&value);
+        print_asset_balance(rpc, asset(args)?, owner)?;
         return Ok(());
     }
     if !matches!(
@@ -339,6 +340,34 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
         _ => unreachable!(),
     };
     submit(args, wallet, call)
+}
+
+fn print_asset_balance(rpc: &str, asset: AssetContract, owner: ProgramId) -> Result<(), String> {
+    let info: serde_json::Value = http_get_json(rpc, &format!("/program/asset/{asset}"))?;
+    let balance: serde_json::Value = http_get_json(
+        rpc,
+        &format!(
+            "/program/asset/{asset}/balance/{}?limit=1",
+            kernel::crypto::program_id_to_string(&owner)
+        ),
+    )?;
+    let name = info["name"]
+        .as_str()
+        .ok_or("invalid asset metadata response")?;
+    let units = balance["balance"]
+        .as_str()
+        .ok_or("invalid asset balance response")?;
+    let share_count = balance["share_count"]
+        .as_u64()
+        .ok_or("invalid asset share count response")?;
+    println!("Asset: {name}");
+    println!("Asset ID: {asset}");
+    println!("Program ID: {owner}");
+    println!(
+        "Balance: {} ({share_count} shares)",
+        super::cli::format_asset_amount(units, extension::asset_program::asset::ASSET_DECIMALS,)?
+    );
+    Ok(())
 }
 
 fn vm_call(args: &[String]) -> Result<ProgramCall, String> {

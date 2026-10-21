@@ -14,6 +14,10 @@ pub(super) const DEFAULT_PROGRAM_ACTIVITY_LIMIT: usize = 50;
 
 pub(super) const MAX_PROGRAM_ACTIVITY_LIMIT: usize = 250;
 
+pub(super) const DEFAULT_ASSET_SHARE_LIMIT: usize = 100;
+
+pub(super) const MAX_ASSET_SHARE_LIMIT: usize = 256;
+
 pub(super) fn print_account(path: Option<&str>, program_id: &str) -> Result<(), String> {
     let database = database_path(path);
 
@@ -26,6 +30,8 @@ pub(super) fn print_account(path: Option<&str>, program_id: &str) -> Result<(), 
         &read_pending_operations(&database)?,
         program_id,
         0,
+        None,
+        DEFAULT_ASSET_SHARE_LIMIT,
         None,
     )?;
 
@@ -47,6 +53,13 @@ pub(super) fn account_response(
     utxo_offset: usize,
 
     utxo_after: Option<kernel::monetary::coin::CoinShare>,
+
+    asset_share_limit: usize,
+
+    asset_share_after: Option<(
+        extension::asset_program::asset::AssetContract,
+        extension::asset_program::asset::Share,
+    )>,
 ) -> Result<serde_json::Value, String> {
     let mut response = coin_account_response(
         ledger.state(),
@@ -56,17 +69,10 @@ pub(super) fn account_response(
         utxo_offset,
         utxo_after,
     )?;
-    let mut owned_asset_shares: Vec<_> = ledger
-        .state()
-        .extensions()
-        .assets
-        .shares_by_owner(Owner::Program(program_id))
-        .collect();
-    owned_asset_shares.sort_by_key(|(share, _)| *share);
-    let asset_shares: Vec<_> = owned_asset_shares.into_iter()
-        .map(|(share, value)| serde_json::json!({"id":share.to_string(),"asset":value.asset.to_string(),"amount":value.amount.to_string()}))
-        .collect();
+    let (asset_shares, next_asset_cursor) =
+        program_account_asset_share_page(ledger, program_id, asset_share_limit, asset_share_after);
     response["asset_shares"] = serde_json::json!(asset_shares);
+    response["next_asset_cursor"] = serde_json::json!(next_asset_cursor);
     response["program_assets"] = serde_json::json!(program_account_assets(ledger, program_id)?);
     Ok(response)
 }
@@ -450,8 +456,27 @@ pub(super) fn explorer_transaction_response(
 ) -> Result<serde_json::Value, String> {
     let tip_height = ledger.tip_height().map_or(0, |height| height.0);
 
-    let location = index::transaction_location(database, ledger, hash)?
-        .ok_or("transaction was not found in the canonical chain")?;
+    let Some(location) = index::transaction_location(database, ledger, hash)? else {
+        let pending = read_mempool(database)?
+            .into_iter()
+            .find(|transaction| transaction.id().is_ok_and(|id| id == hash));
+        let Some(transaction) = pending else {
+            return Err("transaction was not found in the canonical chain or mempool".into());
+        };
+        let size_bytes = canonical_bytes(&transaction)
+            .map_err(|error| error.to_string())?
+            .len();
+        return Ok(serde_json::json!({
+            "hash": hex::encode(hash),
+            "type": transaction_kind(&transaction),
+            "status": "pending",
+            "height": null,
+            "block_hash": null,
+            "confirmations": 0,
+            "size_bytes": size_bytes,
+            "transaction": transaction_response(&transaction, None),
+        }));
+    };
 
     let block = canonical_block(database, ledger, location.height)?;
 
@@ -502,7 +527,7 @@ pub(super) fn explorer_transaction_response(
 
             &transaction,
 
-            protocol_burn,
+            Some(protocol_burn),
 
         ),
 
@@ -512,7 +537,7 @@ pub(super) fn explorer_transaction_response(
 pub(super) fn transaction_response(
     transaction: &Transaction,
 
-    protocol_burn: Zeno,
+    protocol_burn: Option<Zeno>,
 ) -> serde_json::Value {
     match transaction {
         AuthorizedProgramEnvelope::Program(program) => {
@@ -709,7 +734,7 @@ fn block_response_with_burns(block: &Block, burns: Vec<Zeno>) -> Result<serde_js
 
                     &transaction,
 
-                    protocol_burn,
+                    Some(protocol_burn),
 
                 ),
 
@@ -806,16 +831,32 @@ fn block_response_with_burns(block: &Block, burns: Vec<Zeno>) -> Result<serde_js
     }))
 }
 
-fn program_shares(
+fn program_account_asset_share_page(
     ledger: &Ledger,
-
-    asset: extension::asset_program::asset::AssetContract,
-
     program_id: ProgramId,
-) -> Vec<serde_json::Value> {
-    ledger.state().extensions().assets.shares_by_owner_asset(Owner::Program(program_id), asset)
-
-        .map(|(id, s)| serde_json::json!({"share_id": id.to_string(), "amount": s.amount.to_string(), "owner": asset_owner_response(s.owner)})).collect()
+    limit: usize,
+    after: Option<(
+        extension::asset_program::asset::AssetContract,
+        extension::asset_program::asset::Share,
+    )>,
+) -> (Vec<serde_json::Value>, Option<String>) {
+    let (page, next_cursor) = ledger
+        .state()
+        .extensions()
+        .assets
+        .asset_share_page_by_owner(Owner::Program(program_id), after, limit);
+    let next_cursor = next_cursor.map(|(asset, share)| format!("{asset}{share}"));
+    let page = page
+        .into_iter()
+        .map(|(asset, share, value)| {
+            serde_json::json!({
+                "id": share.to_string(),
+                "asset": asset.to_string(),
+                "amount": value.amount.to_string(),
+            })
+        })
+        .collect();
+    (page, next_cursor)
 }
 
 pub(super) fn program_account_assets(
@@ -824,22 +865,29 @@ pub(super) fn program_account_assets(
     program_id: ProgramId,
 ) -> Result<Vec<serde_json::Value>, String> {
     let state = &ledger.state().extensions().assets;
-
-    let mut result = Vec::new();
-
-    for (asset, record) in state.records() {
-        let shares = program_shares(ledger, *asset, program_id);
-
-        if shares.is_empty()
-            && record.metadata.creator != Owner::Program(program_id)
-            && record.metadata.mint_authority != Owner::Program(program_id)
-        {
+    let owner = Owner::Program(program_id);
+    let assets = state
+        .assets_by_owner_role(owner)
+        .chain(state.assets_by_owner_shares(owner))
+        .collect::<BTreeSet<_>>();
+    let mut result = Vec::with_capacity(assets.len());
+    for asset in assets {
+        let Some(record) = state.records().get(&asset) else {
             continue;
-        }
-
-        result.push(serde_json::json!({"program_id":0,"asset":asset.to_string(),"name":record.metadata.name,"max_supply":record.metadata.max_supply.to_string(),"mint":record.supply.to_string(),"shares":shares}));
+        };
+        let balance = state.balance_by_owner_asset(owner, asset);
+        let share_count = state.share_count_by_owner_asset(owner, asset);
+        result.push(serde_json::json!({
+            "program_id": 0,
+            "asset": asset.to_string(),
+            "name": record.metadata.name,
+            "max_supply": record.metadata.max_supply.to_string(),
+            "mint": record.supply.to_string(),
+            "supply": record.supply.to_string(),
+            "balance": balance.to_string(),
+            "share_count": share_count,
+        }));
     }
-
     Ok(result)
 }
 
@@ -848,6 +896,7 @@ pub(super) fn program_asset_response(
 
     route: &str,
 ) -> Result<serde_json::Value, String> {
+    let (route, query) = route.split_once('?').unwrap_or((route, ""));
     let parts = route
         .trim_start_matches("/program/asset/")
         .split('/')
@@ -866,6 +915,9 @@ pub(super) fn program_asset_response(
         .ok_or("program asset was not found")?;
 
     if parts.len() == 1 {
+        if !query.is_empty() {
+            return Err("invalid program asset query".into());
+        }
         return Ok(
             serde_json::json!({"program_id":0,"asset":asset.to_string(),"name":record.metadata.name,"max_supply":record.metadata.max_supply.to_string(),"supply":record.supply.to_string(),"total_minted":record.total_minted.to_string(),"total_burned":record.total_burned.to_string(),"creator":asset_owner_response(record.metadata.creator),"mint_authority":asset_authority_response(record.metadata.mint_authority),"mint_nonce":record.mint_nonce}),
         );
@@ -873,31 +925,100 @@ pub(super) fn program_asset_response(
 
     if parts.len() == 3 && parts[1] == "balance" {
         let program_id = parse_program_id(parts[2])?;
+        let (limit, after) = parse_asset_share_page_query(query)?;
+        let asset_state = &ledger.state().extensions().assets;
+        let owner = Owner::Program(program_id);
+        let balance = asset_state.balance_by_owner_asset(owner, asset);
+        let share_count = asset_state.share_count_by_owner_asset(owner, asset);
+        let (page, next_cursor) =
+            asset_state.asset_share_page_by_owner_asset(owner, asset, after, limit);
+        let shares = page
+            .into_iter()
+            .map(|(id, share)| {
+                serde_json::json!({
+                    "share_id": id.to_string(),
+                    "amount": share.amount.to_string(),
+                    "owner": asset_owner_response(share.owner),
+                })
+            })
+            .collect::<Vec<_>>();
 
-        let shares = program_shares(ledger, asset, program_id);
-
-        let total = ledger
-            .state()
-            .extensions()
-            .assets
-            .shares_by_owner_asset(Owner::Program(program_id), asset)
-            .try_fold(
-                extension::asset_program::asset::Unit::ZERO,
-                |sum, (_, s)| sum.checked_add(s.amount).ok_or("program balance overflow"),
-            )?;
-
-        return Ok(
-            serde_json::json!({"monetary_program":0,"asset":asset.to_string(),"program_id":kernel::crypto::program_id_to_string(&program_id),"balance":total.to_string(),"shares":shares}),
-        );
+        return Ok(serde_json::json!({
+            "monetary_program": 0,
+            "asset": asset.to_string(),
+            "program_id": kernel::crypto::program_id_to_string(&program_id),
+            "balance": balance.to_string(),
+            "share_count": share_count,
+            "shares": shares,
+            "next_cursor": next_cursor.map(|cursor| cursor.to_string()),
+        }));
     }
 
     Err("invalid program asset route".into())
 }
 
+fn parse_asset_share_page_query(
+    query: &str,
+) -> Result<(usize, Option<extension::asset_program::asset::Share>), String> {
+    let mut limit = DEFAULT_ASSET_SHARE_LIMIT;
+    let mut after = None;
+    let mut seen_limit = false;
+    let mut seen_after = false;
+    if query.is_empty() {
+        return Ok((limit, after));
+    }
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=').ok_or("invalid asset balance query")?;
+        if value.is_empty() {
+            return Err("invalid asset balance query".into());
+        }
+        match name {
+            "limit" if !seen_limit => {
+                seen_limit = true;
+                limit = value
+                    .parse::<usize>()
+                    .map_err(|_| "invalid asset share limit")?;
+                if limit == 0 || limit > MAX_ASSET_SHARE_LIMIT {
+                    return Err("asset share limit is out of range".into());
+                }
+            }
+            "after" if !seen_after => {
+                seen_after = true;
+                after = Some(
+                    value
+                        .parse::<extension::asset_program::asset::Share>()
+                        .map_err(|_| "invalid asset share cursor")?,
+                );
+            }
+            _ => return Err("invalid asset balance query".into()),
+        }
+    }
+    Ok((limit, after))
+}
+
+pub(super) fn parse_asset_account_cursor(
+    cursor: &str,
+) -> Result<
+    (
+        extension::asset_program::asset::AssetContract,
+        extension::asset_program::asset::Share,
+    ),
+    String,
+> {
+    if cursor.len() != 128 || !cursor.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("invalid asset share cursor".into());
+    }
+    let (asset, share) = cursor.split_at(64);
+    Ok((
+        asset.parse().map_err(|_| "invalid asset share cursor")?,
+        share.parse().map_err(|_| "invalid asset share cursor")?,
+    ))
+}
+
 fn program_transaction_response(
     tx: &kernel::program::AuthorizedProgramInvocation,
 
-    burn: Zeno,
+    burn: Option<Zeno>,
 ) -> serde_json::Value {
     use extension::{
         asset_program::type_::AssetCall,
@@ -917,7 +1038,7 @@ fn program_transaction_response(
 
             "outputs":coin_outputs(&tx.payment).iter().map(|o|serde_json::json!({"recipient":coin_owner_response(o.output),"amount":o.amount.as_zeno()})).collect::<Vec<_>>(),
 
-            "miner_fee":tx.payment.charges.miner_fee.as_zeno(), "protocol_burn":burn.as_zeno(),
+            "miner_fee":tx.payment.charges.miner_fee.as_zeno(), "protocol_burn":burn.map(|value| value.as_zeno()),
 
         });
     }
@@ -950,7 +1071,7 @@ fn program_transaction_response(
         Err(_) => serde_json::Value::Null,
     };
 
-    serde_json::json!({"type":"program","program_id":tx.call.program.0,"opcode":tx.call.opcode,"payload":hex::encode(&tx.call.payload),"signer":kernel::crypto::program_id_to_string(&tx.signer),"asset_instruction":instruction,"coin_inputs":tx.payment.coin_parts().map(|(i,_)|i.iter().map(ToString::to_string).collect::<Vec<_>>()),"coin_outputs":coin_outputs(&tx.payment).iter().map(|o|serde_json::json!({"recipient":coin_owner_response(o.output),"amount":o.amount.as_zeno()})).collect::<Vec<_>>(),"miner_fee":tx.payment.charges.miner_fee.as_zeno(),"protocol_burn":burn.as_zeno()})
+    serde_json::json!({"type":"program","program_id":tx.call.program.0,"opcode":tx.call.opcode,"payload":hex::encode(&tx.call.payload),"signer":kernel::crypto::program_id_to_string(&tx.signer),"asset_instruction":instruction,"coin_inputs":tx.payment.coin_parts().map(|(i,_)|i.iter().map(ToString::to_string).collect::<Vec<_>>()),"coin_outputs":coin_outputs(&tx.payment).iter().map(|o|serde_json::json!({"recipient":coin_owner_response(o.output),"amount":o.amount.as_zeno()})).collect::<Vec<_>>(),"miner_fee":tx.payment.charges.miner_fee.as_zeno(),"protocol_burn":burn.map(|value| value.as_zeno())})
 }
 
 pub(super) fn program_recipients(tx: &kernel::program::AuthorizedProgramInvocation) -> Vec<Owner> {
@@ -1037,30 +1158,7 @@ fn program_asset_summaries(
 
     program_id: ProgramId,
 ) -> Result<Vec<serde_json::Value>, String> {
-    program_account_assets(ledger, program_id)?
-        .into_iter()
-        .map(|mut entry| {
-            let shares = entry.as_object_mut().unwrap().remove("shares").unwrap();
-
-            let amount = shares
-                .as_array()
-                .unwrap()
-                .iter()
-                .try_fold(0_u128, |sum, s| {
-                    let value = s["amount"]
-                        .as_str()
-                        .ok_or("invalid program balance")?
-                        .parse::<u128>()
-                        .map_err(|_| "invalid program balance")?;
-
-                    sum.checked_add(value).ok_or("program balance overflow")
-                })?;
-
-            entry["balance"] = serde_json::Value::String(amount.to_string());
-
-            Ok(entry)
-        })
-        .collect()
+    program_account_assets(ledger, program_id)
 }
 
 fn coin_owner_response(owner: Owner) -> serde_json::Value {

@@ -28,6 +28,8 @@ impl AssetState {
             records,
             shares,
             by_owner: _,
+            owner_asset_balances: _,
+            asset_roles: _,
             supply_cache,
         } = self;
         supply_cache

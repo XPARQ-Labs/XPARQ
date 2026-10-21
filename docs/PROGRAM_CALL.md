@@ -78,7 +78,7 @@ Snapshots contain canonical state and rollback journals, not application executo
 | POST /program/deploy | Signed Borsh AuthorizedDeployProgram, without BlockOperation wrapper |
 | POST /program/deploy/quote | Draft Borsh AuthorizedDeployProgram before signing; validates deploy structure and returns commitment/burn |
 | GET /program/asset/{asset} | Metadata, supply and mint nonce |
-| GET /program/asset/{asset}/balance/{program_id} | Balance and owned shares |
+| GET /program/asset/{asset}/balance/{program_id} | Aggregate balance and a bounded page of owned shares |
 
 Program quote verifies authorization but does not validate exact payment burn.
 VM quotes also check payment input ownership/conservation and program balances. It returns `created_state_weight`, `vm_fuel` (zero for non-VM calls), and
@@ -95,8 +95,11 @@ use 8 decimals.
 
 Asset CLI commands cover register/mint/transfer/burn/consolidate/info/balance.
 `program-register` creates an asset; `program-deploy` deploys bytecode. Account
-and balance responses expose `program_assets`. Explorer indexes include asset
-recipients even when they receive no XPQ. See [OpenAPI](openapi.json) for routes.
+and balance responses expose `program_assets` summaries with aggregate balance
+and share count. Asset balance responses return at most 256 shares and provide
+`next_cursor`; account responses page shares separately with `asset_after` and
+`next_asset_cursor`. Explorer indexes include asset recipients even when they
+receive no XPQ. See [OpenAPI](openapi.json) for routes.
 
 ## Storage and compatibility
 

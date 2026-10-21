@@ -656,19 +656,9 @@ fn legacy_apply(
             .iter()
             .map(|(&key, &value)| (key, value))
             .collect(),
-        by_owner: state
-            .by_owner
-            .iter()
-            .map(|(&owner, assets)| {
-                (
-                    owner,
-                    assets
-                        .iter()
-                        .map(|(&asset, ids)| (asset, ids.keys().map(|&id| (id, ())).collect()))
-                        .collect(),
-                )
-            })
-            .collect(),
+        by_owner: state.by_owner.clone(),
+        owner_asset_balances: state.owner_asset_balances.clone(),
+        asset_roles: state.asset_roles.clone(),
         supply_cache: SupplyAuditCache::default(),
     };
     next.apply_monetary_operation(call, context)?;

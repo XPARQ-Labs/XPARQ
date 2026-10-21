@@ -2,14 +2,64 @@ use std::{
     collections::{BTreeMap, VecDeque},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, ToSocketAddrs},
-    sync::mpsc,
+    sync::{Condvar, Mutex, mpsc},
     time::{Duration, Instant},
 };
 
 use socket2::{Domain, Protocol, Socket, Type};
+use tokio::net::TcpListener as TokioTcpListener;
 
 use super::*;
 use super::{chain_sync::*, config::*, gossip::*, mempool::*, protocol::*, state::*, util::*};
+
+pub(super) struct SyncGate {
+    active: Mutex<usize>,
+    available: Condvar,
+    limit: usize,
+}
+
+impl SyncGate {
+    pub(super) fn new(limit: usize) -> Self {
+        Self {
+            active: Mutex::new(0),
+            available: Condvar::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    fn acquire(&self) -> Result<SyncPermit<'_>, String> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| "peer sync gate lock is poisoned")?;
+        while *active >= self.limit {
+            active = self
+                .available
+                .wait(active)
+                .map_err(|_| "peer sync gate lock is poisoned")?;
+        }
+        *active += 1;
+        Ok(SyncPermit { gate: self })
+    }
+}
+
+struct SyncPermit<'a> {
+    gate: &'a SyncGate,
+}
+
+impl Drop for SyncPermit<'_> {
+    fn drop(&mut self) {
+        let mut active = self
+            .gate
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *active = active.saturating_sub(1);
+        self.gate.available.notify_one();
+    }
+}
+
+pub(super) const MAX_CONCURRENT_SYNC_SESSIONS: usize = 2;
 
 pub(super) fn serve_p2p(path: Option<&str>, listen: &str) -> Result<(), String> {
     let database = database_path(path);
@@ -19,21 +69,60 @@ pub(super) fn serve_p2p(path: Option<&str>, listen: &str) -> Result<(), String> 
 
 pub(super) fn serve_p2p_database(database: PathBuf, listen: &str) -> Result<(), String> {
     let listeners = bind_p2p_listeners(listen).map_err(|error| format!("bind P2P: {error}"))?;
-    println!("p2p: {listen}");
+    let bound = listeners
+        .iter()
+        .filter_map(|listener| listener.local_addr().ok())
+        .map(|address| address.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("p2p: {bound}");
     let active = Arc::new(AtomicUsize::new(0));
     let active_by_ip = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
     let rejected_until = Arc::new(Mutex::new(BTreeMap::<IpAddr, (u32, Instant)>::new()));
     let (sender, receiver) = mpsc::channel();
-    for listener in listeners {
-        let sender = sender.clone();
-        thread::spawn(move || {
-            for connection in listener.incoming() {
-                if sender.send(connection).is_err() {
-                    break;
-                }
+    let accept_sender = sender.clone();
+    thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = accept_sender.send(Err(io::Error::other(format!(
+                    "create P2P runtime: {error}"
+                ))));
+                return;
             }
+        };
+        runtime.block_on(async move {
+            let listeners = match listeners
+                .into_iter()
+                .map(TokioTcpListener::from_std)
+                .collect::<io::Result<Vec<_>>>()
+            {
+                Ok(listeners) => listeners,
+                Err(error) => {
+                    let _ = accept_sender.send(Err(error));
+                    return;
+                }
+            };
+            for listener in listeners {
+                let sender = accept_sender.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let accepted = listener
+                            .accept()
+                            .await
+                            .and_then(|(stream, _)| stream.into_std());
+                        if sender.send(accepted).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            std::future::pending::<()>().await;
         });
-    }
+    });
     drop(sender);
     for connection in receiver {
         match connection {
@@ -122,34 +211,27 @@ fn bind_p2p_listeners(listen: &str) -> io::Result<Vec<TcpListener>> {
             "P2P listen address must be an IP socket address",
         )
     })?;
-    if requested.ip() == IpAddr::V4(Ipv4Addr::UNSPECIFIED) {
-        match bind_dual_stack(requested.port()) {
-            Ok(listener) => return Ok(vec![listener]),
+    let listeners = if requested.ip().is_unspecified() {
+        let port = requested.port();
+        let v6_listener = bind_v6_only(port);
+        match v6_listener {
+            Ok(v6_listener) => {
+                let port = v6_listener.local_addr()?.port();
+                let v4_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
+                vec![v6_listener, v4_listener]
+            }
             Err(error) if can_fall_back_to_separate_families(&error) => {
-                match bind_v6_only(requested.port()) {
-                    Ok(v6_listener) => {
-                        let v4_listener = TcpListener::bind(requested)?;
-                        return Ok(vec![v4_listener, v6_listener]);
-                    }
-                    Err(error) if can_fall_back_to_separate_families(&error) => {
-                        return Ok(vec![TcpListener::bind(requested)?]);
-                    }
-                    Err(error) => return Err(error),
-                }
+                vec![TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?]
             }
             Err(error) => return Err(error),
         }
+    } else {
+        vec![TcpListener::bind(requested)?]
+    };
+    for listener in &listeners {
+        listener.set_nonblocking(true)?;
     }
-    Ok(vec![TcpListener::bind(requested)?])
-}
-
-fn bind_dual_stack(port: u16) -> io::Result<TcpListener> {
-    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
-    socket.set_only_v6(false)?;
-    socket.set_reuse_address(true)?;
-    socket.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
-    socket.listen(1024)?;
-    Ok(socket.into())
+    Ok(listeners)
 }
 
 fn bind_v6_only(port: u16) -> io::Result<TcpListener> {
@@ -258,8 +340,8 @@ pub(super) fn run_network(
 ) -> Result<(), String> {
     let database = database_path(path);
     load_or_initialize(&database)?;
-    let sync_lock = Arc::new(Mutex::new(()));
-    start_peer_supervisor(database.clone(), peers.to_vec(), sync_lock);
+    let sync_gate = Arc::new(SyncGate::new(MAX_CONCURRENT_SYNC_SESSIONS));
+    start_peer_supervisor(database.clone(), peers.to_vec(), sync_gate);
     println!("outbound_peers: {}", peers.len());
     serve_p2p_database(database, listen)
 }
@@ -267,7 +349,7 @@ pub(super) fn run_network(
 pub(super) fn start_peer_supervisor(
     database: PathBuf,
     configured: Vec<String>,
-    sync_lock: Arc<Mutex<()>>,
+    sync_gate: Arc<SyncGate>,
 ) {
     let configured: Vec<_> = configured
         .into_iter()
@@ -312,18 +394,33 @@ pub(super) fn start_peer_supervisor(
                 active.insert(peer.clone());
                 dialing += 1;
                 let database = database.clone();
-                let sync_lock = Arc::clone(&sync_lock);
+                let sync_gate = Arc::clone(&sync_gate);
                 let events = events.clone();
                 let public_only = !configured.contains(&peer);
                 let mut consecutive_failures: u32 =
                     retry.get(&peer).map_or(0, |(failures, _)| *failures);
                 thread::spawn(move || {
-                    let dialed = dial_peer_database_with_policy(&database, &peer, public_only);
-                    let _ = events.send((peer.clone(), None));
-                    let result = dialed.and_then(|connection| match sync_lock.lock() {
-                        Ok(_guard) => synchronize_peer_database(&database, &peer, connection),
-                        Err(_) => Err("outbound sync lock is poisoned".into()),
-                    });
+                    let sync_started = Instant::now();
+                    let result = match sync_gate.acquire() {
+                        Ok(_permit) => {
+                            let dialed =
+                                dial_peer_database_with_policy(&database, &peer, public_only);
+                            let _ = events.send((peer.clone(), None));
+                            dialed.and_then(|connection| {
+                                synchronize_peer_database(&database, &peer, connection)
+                            })
+                        }
+                        Err(error) => {
+                            let _ = events.send((peer.clone(), None));
+                            Err(error)
+                        }
+                    };
+                    if let Err(error) = &result {
+                        super::mining::log_node(format!(
+                            "p2p_sync_failed: peer={peer} elapsed_ms={:.3} reason={error}",
+                            sync_started.elapsed().as_secs_f64() * 1_000.0,
+                        ));
+                    }
                     let reconnect_after = match result {
                         Ok(mut connection) => {
                             consecutive_failures = 0;
@@ -437,32 +534,58 @@ fn connect_with_policy(
     let addresses = peer
         .to_socket_addrs()
         .map_err(|error| format!("resolve peer: {error}"))?;
-    let deadline = Instant::now() + timeout;
-    let mut last_error = "peer resolved to no admissible addresses".to_string();
-    for address in interleave(addresses.collect()) {
-        if public_only && !is_admissible_discovered_peer(&address) {
-            continue;
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err("connect peer: dial timeout".into());
-        }
-        match TcpStream::connect_timeout(&address, remaining.min(PER_ADDRESS_TIMEOUT)) {
-            Ok(stream) => {
-                configure_p2p_stream(&stream)
-                    .map_err(|error| format!("configure peer stream: {error}"))?;
-                return Ok(stream);
-            }
-            Err(error) => last_error = error.to_string(),
-        }
+    let addresses: Vec<_> = interleave(addresses.collect())
+        .into_iter()
+        .filter(|address| !public_only || is_admissible_discovered_peer(address))
+        .collect();
+    if addresses.is_empty() {
+        return Err("peer resolved to no admissible addresses".into());
     }
-    Err(format!("connect peer: {last_error}"))
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("create peer dial runtime: {error}"))?;
+    let stream = runtime
+        .block_on(async move {
+            let deadline = tokio::time::Instant::now() + timeout;
+            let mut attempts = tokio::task::JoinSet::new();
+            for (index, address) in addresses.into_iter().enumerate() {
+                attempts.spawn(async move {
+                    if index != 0 {
+                        tokio::time::sleep(Duration::from_millis(250 * index as u64)).await;
+                    }
+                    tokio::time::timeout_at(deadline, tokio::net::TcpStream::connect(address))
+                        .await
+                        .map_err(|_| "dial timeout".to_string())?
+                        .map_err(|error| error.to_string())
+                });
+            }
+            let mut last_error = "dial timeout".to_string();
+            while let Some(result) = attempts.join_next().await {
+                match result {
+                    Ok(Ok(stream)) => {
+                        attempts.abort_all();
+                        return stream.into_std().map_err(|error| error.to_string());
+                    }
+                    Ok(Err(error)) => last_error = error,
+                    Err(error) => last_error = error.to_string(),
+                }
+            }
+            Err(last_error)
+        })
+        .map_err(|error| format!("connect peer: {error}"))?;
+    configure_p2p_stream(&stream).map_err(|error| format!("configure peer stream: {error}"))?;
+    Ok(stream)
 }
 
-const PER_ADDRESS_TIMEOUT: Duration = Duration::from_secs(3);
 const P2P_SESSION_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn configure_p2p_stream(stream: &TcpStream) -> io::Result<()> {
+    // Both inbound and outbound streams arrive here through Tokio's
+    // `into_std`, which deliberately leaves the std stream nonblocking.
+    // The P2P protocol below uses blocking `read_exact`/`write_all` with
+    // socket timeouts, so restore blocking mode before handing it off.
+    stream.set_nonblocking(false)?;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(P2P_SESSION_TIMEOUT))?;
     stream.set_write_timeout(Some(P2P_SESSION_TIMEOUT))
@@ -492,8 +615,17 @@ fn dial_peer_database_with_policy(
     public_only: bool,
 ) -> Result<ConnectedPeer, String> {
     load_or_initialize(database)?;
+    let dial_started = Instant::now();
     let mut stream = connect_with_policy(peer, DIAL_TIMEOUT, public_only)?;
+    let dial_time = dial_started.elapsed();
+    let handshake_started = Instant::now();
     let handshake = exchange_handshake(database, &mut stream)?.peer;
+    super::mining::log_node(format!(
+        "p2p_handshake: peer={peer} dial_ms={:.3} handshake_ms={:.3} height={}",
+        dial_time.as_secs_f64() * 1_000.0,
+        handshake_started.elapsed().as_secs_f64() * 1_000.0,
+        handshake.tip_height.0,
+    ));
     Ok(ConnectedPeer { handshake, stream })
 }
 
@@ -502,6 +634,7 @@ fn synchronize_peer_database(
     peer: &str,
     connection: ConnectedPeer,
 ) -> Result<ConnectedPeer, String> {
+    let started = Instant::now();
     let ConnectedPeer {
         handshake,
         mut stream,
@@ -517,14 +650,24 @@ fn synchronize_peer_database(
     )? {
         return Err("peer chain is below configured work/weight minimums".into());
     }
+    let header_started = Instant::now();
     let sync = synchronize_headers(database, &mut stream, &handshake)?;
     let verified = sync.headers.len();
     let preferred = sync.preferred;
+    super::mining::log_node(format!(
+        "p2p_sync_headers: peer={peer} verified={verified} preferred={preferred} elapsed_ms={:.3}",
+        header_started.elapsed().as_secs_f64() * 1_000.0,
+    ));
+    let block_started = Instant::now();
     let applied = if preferred {
         synchronize_blocks(database, &mut stream, sync)?
     } else {
         0
     };
+    super::mining::log_node(format!(
+        "p2p_sync_blocks: peer={peer} applied={applied} elapsed_ms={:.3}",
+        block_started.elapsed().as_secs_f64() * 1_000.0,
+    ));
     let discovered = if handshake.capabilities & CAPABILITY_PEER_DISCOVERY != 0 {
         request_discovered_peers(&mut stream)?
     } else {
@@ -559,6 +702,10 @@ fn synchronize_peer_database(
         handshake.tip_height.0,
         hex::encode(handshake.tip_hash),
         format_work(handshake.cumulative_work),
+    ));
+    super::mining::log_node(format!(
+        "p2p_sync_complete: peer={peer} verified_headers={verified} applied_blocks={applied} elapsed_ms={:.3}",
+        started.elapsed().as_secs_f64() * 1_000.0,
     ));
     Ok(ConnectedPeer { handshake, stream })
 }
@@ -890,17 +1037,19 @@ pub(super) fn serve_block_requests(
 
 fn encode_discovery_addresses(mut peers: Vec<String>) -> Result<Vec<u8>, String> {
     peers.truncate(MAX_DISCOVERED_PEERS);
-    // Borsh Vec<String>: count plus each string's length prefix and bytes.
-    let mut size = 4;
-    let count = peers
+    let addresses = peers
         .iter()
-        .take_while(|peer| {
-            size += 4 + peer.len();
-            size <= MAX_PEERS_RESPONSE_SIZE
-        })
-        .count();
-    peers.truncate(count);
-    canonical_bytes(&peers).map_err(|error| error.to_string())
+        .filter_map(|peer| peer.parse::<SocketAddr>().ok())
+        .collect::<Vec<_>>();
+    let mut encoded = encode_peer_endpoints(&addresses, MAX_DISCOVERED_PEERS);
+    while encoded.len() > MAX_PEERS_RESPONSE_SIZE && !addresses.is_empty() {
+        let shortened = &addresses[..addresses.len() - 1];
+        encoded = encode_peer_endpoints(shortened, MAX_DISCOVERED_PEERS);
+        if shortened.is_empty() {
+            break;
+        }
+    }
+    Ok(encoded)
 }
 
 pub(super) fn record_discovered_peers(
@@ -1017,16 +1166,14 @@ pub(super) fn refresh_peer_addresses(
 
 fn encode_peer_announcement_addresses(mut peers: Vec<String>) -> Result<Vec<u8>, String> {
     peers.truncate(MAX_PEER_ANNOUNCEMENT_ENDPOINTS);
-    let mut size = 4;
-    let count = peers
+    let addresses = peers
         .iter()
-        .take_while(|peer| {
-            size += 4 + peer.len();
-            size <= MAX_PEERS_RESPONSE_SIZE
-        })
-        .count();
-    peers.truncate(count);
-    canonical_bytes(&peers).map_err(|error| error.to_string())
+        .filter_map(|peer| peer.parse::<SocketAddr>().ok())
+        .collect::<Vec<_>>();
+    Ok(encode_peer_endpoints(
+        &addresses,
+        MAX_PEER_ANNOUNCEMENT_ENDPOINTS,
+    ))
 }
 
 fn check_peer_announcement_rate_limit(
@@ -1126,9 +1273,15 @@ mod connection_tests {
         assert!(endpoint.parse::<PeerAddress>().unwrap().is_admissible());
         let encoded = encode_discovery_addresses(vec![endpoint; MAX_DISCOVERED_PEERS]).unwrap();
         assert!(encoded.len() <= MAX_PEERS_RESPONSE_SIZE);
-        let decoded: Vec<String> = canonical_decode(&encoded).unwrap();
-        assert!(!decoded.is_empty());
-        assert!(decoded.len() < MAX_DISCOVERED_PEERS);
+        assert_eq!(u16::from_be_bytes(encoded[..2].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn peer_exchange_binary_codec_round_trips_ipv6() {
+        let endpoint = "[2001:4860:4860::8888]:6677";
+        let encoded = encode_discovery_addresses(vec![endpoint.to_string()]).unwrap();
+        let decoded = decode_peer_addresses(&encoded, MAX_DISCOVERED_PEERS).unwrap();
+        assert_eq!(decoded, vec![endpoint.parse::<PeerAddress>().unwrap()]);
     }
 
     #[test]

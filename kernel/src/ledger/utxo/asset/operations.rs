@@ -104,6 +104,8 @@ impl AssetState {
                         total_burned: Unit::ZERO,
                     },
                 );
+                self.index_asset_role(asset, context.actor);
+                self.index_asset_role(asset, call.mint_authority);
             }
 
             AssetCall::Mint(call) => {

@@ -197,7 +197,9 @@ pub(super) fn synchronize_blocks(
     stream: &mut TcpStream,
     sync: HeaderSyncResult,
 ) -> Result<usize, String> {
+    let download_started = std::time::Instant::now();
     let mut blocks = Vec::with_capacity(sync.headers.len());
+    let mut downloaded_bytes = 0_u64;
     for expected in &sync.headers {
         let expected_hash = expected.hash().map_err(|error| error.to_string())?;
         let mut request = Vec::with_capacity(33);
@@ -208,6 +210,7 @@ pub(super) fn synchronize_blocks(
         if response.first() != Some(&BLOCK_MESSAGE) {
             return Err("peer returned an unexpected block response".into());
         }
+        downloaded_bytes = downloaded_bytes.saturating_add(response.len() as u64);
         let block =
             decode_block(&response[1..]).map_err(|error| format!("invalid peer block: {error}"))?;
         if block.height() != expected.height
@@ -222,7 +225,19 @@ pub(super) fn synchronize_blocks(
         notify_gossip();
         blocks.push(block);
     }
-    apply_verified_branch(database, sync, blocks)
+    super::mining::log_node(format!(
+        "p2p_block_download: blocks={} bytes={downloaded_bytes} elapsed_ms={:.3}",
+        blocks.len(),
+        download_started.elapsed().as_secs_f64() * 1_000.0,
+    ));
+    let block_count = blocks.len();
+    let apply_started = std::time::Instant::now();
+    let applied = apply_verified_branch(database, sync, blocks)?;
+    super::mining::log_node(format!(
+        "p2p_block_apply: downloaded={block_count} applied={applied} elapsed_ms={:.3}",
+        apply_started.elapsed().as_secs_f64() * 1_000.0,
+    ));
+    Ok(applied)
 }
 
 pub(super) fn apply_verified_branch(

@@ -191,7 +191,9 @@ pub fn account_wallet_for_legacy_transfer_from_file_bytes(
         .iter()
         .map(|salt| wallet_salt_bytes_from_string(salt))
         .collect::<Result<Vec<_>, _>>()?;
-    let unique_salts = listed_salts.iter().collect::<std::collections::BTreeSet<_>>();
+    let unique_salts = listed_salts
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
     if listed_salts.is_empty()
         || listed_salts.len() > MAX_WALLET_ACCOUNTS
         || unique_salts.len() != listed_salts.len()

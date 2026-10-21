@@ -74,10 +74,9 @@ transfer in canonical share-ID order, stopping when funded, and returns change
 to that program. Wallet signature policies cannot spend shares owned by deployed contracts.
 Receiving does not require deployment; executing bytecode does.
 
-Recipient and amount are embedded in code. Calls are public and can trigger the
-fixed payout repeatedly while funded. There are no caller checks, branches,
-arbitrary call arguments, cross-contract calls, or dynamic withdrawal policies
-in this initial transfer instruction set.
+For v2/v3, recipient and amount are embedded in code. Calls are public and can
+trigger the fixed payout repeatedly while funded. The v4 vault example adds an
+owner check and reads a chosen recipient and amount from authenticated call data.
 
 Payment, both transfers, and the scalar state effect commit atomically. Failed
 execution, insufficient balance, invalid ownership, or output collision commits
@@ -87,7 +86,7 @@ coin UTXO counts, asset state growth, and fuel. The caller pays these costs.
 
 Send funds with `--to program:HEX_PROGRAM_ID` on `sign-spend`, `program-transfer`,
 or `program-mint`. Inspect balances using `program-account --program-id HEX_ID`
-or `GET /program/account/HEX_ID`. See the [fixed payout example](../examples/vault/README.md).
+or `GET /program/account/HEX_ID`. See the [owner-controlled vault example](../examples/vault/README.md).
 
 CoinOutput's Borsh recipient uses a tagged Program owner,
 coin state-weight accounting, and chain-spec 1/schema 1 compatibility.

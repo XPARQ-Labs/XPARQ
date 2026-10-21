@@ -88,7 +88,7 @@ public bytes. `account-use` selects a salt already recorded in the file. `sign-s
 also accepts `--legacy-salt HEX64` for one XPQ transfer; it does not add that
 32-byte salt as a wallet account. All balance,
 history, transfer, asset and deploy commands then use the active account. The
-interactive menu provides **13. Manage Accounts**: `add` generates and selects
+interactive menu provides **12. Manage Accounts**: `add` generates and selects
 a new account; `use` selects a recorded salt. Both update the same wallet JSON.
 `account_salts` retains all accounts, while `account_salt` and `program_id` identify
 the active one; other ProgramIds are derived when listing accounts. The file supports up to 256
