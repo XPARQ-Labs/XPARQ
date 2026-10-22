@@ -1,5 +1,5 @@
 use super::burn::MINER_PROTOCOL_BURN;
-use crate::{blockchain::Block, common::Height, monetary::coin::Zeno};
+use crate::{blockchain::Block, common::Height, monetary::coin::Zeno, operation::BlockOperation};
 use crypto::{Hash, HashDomain, ProgramId, canonical_bytes, domain};
 use static_assertions::const_assert;
 use std::{error::Error as StdError, fmt};
@@ -14,6 +14,10 @@ pub const EMISSION_RISING_STEPS: u64 = 5;
 pub const EMISSION_HALVINGS_TO_TAIL: u64 = 6;
 
 pub const EMISSION_INTERVAL: u64 = 100_000;
+
+/// First block whose scheduled gross subsidy is the permanent tail amount.
+pub const FOTE_ACTIVATION_HEIGHT: u64 =
+    (EMISSION_RISING_STEPS + EMISSION_HALVINGS_TO_TAIL) * EMISSION_INTERVAL + 1;
 
 const_assert!(BLOCK_EMISSION_START * (1_u64 << EMISSION_RISING_STEPS) == MAX_BLOCK_EMISSION);
 
@@ -93,6 +97,7 @@ impl ValidatedEmission {
 pub enum EmissionError {
     MissingEmission,
     InvalidSubsidy,
+    ArithmeticOverflow,
     Serialization,
 }
 
@@ -101,6 +106,7 @@ impl fmt::Display for EmissionError {
         match self {
             Self::MissingEmission => f.write_str("block emission is missing"),
             Self::InvalidSubsidy => f.write_str("block emission subsidy is invalid"),
+            Self::ArithmeticOverflow => f.write_str("block emission arithmetic overflow"),
             Self::Serialization => f.write_str("emission encoding failed"),
         }
     }
@@ -130,7 +136,7 @@ pub fn emission_origin(block: &Block) -> Result<Hash, EmissionError> {
 pub(crate) fn authorize_emission(block: &Block) -> Result<ValidatedEmission, EmissionError> {
     let emission = block.emission().ok_or(EmissionError::MissingEmission)?;
 
-    let expected = block_emission_for_height(block.height());
+    let expected = expected_emission_for_operations(block.height(), block.operations())?;
 
     if emission.subsidy != expected {
         return Err(EmissionError::InvalidSubsidy);
@@ -154,6 +160,41 @@ pub(crate) fn authorize_emission(block: &Block) -> Result<ValidatedEmission, Emi
     })
 }
 
+/// Calculates the canonical block subsidy from its operations.
+///
+/// Before FOTE activation this is the historical height-only schedule. From
+/// activation onward, valid operation fees credited to the block miner offset
+/// the net tail issuance. Invalid operations still cause block execution to
+/// fail; their encoded fees cannot make an invalid block valid.
+pub fn expected_emission_for_operations(
+    height: Height,
+    operations: &[BlockOperation],
+) -> Result<Zeno, EmissionError> {
+    let scheduled = block_emission_for_height(height);
+    if height.0 < FOTE_ACTIVATION_HEIGHT {
+        return Ok(scheduled);
+    }
+
+    let fees = operations.iter().try_fold(Zeno::ZERO, |total, operation| {
+        let fee = match operation {
+            BlockOperation::ProgramCall(call) => call.payment.charges.miner_fee,
+            BlockOperation::DeployProgram(deploy) => deploy.payment.charges.miner_fee,
+        };
+        total
+            .checked_add(fee)
+            .ok_or(EmissionError::ArithmeticOverflow)
+    })?;
+
+    let net_tail = scheduled
+        .checked_sub(MINER_PROTOCOL_BURN)
+        .ok_or(EmissionError::InvalidSubsidy)?;
+    let net_issuance = net_tail.checked_sub(fees).unwrap_or(Zeno::ZERO);
+    MINER_PROTOCOL_BURN
+        .checked_add(net_issuance)
+        .ok_or(EmissionError::ArithmeticOverflow)
+}
+
+/// Returns the height-scheduled gross subsidy before any FOTE fee offset.
 pub fn expected_emission_for_height(height: Height) -> Zeno {
     block_emission_for_height(height)
 }

@@ -14,7 +14,8 @@ For a non-genesis block, a node checks that:
 2. Its height follows its parent and its previous-block hash names that parent.
 3. Its target is the one required by the active difficulty rule, and its
    Argon2id proof of work meets that target.
-4. Its emission declares the exact subsidy for its height.
+4. Its emission declares the exact subsidy required by the height schedule and,
+   from height `1,100,001`, the block's valid miner fees.
 5. Applying its operations produces valid authorization, ownership, value
    conservation, required protocol burns, and the committed canonical state.
 
@@ -41,20 +42,19 @@ boundary examples are in [WBDA.md](WBDA.md).
 
 ## Emission and protocol burn
 
-The active [emission model](EMISSION.md) prescribes gross subsidy by block
-height. It starts at 1.562500 XPQ, rises to 50 XPQ, then halves to a permanent
-0.781250 XPQ tail. Every non-genesis block must declare the exact scheduled
-subsidy. The fixed miner protocol burn is deducted from that subsidy. Valid
-transaction miner fees are credited separately and do not reduce active
-subsidy.
+The [emission model](EMISSION.md) starts at 1.562500 XPQ, rises to 50 XPQ, then
+halves to a permanent 0.781250 XPQ tail. Through height `1,100,000`, every
+non-genesis block declares the exact scheduled subsidy and miner fees are
+credited separately. Starting at height `1,100,001`, the scheduled
+[FOTE](FOTE.md) rule reduces net tail issuance by the block's valid miner fees,
+down to zero. The protocol burn remains deducted from the gross subsidy.
 
 Transactions must also satisfy the protocol's archival and net state-growth
 burn rules. See [program-call validation](docs/PROGRAM_CALL.md) and the burn
 policy in `kernel/src/consensus/policy/burn.rs` for details.
 
-[FOTE](FOTE.md) proposes using eligible transaction fees to offset tail
-emission. It is not active: the current subsidy remains height-based, and FOTE
-would require a coordinated consensus upgrade.
+[FOTE](FOTE.md) activates at the fixed tail-emission height. Chain-spec identity
+includes this consensus rule; nodes must upgrade as a coordinated network.
 
 ## Fork choice
 
@@ -83,7 +83,7 @@ from starting with its local chain.
 
 - [WBDA](WBDA.md): active weight-based difficulty adjustment.
 - [Emission model](EMISSION.md): active subsidy schedule and miner emission.
-- [FOTE](FOTE.md): proposed fee-offset tail emission; inactive.
+- [FOTE](FOTE.md): fee-offset tail emission, active from height `1,100,001`.
 - [Architecture](docs/ARCHITECTURE.md): consensus module responsibilities.
 - `kernel/src/consensus/block.rs`: canonical block admission.
 - `kernel/src/consensus/pow.rs`: Argon2id proof-of-work construction.

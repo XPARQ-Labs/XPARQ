@@ -917,7 +917,9 @@ See [ProgramCall integration](docs/PROGRAM_CALL.md) for registration, mint,
 transfer, burn and consolidation instructions.
 
 All monetary Program calls carry `CoinTransition` with `CoinCharges { miner_fee }`.
-The miner fee is credited to the block miner as a separate UTXO. Protocol burn
+The miner fee is credited to the block miner as a separate UTXO. From height
+1,100,001, eligible fees also reduce net tail emission under FOTE; the block
+protocol burn remains applied to the gross subsidy. Transaction protocol burn
 is the verified difference between XPQ inputs, program-owned outputs and the
 miner fee. Coin outputs encode the recipient Program ID.
 

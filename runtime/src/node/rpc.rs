@@ -259,7 +259,7 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
             serde_json::json!({"operations": operations})
         }
         "/fee-policy" => {
-            let emission = expected_next_emission(&ledger)?;
+            let emission = expected_next_emission(&ledger, &[])?;
             serde_json::json!({
                 "minimum_fee_rate_zeno_per_byte": MIN_RELAY_FEE_ZENO_PER_BYTE,
                 "state_burn_algorithm": kernel::consensus::STATE_BURN_ALGORITHM,

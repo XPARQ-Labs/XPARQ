@@ -573,7 +573,7 @@ pub(super) fn candidate_operation_block(
     );
     let previous = ledger.tip_hash().ok_or("canonical genesis is missing")?;
     let difficulty = expected_next_difficulty(&ledger.chain).map_err(|error| error.to_string())?;
-    let subsidy = expected_next_emission(ledger)?;
+    let subsidy = expected_next_emission(ledger, &operations)?;
     let mut block = Block::from_protocol_operations(
         height,
         previous,
@@ -591,12 +591,16 @@ pub(super) fn candidate_operation_block(
     Ok(block)
 }
 
-pub(super) fn expected_next_emission(ledger: &Ledger) -> Result<Zeno, String> {
+pub(super) fn expected_next_emission(
+    ledger: &Ledger,
+    operations: &[kernel::operation::BlockOperation],
+) -> Result<Zeno, String> {
     let height = Height(
         ledger
             .tip_height()
             .map_or(0, |height| height.0.saturating_add(1)),
     );
 
-    Ok(expected_emission_for_height(height))
+    kernel::consensus::expected_emission_for_operations(height, operations)
+        .map_err(|error| error.to_string())
 }

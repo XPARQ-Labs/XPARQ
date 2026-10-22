@@ -8,8 +8,8 @@ use crate::{
     common::Nonce,
     consensus::{
         BLOCK_EMISSION_START, COIN_UTXO_STATE_WEIGHT, DIFFICULTY_ALGORITHM, EMISSION_INTERVAL,
-        EMISSION_RISING_STEPS, EMPTY_BLOCK_ARCHIVAL_BYTES, POW_ALGORITHM, POW_ARGON2_ITERATIONS,
-        POW_ARGON2_LANES, POW_ARGON2_MEMORY_KIB, STATE_BURN_ALGORITHM,
+        EMISSION_RISING_STEPS, EMPTY_BLOCK_ARCHIVAL_BYTES, FOTE_ACTIVATION_HEIGHT, POW_ALGORITHM,
+        POW_ARGON2_ITERATIONS, POW_ARGON2_LANES, POW_ARGON2_MEMORY_KIB, STATE_BURN_ALGORITHM,
         STATE_BURN_RATE_ZENO_PER_BYTE, TAIL_BLOCK_EMISSION, TARGET_BITS_START,
         WBDA_HIGH_UTILIZATION_PPM, WBDA_LOW_UTILIZATION_PPM, WBDA_TARGET_BLOCK_WEIGHT, WBDA_WINDOW,
     },
@@ -67,7 +67,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`]
 /// changes.
-pub const CHAIN_SPEC_VERSION: u32 = 1;
+pub const CHAIN_SPEC_VERSION: u32 = 2;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -96,6 +96,8 @@ struct ChainSpecIdentity<'a> {
     emission_rising_steps: u64,
     emission_interval: u64,
     tail_block_emission: u64,
+    fote_activation_height: u64,
+    tail_emission_rule: &'a str,
 
     // Protocol burn
     state_burn_algorithm: &'a str,
@@ -171,6 +173,8 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         emission_rising_steps: EMISSION_RISING_STEPS,
         emission_interval: EMISSION_INTERVAL,
         tail_block_emission: TAIL_BLOCK_EMISSION,
+        fote_activation_height: FOTE_ACTIVATION_HEIGHT,
+        tail_emission_rule: "fee-offset-net-tail-v1",
 
         // Protocol burn
         state_burn_algorithm: STATE_BURN_ALGORITHM,
@@ -238,12 +242,12 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 mod phase3_chain_spec_tests {
     #[test]
     fn bounded_work_rules_have_frozen_mainnet_chain_spec_identity() {
-        assert_eq!(super::CHAIN_SPEC_VERSION, 1);
+        assert_eq!(super::CHAIN_SPEC_VERSION, 2);
         assert_eq!(
             super::chain_spec_hash().unwrap().into_bytes(),
             [
-                214, 203, 93, 185, 196, 175, 20, 63, 33, 123, 83, 191, 223, 186, 224, 48, 31, 241,
-                100, 123, 18, 122, 225, 238, 182, 156, 145, 113, 207, 102, 7, 188
+                253, 72, 127, 139, 73, 188, 238, 228, 195, 17, 98, 125, 165, 87, 225, 45, 95, 245,
+                7, 216, 220, 232, 69, 92, 94, 53, 223, 226, 212, 226, 210, 159
             ]
         );
     }

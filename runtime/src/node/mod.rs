@@ -25,10 +25,7 @@ use kernel::{
     block::{Block, Emission},
     codec::{block_bytes, decode_block},
     common::{Height, Nonce},
-    consensus::{
-        Work, apply_block, compare_chain_tips, expected_emission_for_height,
-        expected_next_difficulty, new_pow_memory,
-    },
+    consensus::{Work, apply_block, compare_chain_tips, expected_next_difficulty, new_pow_memory},
     crypto::{BlockHash, ProgramId, canonical_bytes, canonical_decode, program_id_from_string},
     genesis::{EXPECTED_GENESIS_HASH, chain_spec_hash, genesis_block},
     ledger::Ledger,
@@ -36,6 +33,9 @@ use kernel::{
     operation::BlockOperation,
     program::{AuthorizedProgramEnvelope, ProgramEnvelope as Transaction},
 };
+
+#[cfg(test)]
+use kernel::consensus::expected_emission_for_height;
 
 #[cfg(test)]
 use kernel::crypto::PoWMemory;

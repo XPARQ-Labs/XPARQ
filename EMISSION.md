@@ -2,21 +2,23 @@
 
 ## Status
 
-This document describes the active, height-based XPARQ block-emission schedule.
-It does not activate the proposed Fee-Offset Tail Emission (FOTE) described in
-[`FOTE.md`](FOTE.md).
+This document describes the height-based XPARQ block-emission schedule and the
+scheduled Fee-Offset Tail Emission (FOTE) described in [`FOTE.md`](FOTE.md).
+FOTE activates at block height `1,100,001`.
 
 ## Units and validation
 
-XPQ is represented in integer zeno, with 100,000,000 zeno per XPQ. Emission is
-determined by block height, not elapsed time, transaction fees, block weight, or
-miner identity. The genesis block has no emission. Every later block must declare
-the exact subsidy prescribed for its height or consensus rejects it.
+XPQ is represented in integer zeno, with 100,000,000 zeno per XPQ. Before
+height `1,100,001`, emission is determined by block height. From that height
+onward, transaction miner fees reduce net tail issuance. The genesis block has
+no emission. Every later block must declare the exact subsidy prescribed by the
+active rule or consensus rejects it.
 
-The listed subsidy is the gross per-block subsidy. The protocol subtracts the
-fixed `MINER_PROTOCOL_BURN` from it to calculate the miner's emission. The miner
-also receives valid transaction miner fees separately; those fees do not reduce
-the active block subsidy.
+The listed subsidy is the scheduled gross per-block subsidy. Before FOTE
+activation, the protocol subtracts the fixed `MINER_PROTOCOL_BURN` from it to
+calculate the miner's emission, and valid transaction fees are credited
+separately. At and after activation, the fee-offset rule may reduce the gross
+subsidy while preserving the protocol burn.
 
 ## Schedule
 
@@ -24,7 +26,7 @@ The schedule uses 100,000-block intervals. It starts at 1.562500 XPQ, doubles
 for five intervals to a 50 XPQ peak, then halves for six intervals until it
 reaches a permanent 0.781250 XPQ tail.
 
-| Block heights | Gross subsidy per block |
+| Block heights | Scheduled gross subsidy per block |
 | --- | ---: |
 | 1–100,000 | 1.562500 XPQ |
 | 100,001–200,000 | 3.125000 XPQ |
@@ -56,28 +58,31 @@ are for display.
 
 ## Miner reward and issuance
 
-Let `E(h)` be the gross subsidy for height `h`, and `B` be
-`MINER_PROTOCOL_BURN`. The emission component paid to the miner is:
+Let `E(h)` be the scheduled gross subsidy for height `h`, and `B` be
+`MINER_PROTOCOL_BURN`. Before FOTE activation, the emission component paid to
+the miner is:
 
 ```text
 miner_emission(h) = E(h) - B
 ```
 
-The protocol burn is accounted for separately. Transaction miner fees are
-additional transfers to the miner, not new issuance and not an offset against
-`E(h)` under the active rules.
+The protocol burn is accounted for separately. At and after FOTE activation,
+let `R = E(h) - B` and let `F` be the sum of valid operation miner fees credited
+to the block miner. The gross subsidy becomes `B + max(0, R - F)`, so the net
+emission is `max(0, R - F)`. Transaction fees remain transfers to the miner and
+are not new issuance.
 
-The permanent tail means the schedule has no finite maximum supply: after height
-1,100,000, each block continues to issue the tail subsidy, less the fixed
-protocol burn. Actual net supply change also depends on transaction and state
+The permanent tail begins at height `1,100,001`. Under FOTE, net tail issuance
+falls as eligible miner fees rise and reaches zero for a block when its fees are
+at least `R`. Actual net supply change also depends on transaction and state
 burns.
 
 ## Relation to FOTE
 
-Under the active schedule, fees add to the miner's reward while gross subsidy
-continues to depend only on height. FOTE proposes using eligible block fees to
-reduce net tail emission. That would make emission depend on block contents and
-would require a coordinated consensus upgrade; it is not part of this model yet.
+Before activation, fees add to the miner's reward while gross subsidy depends
+only on height. Starting at height `1,100,001`, FOTE uses eligible block fees to
+reduce net tail emission. This is a scheduled consensus rule; all nodes must
+upgrade before activation.
 
 ## Current implementation references
 

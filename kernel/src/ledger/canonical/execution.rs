@@ -107,16 +107,19 @@ impl Ledger {
 
             expected_burns = emission.protocol_burn();
 
-            let id = CoinShare::from_emission(&emission.origin().0);
+            let mut created_coin_ids = Vec::new();
+            if !emission.miner_emission().is_zero() {
+                let id = CoinShare::from_emission(&emission.origin().0);
+                state.utxos.insert_coin(
+                    id,
+                    CoinUtxo {
+                        amount: emission.miner_emission(),
 
-            state.utxos.insert_coin(
-                id,
-                CoinUtxo {
-                    amount: emission.miner_emission(),
-
-                    owner: Owner::Program(emission.recipient()),
-                },
-            )?;
+                        owner: Owner::Program(emission.recipient()),
+                    },
+                )?;
+                created_coin_ids.push(id);
+            }
 
             checkpoint(BlockTransitionPoint::EmissionCreated, &mut state)?;
 
@@ -127,7 +130,7 @@ impl Ledger {
                 .ok_or(StateError::AmountOverflow)?;
 
             let mut coin = CoinRollbackJournal {
-                created_coin_ids: vec![id],
+                created_coin_ids,
 
                 mined: emission.subsidy(),
 
