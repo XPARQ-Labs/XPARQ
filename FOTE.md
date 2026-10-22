@@ -105,6 +105,13 @@ reject old and upgraded binaries even before activation. Nodes must be upgraded
 as a coordinated network before height `1,100,001`; the genesis hash and stored
 historical chain data remain unchanged.
 
+On startup, the node recognizes the exact pre-FOTE chain-spec identity and
+updates the redb metadata only when the database tip is below height
+`1,100,001`. A database at or beyond activation with the old identity is
+rejected. Pre-FOTE snapshots carry the old identity, so they are not trusted by
+the upgraded node; it replays the stored blocks under the unchanged historical
+rules and writes a current snapshot.
+
 ## Scope
 
 FOTE changes tail-phase issuance only. It does not change transaction encoding,

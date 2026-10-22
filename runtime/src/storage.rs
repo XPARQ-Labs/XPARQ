@@ -19,6 +19,14 @@ const DATABASE_FILE: &str = "xparq.redb";
 // Tagged CoinOutput recipients require a fresh database; old bytes are incompatible.
 const SCHEMA_VERSION: u32 = 1;
 
+// Chain-spec identity immediately before FOTE was added. This database can be
+// adopted without rewriting canonical blocks while its tip is still before
+// FOTE activation, because every block in that prefix keeps the old rules.
+const PRE_FOTE_CHAIN_SPEC_HASH: [u8; 32] = [
+    0xd6, 0xcb, 0x5d, 0xb9, 0xc4, 0xaf, 0x14, 0x3f, 0x21, 0x7b, 0x53, 0xbf, 0xdf, 0xba, 0xe0, 0x30,
+    0x1f, 0xf1, 0x64, 0x7b, 0x12, 0x7a, 0xe1, 0xee, 0xb6, 0x9c, 0x91, 0x71, 0xcf, 0x66, 0x07, 0xbc,
+];
+
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("canonical_blocks");
 const MEMPOOL: TableDefinition<u64, &[u8]> = TableDefinition::new("mempool");
@@ -897,6 +905,16 @@ fn initialize(database: &Database) -> Result<(), String> {
         .begin_write()
         .map_err(|error| format!("begin redb schema transaction: {error}"))?;
 
+    let stored_tip_height = {
+        let blocks = transaction
+            .open_table(BLOCKS)
+            .map_err(|error| format!("open blocks table: {error}"))?;
+        blocks
+            .last()
+            .map_err(|error| format!("read canonical block tip: {error}"))?
+            .map(|(height, _)| height.value())
+    };
+
     {
         let mut metadata = transaction
             .open_table(META)
@@ -957,7 +975,23 @@ fn initialize(database: &Database) -> Result<(), String> {
 
         match stored_chain_spec {
             Some(hash) if hash.as_slice() != expected_chain_spec => {
-                return Err("redb chain specification does not match this node".into());
+                let is_known_pre_fote_spec = hash.as_slice() == PRE_FOTE_CHAIN_SPEC_HASH;
+                let chain_is_pre_fote = stored_tip_height.map_or(true, |height| {
+                    height < kernel::consensus::FOTE_ACTIVATION_HEIGHT
+                });
+
+                if is_known_pre_fote_spec && chain_is_pre_fote {
+                    metadata
+                        .insert("chain_spec_hash", expected_chain_spec.as_slice())
+                        .map_err(|error| format!("migrate stored chain specification: {error}"))?;
+                    eprintln!(
+                        "storage: adopted pre-FOTE database at tip {}; existing snapshots may require a full replay",
+                        stored_tip_height
+                            .map_or_else(|| "empty".to_string(), |height| height.to_string())
+                    );
+                } else {
+                    return Err("redb chain specification does not match this node".into());
+                }
             }
 
             Some(_) => {}
