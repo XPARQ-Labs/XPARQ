@@ -9,11 +9,11 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
         );
     }
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
-    let recipient = option(args, "--to")
-        .map(super::util::parse_owner)
-        .transpose()?;
-    let recipient = recipient.ok_or("missing --to")?;
-    let amount = parse_amount(option(args, "--amount").ok_or("missing --amount")?)?;
+    let (payment_outputs, total_amount) = coin_transfer_outputs(args)?;
+    let created_coin_without_change = u64::try_from(payment_outputs.len())
+        .map_err(|_| "coin output count overflow")?
+        .checked_add(1)
+        .ok_or("coin output count overflow")?;
     let inputs = repeated_options(args, "--input")
         .into_iter()
         .map(kernel::monetary::coin::CoinShare::from_str)
@@ -59,8 +59,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
     };
     let initially_active_salt = wallet.0.account_salt;
     let transaction = automatic_fee_transaction(|fee, archival_burn| {
-        let required = amount
-            .as_zeno()
+        let required = total_amount
             .checked_add(fee)
             .ok_or("transaction amount plus fee overflow")?;
         let (selected, change, _state_burn, change_program_id, signer) = if inputs.is_empty() {
@@ -76,7 +75,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
                 let (selected, _total, state_burn, change) = select_inputs_from_candidates(
                     candidates,
                     required,
-                    2,
+                    created_coin_without_change,
                     0,
                     archival_burn,
                     0,
@@ -101,7 +100,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
                     select_wallet_account_inputs_with_state_burn(
                         account_candidates,
                         required,
-                        2,
+                        created_coin_without_change,
                         0,
                         archival_burn,
                         initially_active_salt,
@@ -111,7 +110,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
             }
         } else {
             let gross_change = explicit_change.map_or(0, Zeno::as_zeno);
-            let created = 2_u64 + u64::from(gross_change > fee);
+            let created = created_coin_without_change + u64::from(gross_change > fee);
             let state_burn = StateTransitionWeight {
                 created_coin_utxos: created,
                 consumed_coin_utxos: u64::try_from(inputs.len())
@@ -136,7 +135,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
                 signer,
             )
         };
-        let mut outputs = vec![CoinOutput::to_owner(recipient, amount)];
+        let mut outputs = payment_outputs.clone();
         if change > 0 {
             outputs.push(CoinOutput::new(change_program_id, Zeno::from_zeno(change)));
         }
@@ -183,6 +182,56 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
         println!("Protocol Burn: {}", format_amount(burn));
     }
     submit_or_print_transaction(args, &transaction)
+}
+
+fn coin_transfer_outputs(args: &[String]) -> Result<(Vec<CoinOutput>, u64), String> {
+    let entries = repeated_options(args, "--output");
+    if entries.is_empty() {
+        let recipient = option(args, "--to")
+            .map(super::util::parse_owner)
+            .transpose()?
+            .ok_or("missing --to or --output")?;
+        let amount = parse_amount(option(args, "--amount").ok_or("missing --amount")?)?;
+        let outputs = vec![CoinOutput::to_owner(recipient, amount)];
+        let total = amount.as_zeno();
+        return Ok((outputs, total));
+    }
+    if option(args, "--to").is_some() || option(args, "--amount").is_some() {
+        return Err("do not combine --output with --to or --amount".into());
+    }
+    parse_coin_output_options(args, "--output")
+}
+
+pub(super) fn parse_coin_output_options(
+    args: &[String],
+    option_name: &str,
+) -> Result<(Vec<CoinOutput>, u64), String> {
+    let entries = repeated_options(args, option_name);
+    if entries.len() > MAX_BATCH_TRANSFER_OUTPUTS {
+        return Err(format!(
+            "coin batch transfer supports at most {MAX_BATCH_TRANSFER_OUTPUTS} recipients"
+        ));
+    }
+    let outputs = entries
+        .into_iter()
+        .map(|entry| {
+            let (recipient, amount) = entry
+                .split_once('=')
+                .ok_or_else(|| format!("{option_name} must use PROGRAM_ID=AMOUNT"))?;
+            if recipient.is_empty() || amount.is_empty() {
+                return Err(format!("{option_name} must use PROGRAM_ID=AMOUNT"));
+            }
+            let recipient = program_id_from_string(recipient).map_err(|error| error.to_string())?;
+            let amount = parse_amount(amount)?;
+            Ok(CoinOutput::new(recipient, amount))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let total = outputs.iter().try_fold(0_u64, |total, output| {
+        total
+            .checked_add(output.amount.as_zeno())
+            .ok_or_else(|| "coin batch transfer total overflow".to_string())
+    })?;
+    Ok((outputs, total))
 }
 
 pub(super) fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {

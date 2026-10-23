@@ -1,0 +1,10 @@
+# Accept Borsh AssetContract + Vec<AssetOutput> in calldata.
+# Only the deployer may distribute the program's own asset shares.
+caller
+deployer
+equal
+assert
+data
+asset.transfer.outputs
+u128.const 1
+return

@@ -67,10 +67,10 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`]
 /// changes.
-pub const CHAIN_SPEC_VERSION: u32 = 2;
+pub const CHAIN_SPEC_VERSION: u32 = 3;
 
 #[derive(BorshSerialize)]
-struct ChainSpecIdentity<'a> {
+struct ChainSpecIdentity<'a, const VM_LIMITS: usize> {
     version: u32,
 
     // Genesis
@@ -128,7 +128,7 @@ struct ChainSpecIdentity<'a> {
     max_vm_code_size: u64,
     max_vm_stack_items: u16,
     max_vm_memory_pages: u16,
-    vm_application_limits: [u64; 11],
+    vm_application_limits: [u64; VM_LIMITS],
     vm_call_format: &'a str,
     vm_instruction_cost: u64,
     vm_memory_page_cost: u64,
@@ -147,8 +147,63 @@ struct ChainSpecIdentity<'a> {
 /// Domain-separated identity of every consensus parameter that nodes must
 /// agree on.
 pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
-    let identity = ChainSpecIdentity {
-        version: CHAIN_SPEC_VERSION,
+    let identity = chain_spec_identity(
+        CHAIN_SPEC_VERSION,
+        "xpvm-v1-v2-v3-v4-typed-applications-metered-calls-asset-multioutput-v2",
+        [
+            crate::program::vm_app::MAX_DATA_BYTES as u64,
+            crate::program::vm_app::MAX_KEY_BYTES as u64,
+            crate::program::vm_app::MAX_STORAGE_ENTRIES as u64,
+            crate::program::vm_app::MAX_STORAGE_BYTES as u64,
+            crate::program::vm_app::MAX_CALL_DEPTH as u64,
+            crate::program::vm_app::MAX_CALLS as u64,
+            crate::program::vm_app::MAX_ACTIONS as u64,
+            crate::program::vm_app::CALL_COST,
+            crate::program::vm::APPLICATION_VERSION as u64,
+            crate::program::vm_app::MAX_CODE_BYTES as u64,
+            crate::program::vm_app::MAX_INSTRUCTIONS as u64,
+            crate::program::vm_app::MAX_ASSET_TRANSFER_OUTPUTS as u64,
+        ],
+    );
+
+    let bytes = crypto::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
+
+    Ok(domain(HashDomain::ChainSpec, &bytes))
+}
+
+/// Identity used immediately before asset multioutput support was introduced.
+/// Storage uses this to recognize and migrate an otherwise compatible local database.
+pub fn pre_asset_multioutput_chain_spec_hash() -> Result<Hash, GenesisError> {
+    let identity = chain_spec_identity(
+        2,
+        "xpvm-v1-v2-v3-v4-typed-applications-metered-calls-v1",
+        [
+            crate::program::vm_app::MAX_DATA_BYTES as u64,
+            crate::program::vm_app::MAX_KEY_BYTES as u64,
+            crate::program::vm_app::MAX_STORAGE_ENTRIES as u64,
+            crate::program::vm_app::MAX_STORAGE_BYTES as u64,
+            crate::program::vm_app::MAX_CALL_DEPTH as u64,
+            crate::program::vm_app::MAX_CALLS as u64,
+            crate::program::vm_app::MAX_ACTIONS as u64,
+            crate::program::vm_app::CALL_COST,
+            crate::program::vm::APPLICATION_VERSION as u64,
+            crate::program::vm_app::MAX_CODE_BYTES as u64,
+            crate::program::vm_app::MAX_INSTRUCTIONS as u64,
+        ],
+    );
+
+    let bytes = crypto::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
+
+    Ok(domain(HashDomain::ChainSpec, &bytes))
+}
+
+fn chain_spec_identity<const VM_LIMITS: usize>(
+    version: u32,
+    vm_bytecode_format: &'static str,
+    vm_application_limits: [u64; VM_LIMITS],
+) -> ChainSpecIdentity<'static, VM_LIMITS> {
+    ChainSpecIdentity {
+        version,
 
         genesis_hash: EXPECTED_GENESIS_HASH.into_bytes(),
 
@@ -201,23 +256,11 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         ownership_model: "program-only-tag0-signature-policy-v2-scheme-key-salt32-v3",
         monetary_call_format: "route0-transfer1-create2-mint3-burn4-currency0coin1asset-denycoinburn-legacyassetroute1",
         application_state_format: "program-owned-coin-asset-share32-and-versioned-program-kv-state-v5",
-        vm_bytecode_format: "xpvm-v1-v2-v3-v4-typed-applications-metered-calls-v1",
+        vm_bytecode_format,
         max_vm_code_size: crate::program::MAX_PROGRAM_CODE_SIZE as u64,
         max_vm_stack_items: crate::program::vm::MAX_STACK_ITEMS,
         max_vm_memory_pages: crate::program::vm::MAX_MEMORY_PAGES,
-        vm_application_limits: [
-            crate::program::vm_app::MAX_DATA_BYTES as u64,
-            crate::program::vm_app::MAX_KEY_BYTES as u64,
-            crate::program::vm_app::MAX_STORAGE_ENTRIES as u64,
-            crate::program::vm_app::MAX_STORAGE_BYTES as u64,
-            crate::program::vm_app::MAX_CALL_DEPTH as u64,
-            crate::program::vm_app::MAX_CALLS as u64,
-            crate::program::vm_app::MAX_ACTIONS as u64,
-            crate::program::vm_app::CALL_COST,
-            crate::program::vm::APPLICATION_VERSION as u64,
-            crate::program::vm_app::MAX_CODE_BYTES as u64,
-            crate::program::vm_app::MAX_INSTRUCTIONS as u64,
-        ],
+        vm_application_limits,
         vm_call_format: "program-id-2-opcode-0-id-or-opcode-1-id-data-v2",
         vm_instruction_cost: crate::program::vm::INSTRUCTION_COST,
         vm_memory_page_cost: crate::program::vm::MEMORY_PAGE_COST,
@@ -231,23 +274,19 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         program_instance_derivation: "xparq:program-id:v2-program-principal-nonce-code-hash",
         deploy_authorization: "xparq:deploy-program:v1",
         deploy_burn_rule: "operation-bytes-plus-registry-growth-v1",
-    };
-
-    let bytes = crypto::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
-
-    Ok(domain(HashDomain::ChainSpec, &bytes))
+    }
 }
 
 #[cfg(all(test, feature = "mainnet"))]
 mod phase3_chain_spec_tests {
     #[test]
     fn bounded_work_rules_have_frozen_mainnet_chain_spec_identity() {
-        assert_eq!(super::CHAIN_SPEC_VERSION, 2);
+        assert_eq!(super::CHAIN_SPEC_VERSION, 3);
         assert_eq!(
             super::chain_spec_hash().unwrap().into_bytes(),
             [
-                253, 72, 127, 139, 73, 188, 238, 228, 195, 17, 98, 125, 165, 87, 225, 45, 95, 245,
-                7, 216, 220, 232, 69, 92, 94, 53, 223, 226, 212, 226, 210, 159
+                203, 193, 228, 144, 2, 158, 228, 24, 200, 226, 179, 215, 223, 115, 34, 235, 116,
+                132, 111, 70, 46, 84, 192, 97, 45, 71, 99, 127, 35, 249, 239, 134
             ]
         );
     }

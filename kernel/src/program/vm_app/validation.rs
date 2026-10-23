@@ -46,7 +46,7 @@ pub(super) fn instructions(code: &[u8]) -> Result<BTreeMap<usize, Instruction>, 
                 }
                 len
             }
-            0x00 | 0x02..=0x05 | 0x12..=0x19 | 0x22..=0x2b | 0x30..=0x37 | 0x40..=0x4b => 0,
+            0x00 | 0x02..=0x05 | 0x12..=0x19 | 0x22..=0x2b | 0x30..=0x37 | 0x40..=0x4c => 0,
             _ => return Err(CodeError::InvalidInstruction),
         };
         let immediate = code

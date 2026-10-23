@@ -89,10 +89,11 @@ or `program-mint`. Inspect balances using `program-account --program-id HEX_ID`
 or `GET /program/account/HEX_ID`. See the [owner-controlled vault example](../examples/vault/README.md).
 
 CoinOutput's Borsh recipient uses a tagged Program owner,
-coin state-weight accounting, and chain-spec 1/schema 1 compatibility.
-Old serialized transactions and databases must not be reused with this format.
-Use a fresh development data directory; there is no database migration here.
-All peers must run the matching protocol version.
+coin state-weight accounting, and chain-spec 3/schema 1 compatibility.
+Old serialized transactions must not be reused with this format. A database
+from chain-spec 2 migrates in place under the current protocol; see
+[storage compatibility](PROGRAM_CALL.md#storage-and-compatibility). All peers
+must run the matching protocol version.
 
 
 ## Program-owned asset registration and minting (v3)
@@ -140,14 +141,15 @@ The RPC quote uses that same settlement and charges the caller for state growth
 and all instruction fuel. Any failure commits no effects.
 
 Requests are fixed in deployed code, and invocation remains public. These
-instructions add asset issuance, while dynamic recipients, sale pricing, payment
-inspection and access rules remain future VM capabilities. See the buildable
+instructions add asset issuance. XPVM v4 supports batched dynamic asset-transfer
+recipients; sale pricing, payment inspection and access rules remain future VM
+capabilities. See the buildable
 [asset issuer example](../examples/asset_issuer/README.md).
 
 These additional consensus rules change the chain specification identity to
 version 3. All peers must use the matching build. Existing v1/v2 code is accepted
-on the new chain, but development databases committed to an older chain identity
-require a fresh data directory; no chain migration is included.
+on the new chain. A database from the immediately preceding chain-spec version 2
+migrates in place; older or otherwise incompatible chain identities are rejected.
 
 
 ## Application bytecode (v4)
@@ -209,11 +211,22 @@ v1–v3. Operand lists show bottom-to-top order, with the last item popped first
 | 49 | height | consensus execution height → integer |
 | 4a | deployer | deploying ProgramId as Owner; grants no implicit authority |
 | 4b | asset.burn | asset ID bytes, positive u128 amount → burn own shares under kernel rules |
+| 4c | asset.transfer.outputs | Borsh transfer request bytes → split asset shares across multiple recipients |
 
 Static transfer/register/mint opcodes 06–09 are v2/v3 instructions and are not
 accepted in v4. Registration uses the same bounded request and supply rules as v3.
 Mint recipient and amount can now come from calldata or computed state. The kernel
 still binds the mint authority and asset ownership to the executing program.
+
+`asset.transfer.outputs` consumes one bytes value containing a Borsh
+`AssetContract` followed by a Borsh `Vec<AssetOutput>`. Each output has a Program
+Owner and a positive u128 asset amount. The list must contain 1–255 outputs; the
+kernel selects the executing program's shares to cover their combined amount and
+returns any remainder as change. The call is atomic. It costs the normal transfer
+fuel, one additional fuel per listed output, and one per selected input. With the
+4 KiB VM data limit, a single encoded request can carry at most 82 outputs.
+Programs can pass the request through authenticated calldata, for example with
+`data` followed by `asset.transfer.outputs`.
 
 ### Authenticated frames and atomic effects
 
@@ -293,10 +306,11 @@ all input bytes and payment outputs. `/program/quote` additionally returns
 `vm_return_value` as a decimal string (null for non-VM calls); this is a preview,
 not a committed transaction receipt.
 
-The current protocol uses chain-spec version 1 and database schema 1. Coin and
-asset share IDs are full 32-byte hashes. Bytecode
-versions 1–4 remain supported with the current program-only Owner encoding, but databases committed to
-an older chain identity are rejected. No migration of an existing chain is included.
+The current protocol uses chain-spec version 3 and database schema 1. Coin and
+asset share IDs are 32 bytes. Bytecode versions 1–4 remain supported with the
+current program-only Owner encoding. Databases from chain-spec version 2 migrate
+in place and keep blocks and state; their old snapshots trigger one full replay.
+Other chain identities and incompatible schemas are rejected.
 
 Read public application storage with `GET /program/state/HEX_ID/HEX_KEY`.
 The key is 1–128 decoded bytes. The response contains a hex value (null for a

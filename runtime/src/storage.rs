@@ -975,17 +975,33 @@ fn initialize(database: &Database) -> Result<(), String> {
 
         match stored_chain_spec {
             Some(hash) if hash.as_slice() != expected_chain_spec => {
+                let previous_asset_vm_spec =
+                    kernel::genesis::pre_asset_multioutput_chain_spec_hash()
+                        .map_err(|error| {
+                            format!("calculate previous chain specification: {error}")
+                        })?
+                        .0;
+                let is_known_previous_asset_vm_spec = hash.as_slice() == previous_asset_vm_spec;
                 let is_known_pre_fote_spec = hash.as_slice() == PRE_FOTE_CHAIN_SPEC_HASH;
                 let chain_is_pre_fote = stored_tip_height.map_or(true, |height| {
                     height < kernel::consensus::FOTE_ACTIVATION_HEIGHT
                 });
 
-                if is_known_pre_fote_spec && chain_is_pre_fote {
+                // This predecessor only differs by adding opcode 0x4c. Blocks
+                // under the old validator could not deploy it, so their
+                // transitions remain valid and are replayed under current rules.
+                if is_known_previous_asset_vm_spec || (is_known_pre_fote_spec && chain_is_pre_fote)
+                {
                     metadata
                         .insert("chain_spec_hash", expected_chain_spec.as_slice())
                         .map_err(|error| format!("migrate stored chain specification: {error}"))?;
+                    let migration = if is_known_previous_asset_vm_spec {
+                        "previous XPVM asset-transfer database"
+                    } else {
+                        "pre-FOTE database"
+                    };
                     eprintln!(
-                        "storage: adopted pre-FOTE database at tip {}; existing snapshots may require a full replay",
+                        "storage: adopted {migration} at tip {}; canonical blocks were preserved; old snapshots may require a full replay",
                         stored_tip_height
                             .map_or_else(|| "empty".to_string(), |height| height.to_string())
                     );

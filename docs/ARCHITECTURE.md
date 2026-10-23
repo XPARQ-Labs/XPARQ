@@ -207,11 +207,11 @@ The kernel settles all effects atomically with caller payment and state changes.
 
 XPVM v4 adds typed calldata, authenticated immediate caller/signing context,
 conditional control flow, program-local key/value storage, dynamic monetary
-requests, and synchronous calls between deployed programs. The caller program
-cannot choose the callee's authenticated caller. Calls share fuel and rollback;
-active-frame reentrancy is rejected. These primitives allow new application
-bytecode without changing the compiled XPQ/asset applications or node binary.
-Kernel monetary validation remains authoritative. See [v4](XPVM.md#application-bytecode-v4).
+requests, synchronous calls between deployed programs, and batched asset
+outputs. The caller program cannot choose the callee's authenticated caller.
+Calls share fuel and rollback; active-frame reentrancy is rejected. Kernel
+monetary validation remains authoritative. The multioutput opcode is included
+in chain-spec version 3. See [v4](XPVM.md#application-bytecode-v4).
 
 ## Program ownership
 
@@ -230,9 +230,11 @@ the unified monetary dispatcher route, not an ownership ProgramId; monetary
 opcode 1 selects transfer. Account IDs bind policy/scheme/key/salt; deployed IDs
 bind deployer/nonce/code hash. An asset contract ID identifies the asset record.
 
-The current chain-spec is 9, database schema is 17, snapshot format is 3 and
-wallet file format is 2. Old chain databases are rejected; no migration is
-provided. See [ProgramCall compatibility](PROGRAM_CALL.md#storage-and-compatibility).
+The current chain-spec is 3, database schema is 1, snapshot format is 3 and
+wallet file format is 2. A database from chain-spec 2 migrates its metadata in
+place and retains blocks and state; its old snapshot requires one full replay.
+Other chain identities and incompatible schemas are rejected. See
+[ProgramCall compatibility](PROGRAM_CALL.md#storage-and-compatibility).
 
 Application extensibility is bounded by the existing XPVM instructions and hosts.
 The VM hashes bytes with XPARQ Raw-domain SHA3-256, while root transaction

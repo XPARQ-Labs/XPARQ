@@ -159,6 +159,7 @@ pub fn assemble(source: &str, definitions: &BTreeMap<String, String>) -> Result<
                         "height" => 0x49,
                         "deployer" => 0x4a,
                         "asset.burn" => 0x4b,
+                        "asset.transfer.outputs" => 0x4c,
                         _ => return Err(format!("unknown instruction {name}")),
                     };
                     if !operand.is_empty() {

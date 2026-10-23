@@ -103,16 +103,18 @@ receive no XPQ. See [OpenAPI](openapi.json) for routes.
 
 ## Storage and compatibility
 
-Current chain spec version is **1**, storage schema **1**, and newly written
+Current chain spec version is **3**, storage schema **1**, and newly written
 snapshot version **3**. The snapshot loader supports the legacy v1 representation
 only when its decoder and chain/schema checks accept it; v2 is not accepted by
 this loader. Snapshots must match chain identity, checksum, canonical log and
 state invariants. If no snapshot qualifies, startup replays from genesis.
 
-The reset baseline requires fresh compatible chain storage. Schema-mismatched
-databases are rejected, not automatically migrated; legacy asset balances are
-not imported. The chain-spec hash commits to the actual rules and formats; a
-version number alone cannot make incompatible state readable.
+Databases from the immediately preceding chain-spec version 2 migrate their
+metadata in place and retain blocks and state. Their old snapshots trigger one
+full replay from stored history. Schema-mismatched databases are rejected, and
+legacy asset balances are not imported. The chain-spec hash commits to the
+actual rules and formats; a version number alone cannot make incompatible state
+readable.
 
 ## Verification status and remaining gates
 

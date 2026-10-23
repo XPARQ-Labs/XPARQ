@@ -21,12 +21,14 @@ export XPARQ_RPC=127.0.0.1:26666
 The interactive menu supports wallet creation and restoration, balances,
 canonical history, UTXO tracking and consolidation, XPQ sends, Program assets,
 block exploration, mempool inspection, bytecode deployment, and salted account
-management. Choose **14. Mempool** to list pending operations, **15. Fee Policy**
-to inspect relay and burn rules, **16. Program State** to read a public XPVM
-storage value, **17. Coin Origin** to look up a CoinShare's creation record, or
-**18. Program Account by ID** to inspect an account through the selected node's
-RPC endpoint. **19. Exit** closes the wallet. Program storage keys are entered
-as hex bytes.
+management. **7. Transfer** sends XPQ to one recipient. **8. Batch Transfer**
+lets you send XPQ coin, a Program asset, or both in one transaction, with
+multiple recipients for each.
+Choose **15. Mempool** to list pending operations, **16. Fee Policy** to inspect
+relay and burn rules, **17. Program State** to read public XPVM storage,
+**18. Coin Origin** to look up a CoinShare's creation record, or **19. Program
+Account by ID** to inspect an account through RPC. **20. Exit** closes the
+wallet. Program storage keys are entered as hex bytes.
 
 ## Security
 
@@ -83,15 +85,30 @@ The examples below assume the `wallet` executable is on PATH; otherwise use
 wallet program-register --name Gold --max-supply 100 --initial-mint 40 --wallet wallet.json --rpc 127.0.0.1:6666
 wallet program-mint --asset CONTRACT --to PROGRAM_ID --amount 20
 wallet program-transfer --asset CONTRACT --to PROGRAM_ID --amount 15
+wallet program-transfer --asset CONTRACT \
+  --output PROGRAM_ID_A=10 --output PROGRAM_ID_B=5
+wallet program-transfer --asset CONTRACT --output ASSET_RECIPIENT=2 \
+  --coin-output XPQ_RECIPIENT=1
+wallet sign-spend --output PROGRAM_ID_A=1 --output PROGRAM_ID_B=0.5
 wallet program-burn --asset CONTRACT --amount 5
 wallet program-consolidate --asset CONTRACT
 wallet program-info --asset CONTRACT
 wallet program-balance --asset CONTRACT --program-id PROGRAM_ID
 ```
 
-`--fixed-supply` disables further minting at registration. The interactive
-Program Assets menu can list assets held or controlled by the active account,
-pick one by number, and choose fixed supply when creating an asset.
+`--fixed-supply` disables further minting at registration. The Program Assets
+menu can list and select your assets and transfer to one recipient. The main
+menu's **Batch Transfer** option supports XPQ, a Program asset, or both in one
+signed transaction. Enter up to 255 XPQ recipients and 254 asset recipients
+(the asset transfer may need one more output for change). From the command
+line, `sign-spend` accepts repeated `--output PROGRAM_ID=AMOUNT` options;
+`program-transfer` accepts repeated `--output` options for asset outputs and
+repeated `--coin-output PROGRAM_ID=AMOUNT` options for XPQ in the same signed
+transaction. The wallet selects enough shares and returns any change to itself.
+The coin outputs and asset transfer settle atomically in one ProgramCall.
+Direct single-recipient forms remain available as
+`sign-spend --to PROGRAM_ID --amount AMOUNT` and
+`program-transfer --to PROGRAM_ID --amount AMOUNT`.
 `program-balance` prints the formatted total and share count without downloading
 the share inventory. `--offline` prints canonical signed transaction hex without
 submitting it; RPC is still needed to
@@ -200,11 +217,12 @@ last path parameter. The old identity routes and `wallet address` command do not
 exist; Program IDs do not accept the old Base56 encoding.
 
 Wallet files use version 2 and store the active `program_id`, `account_salt`,
-`account_salts`, signature scheme, public key and recovery material. Chain-spec 1
-and database schema 1 require compatible fresh storage; no old-chain migration
-is included. Coin and asset share IDs are 32 bytes, displayed as 64 hexadecimal
-characters. Old wallet files require explicit mnemonic restoration using the
-original signature scheme and, for a nondefault account, its salt.
+`account_salts`, signature scheme, public key and recovery material. Database
+schema 1 can migrate metadata from the immediately preceding chain-spec version
+2 without deleting blocks or state; the node replays block history once to
+replace old snapshots. Coin and asset share IDs are 32 bytes, displayed as 64
+hexadecimal characters. Old wallet files require explicit mnemonic restoration
+using the original signature scheme and, for a nondefault account, its salt.
 
 ## Multiple accounts in one wallet
 

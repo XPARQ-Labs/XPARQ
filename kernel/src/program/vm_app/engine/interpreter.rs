@@ -1,7 +1,7 @@
 //! Typed application stack and metered opcode execution.
 
 use super::super::{
-    CALL_COST, MAX_DATA_BYTES,
+    CALL_COST, MAX_ASSET_TRANSFER_OUTPUTS, MAX_DATA_BYTES,
     storage::check_key,
     valid_storage, validate_code,
     validation::{HEADER, instructions},
@@ -9,7 +9,7 @@ use super::super::{
 use super::Engine;
 use crate::{
     common::Owner,
-    monetary::asset::{AssetContract, Unit},
+    monetary::asset::{AssetContract, AssetOutput, Unit},
     program::{
         ProgramId,
         vm::{self, ExecutionError},
@@ -77,7 +77,7 @@ impl Engine<'_> {
             self.charge(match i.op {
                 0x30 => vm::STATE_READ_COST,
                 0x31 | 0x32 => vm::STATE_WRITE_COST,
-                0x40..=0x42 | 0x4b => vm::TRANSFER_COST,
+                0x40..=0x42 | 0x4b | 0x4c => vm::TRANSFER_COST,
                 0x43 => CALL_COST,
                 _ => vm::INSTRUCTION_COST,
             })?;
@@ -354,6 +354,11 @@ impl Engine<'_> {
                     let asset = asset_id(pop(&mut stack)?.bytes()?)?;
                     self.transfer_asset(id, asset, recipient, amount)?;
                 }
+                0x4c => {
+                    let request = pop(&mut stack)?.bytes()?;
+                    let (asset, outputs) = decode_asset_transfer(&request)?;
+                    self.transfer_asset_many(id, asset, outputs)?;
+                }
                 0x42 => {
                     let amount = pop(&mut stack)?.int()?;
                     let recipient = pop(&mut stack)?.owner()?;
@@ -435,4 +440,30 @@ impl Engine<'_> {
 
 fn asset_id(bytes: Vec<u8>) -> Result<AssetContract, ExecutionError> {
     AssetContract::try_from_slice(&bytes).map_err(|_| ExecutionError::InvalidOperand)
+}
+
+fn decode_asset_transfer(
+    bytes: &[u8],
+) -> Result<(AssetContract, Vec<AssetOutput>), ExecutionError> {
+    let mut reader = bytes;
+    let asset = AssetContract::deserialize_reader(&mut reader)
+        .map_err(|_| ExecutionError::InvalidOperand)?;
+    let count = u32::deserialize_reader(&mut reader).map_err(|_| ExecutionError::InvalidOperand)?;
+    let count = usize::try_from(count).map_err(|_| ExecutionError::ResourceLimit)?;
+    if count == 0 || count > MAX_ASSET_TRANSFER_OUTPUTS {
+        return Err(ExecutionError::ResourceLimit);
+    }
+    let mut outputs = Vec::with_capacity(count);
+    for _ in 0..count {
+        let output = AssetOutput::deserialize_reader(&mut reader)
+            .map_err(|_| ExecutionError::InvalidOperand)?;
+        if output.amount.is_zero() {
+            return Err(ExecutionError::InvalidOperand);
+        }
+        outputs.push(output);
+    }
+    if !reader.is_empty() {
+        return Err(ExecutionError::InvalidOperand);
+    }
+    Ok((asset, outputs))
 }

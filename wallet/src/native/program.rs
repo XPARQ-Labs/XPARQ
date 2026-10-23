@@ -34,6 +34,50 @@ fn encode<T: borsh::BorshSerialize>(opcode: AssetOpcode, value: &T) -> Result<Pr
 fn recipient(args: &[String]) -> Result<Owner, String> {
     super::util::parse_owner(option(args, "--to").ok_or("missing --to")?)
 }
+pub(super) const MAX_PROGRAM_TRANSFER_RECIPIENTS: usize =
+    extension::asset_program::opcode::MAX_ASSET_OUTPUTS - 1;
+
+fn transfer_outputs(args: &[String]) -> Result<Vec<AssetOutput>, String> {
+    let entries = repeated_options(args, "--output");
+    if entries.is_empty() {
+        let output = AssetOutput::new(recipient(args)?, amount(args, "--amount")?);
+        if output.amount.is_zero() {
+            return Err("transfer amount must be positive".into());
+        }
+        return Ok(vec![output]);
+    }
+    if option(args, "--to").is_some() || option(args, "--amount").is_some() {
+        return Err("use either --to/--amount or repeated --output PROGRAM_ID=AMOUNT".into());
+    }
+    if entries.len() > MAX_PROGRAM_TRANSFER_RECIPIENTS {
+        return Err(format!(
+            "program transfer supports at most {MAX_PROGRAM_TRANSFER_RECIPIENTS} recipients"
+        ));
+    }
+    entries
+        .into_iter()
+        .map(|entry| {
+            let (program_id, value) = entry
+                .split_once('=')
+                .ok_or("expected --output PROGRAM_ID=AMOUNT")?;
+            let owner = super::util::parse_owner(program_id)?;
+            let amount = Unit::from_units(parse_asset_display_amount(value, ASSET_DECIMALS)?);
+            if amount.is_zero() {
+                return Err("transfer amounts must be positive".into());
+            }
+            Ok(AssetOutput::new(owner, amount))
+        })
+        .collect()
+}
+
+fn output_total(outputs: &[AssetOutput]) -> Result<Unit, String> {
+    outputs.iter().try_fold(Unit::ZERO, |total, output| {
+        total
+            .checked_add(output.amount)
+            .ok_or_else(|| "program transfer amount overflow".to_string())
+    })
+}
+
 fn shares(
     rpc: &str,
     owner: ProgramId,
@@ -80,6 +124,16 @@ fn shares(
 }
 
 fn submit(args: &[String], wallet: LoadedWallet, call: ProgramCall) -> Result<(), String> {
+    submit_with_coin_outputs(args, wallet, call, Vec::new(), 0)
+}
+
+fn submit_with_coin_outputs(
+    args: &[String],
+    wallet: LoadedWallet,
+    call: ProgramCall,
+    coin_outputs: Vec<CoinOutput>,
+    coin_total: u64,
+) -> Result<(), String> {
     reject_manual_fee(args)?;
     extension::script::execute::decode_program(&call)
         .map_err(|e| format!("invalid ProgramCall: {e:?}"))?;
@@ -95,23 +149,32 @@ fn submit(args: &[String], wallet: LoadedWallet, call: ProgramCall) -> Result<()
     } else {
         None
     };
+    let coin_output_count =
+        u64::try_from(coin_outputs.len()).map_err(|_| "coin output count overflow")?;
+    let created_coin_without_change = 1_u64
+        .checked_add(u64::from(deposit_owner.is_some()))
+        .and_then(|count| count.checked_add(coin_output_count))
+        .ok_or("coin output count overflow")?;
+    let quote_required = deposit
+        .checked_add(coin_total)
+        .and_then(|amount| amount.checked_add(1))
+        .ok_or("coin outputs, deposit and fee overflow")?;
     // Quote state growth using a signed envelope; the quote performs no mutation.
     let (inputs, _, _, change) = select_account_inputs_with_state_burn(
         rpc,
         &wallet,
-        deposit.checked_add(1).ok_or("deposit plus fee overflow")?,
-        1 + u64::from(deposit_owner.is_some()),
+        quote_required,
+        created_coin_without_change,
         0,
         0,
     )?;
-    let mut outputs = if change > 0 {
-        vec![CoinOutput::new(
+    let mut outputs = coin_outputs.clone();
+    if change > 0 {
+        outputs.push(CoinOutput::new(
             wallet.program_id(),
             Zeno::from_zeno(change),
-        )]
-    } else {
-        vec![]
-    };
+        ));
+    }
     if let Some(owner) = deposit_owner {
         outputs.push(CoinOutput::to_owner(owner, Zeno::from_zeno(deposit)));
     }
@@ -149,22 +212,22 @@ fn submit(args: &[String], wallet: LoadedWallet, call: ProgramCall) -> Result<()
             &wallet,
             fee.checked_add(vm_fuel)
                 .and_then(|v| v.checked_add(deposit))
-                .ok_or("fee plus VM fuel and deposit overflow")?,
-            (1_u64 + u64::from(deposit_owner.is_some()))
+                .and_then(|v| v.checked_add(coin_total))
+                .ok_or("fee, VM fuel, deposit and coin outputs overflow")?,
+            created_coin_without_change
                 .checked_add(vm_created)
                 .ok_or("VM output count overflow")?,
             growth,
             archival,
             vm_consumed,
         )?;
-        let mut outputs = if change > 0 {
-            vec![CoinOutput::new(
+        let mut outputs = coin_outputs.clone();
+        if change > 0 {
+            outputs.push(CoinOutput::new(
                 wallet.program_id(),
                 Zeno::from_zeno(change),
-            )]
-        } else {
-            vec![]
-        };
+            ));
+        }
         if let Some(owner) = deposit_owner {
             outputs.push(CoinOutput::to_owner(owner, Zeno::from_zeno(deposit)));
         }
@@ -229,6 +292,9 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
     ) {
         return Err(format!("unknown program command {command}"));
     }
+    if command != "program-transfer" && !repeated_options(args, "--coin-output").is_empty() {
+        return Err("--coin-output is only supported with program-transfer".into());
+    }
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let call = match command {
         "program-call" => vm_call(args)?,
@@ -287,22 +353,24 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
         }
         "program-transfer" | "program-consolidate" => {
             let id = asset(args)?;
+            let mut outputs = if command == "program-consolidate" {
+                Vec::new()
+            } else {
+                transfer_outputs(args)?
+            };
             let required = if command == "program-consolidate" {
                 None
             } else {
-                Some(amount(args, "--amount")?)
+                Some(output_total(&outputs)?)
             };
             let (inputs, total) = shares(rpc, wallet.program_id(), id, required)?;
             if command == "program-consolidate" && inputs.len() < 2 {
                 return Err("program consolidation requires at least two shares".into());
             }
             let sent = required.unwrap_or(total);
-            let to = if command == "program-consolidate" {
-                Owner::Program(wallet.program_id())
-            } else {
-                recipient(args)?
-            };
-            let mut outputs = vec![AssetOutput::new(to, sent)];
+            if command == "program-consolidate" {
+                outputs.push(AssetOutput::new(Owner::Program(wallet.program_id()), sent));
+            }
             let change = total
                 .checked_sub(sent)
                 .ok_or("insufficient program balance")?;
@@ -311,6 +379,9 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
                     Owner::Program(wallet.program_id()),
                     change,
                 ));
+            }
+            if outputs.len() > extension::asset_program::opcode::MAX_ASSET_OUTPUTS {
+                return Err("program transfer exceeds the asset output limit".into());
             }
             encode(
                 AssetOpcode::Transfer,
@@ -339,7 +410,13 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
         }
         _ => unreachable!(),
     };
-    submit(args, wallet, call)
+    if command == "program-transfer" {
+        let (coin_outputs, coin_total) =
+            super::transaction::parse_coin_output_options(args, "--coin-output")?;
+        submit_with_coin_outputs(args, wallet, call, coin_outputs, coin_total)
+    } else {
+        submit(args, wallet, call)
+    }
 }
 
 fn print_asset_balance(rpc: &str, asset: AssetContract, owner: ProgramId) -> Result<(), String> {

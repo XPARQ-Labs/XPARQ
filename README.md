@@ -36,8 +36,8 @@ Build and dependency-check configuration is documented in
 ## Developer tooling
 
 The [devkit](devkit/README.md) provides a kernel-validated XPVM v4 assembler,
-isolated local devnet runner, counter/vault/asset-transfer examples and lifecycle
-tests. Start with `python3 devkit/devnet/run.py build`, then
+isolated local devnet runner, counter/vault/asset-transfer and multioutput
+examples, and lifecycle tests. Start with `python3 devkit/devnet/run.py build`, then
 `python3 devkit/devnet/run.py demo`. Its devnet binaries and database are separate
 from normal node/wallet builds and node storage.
 
@@ -491,19 +491,23 @@ XPARQ Wallet
 5. Transaction History
 6. UTXO
 7. Transfer
-8. Consolidate UTXOs
-9. Explorer
-10. Program Assets
-11. Deploy Program
-12. Manage Accounts
-13. Migrate Legacy 32-byte Account
-14. Mempool
-15. Fee Policy
-16. Program State
-17. Coin Origin
-18. Program Account by ID
-19. Exit
+8. Batch Transfer
+9. Consolidate UTXOs
+10. Explorer
+11. Program Assets
+12. Deploy Program
+13. Manage Accounts
+14. Migrate Legacy 32-byte Account
+15. Mempool
+16. Fee Policy
+17. Program State
+18. Coin Origin
+19. Program Account by ID
+20. Exit
 ```
+
+**Transfer** sends XPQ to one recipient. **Batch Transfer** can split XPQ coin
+and/or a Program asset among multiple recipients in one signed transaction.
 
 ### Create a wallet
 
@@ -951,18 +955,20 @@ emission, and fork-choice rules.
 
 ### Protocol and storage compatibility
 
-The current protocol uses **chain-spec version 1** and **database schema 1**.
+The current protocol uses **chain-spec version 3** and **database schema 1**.
 This fresh repository starts at release **1.0.0**. Earlier audit documents retain
-the development version numbers used when those audits were recorded. The
-version-1 chain identity requires fresh node storage; no old-chain migration is included.
+the development version numbers used when those audits were recorded. A database
+from the immediately preceding chain-spec version 2 migrates in place: canonical
+blocks and state are retained. Its old snapshots require one full replay from the
+stored block history, after which the node writes a current snapshot.
 Coin share and asset share identifiers use full domain-separated SHA3-256 hashes
 (32 bytes, displayed as 64 hexadecimal characters). The former 16-byte share
 encoding is rejected. A canonical coin UTXO occupies 73 bytes for state-growth
 burn accounting.
 
-Older databases are incompatible; no automatic migration of ledger state,
-assets or transactions is provided. Use fresh storage for the current chain,
-keeping older databases separate. See [Program ID compatibility](docs/OWNERSHIP.md#compatibility)
+Databases with a different genesis, incompatible schema, or an unrecognized
+chain-spec identity remain incompatible. This metadata migration does not import
+legacy assets or transactions. See [Program ID compatibility](docs/OWNERSHIP.md#compatibility)
 for wallet identity changes.
 
 Check the complete workspace:

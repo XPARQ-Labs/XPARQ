@@ -24,6 +24,9 @@ pub const MAX_STORAGE_BYTES: usize = 1_048_576;
 pub const MAX_CALL_DEPTH: usize = 8;
 pub const MAX_CALLS: usize = 64;
 pub const MAX_ACTIONS: usize = 256;
+/// Maximum explicitly listed outputs in one asset.transfer.outputs instruction.
+/// One additional output may be created as change to the executing program.
+pub const MAX_ASSET_TRANSFER_OUTPUTS: usize = 255;
 pub const CALL_COST: u64 = 20;
 
 pub struct AppliedVm {

@@ -12,18 +12,19 @@ pub(super) fn interactive_menu() -> Result<(), String> {
         println!("5. Transaction History");
         println!("6. UTXO");
         println!("7. Transfer");
-        println!("8. Consolidate UTXOs");
-        println!("9. Explorer");
-        println!("10. Program Assets");
-        println!("11. Deploy Program");
-        println!("12. Manage Accounts");
-        println!("13. Migrate Legacy 32-byte Account");
-        println!("14. Mempool");
-        println!("15. Fee Policy");
-        println!("16. Program State");
-        println!("17. Coin Origin");
-        println!("18. Program Account by ID");
-        println!("19. Exit");
+        println!("8. Batch Transfer");
+        println!("9. Consolidate UTXOs");
+        println!("10. Explorer");
+        println!("11. Program Assets");
+        println!("12. Deploy Program");
+        println!("13. Manage Accounts");
+        println!("14. Migrate Legacy 32-byte Account");
+        println!("15. Mempool");
+        println!("16. Fee Policy");
+        println!("17. Program State");
+        println!("18. Coin Origin");
+        println!("19. Program Account by ID");
+        println!("20. Exit");
 
         match prompt("Select")?.as_str() {
             "1" => {
@@ -55,16 +56,17 @@ pub(super) fn interactive_menu() -> Result<(), String> {
             "5" => interactive_history()?,
             "6" => interactive_wallet_query(print_utxo_tracker)?,
             "7" => interactive_spend()?,
-            "8" => interactive_wallet_query(consolidate_coin_utxos)?,
-            "9" => interactive_block_explorer()?,
-            "10" => interactive_program_assets()?,
-            "11" => {
+            "8" => interactive_batch_transfer()?,
+            "9" => interactive_wallet_query(consolidate_coin_utxos)?,
+            "10" => interactive_block_explorer()?,
+            "11" => interactive_program_assets()?,
+            "12" => {
                 let (mut args, _, _) = interactive_asset_wallet_rpc()?;
                 args.extend(["--code".into(), prompt("XPVM bytecode file")?]);
                 args.extend(["--nonce".into(), prompt("Deploy nonce")?]);
                 super::deploy::deploy_program(&args)?;
             }
-            "12" => {
+            "13" => {
                 let path = prompt_default("Wallet file", DEFAULT_WALLET_PATH)?;
                 manage_accounts("accounts", &["--wallet".into(), path.clone()])?;
                 match prompt("Account action (add/use/back)")?.as_str() {
@@ -86,13 +88,13 @@ pub(super) fn interactive_menu() -> Result<(), String> {
                     choice => return Err(format!("unknown account action `{choice}`")),
                 }
             }
-            "13" | "migrate" => interactive_legacy_migration()?,
-            "14" | "mempool" => interactive_mempool()?,
-            "15" | "fee-policy" => interactive_fee_policy()?,
-            "16" | "program-state" => interactive_program_state()?,
-            "17" | "coin-origin" => interactive_coin_origin()?,
-            "18" | "program-account" => interactive_program_account()?,
-            "19" | "exit" | "quit" => return Ok(()),
+            "14" | "migrate" => interactive_legacy_migration()?,
+            "15" | "mempool" => interactive_mempool()?,
+            "16" | "fee-policy" => interactive_fee_policy()?,
+            "17" | "program-state" => interactive_program_state()?,
+            "18" | "coin-origin" => interactive_coin_origin()?,
+            "19" | "program-account" => interactive_program_account()?,
+            "20" | "exit" | "quit" => return Ok(()),
             choice => println!("Unknown selection `{choice}`"),
         }
     }
@@ -155,19 +157,105 @@ fn interactive_program_assets() -> Result<(), String> {
         let asset = prompt_program_asset(&assets)?;
         args.extend(["--asset".into(), asset]);
     }
-    if choice == "2" || choice == "3" {
+    if matches!(choice.as_str(), "2" | "3") {
         args.extend(interactive_asset_recipient()?);
-    }
-    if matches!(choice.as_str(), "2" | "3" | "4") {
+        args.extend(["--amount".into(), prompt("Amount")?]);
+    } else if choice == "4" {
         args.extend(["--amount".into(), prompt("Amount")?]);
     }
     super::program::command(command, &args)
+}
+
+fn interactive_batch_transfer() -> Result<(), String> {
+    println!("Batch Transfer");
+    println!("1. XPQ coin");
+    println!("2. Program asset");
+    println!("3. XPQ coin + Program asset");
+    println!("4. Back");
+    match prompt("Select")?.as_str() {
+        "1" => {
+            let mut args =
+                interactive_transfer_outputs("--output", "XPQ amount", MAX_BATCH_TRANSFER_OUTPUTS)?;
+            args.extend(["--rpc".into(), prompt_default("RPC", default_rpc_addr())?]);
+            args.extend([
+                "--wallet".into(),
+                prompt_default("Wallet file", DEFAULT_WALLET_PATH)?,
+            ]);
+            sign_spend(&args)
+        }
+        "2" => interactive_asset_batch_transfer(),
+        "3" => interactive_combined_batch_transfer(),
+        "4" | "back" => Ok(()),
+        _ => Err("unknown batch transfer selection".into()),
+    }
+}
+
+fn interactive_asset_batch_transfer() -> Result<(), String> {
+    let (mut args, rpc, program_id) = interactive_asset_wallet_rpc()?;
+    let assets = http_get_json::<BalanceResponse>(&rpc, &format!("/program/balance/{program_id}"))?
+        .program_assets;
+    print_program_asset_list(&assets)?;
+    args.extend(["--asset".into(), prompt_program_asset(&assets)?]);
+    args.extend(interactive_transfer_outputs(
+        "--output",
+        "Asset amount",
+        super::program::MAX_PROGRAM_TRANSFER_RECIPIENTS,
+    )?);
+    super::program::command("program-transfer", &args)
+}
+
+fn interactive_combined_batch_transfer() -> Result<(), String> {
+    let (mut args, rpc, program_id) = interactive_asset_wallet_rpc()?;
+    let assets = http_get_json::<BalanceResponse>(&rpc, &format!("/program/balance/{program_id}"))?
+        .program_assets;
+    print_program_asset_list(&assets)?;
+    args.extend(["--asset".into(), prompt_program_asset(&assets)?]);
+    println!("Asset recipients:");
+    args.extend(interactive_transfer_outputs(
+        "--output",
+        "Asset amount",
+        super::program::MAX_PROGRAM_TRANSFER_RECIPIENTS,
+    )?);
+    println!("XPQ recipients:");
+    args.extend(interactive_transfer_outputs(
+        "--coin-output",
+        "XPQ amount",
+        MAX_BATCH_TRANSFER_OUTPUTS,
+    )?);
+    super::program::command("program-transfer", &args)
 }
 
 fn interactive_asset_recipient() -> Result<[String; 2], String> {
     let recipient = prompt("Recipient Program ID")?;
     program_id_from_string(&recipient).map_err(|error| error.to_string())?;
     Ok(["--to".into(), recipient])
+}
+
+fn interactive_transfer_outputs(
+    output_option: &str,
+    amount_label: &str,
+    max_outputs: usize,
+) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    loop {
+        let recipient = prompt("Recipient Program ID")?;
+        program_id_from_string(&recipient).map_err(|error| error.to_string())?;
+        let amount = prompt(amount_label)?;
+        args.extend([output_option.into(), format!("{recipient}={amount}")]);
+        if args.len() / 2 >= max_outputs {
+            println!("Reached the maximum number of transfer recipients.");
+            break;
+        }
+        match prompt_default("Add another recipient? (yes/no)", "no")?
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "yes" | "y" => {}
+            "no" | "n" => break,
+            _ => return Err("answer yes or no".into()),
+        }
+    }
+    Ok(args)
 }
 
 fn interactive_asset_wallet_rpc() -> Result<(Vec<String>, String, String), String> {

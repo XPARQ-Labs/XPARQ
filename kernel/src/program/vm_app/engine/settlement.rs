@@ -186,7 +186,42 @@ impl Engine<'_> {
         recipient: Owner,
         amount: u128,
     ) -> Result<(), ExecutionError> {
+        self.transfer_asset_outputs(
+            id,
+            asset,
+            vec![AssetOutput::new(recipient, Unit::from_units(amount))],
+            false,
+        )
+    }
+    pub(super) fn transfer_asset_many(
+        &mut self,
+        id: ProgramId,
+        asset: AssetContract,
+        outputs: Vec<AssetOutput>,
+    ) -> Result<(), ExecutionError> {
+        if outputs.is_empty() || outputs.len() > super::super::MAX_ASSET_TRANSFER_OUTPUTS {
+            return Err(ExecutionError::ResourceLimit);
+        }
+        self.charge(outputs.len() as u64)?;
+        self.transfer_asset_outputs(id, asset, outputs, true)
+    }
+    fn transfer_asset_outputs(
+        &mut self,
+        id: ProgramId,
+        asset: AssetContract,
+        mut outputs: Vec<AssetOutput>,
+        multiple: bool,
+    ) -> Result<(), ExecutionError> {
         self.ensure_accounts(id)?;
+        let amount = outputs.iter().try_fold(0_u128, |total, output| {
+            let value = output.amount.as_units();
+            if value == 0 {
+                return Err(ExecutionError::InvalidOperand);
+            }
+            total
+                .checked_add(value)
+                .ok_or(ExecutionError::ArithmeticOverflow)
+        })?;
         if amount == 0 {
             return Err(ExecutionError::InvalidOperand);
         }
@@ -220,15 +255,25 @@ impl Engine<'_> {
         let change = total
             .checked_sub(amount)
             .ok_or(ExecutionError::SettlementFailed)?;
-        let mut outputs = vec![AssetOutput::new(recipient, Unit::from_units(amount))];
         if change != 0 {
             outputs.push(AssetOutput::new(actor, Unit::from_units(change)));
         }
-        let bytes = canonical_bytes(&(
-            b"xparq:vm-asset-transfer:v4",
-            self.commitment,
-            self.actions as u64,
-        ))
+        if outputs.len() > crate::program::system::asset_program::opcode::MAX_ASSET_OUTPUTS {
+            return Err(ExecutionError::ResourceLimit);
+        }
+        let bytes = if multiple {
+            canonical_bytes(&(
+                b"xparq:vm-asset-transfer-many:v1",
+                self.commitment,
+                self.actions as u64,
+            ))
+        } else {
+            canonical_bytes(&(
+                b"xparq:vm-asset-transfer:v4",
+                self.commitment,
+                self.actions as u64,
+            ))
+        }
         .map_err(|_| ExecutionError::SettlementFailed)?;
         let journal = crate::program::asset_host::execute_asset(
             self.apps,
